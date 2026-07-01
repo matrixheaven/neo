@@ -34,8 +34,9 @@ impl LuaWorkflowRunner {
         let lua = Lua::new();
         self.install_recorder_neo_table(&lua)?;
         lua.load(source)
+            .set_name("workflow script")
             .exec()
-            .map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))
+            .map_err(|err| WorkflowError::Lua(err.to_string()))
     }
 
     pub async fn run_script_with_context(
@@ -48,10 +49,11 @@ impl LuaWorkflowRunner {
         self.install_host_neo_table(&lua, ctx, event_context)?;
         let value = lua
             .load(source)
+            .set_name("workflow script")
             .eval_async::<Value>()
             .await
-            .map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))?;
-        lua_return_to_json(&lua, value).map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))
+            .map_err(|err| WorkflowError::Lua(err.to_string()))?;
+        lua_return_to_json(&lua, value).map_err(|err| WorkflowError::Lua(err.to_string()))
     }
 
     fn install_recorder_neo_table(&self, lua: &Lua) -> Result<(), WorkflowError> {
@@ -415,6 +417,18 @@ impl mlua::UserData for DelegateHandle {
                 .clone()
                 .unwrap_or_else(|| this.summary.clone()))
         });
+        methods.add_meta_method(
+            mlua::MetaMethod::Index,
+            |lua, this, key: String| match key.as_str() {
+                "kind" => lua.to_value(&this.kind),
+                "agent_id" => lua.to_value(&this.agent_id),
+                "name" => lua.to_value(&this.name),
+                "status" => lua.to_value(&this.status),
+                "summary" => lua.to_value(&this.summary),
+                "result" => lua.to_value(&this.result),
+                _ => Ok(mlua::Value::Nil),
+            },
+        );
     }
 }
 
@@ -455,6 +469,19 @@ impl mlua::UserData for SwarmHandle {
                 .clone()
                 .unwrap_or_else(|| this.summary.clone()))
         });
+        methods.add_meta_method(
+            mlua::MetaMethod::Index,
+            |lua, this, key: String| match key.as_str() {
+                "kind" => lua.to_value(&this.kind),
+                "swarm_id" => lua.to_value(&this.swarm_id),
+                "status" => lua.to_value(&this.status),
+                "summary" => lua.to_value(&this.summary),
+                "items" => lua.to_value(&this.items),
+                "has_failures" => lua.to_value(&this.has_failures),
+                "result" => lua.to_value(&this.result),
+                _ => Ok(mlua::Value::Nil),
+            },
+        );
     }
 }
 
@@ -616,13 +643,4 @@ fn status_from_result(result: &ToolResult) -> &'static str {
     } else {
         "completed"
     }
-}
-
-fn sanitize_lua_error(err: impl ToString) -> String {
-    let raw = err.to_string();
-    // mlua embeds the Rust source file path as the Lua chunk name
-    // (e.g. `[string "crates/neo-agent-core/src/workflow/lua.rs:36:..."]`).
-    // Replace every occurrence of the path so the actual error message survives
-    // while no internal source path leaks to the user.
-    raw.replace("crates/neo-agent-core/src/", "<workflow>")
 }
