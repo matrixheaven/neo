@@ -127,7 +127,7 @@ impl Tool for DelegateTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\ntask: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use /tasks to inspect progress.",
+                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\ntask: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
                     snapshot.id.as_str(),
                     snapshot.display_name.as_str(),
                     request.task,
@@ -302,7 +302,7 @@ impl Tool for DelegateSwarmTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "swarm_id: {}\nkind: delegate-swarm\nstatus: running\nitems: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use /tasks to inspect progress.",
+                    "swarm_id: {}\nkind: delegate-swarm\nstatus: running\nitems: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
                     swarm_id,
                     total_children,
                 ))

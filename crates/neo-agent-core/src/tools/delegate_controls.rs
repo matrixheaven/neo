@@ -113,7 +113,8 @@ impl Tool for ListDelegatesTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: ListDelegatesInput = parse_input(self.name(), input)?;
-            let include_completed = input.include_completed;
+            let include_completed =
+                input.include_completed || input.state.is_some_and(|s| s.is_terminal());
             let offset = parse_list_cursor(self.name(), input.cursor.as_deref())?;
             let limit = input.limit.max(1);
 
@@ -229,8 +230,11 @@ impl Tool for ListDelegatesTool {
             let mut content = if page_rows.is_empty() {
                 "No delegates found.\n".to_owned()
             } else {
-                format!("delegates: {total}\n")
+                format!("total: {total}\n")
             };
+            if let Some(cursor) = &next_cursor {
+                content.push_str(&format!("next_cursor: {cursor}\n"));
+            }
             let rows: Vec<_> = page_rows.iter().map(|row| row.json.clone()).collect();
             for row in &page_rows {
                 content.push_str(&row.detail);
@@ -284,6 +288,28 @@ impl Tool for WaitDelegateTool {
             let input: WaitDelegateInput = parse_input(self.name(), input)?;
             let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(30_000));
             let deadline = std::time::Instant::now() + timeout;
+
+            // Pre-check: if the ID doesn't exist anywhere, return immediately.
+            let exists = if input.id.starts_with("swarm_") {
+                ctx.multi_agent.swarm_snapshot(&input.id).is_some()
+                    || ctx.background_tasks.snapshot(&input.id).await.is_ok()
+            } else if input.id.starts_with("agent_") {
+                ctx.multi_agent.agent_snapshot(&input.id).is_some()
+                    || ctx.background_tasks.snapshot(&input.id).await.is_ok()
+            } else {
+                ctx.background_tasks.snapshot(&input.id).await.is_ok()
+            };
+            if !exists {
+                return Ok(ToolResult::ok(format!(
+                    "id: {}\nstatus: not_found\nnext_step: No delegate or background task with this ID exists. Check the ID or use ListDelegates to see available delegates.",
+                    input.id,
+                ))
+                .with_details(json!({
+                    "kind": "delegate_wait",
+                    "task_id": input.id,
+                    "outcome": "not_found",
+                })));
+            }
 
             // Route by ID prefix.
             if input.id.starts_with("swarm_") {
