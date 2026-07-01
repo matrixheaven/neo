@@ -91,15 +91,9 @@ impl SwarmCardComponent {
                 Span::styled("● Swarm: ", brand),
                 Span::styled(self.snapshot.description.as_str(), primary),
                 Span::styled(
-                    format!(" · {total} agents · {running} run · {completed} done · {queued} wait"),
+                    format!(" · {total} agents · {running} run · {completed} done · {queued} wait · progress ["),
                     muted,
                 ),
-            ])
-            .truncate_to_width(width),
-        );
-        lines.push(
-            Line::from_spans(vec![
-                Span::styled("  progress [", muted),
                 Span::styled(
                     compact_progress_meter(progress, 18),
                     Style::default().fg(theme.status_warn),

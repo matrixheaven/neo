@@ -68,6 +68,7 @@ pub(crate) fn agent_details(
         "previous_status": agent.previous_status.map(AgentLifecycleState::as_str),
         "resumed_from": agent.resumed_from.as_ref().map(crate::multi_agent::AgentId::as_str),
         "summary_scope": summary_scope.as_str(),
+        "agent": agent,
     });
     if let Some(context) = context {
         value["context_mode"] = json!(context_mode_label(context));
@@ -140,5 +141,6 @@ pub(crate) fn swarm_details(swarm: &SwarmSnapshot) -> Value {
         "aggregate": swarm.aggregate,
         "items": items,
         "resume_hint": "Call DelegateSwarm with resume_agent_ids for unfinished children.",
+        "swarm": swarm,
     })
 }

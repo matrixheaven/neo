@@ -386,13 +386,18 @@ fn option_b_collapsed_swarm_shows_names_badges_and_bayes_progress() {
         children,
     };
 
-    let text =
-        plain(SwarmCardComponent::new(snapshot).render_with_theme(160, &TuiTheme::default()))
-            .join("\n");
+    let rows =
+        plain(SwarmCardComponent::new(snapshot).render_with_theme(160, &TuiTheme::default()));
+    let text = rows.join("\n");
+    let header = rows.first().expect("swarm header");
 
     assert!(text.contains("Swarm: 角色对比测试"), "{text}");
-    assert!(text.contains("progress ["), "{text}");
-    assert!(text.contains("bayes estimate"), "{text}");
+    assert!(header.contains("progress ["), "{text}");
+    assert!(header.contains("bayes estimate"), "{text}");
+    assert!(
+        !rows.iter().any(|row| row.starts_with("  progress [")),
+        "progress belongs in the swarm summary header, not its own child-like row: {text}"
+    );
     assert!(text.contains("Nova  [Coder]"), "{text}");
     assert!(text.contains("Iris  [Planner]"), "{text}");
     assert!(text.contains("Vega  [Explorer]"), "{text}");

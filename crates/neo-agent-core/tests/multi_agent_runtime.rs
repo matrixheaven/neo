@@ -1143,18 +1143,21 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
     let delegate_result = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::ToolExecutionFinished { result, .. }
-                if result.content.contains("status: completed")
-                    && result.content.contains("items: 3") =>
-            {
+            AgentEvent::ToolExecutionFinished { name, result, .. } if name == "DelegateSwarm" => {
                 Some(result)
             }
             _ => None,
         })
         .expect("swarm tool result");
-    assert!(delegate_result.content.contains("api ok"));
-    assert!(delegate_result.content.contains("tui ok"));
-    assert!(delegate_result.content.contains("runtime ok"));
+    let items = delegate_result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .expect("swarm details include items");
+    assert!(items.iter().any(|item| item["summary"] == "api ok"));
+    assert!(items.iter().any(|item| item["summary"] == "tui ok"));
+    assert!(items.iter().any(|item| item["summary"] == "runtime ok"));
 }
 
 #[tokio::test]
@@ -1232,14 +1235,19 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
         swarm_result.content
     );
     assert!(
-        swarm_result.content.contains("agent_id:"),
-        "{}",
-        swarm_result.content
-    );
-    assert!(
         swarm_result.content.contains("status: completed"),
         "{}",
         swarm_result.content
+    );
+    let items = swarm_result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .expect("swarm details include items");
+    assert!(
+        items.iter().all(|item| item["agent_id"].as_str().is_some()),
+        "{items:#?}"
     );
 }
 
@@ -2002,10 +2010,15 @@ async fn delegate_swarm_resume_agent_ids_restarts_existing_children() {
         .expect("swarm resume should complete");
 
     assert!(!swarm.is_error, "{}", swarm.content);
+    let items = swarm
+        .details
+        .as_ref()
+        .and_then(|details| details.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .expect("swarm details include items");
     assert!(
-        swarm.content.contains(agent_id.as_str()),
-        "{}",
-        swarm.content
+        items.iter().any(|item| item["agent_id"] == agent_id),
+        "{items:#?}"
     );
 }
 

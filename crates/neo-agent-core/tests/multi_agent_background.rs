@@ -923,9 +923,15 @@ async fn message_delegate_rejects_completed_agent_with_resume_hint() {
     assert!(
         message
             .content
-            .contains("agent is not running; use Delegate with resume"),
+            .contains("terminal agents cannot receive live messages"),
         "{}",
         message.content
+    );
+    assert_eq!(
+        message.details.as_ref().and_then(|details| details
+            .get("resume_hint")
+            .and_then(serde_json::Value::as_str)),
+        Some(format!("Delegate with resume=\"{agent_id}\"").as_str())
     );
 }
 

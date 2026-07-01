@@ -717,6 +717,12 @@ impl Tool for MessageDelegateTool {
                 }
             }
 
+            if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.id)
+                && agent.state.is_terminal()
+            {
+                return Ok(terminal_delegate_error(agent.id.as_str(), agent.state));
+            }
+
             match ctx
                 .multi_agent
                 .deliver_live_agent_message(&input.id, input.message.clone())
