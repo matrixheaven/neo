@@ -16,6 +16,7 @@ const FINAL_TEXT_CHARS: usize = 110;
 pub struct ChildActivityView<'a> {
     pub tools: Vec<ChildToolRow<'a>>,
     pub thinking: Option<String>,
+    pub body_text: Option<String>,
     pub final_text: Option<String>,
     pub final_is_error: bool,
 }
@@ -72,24 +73,30 @@ pub fn child_activity_view(
     snapshot: &AgentSnapshot,
     max_tool_rows: usize,
 ) -> ChildActivityView<'_> {
-    let start = snapshot.activity.len().saturating_sub(max_tool_rows);
-    let activity_window = &snapshot.activity[start..];
+    let thinking = combined_text_activity(&snapshot.activity, true);
+    let latest_body =
+        latest_text_activity(&snapshot.activity, false).or_else(|| snapshot.latest_text.clone());
     let final_text = snapshot
         .outcome
         .as_ref()
         .map(|outcome| outcome.summary.clone())
-        .or_else(|| latest_text_activity(activity_window, false))
-        .or_else(|| snapshot.latest_text.clone());
-    let thinking = latest_text_activity(activity_window, true);
-    let tool_rows = activity_window
-        .iter()
-        .filter_map(tool_row)
-        .collect::<Vec<_>>();
-    let start = tool_rows.len().saturating_sub(max_tool_rows);
-    let tools = tool_rows.into_iter().skip(start).collect::<Vec<_>>();
+        .or_else(|| {
+            snapshot
+                .state
+                .is_terminal()
+                .then(|| latest_body.clone())
+                .flatten()
+        });
+    let body_text = if snapshot.state.is_terminal() {
+        latest_body.filter(|text| final_text.as_ref() != Some(text))
+    } else {
+        latest_body
+    };
+    let tools = visible_tool_rows(&snapshot.activity, max_tool_rows);
     ChildActivityView {
         tools,
         thinking,
+        body_text,
         final_text,
         final_is_error: snapshot
             .outcome
@@ -124,7 +131,7 @@ pub fn render_child_tool_row(
     let suffix = row
         .summary
         .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" ({})", one_line(value)))
+        .map(|value| format!("  {}", one_line(value)))
         .unwrap_or_default();
     let mut lines = vec![
         Line::from_spans(vec![
@@ -148,17 +155,39 @@ pub fn render_child_thinking(
     indent: &str,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let preview = tail_non_empty_lines(text, THINKING_PREVIEW_LINES).join(" ");
-    if preview.is_empty() {
-        return Vec::new();
-    }
-    vec![
+    let mut lines = vec![
         Line::styled(
-            format!("{indent}◌ {}", compact_chars(&preview, FINAL_TEXT_CHARS)),
+            format!("{indent}◌ thinking"),
             Style::default().fg(theme.text_muted),
         )
         .truncate_to_width(width),
-    ]
+    ];
+    lines.extend(
+        tail_non_empty_lines(text, THINKING_PREVIEW_LINES)
+            .into_iter()
+            .map(|line| {
+                Line::styled(
+                    format!(
+                        "{indent}  {}",
+                        compact_chars(&one_line(&line), FINAL_TEXT_CHARS)
+                    ),
+                    Style::default().fg(theme.text_muted),
+                )
+                .truncate_to_width(width)
+            }),
+    );
+    lines
+}
+
+pub fn render_child_body(text: &str, width: usize, indent: &str, theme: &TuiTheme) -> Option<Line> {
+    let compact = compact_chars(&one_line(text), FINAL_TEXT_CHARS);
+    (!compact.is_empty()).then(|| {
+        Line::styled(
+            format!("{indent}│ {compact}"),
+            Style::default().fg(theme.text_primary),
+        )
+        .truncate_to_width(width)
+    })
 }
 
 pub fn render_child_final(
@@ -219,7 +248,74 @@ fn tool_row(entry: &AgentActivityEntry) -> Option<ChildToolRow<'_>> {
     }
 }
 
+fn visible_tool_rows(
+    activity: &[AgentActivityEntry],
+    max_tool_rows: usize,
+) -> Vec<ChildToolRow<'_>> {
+    if max_tool_rows == 0 {
+        return Vec::new();
+    }
+    let tool_rows = activity.iter().filter_map(tool_row).collect::<Vec<_>>();
+    if tool_rows.len() <= max_tool_rows {
+        return tool_rows;
+    }
+
+    let mut keep = vec![false; tool_rows.len()];
+    for (index, row) in tool_rows.iter().enumerate().rev() {
+        if row.phase == AgentToolActivityPhase::Ongoing {
+            keep[index] = true;
+        }
+    }
+
+    let kept = keep.iter().filter(|value| **value).count();
+    if kept > max_tool_rows {
+        let mut remaining = max_tool_rows;
+        for index in (0..keep.len()).rev() {
+            if keep[index] {
+                if remaining == 0 {
+                    keep[index] = false;
+                } else {
+                    remaining -= 1;
+                }
+            }
+        }
+    } else {
+        let mut remaining = max_tool_rows - kept;
+        for index in (0..tool_rows.len()).rev() {
+            if keep[index] {
+                continue;
+            }
+            if remaining == 0 {
+                break;
+            }
+            keep[index] = true;
+            remaining -= 1;
+        }
+    }
+
+    tool_rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| keep[index].then_some(row))
+        .collect()
+}
+
 fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
+    activity
+        .iter()
+        .rev()
+        .filter_map(|entry| match &entry.kind {
+            AgentActivityKind::Text {
+                text,
+                thinking: entry_thinking,
+            } if *entry_thinking == thinking => Some(text.trim()),
+            _ => None,
+        })
+        .find(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn combined_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
     let text = activity
         .iter()
         .filter_map(|entry| match &entry.kind {
@@ -231,7 +327,7 @@ fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Opti
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
-        .join(" ");
+        .join("\n");
     (!text.is_empty()).then_some(text)
 }
 

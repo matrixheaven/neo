@@ -1,14 +1,13 @@
 use std::time::Duration;
 
-use neo_agent_core::multi_agent::{
-    AgentLifecycleState, AgentRunMode, AgentSnapshot, AgentToolActivityPhase,
-};
+use neo_agent_core::multi_agent::{AgentLifecycleState, AgentRunMode, AgentSnapshot};
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
-    can_detach, child_activity_view, display_elapsed, format_elapsed, format_token_count, one_line,
-    role_label,
+    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed, format_elapsed,
+    format_token_count, render_child_body, render_child_final, render_child_thinking,
+    render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,37 +159,59 @@ impl DelegateGroupComponent {
     ) -> Vec<Line> {
         let branch = if is_last { "└─" } else { "├─" };
         let continuation = if is_last { "   " } else { "│  " };
-        let activity = latest_activity(agent).unwrap_or_else(|| fallback_activity(agent));
+        let state_style = Style::default().fg(if agent.state.is_terminal() {
+            theme.text_muted
+        } else {
+            theme.text_primary
+        });
+        let muted = Style::default().fg(theme.text_muted);
+        let primary = Style::default().fg(theme.text_primary);
         let mut lines = vec![
             Line::from_spans(vec![
                 Span::raw(format!("  {branch} ")),
+                Span::styled(agent.display_name.as_str(), state_style),
+                Span::raw("  "),
+                Span::styled(format!("[{}]", role_label(agent.role)), muted),
                 Span::styled(
-                    format!("{} · {}", role_label(agent.role), agent.display_title()),
-                    Style::default().fg(theme.text_primary),
-                ),
-                Span::styled(
-                    format_stats(agent, self.now_ms),
-                    Style::default().fg(theme.text_muted),
+                    format!(
+                        "  {}{}",
+                        agent.display_title(),
+                        format_stats(agent, self.now_ms)
+                    ),
+                    primary,
                 ),
             ])
             .truncate_to_width(width),
         ];
-        if !agent.state.is_terminal() {
+
+        let indent = format!("  {continuation}    ");
+        let view = child_activity_view(agent, MAX_CHILD_TOOL_ROWS);
+        for row in &view.tools {
+            lines.extend(render_child_tool_row(row, width, &indent, theme));
+        }
+        if let Some(thinking) = view.thinking.as_deref() {
+            lines.extend(render_child_thinking(thinking, width, &indent, theme));
+        }
+        if let Some(body) = view.body_text.as_deref()
+            && let Some(line) = render_child_body(body, width, &indent, theme)
+        {
+            lines.push(line);
+        }
+        if let Some(final_text) = view.final_text.as_deref() {
+            lines.push(render_child_final(
+                final_text,
+                view.final_is_error,
+                width,
+                &indent,
+                theme,
+            ));
+        }
+
+        if lines.len() == 1 {
             lines.push(
                 Line::styled(
-                    format!("  {continuation}    {activity}"),
+                    format!("{indent}◌ {}", fallback_activity(agent)),
                     Style::default().fg(theme.text_muted),
-                )
-                .truncate_to_width(width),
-            );
-        } else if matches!(
-            agent.state,
-            AgentLifecycleState::Failed | AgentLifecycleState::TimedOut
-        ) {
-            lines.push(
-                Line::styled(
-                    format!("  {continuation}    Error: {activity}"),
-                    Style::default().fg(theme.status_error),
                 )
                 .truncate_to_width(width),
             );
@@ -240,27 +261,9 @@ fn format_stats(agent: &AgentSnapshot, now_ms: Option<u64>) -> String {
     }
 }
 
-fn latest_activity(agent: &AgentSnapshot) -> Option<String> {
-    let view = child_activity_view(agent, 1);
-    if let Some(tool) = view.tools.last() {
-        let verb = if tool.phase == AgentToolActivityPhase::Ongoing {
-            "Using"
-        } else {
-            "Used"
-        };
-        return Some(match tool.summary {
-            Some(summary) if !summary.trim().is_empty() => {
-                format!("{verb} {} ({})", tool.name, one_line(summary))
-            }
-            _ => format!("{verb} {}", tool.name),
-        });
-    }
-    view.final_text.map(|text| one_line(&text))
-}
-
 fn fallback_activity(agent: &AgentSnapshot) -> String {
     match agent.state {
-        AgentLifecycleState::Queued => "Waiting...".to_owned(),
+        AgentLifecycleState::Queued => "Waiting for scheduler slot".to_owned(),
         AgentLifecycleState::Running => "Running...".to_owned(),
         AgentLifecycleState::Completed => "Completed".to_owned(),
         AgentLifecycleState::Failed => "Failed".to_owned(),

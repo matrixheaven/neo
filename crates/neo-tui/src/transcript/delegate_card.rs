@@ -4,8 +4,8 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed, format_elapsed,
-    format_token_count, render_child_final, render_child_thinking, render_child_tool_row,
-    role_label,
+    format_token_count, render_child_body, render_child_final, render_child_thinking,
+    render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,12 +86,13 @@ impl DelegateCardComponent {
                 Span::styled(status_marker(phase), accent),
                 Span::raw(" "),
                 Span::styled(self.snapshot.display_name.as_str(), accent),
+                Span::raw("  "),
+                Span::styled(role_badge(&self.snapshot), muted),
                 Span::styled(
                     format!(
-                        " {} Agent {} ({}) · {} tools · {} · {} tok",
-                        role_label(self.snapshot.role),
-                        state_label(phase),
+                        "  {} · {} · {} tools · {} · {} tok",
                         self.snapshot.task_title,
+                        status_text(phase),
                         self.snapshot.tool_count,
                         format_elapsed(elapsed.as_secs()),
                         format_token_count(self.snapshot.token_count)
@@ -112,6 +113,13 @@ impl DelegateCardComponent {
         }
         if let Some(thinking) = activity.thinking.as_deref() {
             lines.extend(render_child_thinking(thinking, width, "  ", theme));
+        }
+        if let Some(body) = activity
+            .body_text
+            .as_deref()
+            .and_then(|text| render_child_body(text, width, "  ", theme))
+        {
+            lines.push(body);
         }
         if let Some(final_text) = activity.final_text.as_deref() {
             lines.push(render_child_final(
@@ -204,16 +212,20 @@ fn status_marker(phase: DelegateDisplayPhase) -> &'static str {
     }
 }
 
-fn state_label(phase: DelegateDisplayPhase) -> &'static str {
+fn status_text(phase: DelegateDisplayPhase) -> &'static str {
     match phase {
-        DelegateDisplayPhase::Queued => "Queued",
-        DelegateDisplayPhase::Running => "Running",
-        DelegateDisplayPhase::Backgrounded => "Backgrounded",
-        DelegateDisplayPhase::Completed => "Completed",
-        DelegateDisplayPhase::Failed => "Failed",
-        DelegateDisplayPhase::Cancelled => "Cancelled",
-        DelegateDisplayPhase::TimedOut => "Timed Out",
-        DelegateDisplayPhase::Lost => "Lost",
-        DelegateDisplayPhase::Killed => "Killed",
+        DelegateDisplayPhase::Queued => "queued",
+        DelegateDisplayPhase::Running => "running",
+        DelegateDisplayPhase::Backgrounded => "backgrounded",
+        DelegateDisplayPhase::Completed => "done",
+        DelegateDisplayPhase::Failed => "failed",
+        DelegateDisplayPhase::Cancelled => "cancelled",
+        DelegateDisplayPhase::TimedOut => "timed out",
+        DelegateDisplayPhase::Lost => "lost",
+        DelegateDisplayPhase::Killed => "killed",
     }
+}
+
+fn role_badge(snapshot: &AgentSnapshot) -> String {
+    format!("[{}]", role_label(snapshot.role))
 }

@@ -19,8 +19,8 @@ mod workflow_card;
 
 pub(crate) use child_activity::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, compact_chars, display_elapsed,
-    format_elapsed, format_token_count, one_line, render_child_final, render_child_thinking,
-    render_child_tool_row, role_label,
+    format_elapsed, format_token_count, one_line, render_child_body, render_child_final,
+    render_child_thinking, render_child_tool_row, role_label,
 };
 pub use chrome_render::{
     CHROME_GUTTER, ChromeRender, apply_gutter, frame_content_width, render_chrome_lines,

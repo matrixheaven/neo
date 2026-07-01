@@ -7,7 +7,8 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed, format_elapsed,
-    format_token_count, one_line, render_child_final, render_child_thinking, render_child_tool_row,
+    format_token_count, one_line, render_child_body, render_child_final, render_child_thinking,
+    render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,41 +66,84 @@ impl SwarmCardComponent {
         let child_progress = self.child_progresses();
         let progress = aggregate_progress(&child_progress);
         let mut lines = Vec::new();
+        let total = self.snapshot.children.len();
+        let running = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| matches!(child.agent.state, AgentLifecycleState::Running))
+            .count();
+        let completed = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| matches!(child.agent.state, AgentLifecycleState::Completed))
+            .count();
+        let queued = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| matches!(child.agent.state, AgentLifecycleState::Queued))
+            .count();
 
         lines.push(
             Line::from_spans(vec![
-                Span::styled("─ Agent Swarm ─ ", brand),
+                Span::styled("● Swarm: ", brand),
                 Span::styled(self.snapshot.description.as_str(), primary),
                 Span::styled(
-                    format!(
-                        " ─ {} ─ {:.0}%",
-                        swarm_status_label(&self.snapshot),
-                        progress * 100.0,
-                    ),
-                    swarm_status_style(&self.snapshot, theme),
+                    format!(" · {total} agents · {running} run · {completed} done · {queued} wait"),
+                    muted,
                 ),
             ])
             .truncate_to_width(width),
         );
-        lines.push(Line::styled("━".repeat(30), brand));
+        lines.push(
+            Line::from_spans(vec![
+                Span::styled("  progress [", muted),
+                Span::styled(
+                    compact_progress_meter(progress, 18),
+                    Style::default().fg(theme.status_warn),
+                ),
+                Span::styled(
+                    format!(
+                        "] {:.0}% · bayes estimate · max {}",
+                        progress * 100.0,
+                        self.snapshot.max_concurrency,
+                    ),
+                    muted,
+                ),
+            ])
+            .truncate_to_width(width),
+        );
 
-        for (child, progress) in self
+        let mut children = self
             .snapshot
             .children
             .iter()
             .zip(child_progress.iter().copied())
-        {
+            .collect::<Vec<_>>();
+        children.sort_by_key(|(child, _)| child.item_index);
+        let last_child_index = children.len().saturating_sub(1);
+
+        for (index, (child, progress)) in children.into_iter().enumerate() {
             let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
             let elapsed = display_elapsed(&child.agent, self.now_ms);
+            let branch = if index == last_child_index {
+                "└─"
+            } else {
+                "├─"
+            };
             lines.push(
                 Line::from_spans(vec![
-                    Span::styled(format!("{:03} ", child.item_index + 1), muted),
-                    Span::raw("["),
+                    Span::styled(format!("{branch} "), muted),
+                    Span::styled(child.agent.display_name.as_str(), state_style),
+                    Span::raw("  "),
+                    Span::styled(format!("[{}]", role_label(child.agent.role)), muted),
+                    Span::raw(" "),
+                    Span::styled(marker(child.agent.state), state_style),
+                    Span::raw(" ["),
                     progress_bar_line(progress, child.agent.state, theme),
                     Span::raw("] "),
-                    Span::styled(marker(child.agent.state), state_style),
-                    Span::raw(" "),
-                    Span::styled(child.agent.display_name.as_str(), state_style),
                     Span::styled(
                         format!(
                             " {} · {} tools · {} · {} tok · {}",
@@ -160,21 +204,31 @@ impl SwarmCardComponent {
         }
 
         if self.expanded {
-            for child in &self.snapshot.children {
+            for (index, child) in self.snapshot.children.iter().enumerate() {
                 let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
                 let elapsed = display_elapsed(&child.agent, self.now_ms);
+                let branch = if index + 1 == self.snapshot.children.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                let continuation = if index + 1 == self.snapshot.children.len() {
+                    "   "
+                } else {
+                    "│  "
+                };
                 lines.push(
                     Line::from_spans(vec![
-                        Span::raw("  "),
-                        Span::styled(marker(child.agent.state), state_style),
-                        Span::raw(" "),
+                        Span::raw(format!("  {branch} ")),
                         Span::styled(child.agent.display_name.as_str(), state_style),
+                        Span::raw("  "),
+                        Span::styled(format!("[{}]", role_label(child.agent.role)), muted),
                         Span::styled(
                             format!(
-                                " {} · {} tools · {} · {} tok",
+                                "  {} · {} · {} tools · {} tok",
                                 state_label(child.agent.state),
-                                child.agent.tool_count,
                                 format_elapsed(elapsed.as_secs()),
+                                child.agent.tool_count,
                                 format_token_count(child.agent.token_count),
                             ),
                             primary,
@@ -183,19 +237,27 @@ impl SwarmCardComponent {
                     .truncate_to_width(width),
                 );
 
+                let indent = format!("  {continuation} ");
                 let view = child_activity_view(&child.agent, MAX_CHILD_TOOL_ROWS);
                 for tool in &view.tools {
-                    lines.extend(render_child_tool_row(tool, width, "    ", theme));
+                    lines.extend(render_child_tool_row(tool, width, &indent, theme));
                 }
                 if let Some(thinking) = view.thinking.as_deref() {
-                    lines.extend(render_child_thinking(thinking, width, "    ", theme));
+                    lines.extend(render_child_thinking(thinking, width, &indent, theme));
+                }
+                if let Some(body) = view
+                    .body_text
+                    .as_deref()
+                    .and_then(|text| render_child_body(text, width, &indent, theme))
+                {
+                    lines.push(body);
                 }
                 if let Some(final_text) = view.final_text.as_deref() {
                     lines.push(render_child_final(
                         final_text,
                         view.final_is_error,
                         width,
-                        "    ",
+                        &indent,
                         theme,
                     ));
                 }
@@ -298,12 +360,49 @@ fn progress_bar_text(progress: f32, state: AgentLifecycleState) -> String {
     )
 }
 
+fn compact_progress_meter(progress: f32, width: usize) -> String {
+    let width = width.max(1);
+    let filled = ((progress.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
+    format!("{}{}", "■".repeat(filled), "·".repeat(width - filled))
+}
+
 fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str) -> String {
     if agent.state == AgentLifecycleState::Queued {
         if !agent.task_title.is_empty() {
             return compact_chars(&one_line(&agent.task_title), 96);
         }
         return compact_chars(&one_line(fallback_item), 96);
+    }
+    if let Some((name, summary)) = agent
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                name,
+                summary,
+                phase,
+                ..
+            } if *phase == AgentToolActivityPhase::Ongoing => {
+                Some((name.as_str(), summary.as_deref()))
+            }
+            AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+        })
+    {
+        return compact_chars(&format_tool_summary("Using", name, summary), 96);
+    }
+    if let Some((name, summary)) = agent
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool { name, summary, .. } => {
+                Some((name.as_str(), summary.as_deref()))
+            }
+            AgentActivityKind::Text { .. } => None,
+        })
+    {
+        return compact_chars(&format_tool_summary("Used", name, summary), 96);
     }
     let view = child_activity_view(agent, 1);
     if let Some(tool) = view.tools.last() {
@@ -410,21 +509,6 @@ fn render_scheduling_summary(snapshot: &SwarmSnapshot, theme: &TuiTheme) -> Line
             Style::default().fg(theme.text_muted),
         ),
     ])
-}
-
-fn swarm_status_label(snapshot: &SwarmSnapshot) -> &'static str {
-    match snapshot.state {
-        AgentLifecycleState::Queued => "Queued",
-        AgentLifecycleState::Running => "Running",
-        AgentLifecycleState::Completed => "Completed",
-        AgentLifecycleState::Failed => "Failed",
-        AgentLifecycleState::Cancelled => "Cancelled",
-        AgentLifecycleState::TimedOut => "Timed Out",
-    }
-}
-
-fn swarm_status_style(snapshot: &SwarmSnapshot, theme: &TuiTheme) -> Style {
-    Style::default().fg(agent_status_color(snapshot.state, theme))
 }
 
 fn agent_status_color(state: AgentLifecycleState, theme: &TuiTheme) -> Color {

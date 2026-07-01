@@ -293,6 +293,13 @@ impl TranscriptStore {
             group.upsert(snapshot);
             return;
         }
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
+            _ => None,
+        }) {
+            entry.update(snapshot);
+            return;
+        }
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateGroup { component } if component.turn() == turn => {
                 Some(component)
@@ -321,13 +328,6 @@ impl TranscriptStore {
                     component: DelegateGroupComponent::new(turn, vec![existing, snapshot]),
                 },
             );
-            return;
-        }
-        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
-            _ => None,
-        }) {
-            entry.update(snapshot);
             return;
         }
         self.push(TranscriptEntry::Delegate {
