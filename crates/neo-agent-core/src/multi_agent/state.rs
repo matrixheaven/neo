@@ -122,6 +122,8 @@ pub struct AgentSnapshot {
     pub run_count: usize,
     pub live_messages_received: usize,
     pub previous_status: Option<AgentLifecycleState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminal_status_history: Vec<AgentLifecycleState>,
     pub resumed_from: Option<AgentId>,
     pub tool_count: usize,
     pub token_count: usize,

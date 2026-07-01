@@ -548,6 +548,9 @@ impl MultiAgentRuntime {
             );
         }
         let previous_status = agent.state;
+        if previous_status.is_terminal() {
+            agent.terminal_status_history.push(previous_status);
+        }
         agent.state = AgentLifecycleState::Running;
         agent.mode = request.mode;
         agent.task = request.task.clone();
@@ -890,6 +893,7 @@ fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
         run_count: 1,
         live_messages_received: 0,
         previous_status: None,
+        terminal_status_history: Vec::new(),
         resumed_from: None,
         tool_count: 0,
         token_count: 0,

@@ -79,6 +79,14 @@ enum DelegateListOrder {
     Oldest,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DelegateStateScope {
+    #[default]
+    Current,
+    AnyRun,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DelegateListInclude {
@@ -107,6 +115,11 @@ struct ListDelegatesInput {
         description = "Filter by lifecycle state (e.g. running, completed, cancelled). Omit for any state."
     )]
     state: Option<AgentLifecycleState>,
+    #[serde(default)]
+    #[schemars(
+        description = "When state is set, current matches only the current lifecycle state. any_run also matches terminal states recorded before resume."
+    )]
+    state_scope: DelegateStateScope,
     #[serde(default = "default_delegate_list_limit")]
     #[schemars(description = "Maximum number of rows to return. Defaults to 20.")]
     limit: usize,
@@ -147,6 +160,7 @@ struct DelegateListCursorQuery {
     include_completed: bool,
     kind: String,
     state: Option<String>,
+    state_scope: String,
     order: String,
     include: Vec<String>,
 }
@@ -162,6 +176,7 @@ impl DelegateListCursorQuery {
             }
             .to_owned(),
             state: input.state.map(|state| state.as_str().to_owned()),
+            state_scope: state_scope_label(input.state_scope).to_owned(),
             order: match input.order {
                 DelegateListOrder::Newest => "newest",
                 DelegateListOrder::Oldest => "oldest",
@@ -218,6 +233,29 @@ fn empty_delegate_list_next_steps(
         "Pass include_completed=true to list completed, failed, cancelled, or timed_out delegates."
             .to_owned(),
     ]
+}
+
+fn state_scope_label(scope: DelegateStateScope) -> &'static str {
+    match scope {
+        DelegateStateScope::Current => "current",
+        DelegateStateScope::AnyRun => "any_run",
+    }
+}
+
+fn agent_matches_state(
+    agent: &crate::multi_agent::AgentSnapshot,
+    filter_state: AgentLifecycleState,
+    state_scope: DelegateStateScope,
+) -> bool {
+    if agent.state == filter_state {
+        return true;
+    }
+    matches!(state_scope, DelegateStateScope::AnyRun)
+        && agent
+            .terminal_status_history
+            .iter()
+            .copied()
+            .any(|state| state == filter_state)
 }
 
 fn parse_list_cursor(
@@ -307,7 +345,7 @@ impl Tool for ListDelegatesTool {
                 let agents = ctx.multi_agent.list_agents(include_completed);
                 for agent in &agents {
                     if let Some(filter_state) = input.state
-                        && agent.state != filter_state
+                        && !agent_matches_state(agent, filter_state, input.state_scope)
                     {
                         continue;
                     }
@@ -328,6 +366,14 @@ impl Tool for ListDelegatesTool {
                         include_activity,
                     );
                     row["kind"] = json!("agent");
+                    row["current_status"] = json!(agent.state.as_str());
+                    row["terminal_status_history"] = json!(
+                        agent
+                            .terminal_status_history
+                            .iter()
+                            .map(|state| state.as_str())
+                            .collect::<Vec<_>>()
+                    );
                     all_rows.push(DelegateListRow {
                         created_index: ctx
                             .multi_agent
@@ -450,6 +496,7 @@ impl Tool for ListDelegatesTool {
                         DelegateListKind::All => "all",
                     },
                     "state": input.state.map(|state| state.as_str()),
+                    "state_scope": state_scope_label(input.state_scope),
                 },
                 "delegates": rows,
             });
@@ -952,5 +999,142 @@ mod tests {
         assert!(interrupt_result.content.contains("cannot be interrupted"));
         assert!(!interrupt_result.content.contains("live messages"));
         assert_eq!(interrupt_result.details.as_ref().unwrap()["action"], "interrupt");
+    }
+
+    #[tokio::test]
+    async fn list_delegates_any_run_state_finds_resumed_cancelled_agent() {
+        let ctx = test_context();
+        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        let cancelled = ctx
+            .multi_agent
+            .cancel_agent_by_id(agent.id.as_str())
+            .expect("agent cancelled");
+        assert_eq!(cancelled.state, AgentLifecycleState::Cancelled);
+
+        ctx.multi_agent
+            .start_resume_delegate(
+                agent.id.as_str(),
+                &crate::multi_agent::DelegateRequest {
+                    task: "second run".to_owned(),
+                    resume: Some(agent.id.as_str().to_owned()),
+                    title: None,
+                    role: None,
+                    mode: crate::multi_agent::AgentRunMode::Foreground,
+                    context: crate::multi_agent::DelegateContext::None,
+                },
+            )
+            .expect("resume starts");
+        ctx.multi_agent
+            .complete_delegate_for_test(&agent.id, "second run done");
+
+        let result = ListDelegatesTool
+            .execute(
+                &ctx,
+                json!({
+                    "include_completed": true,
+                    "state": "cancelled",
+                    "state_scope": "any_run"
+                }),
+            )
+            .await
+            .expect("list result");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains(agent.id.as_str()));
+        let details = result.details.as_ref().unwrap();
+        assert_eq!(details["query"]["state"], "cancelled");
+        assert_eq!(details["query"]["state_scope"], "any_run");
+        assert_eq!(details["delegates"][0]["current_status"], "completed");
+        assert_eq!(details["delegates"][0]["terminal_status_history"][0], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn list_delegates_current_state_does_not_match_resumed_cancelled_agent() {
+        let ctx = test_context();
+        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        ctx.multi_agent
+            .cancel_agent_by_id(agent.id.as_str())
+            .expect("agent cancelled");
+        ctx.multi_agent
+            .start_resume_delegate(
+                agent.id.as_str(),
+                &crate::multi_agent::DelegateRequest {
+                    task: "second run".to_owned(),
+                    resume: Some(agent.id.as_str().to_owned()),
+                    title: None,
+                    role: None,
+                    mode: crate::multi_agent::AgentRunMode::Foreground,
+                    context: crate::multi_agent::DelegateContext::None,
+                },
+            )
+            .expect("resume starts");
+        ctx.multi_agent
+            .complete_delegate_for_test(&agent.id, "second run done");
+
+        let result = ListDelegatesTool
+            .execute(
+                &ctx,
+                json!({
+                    "include_completed": true,
+                    "state": "cancelled"
+                }),
+            )
+            .await
+            .expect("list result");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("No cancelled delegates found"));
+    }
+
+    #[tokio::test]
+    async fn list_delegates_any_run_history_preserves_repeated_terminal_states() {
+        let ctx = test_context();
+        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        ctx.multi_agent
+            .complete_delegate_for_test(&agent.id, "first run done");
+
+        ctx.multi_agent
+            .start_resume_delegate(
+                agent.id.as_str(),
+                &crate::multi_agent::DelegateRequest {
+                    task: "second run".to_owned(),
+                    resume: Some(agent.id.as_str().to_owned()),
+                    title: None,
+                    role: None,
+                    mode: crate::multi_agent::AgentRunMode::Foreground,
+                    context: crate::multi_agent::DelegateContext::None,
+                },
+            )
+            .expect("second run starts");
+        ctx.multi_agent
+            .complete_delegate_for_test(&agent.id, "second run done");
+        ctx.multi_agent
+            .start_resume_delegate(
+                agent.id.as_str(),
+                &crate::multi_agent::DelegateRequest {
+                    task: "third run".to_owned(),
+                    resume: Some(agent.id.as_str().to_owned()),
+                    title: None,
+                    role: None,
+                    mode: crate::multi_agent::AgentRunMode::Foreground,
+                    context: crate::multi_agent::DelegateContext::None,
+                },
+            )
+            .expect("third run starts");
+
+        let result = ListDelegatesTool
+            .execute(
+                &ctx,
+                json!({
+                    "state": "completed",
+                    "state_scope": "any_run"
+                }),
+            )
+            .await
+            .expect("list result");
+
+        assert!(!result.is_error);
+        let history = &result.details.as_ref().unwrap()["delegates"][0]["terminal_status_history"];
+        assert_eq!(history, &json!(["completed", "completed"]));
     }
 }
