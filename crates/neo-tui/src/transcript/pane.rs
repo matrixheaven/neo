@@ -397,10 +397,12 @@ impl TranscriptPane {
 
     pub fn scroll_transcript_up(&mut self, rows: usize) {
         self.transcript.viewport_mut().scroll_up(rows);
+        self.mark_dirty();
     }
 
     pub fn scroll_transcript_down(&mut self, rows: usize) {
         self.transcript.viewport_mut().scroll_down(rows);
+        self.mark_dirty();
     }
 
     pub fn sync_transcript_view(&mut self, content_rows: usize, viewport_rows: usize) {
@@ -724,7 +726,16 @@ impl TranscriptPane {
             }
         }
         append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-        rows
+
+        let viewport_rows = self.height.saturating_sub(self.live_chrome_height).max(1);
+        self.transcript
+            .viewport_mut()
+            .sync(rows.len(), viewport_rows);
+        let range = self
+            .transcript
+            .viewport()
+            .visible_row_range(rows.len(), viewport_rows);
+        rows.into_iter().skip(range.start).take(range.len()).collect()
     }
 
     fn has_streaming_thinking(&self) -> bool {
