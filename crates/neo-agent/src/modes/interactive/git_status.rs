@@ -1,7 +1,9 @@
 //! Extracted: git-status badge rendering and parsing helpers.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::fs::File;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use neo_agent_core::AgentEvent;
@@ -14,14 +16,19 @@ pub(super) struct GitStatusBadge {
     pub(super) behind: u32,
     pub(super) added: u32,
     pub(super) deleted: u32,
+    pub(super) untracked: u32,
 }
 
 impl GitStatusBadge {
     pub(super) fn format(&self) -> String {
         let mut parts = Vec::new();
-        if self.added > 0 || self.deleted > 0 {
+        let has_line_counts = self.added > 0 || self.deleted > 0;
+        if has_line_counts {
             parts.push(format!("+{} -{}", self.added, self.deleted));
-        } else if self.dirty {
+        }
+        if self.untracked > 0 {
+            parts.push(format!("?{}", self.untracked));
+        } else if self.dirty && !has_line_counts {
             parts.push("±".to_owned());
         }
         let mut sync = String::new();
@@ -87,6 +94,20 @@ pub(super) fn git_status_label_with_program(
             badge.added = added;
             badge.deleted = deleted;
         }
+        let untracked_output = Command::new(program)
+            .arg("-C")
+            .arg(workspace_root)
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .output()
+            .ok();
+        if let Some(output) = untracked_output
+            && output.status.success()
+        {
+            let untracked_files = parse_git_untracked_files_z(&output.stdout);
+            let (added, untracked) = count_untracked_changes(workspace_root, &untracked_files);
+            badge.added = badge.added.saturating_add(added);
+            badge.untracked = badge.untracked.saturating_add(untracked);
+        }
     }
     Some(badge.format())
 }
@@ -117,6 +138,7 @@ pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge>
             behind,
             added: 0,
             deleted: 0,
+            untracked: 0,
         })
 }
 
@@ -157,6 +179,58 @@ pub(super) fn parse_git_numstat(stdout: &str) -> (u32, u32) {
         let line_deleted = parse_git_numstat_count(parts.next());
         (added + line_added, deleted + line_deleted)
     })
+}
+
+pub(super) fn parse_git_untracked_files_z(stdout: &[u8]) -> Vec<PathBuf> {
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect()
+}
+
+pub(super) fn count_untracked_changes(workspace_root: &Path, paths: &[PathBuf]) -> (u32, u32) {
+    paths.iter().fold(
+        (0_u32, 0_u32),
+        |(added, other), path| match count_text_file_lines(&workspace_root.join(path)) {
+            Some(lines) => (added.saturating_add(lines), other),
+            None => (added, other.saturating_add(1)),
+        },
+    )
+}
+
+fn count_text_file_lines(path: &Path) -> Option<u32> {
+    let mut file = File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+
+    let mut buffer = [0_u8; 8192];
+    let mut lines = 0_u32;
+    let mut saw_byte = false;
+    let mut last_byte = 0_u8;
+
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            if *byte == 0 {
+                return None;
+            }
+            saw_byte = true;
+            if *byte == b'\n' {
+                lines = lines.saturating_add(1);
+            }
+            last_byte = *byte;
+        }
+    }
+
+    if saw_byte && last_byte != b'\n' {
+        lines = lines.saturating_add(1);
+    }
+    Some(lines)
 }
 
 fn parse_git_numstat_count(value: Option<&str>) -> u32 {

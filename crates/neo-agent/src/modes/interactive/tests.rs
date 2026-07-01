@@ -13,7 +13,8 @@ use neo_tui::{
 };
 
 use super::git_status::{
-    git_status_label_with_program, parse_git_numstat, parse_git_status_porcelain,
+    count_untracked_changes, git_status_label_with_program, parse_git_numstat,
+    parse_git_status_porcelain, parse_git_untracked_files_z,
 };
 use super::snapshot::{compose_tui_frame, render_overlay_snapshot};
 use super::*;
@@ -120,6 +121,35 @@ fn git_status_badge_formats_dirty_without_line_counts() {
     let badge = parse_git_status_porcelain("## feature\n?? new-file.rs\n").expect("git badge");
 
     assert_eq!(badge.format(), "feature [±]");
+}
+
+#[test]
+fn git_status_badge_counts_untracked_text_file_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(dir.path().join("src")).expect("create source dir");
+    fs::write(dir.path().join("src/new.rs"), "first\nsecond\n").expect("write source file");
+
+    let mut badge = parse_git_status_porcelain("## feature\n?? src/new.rs\n").expect("git badge");
+    let untracked_files = parse_git_untracked_files_z(b"src/new.rs\0");
+    let (added, untracked) = count_untracked_changes(dir.path(), &untracked_files);
+    badge.added = added;
+    badge.untracked = untracked;
+
+    assert_eq!(badge.format(), "feature [+2 -0]");
+}
+
+#[test]
+fn git_status_badge_counts_untracked_files_without_line_counts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(dir.path().join("image.bin"), b"neo\0image").expect("write binary file");
+
+    let mut badge = parse_git_status_porcelain("## feature\n?? image.bin\n").expect("git badge");
+    let untracked_files = parse_git_untracked_files_z(b"image.bin\0");
+    let (added, untracked) = count_untracked_changes(dir.path(), &untracked_files);
+    badge.added = added;
+    badge.untracked = untracked;
+
+    assert_eq!(badge.format(), "feature [?1]");
 }
 
 #[test]
