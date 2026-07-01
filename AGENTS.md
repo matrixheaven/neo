@@ -6,6 +6,8 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 
 ## Critical rules
 
+> **This guide constrains _you_ (the AI collaborator), not Neo.** Nothing here is a product specification or feature requirement. Rules describe working conventions for agents operating in this codebase — do not mistake them for Neo's design, architecture decisions, or user-facing behavior. If a rule says "don't do X", that limits what _you_ do while coding, not what Neo as a tool must support.
+
 1. **Stay in scope.** Don't fix unrelated failures or clean up other agents' work. The worktree is shared and concurrent.
 2. **Never revert worktree files** to make tests pass. If another agent's in-progress work breaks your build, skip those tests and report it.
 3. **Simplify, don't pile on.** Delete obsolete paths. No compatibility branches, fallback paths, or duplicate models to preserve status quo.
