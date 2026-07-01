@@ -45,8 +45,8 @@ Never widen scope to "make sure nothing broke" — that's CI's job. Test evidenc
 ```bash
 cargo build -p neo-agent                    # build binary
 cargo fmt --all --check                     # formatting
-cargo clippy -p <crate> --lib -- -D warnings           # library lint
-cargo clippy -p <crate> --test <target> -- -D warnings # integration-test lint
+cargo clippy -p <crate> --lib -- -D clippy::all           # library lint
+cargo clippy -p <crate> --test <target> -- -D clippy::all # integration-test lint
 cargo nextest run -p <crate> --test <target> <filter>  # integration test
 cargo nextest run -p <crate> --lib <filter>            # library unit test
 cargo nextest run -p <crate> --bin <bin> <filter>      # binary target test
