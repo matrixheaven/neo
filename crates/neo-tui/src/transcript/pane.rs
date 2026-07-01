@@ -735,7 +735,10 @@ impl TranscriptPane {
             .transcript
             .viewport()
             .visible_row_range(rows.len(), viewport_rows);
-        rows.into_iter().skip(range.start).take(range.len()).collect()
+        rows.into_iter()
+            .skip(range.start)
+            .take(range.len())
+            .collect()
     }
 
     fn has_streaming_thinking(&self) -> bool {

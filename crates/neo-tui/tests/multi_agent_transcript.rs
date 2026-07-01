@@ -254,16 +254,17 @@ fn option_b_state_markers_do_not_depend_on_color_only() {
         ..option_b_running_delegate()
     };
 
-    let completed_text = plain(
-        DelegateCardComponent::new(completed).render_with_theme(120, &TuiTheme::default()),
-    )
-    .join("\n");
-    let failed_text = plain(
-        DelegateCardComponent::new(failed).render_with_theme(120, &TuiTheme::default()),
-    )
-    .join("\n");
+    let completed_text =
+        plain(DelegateCardComponent::new(completed).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
+    let failed_text =
+        plain(DelegateCardComponent::new(failed).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
 
-    assert!(completed_text.contains("✓ Nova  [Coder]"), "{completed_text}");
+    assert!(
+        completed_text.contains("✓ Nova  [Coder]"),
+        "{completed_text}"
+    );
     assert!(completed_text.contains("done"), "{completed_text}");
     assert!(failed_text.contains("✗ Nova  [Coder]"), "{failed_text}");
     assert!(failed_text.contains("failed"), "{failed_text}");
@@ -1416,7 +1417,10 @@ fn delegate_card_header_uses_task_title_not_full_prompt() {
         plain(DelegateCardComponent::new(snapshot).render_with_theme(80, &TuiTheme::default()))
             .join("\n");
 
-    assert!(text.contains("Gibbs  [Coder]  Count public modules"), "{text}");
+    assert!(
+        text.contains("Gibbs  [Coder]  Count public modules"),
+        "{text}"
+    );
     assert!(!text.contains("explain every module in detail"), "{text}");
     assert!(text.contains("tools"), "{text}");
 }

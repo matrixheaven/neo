@@ -2433,7 +2433,13 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
         .await
         .expect("wheel up scrolls transcript");
     assert!(transcript_scrollback(&controller) > 0);
-    assert!(!controller.transcript().transcript().viewport().is_following_tail());
+    assert!(
+        !controller
+            .transcript()
+            .transcript()
+            .viewport()
+            .is_following_tail()
+    );
 
     controller
         .handle_input_event(InputEvent::Insert('h'))
@@ -2449,7 +2455,13 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
         .expect("submit restores tail before sending");
 
     assert_eq!(transcript_scrollback(&controller), 0);
-    assert!(controller.transcript().transcript().viewport().is_following_tail());
+    assert!(
+        controller
+            .transcript()
+            .transcript()
+            .viewport()
+            .is_following_tail()
+    );
 }
 
 #[tokio::test]

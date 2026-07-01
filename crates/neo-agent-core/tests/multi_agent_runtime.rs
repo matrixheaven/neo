@@ -172,16 +172,22 @@ fn child_activity_trim_preserves_visible_ongoing_tool_and_latest_text() {
         );
     }
 
-    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    let updated = runtime
+        .snapshot(&snapshot.id)
+        .expect("snapshot remains present");
     assert_eq!(updated.activity.len(), 24);
     assert_eq!(
         latest_tool_phase(&updated, "bash-live"),
         Some(AgentToolActivityPhase::Ongoing)
     );
-    let latest_thinking = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
-        AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
-        _ => None,
-    });
+    let latest_thinking = updated
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
+            _ => None,
+        });
     assert_eq!(latest_thinking, Some("thinking chunk 31"));
 }
 
@@ -212,16 +218,26 @@ fn child_text_and_thinking_deltas_accumulate_into_live_activity() {
         );
     }
 
-    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    let updated = runtime
+        .snapshot(&snapshot.id)
+        .expect("snapshot remains present");
     assert_eq!(updated.latest_text.as_deref(), Some("All edits applied."));
-    let latest_body = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
-        AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
-        _ => None,
-    });
-    let latest_thinking = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
-        AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
-        _ => None,
-    });
+    let latest_body = updated
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+            _ => None,
+        });
+    let latest_thinking = updated
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
+            _ => None,
+        });
     assert_eq!(latest_body, Some("All edits applied."));
     assert_eq!(latest_thinking, Some("Let me verify."));
 }
@@ -243,12 +259,18 @@ fn child_text_delta_accumulation_preserves_repeated_fragments() {
         );
     }
 
-    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    let updated = runtime
+        .snapshot(&snapshot.id)
+        .expect("snapshot remains present");
     assert_eq!(updated.latest_text.as_deref(), Some("haha!"));
-    let latest_body = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
-        AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
-        _ => None,
-    });
+    let latest_body = updated
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+            _ => None,
+        });
     assert_eq!(latest_body, Some("haha!"));
 }
 
