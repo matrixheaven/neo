@@ -590,7 +590,7 @@ Artifacts:
 
   > Skipped: the workspace is currently non-compiling in unrelated areas
   > (in-progress `SkillStore::load` signature refactor in
-  > `run.rs`/`resources.rs`, and prompt-template/extension discovery
+  > `run.rs`/`resources.rs`, and prompt-template discovery
   > regressions), so workspace-wide LCOV/CRAP/CI cannot complete. Per
   > AGENTS.md, those failures are out of NEO-26's scope and must not be
   > fixed here. All 9 NEO-26 focused tests pass via

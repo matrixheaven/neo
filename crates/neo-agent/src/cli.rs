@@ -55,11 +55,6 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// 本地扩展管理
-    Extensions {
-        #[command(subcommand)]
-        command: ExtensionCommand,
-    },
     /// 模型提供商管理
     Provider {
         #[command(subcommand)]
@@ -303,68 +298,5 @@ pub enum McpCommand {
     Auth {
         /// MCP 服务器名称
         server_id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ExtensionCommand {
-    /// 列出本地扩展
-    List {
-        /// 扩展根目录
-        #[arg(default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 安装扩展
-    Install {
-        source: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 更新扩展
-    Update {
-        extension_id: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 卸载扩展
-    Uninstall {
-        extension_id: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 查看扩展状态
-    Status {
-        extension_id: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 启用扩展
-    Enable {
-        extension_id: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 禁用扩展
-    Disable {
-        extension_id: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
-    },
-    /// 调用扩展方法
-    Call {
-        extension_id: String,
-        method: String,
-        /// JSON 参数字符串
-        #[arg(default_value = "{}")]
-        params: String,
-        /// 扩展根目录
-        #[arg(long, default_value = ".neo/extensions")]
-        root: std::path::PathBuf,
     },
 }

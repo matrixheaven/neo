@@ -233,81 +233,6 @@ fn system_input_contents(request: &RecordedRequest) -> Vec<&str> {
         .collect()
 }
 
-fn write_echo_extension_at(extension: &std::path::Path) -> std::path::PathBuf {
-    write_named_echo_extension_at(extension, "echo")
-}
-
-fn write_named_echo_extension_at(
-    extension: &std::path::Path,
-    extension_id: &str,
-) -> std::path::PathBuf {
-    std::fs::create_dir_all(extension).expect("create extension");
-    let log = extension.join("extension-calls.jsonl");
-    let script = extension.join("echo.py");
-    std::fs::write(
-        &script,
-        format!(
-            r#"
-import json
-import sys
-
-log_path = {log_path}
-
-for line in sys.stdin:
-    message = json.loads(line)
-    with open(log_path, "a", encoding="utf-8") as log:
-        log.write(json.dumps(message, sort_keys=True) + "\n")
-    method = message["method"]
-    if method == "tools.list":
-        result = [{{
-            "name": "echo",
-            "description": "Echo text from the Neo extension",
-            "input_schema": {{
-                "type": "object",
-                "properties": {{"text": {{"type": "string"}}}},
-                "required": ["text"]
-            }},
-            "method": "tool.echo"
-        }}]
-    elif method == "tool.echo":
-        result = {{
-            "content": "extension echo: " + message["params"]["text"],
-            "details": {{"source": "extension-test"}}
-        }}
-    else:
-        print(json.dumps({{
-            "type": "response",
-            "id": message["id"],
-            "error": {{"code": "method_not_found", "message": method}}
-        }}), flush=True)
-        continue
-    print(json.dumps({{"type": "response", "id": message["id"], "result": result}}), flush=True)
-"#,
-            log_path =
-                serde_json::to_string(log.to_str().expect("utf8 log path")).expect("log path json")
-        ),
-    )
-    .expect("write extension script");
-    std::fs::write(
-        extension.join("neo-extension.toml"),
-        format!(
-            r#"
-id = "{extension_id}"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-args = [{script}]
-"#,
-            extension_id = extension_id,
-            script = serde_json::to_string(&script).expect("script path json")
-        ),
-    )
-    .expect("write extension manifest");
-    log
-}
-
 fn openai_response_sse(id: &str, text: &str) -> String {
     sse_response(&[
         json!({ "type": "response.created", "response": { "id": id } }),
@@ -959,10 +884,12 @@ fn run_text_rejects_prompt_file_args_outside_workspace() {
 }
 
 #[test]
-fn run_text_registers_enabled_extension_tool_in_model_request() {
+fn run_text_does_not_register_extension_tools_in_model_request() {
     let temp = TempDir::new().expect("tempdir");
-    write_echo_extension_at(&isolated_home_path().join("extensions/echo"));
-    let server = MockSseServer::start(vec![openai_response_sse("resp-ext", "extension ready")]);
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-ext",
+        "extension ignored",
+    )]);
     write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
@@ -973,14 +900,18 @@ fn run_text_registers_enabled_extension_tool_in_model_request() {
 
     let stdout = run(command);
 
-    assert_eq!(stdout, "extension ready\n");
+    assert_eq!(stdout, "extension ignored\n");
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     let tool_names = model_tool_names(&requests[0].body);
+    let removed_tool_prefix = concat!("extension", "__");
     for name in &tool_names {
         assert_model_function_name_safe(name);
+        assert!(
+            !name.starts_with(removed_tool_prefix),
+            "unexpected extension tool registered: {name}"
+        );
     }
-    assert!(tool_names.contains(&"extension__echo__echo"));
     assert!(tool_names.contains(&"CreateSkill"));
     assert!(tool_names.contains(&"ListSkills"));
     assert!(tool_names.contains(&"MoveSkill"));

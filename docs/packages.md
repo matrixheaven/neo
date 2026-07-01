@@ -1,46 +1,9 @@
-# Local Extension And Prompt Assets
+# Local Prompt And Theme Assets
 
-Neo's local-only documentation treats extensions, prompt templates, and themes
-as files under the project or user configuration tree. It does not document a
-hosted catalog, publish flow, publisher identity system, or root trust chain as
-a supported local-agent feature.
-
-## Extensions
-
-Local extensions are directories that contain `neo-extension.toml`:
-
-```toml
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-description = "Local echo extension"
-
-[runner]
-command = "python3"
-args = ["-u", "extension.py"]
-```
-
-Install and manage them with local commands:
-
-```bash
-neo extensions install path/to/extension
-neo extensions list
-neo extensions status echo
-neo extensions disable echo
-neo extensions enable echo
-neo extensions update echo
-neo extensions call echo tool.echo '{"value":42}'
-```
-
-Installed extensions live under `.neo/extensions/<id>`. Neo records local
-source paths in `.neo/extensions-sources.toml` and enablement in
-`.neo/extensions-state.toml`.
-
-Provider-backed turns discover enabled project extensions by calling each
-extension's JSONL RPC `tools.list` method and advertise returned tools as
-`extension__<extension>__<tool>` functions. `--extension <PATH>` adds an
-explicit root for one invocation, and `--no-extensions` disables automatic
-project extension discovery.
+Neo can load prompt templates and themes from local project or user
+configuration directories. This page does not define a hosted catalog, publish
+flow, publisher identity system, or root trust chain as a supported local-agent
+feature.
 
 ## Prompt Templates
 

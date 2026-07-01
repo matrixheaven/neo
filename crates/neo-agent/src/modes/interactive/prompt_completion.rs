@@ -22,7 +22,6 @@ pub(super) fn prompt_completions(
         slash_prompts: slash_prompt_template_completion_items(root, prefix, project_trusted)
             .unwrap_or_default(),
         prompt_packages: prompt_package_completion_items(root, project_trusted)?,
-        extension_commands: extension_command_completion_items(root, project_trusted)?,
         session_commands: session_completion_items(skill_store),
         model_items: model_items.to_vec(),
     };
@@ -61,68 +60,6 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
     items.sort_by(|left, right| left.value.cmp(&right.value));
     items.dedup_by(|left, right| left.value == right.value);
     Ok(items)
-}
-
-fn extension_command_completion_items(
-    root: &Path,
-    project_trusted: bool,
-) -> Result<Vec<PickerItem>> {
-    let mut items = Vec::new();
-    if project_trusted {
-        let project_extension_root = root.join(".neo/extensions");
-        if project_extension_root.exists() {
-            items.extend(
-                discover_extension_commands(&project_extension_root).with_context(|| {
-                    format!(
-                        "failed to discover project extensions under {}",
-                        project_extension_root.display()
-                    )
-                })?,
-            );
-        }
-    }
-    if let Some(neo_home) = crate::config::neo_home() {
-        let user_extension_root =
-            neo_agent_core::tools::extensions::default_extension_root(&neo_home);
-        if user_extension_root.exists() {
-            items.extend(
-                discover_extension_commands(&user_extension_root).with_context(|| {
-                    format!(
-                        "failed to discover user extensions under {}",
-                        user_extension_root.display()
-                    )
-                })?,
-            );
-        }
-    }
-    items.sort_by(|left, right| left.value.cmp(&right.value));
-    items.dedup_by(|left, right| left.value == right.value);
-    items.truncate(100);
-    Ok(items)
-}
-
-fn discover_extension_commands(extension_root: &Path) -> Result<Vec<PickerItem>> {
-    Ok(
-        neo_agent_core::tools::extensions::ExtensionDiscovery::new(extension_root)
-            .discover()
-            .with_context(|| {
-                format!(
-                    "failed to discover extensions under {}",
-                    extension_root.display()
-                )
-            })?
-            .into_iter()
-            .map(|extension| {
-                let value = format!("/{}", extension.manifest.id);
-                let description = prompt_source_description(
-                    extension.manifest.description.as_deref(),
-                    Some(&extension.manifest.id),
-                    Some("local extension"),
-                );
-                PickerItem::new(value.clone(), value, Some(description))
-            })
-            .collect::<Vec<_>>(),
-    )
 }
 
 static STATIC_SLASH_COMMANDS: &[(&str, &str, Option<&str>, Option<&str>)] = &[
@@ -385,7 +322,6 @@ fn model_completion_candidates(
 pub(super) struct CompletionCatalog {
     pub(super) slash_prompts: Vec<PickerItem>,
     pub(super) prompt_packages: Vec<PickerItem>,
-    pub(super) extension_commands: Vec<PickerItem>,
     pub(super) session_commands: Vec<PickerItem>,
     pub(super) model_items: Vec<PickerItem>,
 }
@@ -396,7 +332,6 @@ pub(super) enum CompletionSource {
     LocalFile,
     SlashPrompt,
     PromptPackage,
-    ExtensionCommand,
     SessionCommand,
     ProviderModel,
 }
@@ -407,7 +342,6 @@ impl CompletionSource {
             Self::LocalFile => "local file",
             Self::SlashPrompt => "slash prompt",
             Self::PromptPackage => "prompt package",
-            Self::ExtensionCommand => "extension command",
             Self::SessionCommand => "session command",
             Self::ProviderModel => "provider model",
         }
@@ -480,10 +414,6 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
     let sources = [
         (&catalog.slash_prompts, CompletionSource::SlashPrompt),
         (&catalog.prompt_packages, CompletionSource::PromptPackage),
-        (
-            &catalog.extension_commands,
-            CompletionSource::ExtensionCommand,
-        ),
         (&catalog.session_commands, CompletionSource::SessionCommand),
     ];
     sources
@@ -499,7 +429,7 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
 }
 
 fn completion_source_rank(source: CompletionSource) -> u8 {
-    [0, 1, 2, 3, 4, 5][source as usize]
+    [0, 1, 2, 3, 4][source as usize]
 }
 
 fn completion_description(description: Option<&str>, source_label: &str) -> String {

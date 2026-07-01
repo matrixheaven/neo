@@ -670,309 +670,9 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
 }
 
 #[test]
-fn extensions_list_discovers_manifests() {
-    let temp = TempDir::new().expect("tempdir");
-    let extension = temp.path().join("extensions/echo");
-    fs::create_dir_all(&extension).expect("create extension");
-    fs::write(
-        extension.join("neo-extension.toml"),
-        r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-    )
-    .expect("write manifest");
-
-    let mut list = neo();
-    list.arg("extensions")
-        .arg("list")
-        .arg(temp.path().join("extensions"));
-    let stdout = run(list);
-
-    assert!(stdout.contains("echo"));
-    assert!(stdout.contains("Echo"));
-    assert!(stdout.contains("0.1.0"));
-}
-
-#[test]
-fn extensions_install_update_and_list_sources_from_local_directory() {
-    let temp = TempDir::new().expect("tempdir");
-    let source = temp.path().join("source");
-    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .args(["extensions", "install"])
-        .arg(&source);
-    let installed = run(install);
-    assert!(installed.contains("echo installed"));
-    assert!(installed.contains("0.1.0"));
-
-    let mut disable = neo();
-    disable
-        .current_dir(temp.path())
-        .args(["extensions", "disable", "echo"]);
-    run(disable);
-
-    write_extension_manifest(&source, "echo", "Echo", "0.2.0");
-
-    let mut update = neo();
-    update
-        .current_dir(temp.path())
-        .args(["extensions", "update", "echo"]);
-    let updated = run(update);
-    assert!(updated.contains("echo updated"));
-    assert!(updated.contains("0.2.0"));
-
-    let mut list = neo();
-    list.current_dir(temp.path()).args(["extensions", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("echo"));
-    assert!(listed.contains("0.2.0"));
-    assert!(listed.contains("disabled"));
-    assert!(listed.contains(source.to_string_lossy().as_ref()));
-
-    let state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
-        .expect("read lifecycle state");
-    assert!(state.contains("[extensions.echo]"));
-    assert!(state.contains("enabled = false"));
-}
-
-#[test]
-fn extensions_defaults_use_project_config_directory_when_invoked_from_another_cwd() {
-    let project = TempDir::new().expect("project tempdir");
-    let caller = TempDir::new().expect("caller tempdir");
-    write_home_config("");
-    let source = project.path().join("source");
-    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
-
-    let mut install = neo();
-    install
-        .current_dir(caller.path())
-        .args(["extensions", "install"])
-        .arg(&source);
-    let installed = run(install);
-    assert!(installed.contains("echo installed"));
-
-    let mut disable = neo();
-    disable
-        .current_dir(caller.path())
-        .args(["extensions", "disable", "echo"]);
-    let disabled = run(disable);
-    assert!(disabled.contains("echo disabled"));
-
-    write_extension_manifest(&source, "echo", "Echo", "0.2.0");
-
-    let mut update = neo();
-    update
-        .current_dir(caller.path())
-        .args(["extensions", "update", "echo"]);
-    let updated = run(update);
-    assert!(updated.contains("echo updated"));
-    assert!(updated.contains("0.2.0"));
-
-    let mut list = neo();
-    list.current_dir(caller.path()).args(["extensions", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("echo"));
-    assert!(listed.contains("0.2.0"));
-    assert!(listed.contains("disabled"));
-    assert!(listed.contains(source.to_string_lossy().as_ref()));
-
-    let project_state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
-        .expect("read lifecycle state");
-    assert!(project_state.contains("[extensions.echo]"));
-    assert!(project_state.contains("enabled = false"));
-    let project_registry = fs::read_to_string(neo_home_for_test().join("extensions-sources.toml"))
-        .expect("read source registry");
-    assert!(project_registry.contains("[extensions.echo"));
-    assert!(project_registry.contains(source.to_string_lossy().as_ref()));
-    assert!(
-        neo_home_for_test()
-            .join("extensions/echo/neo-extension.toml")
-            .exists()
-    );
-
-    assert!(!caller.path().join(".neo/extensions-state.toml").exists());
-    assert!(!caller.path().join(".neo/extensions-sources.toml").exists());
-    assert!(!caller.path().join(".neo/extensions").exists());
-}
-
-#[test]
-fn extensions_uninstall_removes_install_dir_and_source_entry() {
-    let temp = TempDir::new().expect("tempdir");
-    let source = temp.path().join("source");
-    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
-    let root = temp.path().join("extensions");
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .args(["extensions", "install"])
-        .arg(&source)
-        .arg("--root")
-        .arg(&root);
-    run(install);
-    assert!(root.join("echo/neo-extension.toml").exists());
-
-    let mut uninstall = neo();
-    uninstall
-        .current_dir(temp.path())
-        .args(["extensions", "uninstall", "echo", "--root"])
-        .arg(&root);
-    let uninstalled = run(uninstall);
-
-    assert!(uninstalled.contains("echo uninstalled"));
-    assert!(!root.join("echo").exists());
-
-    let registry = fs::read_to_string(neo_home_for_test().join("extensions-sources.toml"))
-        .expect("read extension source registry");
-    assert!(!registry.contains("[extensions.echo"));
-    assert!(!registry.contains(source.to_string_lossy().as_ref()));
-}
-
-#[test]
-fn extensions_call_round_trips_json_rpc() {
-    let temp = TempDir::new().expect("tempdir");
-    let extension = temp.path().join("extensions/echo");
-    fs::create_dir_all(&extension).expect("create extension");
-    let script = extension.join("echo.py");
-    fs::write(
-        &script,
-        r#"
-import json
-import sys
-
-message = json.loads(sys.stdin.readline())
-print(json.dumps({
-  "type": "response",
-  "id": message["id"],
-  "result": {
-    "method": message["method"],
-    "params": message["params"]
-  }
-}), flush=True)
-"#,
-    )
-    .expect("write script");
-    fs::write(
-        extension.join("neo-extension.toml"),
-        format!(
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-args = [{}]
-"#,
-            serde_json::to_string(&script).expect("script path should serialize")
-        ),
-    )
-    .expect("write manifest");
-
-    let mut call = neo();
-    call.args(["extensions", "call", "echo", "tool.echo", r#"{"value":42}"#])
-        .arg("--root")
-        .arg(temp.path().join("extensions"));
-    let stdout = run(call);
-
-    assert!(stdout.contains("\"method\":\"tool.echo\""));
-    assert!(stdout.contains("\"value\":42"));
-}
-
-#[test]
-fn extensions_lifecycle_commands_persist_status_and_gate_call() {
-    let temp = TempDir::new().expect("tempdir");
-    let extension = temp.path().join("extensions/echo");
-    fs::create_dir_all(&extension).expect("create extension");
-    let script = extension.join("echo.py");
-    fs::write(
-        &script,
-        r#"
-import json
-import sys
-
-message = json.loads(sys.stdin.readline())
-print(json.dumps({
-  "type": "response",
-  "id": message["id"],
-  "result": {"ok": True}
-}), flush=True)
-"#,
-    )
-    .expect("write script");
-    fs::write(
-        extension.join("neo-extension.toml"),
-        format!(
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-args = [{}]
-"#,
-            serde_json::to_string(&script).expect("script path should serialize")
-        ),
-    )
-    .expect("write manifest");
-
-    let root = temp.path().join("extensions");
-    let mut disable = neo();
-    disable
-        .current_dir(temp.path())
-        .args(["extensions", "disable", "echo", "--root"])
-        .arg(&root);
-    let disabled = run(disable);
-    assert!(disabled.contains("echo disabled"));
-
-    let state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
-        .expect("read lifecycle state");
-    assert!(state.contains("[extensions.echo]"));
-    assert!(state.contains("enabled = false"));
-
-    let mut status = neo();
-    status
-        .current_dir(temp.path())
-        .args(["extensions", "status", "echo", "--root"])
-        .arg(&root);
-    let status_stdout = run(status);
-    assert!(status_stdout.contains("echo"));
-    assert!(status_stdout.contains("disabled"));
-    assert!(status_stdout.contains("state_file"));
-
-    let call = neo()
-        .current_dir(temp.path())
-        .args(["extensions", "call", "echo", "tool.echo", "{}", "--root"])
-        .arg(&root)
-        .output()
-        .expect("neo command should run");
-    assert!(!call.status.success());
-    assert!(String::from_utf8_lossy(&call.stderr).contains("extension \"echo\" is disabled"));
-
-    let mut enable = neo();
-    enable
-        .current_dir(temp.path())
-        .args(["extensions", "enable", "echo", "--root"])
-        .arg(&root);
-    let enabled = run(enable);
-    assert!(enabled.contains("echo enabled"));
-}
-
-#[test]
 fn removed_remote_cli_surfaces_fail_parser() {
     let temp = TempDir::new().expect("tempdir");
     for args in [
-        vec!["extensions", "search", "echo"],
-        vec!["extensions", "install", "echo", "--from", "marketplace"],
         vec!["trust", "publishers", "list"],
         vec!["sessions", "sync", "status"],
         vec!["models", "list", "--pricing"],
@@ -984,6 +684,19 @@ fn removed_remote_cli_surfaces_fail_parser() {
             .expect("neo command should run");
         assert!(!output.status.success());
     }
+}
+
+#[test]
+fn extensions_subcommand_is_unknown() {
+    let output = neo()
+        .args(["extensions", "list"])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized subcommand"));
+    assert!(stderr.contains("extensions"));
 }
 
 fn canonical_project_dir(temp: &TempDir) -> PathBuf {
@@ -1068,24 +781,6 @@ fn trust_deny_persists_untrusted_decision() {
     status.current_dir(temp.path()).args(["trust", "status"]);
     let status_stdout = run(status);
     assert!(status_stdout.contains("Effective decision: untrusted"));
-}
-
-fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {
-    fs::create_dir_all(root).expect("create extension source");
-    fs::write(
-        root.join("neo-extension.toml"),
-        format!(
-            r#"
-id = "{id}"
-name = "{name}"
-version = "{version}"
-
-[runner]
-command = "python3"
-"#
-        ),
-    )
-    .expect("write extension manifest");
 }
 
 #[test]

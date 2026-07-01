@@ -7,7 +7,7 @@ agent-core runtime that can be tested without a terminal UI.
 
 ```text
 neo-agent CLI/TUI
-  -> neo-agent-core runtime, sessions, permissions, tools, MCP, local extensions,
+  -> neo-agent-core runtime, sessions, permissions, tools, MCP,
      skill loading, JSONL RPC, and HTML export
       -> neo-ai provider-neutral model and stream contracts
   -> neo-tui terminal UI primitives (crossterm-based component tree)
@@ -23,8 +23,8 @@ neo-agent CLI/TUI
 - `neo-agent-core` contains a runtime turn loop, fake harness, permissions,
   built-in tools (Read, List, Grep, Find, Glob, Write, Edit, Bash, Terminal,
   TodoList, EnterPlanMode, ExitPlanMode, and goal tools when a GoalManager is
-  attached), MCP adapters, local extension adapters, skill loading, JSONL RPC
-  primitives, HTML export, reasoning event persistence, multi-round
+  attached), MCP adapters, skill loading, JSONL RPC primitives, HTML export,
+  reasoning event persistence, multi-round
   compaction with provider overflow recovery, and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:

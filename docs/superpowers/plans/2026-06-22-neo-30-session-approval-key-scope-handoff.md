@@ -362,7 +362,7 @@ Recommended first implementation:
 
 ### Unknown Dynamic Tools
 
-For MCP, extensions, and generic custom tools:
+For MCP and generic custom tools:
 
 - Prefer no session approval until a safe key is designed.
 - If product insists on session approval, use `ToolExact { tool, arguments_hash }` and label it as exact arguments.

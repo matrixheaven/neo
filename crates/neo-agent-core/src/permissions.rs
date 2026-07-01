@@ -120,7 +120,7 @@ pub enum SessionApprovalKey {
         /// Whether this covers `Write` or `Edit`.
         operation: FileWriteApprovalOperation,
     },
-    /// One named tool (e.g. MCP/extension tools `mcp__<server>__<tool>`),
+    /// One named tool (e.g. MCP tools `mcp__<server>__<tool>`),
     /// keyed by tool name so the same tool is auto-approved for the session.
     Tool {
         /// Canonicalized workspace root (empty if unknown). Prevents a session

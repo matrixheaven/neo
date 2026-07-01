@@ -169,14 +169,6 @@ pub(crate) async fn tool_registry_for_config(
     mcp_manager: Option<&McpConnectionManager>,
 ) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_builtin_tools_and_todos(todos);
-    let extension_home =
-        crate::config::neo_home().unwrap_or_else(|| config.project_dir.join(".neo"));
-    neo_agent_core::tools::extensions::register_enabled_extension_tools(
-        &mut registry,
-        &neo_agent_core::tools::extensions::default_extension_root(&extension_home),
-        &neo_agent_core::tools::extensions::default_extension_state_path(&extension_home),
-    )
-    .await?;
     let manager;
     let manager_ref = if let Some(manager) = mcp_manager {
         manager

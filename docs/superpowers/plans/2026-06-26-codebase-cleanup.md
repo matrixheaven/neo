@@ -241,14 +241,12 @@ Deleted tool_call and scheduling fields (written, never read).
 Removed #[allow(dead_code)] suppression."
 ```
 
-### Task 2.3: Delete dead methods in `ToolRegistry`, `OAuthStore`, `SkillStore`, `ExtensionRunner`, `ExtensionLifecycleStore`, `GoalStore`
+### Task 2.3: Delete dead methods in `ToolRegistry`, `OAuthStore`, `SkillStore`, `GoalStore`
 
 **Files:**
 - Modify: `crates/neo-agent-core/src/tools/mod.rs` — delete `retain_named` (~404) and `remove_named` (~408)
 - Modify: `crates/neo-agent-core/src/oauth/store.rs` — delete `remove_token` (~151)
 - Modify: `crates/neo-agent-core/src/skills/mod.rs` — delete `available_for_slash` (~160)
-- Modify: `crates/neo-agent-core/src/tools/extensions/runner.rs` — delete `child_id` (~105)
-- Modify: `crates/neo-agent-core/src/tools/extensions/installation.rs` — delete `lifecycle` (~97)
 - Modify: `crates/neo-agent-core/src/goal/mod.rs` — delete `is_empty` (~155)
 
 - [ ] **Step 1: Delete `retain_named` and `remove_named`**
@@ -282,25 +280,7 @@ pub fn available_for_slash(&self) -> Vec<&LoadedSkill> {
 }
 ```
 
-- [ ] **Step 4: Delete `child_id`**
-
-In `crates/neo-agent-core/src/tools/extensions/runner.rs`, delete (~line 105):
-```rust
-pub fn child_id(&self) -> Option<u32> {
-    self.child.id()
-}
-```
-
-- [ ] **Step 5: Delete `lifecycle`**
-
-In `crates/neo-agent-core/src/tools/extensions/installation.rs`, delete (~line 97):
-```rust
-pub fn lifecycle(&self) -> ExtensionLifecycleStore {
-    ExtensionLifecycleStore::new(&self.state_path)
-}
-```
-
-- [ ] **Step 6: Delete `GoalStore::is_empty`**
+- [ ] **Step 4: Delete `GoalStore::is_empty`**
 
 In `crates/neo-agent-core/src/goal/mod.rs`, delete (~line 155):
 ```rust
@@ -325,7 +305,6 @@ git commit -m "refactor(neo-agent-core): delete 7 dead methods
 
 Removed: ToolRegistry::{retain_named, remove_named},
 OAuthStore::remove_token, SkillStore::available_for_slash,
-ExtensionRunner::child_id, ExtensionLifecycleStore::lifecycle,
 GoalStore::is_empty. All had zero callers."
 ```
 

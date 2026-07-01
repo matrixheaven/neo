@@ -750,7 +750,7 @@ After each extraction: build + test + commit.
 
 ### Task 3.4: Extract `interactive/prompt_completion.rs`
 
-**Source:** The completion engine (~650 lines) — `CompletionCatalog`, `CompletionCandidate`, `CompletionSource`, `FilesystemCompletionRequest`, `prompt_completions`, `filesystem_completion_candidates`, `model_completion_candidates`, `slash_prompt_template_completion_items`, `prompt_package_completion_items`, `extension_command_completion_items`, `discover_extension_commands`, `STATIC_SLASH_COMMANDS`.
+**Source:** The completion engine (~650 lines) — `CompletionCatalog`, `CompletionCandidate`, `CompletionSource`, `FilesystemCompletionRequest`, `prompt_completions`, `filesystem_completion_candidates`, `model_completion_candidates`, `slash_prompt_template_completion_items`, `prompt_package_completion_items`, `STATIC_SLASH_COMMANDS`.
 
 - [ ] **Step 1: Read the relevant line ranges, move to `prompt_completion.rs`**
 

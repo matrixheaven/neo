@@ -5,7 +5,6 @@ mod delegate;
 mod delegate_controls;
 mod diff;
 mod edit;
-pub mod extensions;
 mod find;
 mod glob;
 mod goal;

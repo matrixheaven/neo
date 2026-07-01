@@ -14,12 +14,12 @@ policy, and terminal UI can evolve independently.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - Model Context Protocol interface, adapters, and safety rules.
 - [Message Queue & Steer](queue-and-steer.md) - queue follow-ups and steer running turns with Ctrl+S.
-- [Local Assets](packages.md) - local extensions, prompt templates, themes, and unsupported distribution surfaces.
+- [Local Assets](packages.md) - prompt templates, themes, and unsupported local asset notes.
 
 ## Repository Map
 
 - `crates/neo-ai` owns provider-neutral chat, stream, model, and tool schema types.
-- `crates/neo-agent-core` owns runtime loops, tools, permissions, sessions, MCP adapters, local extensions, skill loading, JSONL RPC, and HTML export.
+- `crates/neo-agent-core` owns runtime loops, tools, permissions, sessions, MCP adapters, skill loading, JSONL RPC, and HTML export.
 - `crates/neo-tui` owns reusable terminal UI primitives.
 - `crates/neo-agent` is the CLI/TUI binary.
 - `docs` and `examples` contain the public operating model for contributors.

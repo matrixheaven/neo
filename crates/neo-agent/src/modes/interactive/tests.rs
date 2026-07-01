@@ -1841,7 +1841,7 @@ async fn slash_picker_commands_do_not_enter_streaming_mode() {
 }
 
 #[test]
-fn prompt_completions_merges_real_prompt_package_extension_and_session_commands() {
+fn prompt_completions_merges_real_prompt_package_and_session_commands() {
     let temp = tempfile::tempdir().expect("tempdir");
     let prompts_dir = temp.path().join(".neo/prompts");
     fs::create_dir_all(prompts_dir.join("review-pack")).expect("create prompts");
@@ -1855,21 +1855,6 @@ fn prompt_completions_merges_real_prompt_package_extension_and_session_commands(
         "---\ndescription: Refactor from package\n---\nRefactor $1.\n",
     )
     .expect("write packaged prompt");
-    let extension_dir = temp.path().join(".neo/extensions/echo");
-    fs::create_dir_all(&extension_dir).expect("create extension");
-    fs::write(
-        extension_dir.join("neo-extension.toml"),
-        r#"
-id = "echo"
-name = "Echo Tools"
-version = "0.1.0"
-description = "Local echo extension"
-
-[runner]
-command = "echo"
-"#,
-    )
-    .expect("write extension manifest");
 
     let completions =
         prompt_completions(temp.path(), "/", &[], None, true).expect("slash completions");
@@ -1891,16 +1876,6 @@ command = "echo"
             .is_some_and(|description| {
                 description.contains("source: prompt package")
                     && description.contains("provider: review-pack")
-            })
-    );
-    assert!(
-        by_value["/echo"]
-            .description
-            .as_deref()
-            .is_some_and(|description| {
-                description.contains("source: extension command")
-                    && description.contains("provider: echo")
-                    && description.contains("trust: local extension")
             })
     );
     assert!(
@@ -1940,7 +1915,7 @@ fn verbose_startup_mentions_local_keybinding_overrides() {
 }
 
 #[test]
-fn autocomplete_source_model_merges_local_commands_and_provider_models_with_metadata() {
+fn completion_catalog_excludes_extension_commands() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::create_dir(temp.path().join("src")).expect("create src");
     fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
@@ -1955,11 +1930,6 @@ fn autocomplete_source_model_merges_local_commands_and_provider_models_with_meta
             "/review-package",
             "/review-package",
             Some("Packaged review prompt"),
-        )],
-        extension_commands: vec![PickerItem::new(
-            "/review-extension",
-            "/review-extension",
-            Some("Extension command"),
         )],
         session_commands: vec![PickerItem::new(
             "/review-session",
@@ -1989,14 +1959,13 @@ fn autocomplete_source_model_merges_local_commands_and_provider_models_with_meta
         .collect::<Vec<_>>();
     assert!(slash_sources.contains(&CompletionSource::SlashPrompt));
     assert!(slash_sources.contains(&CompletionSource::PromptPackage));
-    assert!(slash_sources.contains(&CompletionSource::ExtensionCommand));
     assert!(slash_sources.contains(&CompletionSource::SessionCommand));
-    assert!(slash.iter().any(|candidate| {
+    assert!(slash.iter().all(|candidate| {
         candidate
             .to_picker_item()
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("source: extension command"))
+            .is_none_or(|description| !description.contains("extension command"))
     }));
 
     let models =
@@ -2005,37 +1974,6 @@ fn autocomplete_source_model_merges_local_commands_and_provider_models_with_meta
     assert_eq!(models[0].value, "@anthropic/claude-sonnet");
     assert_eq!(models[0].source, CompletionSource::ProviderModel);
     assert_eq!(models[0].source_label, "provider model");
-}
-
-#[test]
-fn prompt_completions_include_installed_extension_commands() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let extension = temp.path().join(".neo/extensions/review-extension");
-    fs::create_dir_all(&extension).expect("create extension");
-    fs::write(
-        extension.join("neo-extension.toml"),
-        r#"
-id = "review-extension"
-name = "Review Extension"
-version = "0.1.0"
-description = "Run extension review"
-
-[runner]
-command = "python3"
-"#,
-    )
-    .expect("write manifest");
-
-    let completions =
-        prompt_completions(temp.path(), "/rev", &[], None, true).expect("prompt completions");
-
-    assert!(completions.iter().any(|item| {
-        item.value == "/review-extension"
-            && item
-                .description
-                .as_deref()
-                .is_some_and(|description| description.contains("source: extension command"))
-    }));
 }
 
 #[tokio::test]

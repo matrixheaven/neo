@@ -8,7 +8,7 @@ use serde_json::json;
 fn jsonl_codec_encodes_and_decodes_rpc_messages() {
     let request = RpcMessage::Request(RpcRequest::new(
         "req-1",
-        "extension.describe",
+        "rpc.describe",
         json!({ "name": "alpha" }),
     ));
     let notification =

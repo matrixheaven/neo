@@ -9,7 +9,7 @@ const CONFIG_FILE: &str = "config.toml";
 
 /// Resolve the neo home directory: `$NEO_HOME` if set, otherwise `~/.neo`.
 /// This is the single source of truth for the neo home directory — every
-/// config file, skill, prompt, theme, and extension lives under here.
+/// config file, skill, prompt, and theme lives under here.
 pub(crate) fn neo_home() -> Option<PathBuf> {
     env::var_os("NEO_HOME")
         .filter(|home| !home.is_empty())

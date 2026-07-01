@@ -535,7 +535,7 @@ Do not hold a write lock while awaiting adapter network/process operations. Clon
 At minimum, `tool_registry_for_config` should:
 
 - build built-in tools,
-- build extension tools,
+- build MCP tools,
 - ask the manager to connect/discover enabled MCP servers,
 - register only connected MCP tools,
 - collect diagnostics for failed servers,
@@ -1328,4 +1328,3 @@ When NEO-32 is implemented after this:
 - The overlay should never call `McpStdioToolAdapter` or `McpHttpToolAdapter` directly.
 - The overlay should show env/header keys only.
 - Mutating MCP config while an agent turn is active is allowed if it only affects subsequent model request boundaries; it must not cancel the active turn.
-

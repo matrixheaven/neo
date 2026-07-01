@@ -20,9 +20,9 @@ cargo run -p neo-agent -- --thinking high print "solve this carefully"
 ```
 
 The binary exposes local CLI/TUI surfaces for provider-backed `print` / `run`,
-local JSONL sessions, local skills, local extensions, single Neo config, model
-catalogs, image generation, trust decisions, and configured MCP servers. It
-does not require or start a hosted service for normal operation.
+local JSONL sessions, local skills, single Neo config, model catalogs, image
+generation, trust decisions, and configured MCP servers. It does not require or
+start a hosted service for normal operation.
 
 Use `--list-models [search]` or `models list --json` to inspect the resolved
 catalog without entering interactive mode:
@@ -102,25 +102,14 @@ fork the selected local session with `ctrl+n`. Type `/new` (or `/clear`) to star
 a fresh unsaved session in the current workspace without deleting the previous
 one; the next prompt then creates a new workspace-scoped local session.
 
-## Local Extensions And Skills
+## Local Skills
 
 ```bash
 cargo run -p neo-agent -- skills show path/to/skill
 cargo run -p neo-agent -- --skill path/to/skill print "use this skill"
-cargo run -p neo-agent -- extensions install path/to/extension
-cargo run -p neo-agent -- extensions update echo
-cargo run -p neo-agent -- --offline extensions update echo
-cargo run -p neo-agent -- extensions list
-cargo run -p neo-agent -- extensions status echo
-cargo run -p neo-agent -- extensions disable echo
-cargo run -p neo-agent -- extensions enable echo
-cargo run -p neo-agent -- extensions call echo tool.echo '{"value":42}'
 ```
 
 Default skills are discovered from `~/.neo/skills` and project `.neo/skills`.
-Extensions install from local directories or explicit git/file URLs into the
-project `.neo/extensions` tree, persist local enablement state, and expose
-enabled tools through each extension's JSONL RPC `tools.list`.
 
 ## MCP
 

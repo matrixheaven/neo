@@ -37,7 +37,7 @@ Never widen scope to "make sure nothing broke" — that's CI's job. A package pl
 | Crate | Role |
 |-------|------|
 | `neo-ai` | Provider-neutral `ChatRequest`, `ModelClient`, `AiStreamEvent`, registries, `FakeModelClient`. |
-| `neo-agent-core` | `AgentRuntime`, `ToolRegistry`, built-in tools, `PermissionMode`, sessions, MCP/extension adapters, skills, RPC, export. |
+| `neo-agent-core` | `AgentRuntime`, `ToolRegistry`, built-in tools, `PermissionMode`, sessions, MCP adapters, skills, RPC, export. |
 | `neo-tui` | Terminal UI components, input, diff rendering, inline image encoding. |
 | `neo-agent` | The `neo` binary: CLI parsing, config, dispatch to print/run/resume/TUI modes. |
 ## Build & test commands
@@ -77,9 +77,8 @@ Test runner is `cargo-nextest` (install if missing; never fall back to `cargo te
 
 `read`, `list`, `grep`, `find`, `glob`, `write`, `edit`, `bash`, `terminal` (PTY), `todo`, `enter_plan_mode`, `exit_plan_mode`. With `GoalManager`: `StartGoal`, `ExitGoalMode`, `UpdateGoalStatus`, `GetGoalStatus`. `ask_user` available but not registered by default.
 
-### Extension & MCP namespacing
+### MCP namespacing
 
-- Extensions: `extension__<id>__<tool>` (JSONL RPC).
 - MCP: `mcp__<server>__<tool>` via `McpStdioToolAdapter` / `McpHttpToolAdapter`. Resources are runtime state, not model context.
 
 ### Key TUI/UX contracts

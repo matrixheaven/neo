@@ -1519,9 +1519,7 @@ fn tool_output_preview(
 }
 
 fn should_preview_tool_output(name: &str) -> bool {
-    matches!(name, "Bash" | "Terminal")
-        || name.starts_with("mcp__")
-        || name.starts_with("extension__")
+    matches!(name, "Bash" | "Terminal") || name.starts_with("mcp__")
 }
 
 fn cap_preview_text(text: &str, max_bytes: usize) -> (String, bool) {

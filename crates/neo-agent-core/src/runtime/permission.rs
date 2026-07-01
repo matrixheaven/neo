@@ -894,7 +894,7 @@ fn file_write_approval_scope(
     (Some(scope), None)
 }
 
-/// Build the session scope for a generic tool call (MCP/extension tools and any
+/// Build the session scope for a generic tool call (MCP tools and any
 /// non-builtin tool). The scope is keyed by the fully-qualified tool name so the
 /// same tool is auto-approved for the rest of the session. Returns no prefix rule
 /// (prefix rules are shell-specific). Built-in write/shell tools are handled by

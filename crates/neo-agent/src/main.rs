@@ -1,7 +1,6 @@
 mod cli;
 mod clipboard;
 mod config;
-mod extension_commands;
 mod image_blob;
 mod log_capture;
 mod mcp_ops;
@@ -17,7 +16,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     io::{self, IsTerminal as _, Read as _},
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
 use clap::Parser;
@@ -27,8 +26,7 @@ use serde_json::json;
 
 use crate::{
     cli::{
-        CatalogCommand, Cli, Command, ExtensionCommand, McpCommand, ModelCommand, ProviderCommand,
-        SessionCommand,
+        CatalogCommand, Cli, Command, McpCommand, ModelCommand, ProviderCommand, SessionCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -144,7 +142,6 @@ async fn dispatch_command(
             dispatch_resume_command(config, interactive_options, session_id, log_receiver).await
         }
         Some(Command::Sessions { command }) => dispatch_session_command(config, command).await,
-        Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
         Some(Command::Models { command }) => dispatch_model_command(config, command),
         Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
@@ -557,96 +554,6 @@ fn prompt_with_piped_stdin(prompt: Vec<String>) -> anyhow::Result<Vec<String>> {
         }
     }
     Ok(prompt)
-}
-
-async fn dispatch_extensions(
-    config: &AppConfig,
-    command: ExtensionCommand,
-) -> anyhow::Result<String> {
-    match command {
-        ExtensionCommand::List { root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::list(&paths.root, &paths.state_path, &paths.registry_path)
-        }
-        ExtensionCommand::Install { source, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::install(
-                &paths.root,
-                &paths.state_path,
-                &paths.registry_path,
-                &source,
-            )
-        }
-        ExtensionCommand::Update { extension_id, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::update(
-                &paths.root,
-                &paths.state_path,
-                &paths.registry_path,
-                &extension_id,
-            )
-        }
-        ExtensionCommand::Uninstall { extension_id, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::uninstall(
-                &paths.root,
-                &paths.state_path,
-                &paths.registry_path,
-                &extension_id,
-            )
-        }
-        ExtensionCommand::Status { extension_id, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::status(&paths.root, &paths.state_path, &extension_id)
-        }
-        ExtensionCommand::Enable { extension_id, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::enable(&paths.root, &paths.state_path, &extension_id)
-        }
-        ExtensionCommand::Disable { extension_id, root } => {
-            let paths = extension_paths(config, root);
-            extension_commands::disable(&paths.root, &paths.state_path, &extension_id)
-        }
-        ExtensionCommand::Call {
-            extension_id,
-            method,
-            params,
-            root,
-        } => {
-            let paths = extension_paths(config, root);
-            extension_commands::call(
-                &paths.root,
-                &paths.state_path,
-                &extension_id,
-                &method,
-                &params,
-            )
-            .await
-        }
-    }
-}
-
-struct ExtensionPaths {
-    root: PathBuf,
-    state_path: PathBuf,
-    registry_path: PathBuf,
-}
-
-fn extension_paths(config: &AppConfig, root: PathBuf) -> ExtensionPaths {
-    let neo_home = crate::config::neo_home().unwrap_or_else(|| config.project_dir.join(".neo"));
-    ExtensionPaths {
-        root: resolve_default_extension_root(&neo_home, root),
-        state_path: neo_home.join("extensions-state.toml"),
-        registry_path: neo_home.join("extensions-sources.toml"),
-    }
-}
-
-fn resolve_default_extension_root(neo_home: &Path, root: PathBuf) -> PathBuf {
-    if root == Path::new("extensions") || root == Path::new(".neo/extensions") {
-        neo_home.join("extensions")
-    } else {
-        root
-    }
 }
 
 /// Fetch and display providers from the models.dev catalog.
