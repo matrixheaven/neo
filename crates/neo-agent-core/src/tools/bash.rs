@@ -1,4 +1,4 @@
-use std::{fmt::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{fmt::Write, path::PathBuf, process::Stdio, sync::Arc, sync::LazyLock, time::Duration};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -16,11 +16,29 @@ use rustix::{
     process::{Pid, Signal, kill_process_group},
 };
 
+use super::shell_env::{self, ShellEnv};
 use super::{
     CommandOutput, ManagedBackgroundCommand, Tool, ToolContext, ToolError, ToolFuture, ToolResult,
     ToolUpdateCallback, cap_plain_output, output_from_buffers, parse_input, schema,
 };
 use crate::{BackgroundTaskManager, BackgroundTaskStatus, ShellCommandOrigin, ShellCommandOutcome};
+
+/// Resolved POSIX shell, detected once and cached for the process lifetime
+/// (it depends only on the platform / one-time path discovery). The `Result`
+/// is cached so a missing shell does not trigger re-detection on every call —
+/// detection is deterministic, so a retry would not help. On Windows this is
+/// Git Bash.
+static SHELL: LazyLock<Result<ShellEnv, shell_env::ShellEnvError>> =
+    LazyLock::new(shell_env::detect_shell_env);
+
+pub(crate) fn resolved_shell() -> Result<&'static ShellEnv, ToolError> {
+    (*SHELL).as_ref().map_err(|err| {
+        ToolError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            err.clone(),
+        ))
+    })
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -530,14 +548,43 @@ fn spawn_bash_process_at(
     command_text: &str,
     cwd: &std::path::Path,
 ) -> Result<ManagedChild, ToolError> {
-    let mut process_command = Command::new("bash");
+    let shell = resolved_shell()?;
+    // Git Bash (Windows) needs the cwd as a POSIX path and can't reliably take
+    // it via `.current_dir(windows_path)`; we instead `cd` inside the `-c`
+    // script. We also rewrite `>NUL` redirects to `>/dev/null`. On Unix the
+    // path and command pass through unchanged and `.current_dir` is used.
+    let (effective_cwd, effective_cmd) = if shell.is_windows {
+        let posix_path = shell_env::windows_path_to_posix(cwd);
+        let quoted_path = format!("'{}'", posix_path.replace('\'', "'\\''"));
+        (
+            None,
+            format!(
+                "cd {quoted_path} && {}",
+                shell_env::rewrite_windows_nul_redirect(command_text)
+            ),
+        )
+    } else {
+        (Some(cwd), command_text.to_owned())
+    };
+
+    let mut process_command = Command::new(&shell.shell_path);
+    process_command.arg("-lc").arg(&effective_cmd);
+    if let Some(dir) = effective_cwd {
+        process_command.current_dir(dir);
+    }
     process_command
-        .arg("-lc")
-        .arg(command_text)
-        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Keep git / node / paint tools from opening a pager or colouring the
+    // stream; respect an ambient GIT_TERMINAL_PROMPT when the user set one.
+    // Mirrors docs/kimi-code's `noninteractiveEnv`.
+    process_command.env("NO_COLOR", "1");
+    process_command.env("TERM", "dumb");
+    if std::env::var_os("GIT_TERMINAL_PROMPT").is_none() {
+        process_command.env("GIT_TERMINAL_PROMPT", "0");
+    }
+    process_command.env("SHELL", &shell.shell_path);
     #[cfg(unix)]
     process_command.process_group(0);
 

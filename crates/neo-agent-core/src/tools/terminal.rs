@@ -16,6 +16,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use super::bash::resolved_shell;
+use super::shell_env;
 use super::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback, cap_output,
     parse_input, schema,
@@ -194,9 +196,30 @@ async fn start_terminal(
         .master
         .take_writer()
         .map_err(|err| pty_error("open terminal writer", err))?;
-    let mut builder = CommandBuilder::new("bash");
-    builder.args(["-lc", command]);
-    builder.cwd(ctx.cwd.as_os_str());
+    let shell = resolved_shell()?;
+    // Same Windows/POSIX handling as the Bash tool: Git Bash needs a POSIX cwd
+    // (passed via `cd` inside the `-lc` script, since `.cwd(windows_path)` is
+    // unreliable) and `>NUL` rewritten to `>/dev/null`. On Unix the cwd is set
+    // directly on the builder.
+    let (effective_cwd, effective_cmd) = if shell.is_windows {
+        let posix_path = shell_env::windows_path_to_posix(&ctx.cwd);
+        let quoted_path = format!("'{}'", posix_path.replace('\'', "'\\''"));
+        (
+            None,
+            format!(
+                "cd {quoted_path} && {}",
+                shell_env::rewrite_windows_nul_redirect(command)
+            ),
+        )
+    } else {
+        (Some(ctx.cwd.as_path()), command.to_owned())
+    };
+    let mut builder = CommandBuilder::new(&shell.shell_path);
+    builder.arg("-lc");
+    builder.arg(&effective_cmd);
+    if let Some(dir) = effective_cwd {
+        builder.cwd(dir);
+    }
     let child = pair
         .slave
         .spawn_command(builder)

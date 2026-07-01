@@ -17,6 +17,7 @@ mod plan_mode;
 mod process_supervisor;
 mod read;
 mod sessions;
+mod shell_env;
 mod skills_manager;
 mod terminal;
 mod todo;
