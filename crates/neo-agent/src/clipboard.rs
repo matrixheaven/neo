@@ -38,14 +38,12 @@ pub fn read_text_clipboard() -> Option<String> {
             ("wl-paste", &["--no-newline"][..]),
             ("xclip", &["-selection", "clipboard", "-o"][..]),
         ] {
-            if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
-                if out.status.success() {
-                    if let Ok(text) = String::from_utf8(out.stdout)
-                        && !text.is_empty()
-                    {
-                        return Some(text);
-                    }
-                }
+            if let Ok(out) = std::process::Command::new(cmd).args(args).output()
+                && out.status.success()
+                && let Ok(text) = String::from_utf8(out.stdout)
+                && !text.is_empty()
+            {
+                return Some(text);
             }
         }
         None
@@ -238,18 +236,19 @@ mod linux {
             ),
         ];
         for (cmd, args) in candidates {
-            if let Ok(out) = Command::new(cmd).args(args).output() {
-                if out.status.success() && !out.stdout.is_empty() {
-                    let mime = detect_image_mime(&out.stdout);
-                    match mime {
-                        Some(m) if is_vision_mime(m) => {
-                            return Ok(ClipboardImage {
-                                bytes: out.stdout,
-                                mime_type: m.to_owned(),
-                            });
-                        }
-                        _ => continue,
+            if let Ok(out) = Command::new(cmd).args(args).output()
+                && out.status.success()
+                && !out.stdout.is_empty()
+            {
+                let mime = detect_image_mime(&out.stdout);
+                match mime {
+                    Some(m) if is_vision_mime(m) => {
+                        return Ok(ClipboardImage {
+                            bytes: out.stdout,
+                            mime_type: m.to_owned(),
+                        });
                     }
+                    _ => continue,
                 }
             }
         }
