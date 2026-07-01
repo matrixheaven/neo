@@ -21,8 +21,8 @@ use std::io::{Write, stdout};
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, size},
@@ -238,24 +238,27 @@ fn push_diff_start(buffer: &mut String, append_start: bool) {
     }
 }
 
+fn write_enter_output(output: &mut dyn Write) -> std::io::Result<()> {
+    let mut output = output;
+    execute!(
+        &mut output,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        )
+    )
+}
+
 impl TuiRenderer {
-    /// Enable raw mode + bracketed paste + keyboard enhancement.
-    /// Does NOT enter alternate screen or enable mouse capture.
+    /// Enable raw mode + bracketed paste + mouse capture + keyboard enhancement.
+    /// Does NOT enter alternate screen.
     pub fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
-        execute!(
-            stdout(),
-            EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(
-                // Match Codex: only disambiguate, report event types, and report
-                // alternate keys. REPORT_ALL_KEYS_AS_ESCAPE_CODES is omitted
-                // because it can cause terminals to send Enter as `CSI 13 u`
-                // and may drop the shift modifier on Shift+Enter.
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            )
-        )?;
+        let mut output = stdout();
+        write_enter_output(&mut output)?;
         Ok(Self {
             previous_lines: Vec::new(),
             previous_kitty_image_ids: BTreeSet::new(),
@@ -280,7 +283,12 @@ impl TuiRenderer {
         self.write_leave_output(&mut output);
         let _ = output.flush();
 
-        let _ = execute!(output, PopKeyboardEnhancementFlags, DisableBracketedPaste,);
+        let _ = execute!(
+            output,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+        );
         let _ = disable_raw_mode();
     }
 
@@ -307,15 +315,8 @@ impl TuiRenderer {
     /// Re-enter after suspend.
     pub fn suspend_resume(&mut self) -> std::io::Result<()> {
         enable_raw_mode()?;
-        execute!(
-            stdout(),
-            EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            )
-        )?;
+        let mut output = stdout();
+        write_enter_output(&mut output)?;
         // Force full redraw after resume
         self.first_render = true;
         self.previous_lines.clear();
@@ -943,6 +944,39 @@ mod tests {
             clear_on_shrink: false,
             show_hardware_cursor: true,
         }
+    }
+
+    #[test]
+    fn enter_output_enables_mouse_capture() {
+        let mut buf = Vec::new();
+        write_enter_output(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("\x1b[?1000h")
+                || output.contains("\x1b[?1002h")
+                || output.contains("\x1b[?1006h"),
+            "enter output should enable terminal mouse reporting: {output:?}"
+        );
+    }
+
+    #[test]
+    fn leave_output_disables_mouse_capture() {
+        let mut renderer = test_renderer(Vec::new());
+        let mut buf = Vec::new();
+        renderer.write_leave_output(&mut buf);
+        let _ = execute!(
+            &mut buf,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+        );
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("\x1b[?1000l")
+                || output.contains("\x1b[?1002l")
+                || output.contains("\x1b[?1006l"),
+            "leave output should disable terminal mouse reporting: {output:?}"
+        );
     }
 
     #[test]
