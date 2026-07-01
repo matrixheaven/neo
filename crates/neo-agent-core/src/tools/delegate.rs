@@ -229,17 +229,18 @@ impl Tool for DelegateSwarmTool {
             let mut item_index = 0usize;
             for item in &request.items {
                 let template = request.prompt_template.as_deref().unwrap_or("");
-                let task = apply_swarm_template(template, item, &request.description);
+                let task =
+                    apply_swarm_template(template, item.value.as_str(), &request.description);
                 let snapshot = ctx.multi_agent.queue_delegate(
                     &task,
-                    None,
+                    Some(item.title.as_str()),
                     request.role,
                     request.mode,
                     crate::multi_agent::AgentPathKind::SwarmChild(&swarm_id),
                 );
                 initial_children.push(SwarmChildSnapshot {
                     item_index,
-                    item: item.clone(),
+                    item: item.value.clone(),
                     agent: snapshot,
                 });
                 item_index += 1;
@@ -600,10 +601,16 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
         reject_unknown_placeholders(tool, template)?;
     }
     for (index, item) in request.items.iter().enumerate() {
-        if item.trim().is_empty() {
+        if item.title.trim().is_empty() {
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
-                message: format!("items[{index}] must not be empty"),
+                message: format!("items[{index}].title must not be empty"),
+            });
+        }
+        if item.value.trim().is_empty() {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!("items[{index}].value must not be empty"),
             });
         }
     }
@@ -630,7 +637,7 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
     let mut expanded = std::collections::HashSet::new();
     if let Some(template) = request.prompt_template.as_deref() {
         for item in &request.items {
-            let prompt = apply_swarm_template(template, item, &request.description);
+            let prompt = apply_swarm_template(template, item.value.as_str(), &request.description);
             if !expanded.insert(prompt.clone()) {
                 return Err(ToolError::InvalidInput {
                     tool: tool.to_owned(),
@@ -690,5 +697,48 @@ mod tests {
         assert!(description.contains("per-agent resume prompt"));
         assert_eq!(resume["type"], "object");
         assert_eq!(resume["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn delegate_swarm_request_rejects_empty_item_title() {
+        let request: DelegateSwarmRequest = serde_json::from_value(serde_json::json!({
+            "description": "math checks",
+            "items": [
+                { "title": "   ", "value": "2 + 2" }
+            ],
+            "prompt_template": "Calculate {{item}}"
+        }))
+        .expect("request parses");
+
+        let err =
+            validate_swarm_request("DelegateSwarm", &request).expect_err("empty title rejected");
+        assert_eq!(
+            err.to_string(),
+            "invalid input for DelegateSwarm: items[0].title must not be empty"
+        );
+    }
+
+    #[test]
+    fn delegate_swarm_titled_items_drive_child_titles_and_prompts() {
+        let request: DelegateSwarmRequest = serde_json::from_value(serde_json::json!({
+            "description": "math checks",
+            "items": [
+                { "title": "addition", "value": "2 + 2" },
+                { "title": "multiplication", "value": "3 * 3" }
+            ],
+            "prompt_template": "Calculate {{item}} for {{description}}"
+        }))
+        .expect("request parses");
+
+        assert_eq!(request.items[0].title, "addition");
+        assert_eq!(request.items[0].value, "2 + 2");
+        assert_eq!(
+            apply_swarm_template(
+                request.prompt_template.as_deref().unwrap(),
+                request.items[0].value.as_str(),
+                request.description.as_str()
+            ),
+            "Calculate 2 + 2 for math checks"
+        );
     }
 }

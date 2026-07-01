@@ -65,56 +65,14 @@ pub enum DelegateContext {
     None,
 }
 
-fn deserialize_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::{self, SeqAccess, Visitor};
-    use std::fmt;
-
-    struct StringVecVisitor;
-
-    impl<'de> Visitor<'de> for StringVecVisitor {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a sequence of strings or empty map")
-        }
-
-        fn visit_seq<V>(self, mut seq: V) -> Result<Vec<String>, V::Error>
-        where
-            V: SeqAccess<'de>,
-        {
-            let mut vec = Vec::new();
-            while let Some(item) = seq.next_element()? {
-                vec.push(item);
-            }
-            Ok(vec)
-        }
-
-        fn visit_map<M>(self, mut map: M) -> Result<Vec<String>, M::Error>
-        where
-            M: de::MapAccess<'de>,
-        {
-            // An empty map {} is treated as an empty vec. If the map has
-            // entries, it's an error.
-            if map.next_key::<String>()?.is_some() {
-                return Err(de::Error::custom(
-                    "expected a sequence of strings, got a non-empty map",
-                ));
-            }
-            Ok(Vec::new())
-        }
-
-        fn visit_unit<E>(self) -> Result<Vec<String>, E>
-        where
-            E: de::Error,
-        {
-            Ok(Vec::new())
-        }
-    }
-
-    deserializer.deserialize_any(StringVecVisitor)
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DelegateSwarmItem {
+    #[schemars(
+        description = "Short human title for this child agent in ListDelegates and transcripts."
+    )]
+    pub title: String,
+    #[schemars(description = "Item value inserted into prompt_template as {{item}}.")]
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -123,11 +81,11 @@ pub struct DelegateSwarmRequest {
         description = "Required non-empty human title for the swarm. Not injected into every child task."
     )]
     pub description: String,
-    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    #[serde(default)]
     #[schemars(
-        description = "New child task items. When present, prompt_template is required and must contain {{item}}."
+        description = "New child task items as JSON objects with title and value. value is inserted into prompt_template as {{item}}."
     )]
-    pub items: Vec<String>,
+    pub items: Vec<DelegateSwarmItem>,
     #[serde(default)]
     #[schemars(
         description = "Template for new child tasks. Supports exactly {{item}} and optional {{description}}. Required when items is present."
