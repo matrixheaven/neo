@@ -1159,6 +1159,24 @@ impl Tool for TaskOutputTool {
             let input: TaskOutputInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
 
+            if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.task_id) {
+                return Ok(
+                    ToolResult::ok(super::multi_agent_format::delegate_result_content(
+                        &agent,
+                        crate::multi_agent::DelegateContext::None,
+                    ))
+                    .with_details(super::multi_agent_format::agent_details(
+                        "delegate",
+                        &agent,
+                        Some(crate::multi_agent::DelegateContext::None),
+                        super::multi_agent_format::SummaryScope::CurrentRun,
+                        true,
+                        true,
+                        false,
+                    )),
+                );
+            }
+
             // Route swarm IDs to rich swarm output from the runtime.
             if input.task_id.starts_with("swarm_")
                 && let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.task_id)
@@ -1811,6 +1829,29 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("task_id:"));
         assert!(result.content.contains("status:"));
+    }
+
+    #[tokio::test]
+    async fn task_output_tool_reads_runtime_delegate_without_background_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path()).unwrap();
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("calculate a small sum");
+
+        let result = TaskOutputTool
+            .execute(&ctx, json!({ "task_id": agent.id.as_str() }))
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("agent_id:"));
+        assert!(result.content.contains(agent.id.as_str()));
+        assert_eq!(result.details.as_ref().unwrap()["kind"], "delegate");
+        assert_eq!(
+            result.details.as_ref().unwrap()["agent_id"],
+            agent.id.as_str()
+        );
     }
 
     #[tokio::test]
