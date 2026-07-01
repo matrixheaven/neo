@@ -77,11 +77,11 @@ impl TranscriptPane {
 
     fn apply_delegate_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::DelegateStarted { agent, .. }
-            | AgentEvent::DelegateUpdated { agent, .. }
-            | AgentEvent::DelegateFinished { agent, .. } => {
+            AgentEvent::DelegateStarted { turn, agent }
+            | AgentEvent::DelegateUpdated { turn, agent }
+            | AgentEvent::DelegateFinished { turn, agent } => {
                 self.finish_active_text_blocks();
-                self.transcript.upsert_delegate(agent.clone());
+                self.transcript.upsert_delegate(*turn, agent.clone());
                 self.mark_dirty();
                 true
             }

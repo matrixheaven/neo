@@ -2,8 +2,8 @@ use crate::primitive::Line;
 use crate::primitive::theme::TuiTheme;
 use crate::shell::ToolStatusKind;
 use crate::transcript::{
-    DelegateCardComponent, ShellRunComponent, SwarmCardComponent, ToolCallComponent, ToolCallState,
-    WorkflowCardComponent,
+    DelegateCardComponent, DelegateGroupComponent, ShellRunComponent, SwarmCardComponent,
+    ToolCallComponent, ToolCallState, WorkflowCardComponent,
 };
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
@@ -283,8 +283,48 @@ impl TranscriptStore {
 
     /// Upsert a delegate card by agent ID. If a card for this agent already
     /// exists, update it in place; otherwise append a new entry.
-    pub fn upsert_delegate(&mut self, snapshot: AgentSnapshot) {
+    pub fn upsert_delegate(&mut self, turn: u32, snapshot: AgentSnapshot) {
         let id = snapshot.id.as_str().to_owned();
+        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
+                Some(component)
+            }
+            _ => None,
+        }) {
+            group.upsert(snapshot);
+            return;
+        }
+        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::DelegateGroup { component } if component.turn() == turn => {
+                Some(component)
+            }
+            _ => None,
+        }) && is_root_delegate(&snapshot)
+        {
+            group.upsert(snapshot);
+            return;
+        }
+        if is_root_delegate(&snapshot)
+            && let Some(index) = self.entries.iter().position(|entry| {
+                matches!(
+                    entry,
+                    TranscriptEntry::Delegate { component }
+                        if component.turn() == Some(turn)
+                            && is_root_delegate(component.snapshot())
+                )
+            })
+            && let TranscriptEntry::Delegate { component } = self.entries.remove(index)
+        {
+            let existing = component.into_snapshot();
+            self.entries.insert(
+                index,
+                TranscriptEntry::DelegateGroup {
+                    component: DelegateGroupComponent::new(turn, vec![existing, snapshot]),
+                },
+            );
+            self.viewport.follow_bottom();
+            return;
+        }
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
             _ => None,
@@ -293,7 +333,7 @@ impl TranscriptStore {
             return;
         }
         self.push(TranscriptEntry::Delegate {
-            component: DelegateCardComponent::new(snapshot),
+            component: DelegateCardComponent::with_turn(turn, snapshot),
         });
     }
 
@@ -338,6 +378,12 @@ impl TranscriptStore {
 
     pub fn entries_mut(&mut self) -> &mut [TranscriptEntry] {
         &mut self.entries
+    }
+
+    pub fn tick_live_entries(&mut self, now_ms: u64) -> bool {
+        self.entries
+            .iter_mut()
+            .any(|entry| entry.on_render_tick(now_ms))
     }
 
     /// Remove the entry at `index`, shifting later entries down. Returns the
@@ -426,6 +472,10 @@ impl TranscriptStore {
             .flat_map(|entry| entry.render(width, theme))
             .collect()
     }
+}
+
+fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {
+    snapshot.path.is_root_child()
 }
 
 fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> SwarmSnapshot {

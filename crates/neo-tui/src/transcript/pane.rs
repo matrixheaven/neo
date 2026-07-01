@@ -512,10 +512,23 @@ impl TranscriptPane {
 
     pub fn render_tick(&mut self) {
         self.activity_frame = self.activity_frame.wrapping_add(1);
-        if self.has_streaming_thinking() {
+        let now_ms = current_time_ms();
+        if self.transcript.tick_live_entries(now_ms) || self.has_streaming_thinking() {
             self.mark_dirty();
         }
         let _ = self.render_frame(self.width, self.height);
+    }
+
+    #[must_use]
+    pub const fn is_dirty_for_test(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn render_tick_at_ms_for_test(&mut self, now_ms: u64) {
+        self.activity_frame = self.activity_frame.wrapping_add(1);
+        if self.transcript.tick_live_entries(now_ms) || self.has_streaming_thinking() {
+            self.mark_dirty();
+        }
     }
 
     /// Render a single flat frame of all non-chrome content lines as ANSI
@@ -733,6 +746,15 @@ impl TranscriptPane {
         let mut ordered = std::mem::take(tool_run);
         super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme)
     }
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn append_transcript_block(rows: &mut Vec<Line>, block: Vec<Line>) {

@@ -3,8 +3,9 @@ use std::time::Duration;
 use neo_agent_core::AgentEvent;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, SwarmAggregate,
-    SwarmChildSnapshot, SwarmSnapshot,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, AgentTerminalReason,
+    AgentToolActivityPhase, AgentToolOutputPreview, SwarmAggregate, SwarmChildSnapshot,
+    SwarmSnapshot,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
@@ -21,6 +22,12 @@ fn running_delegate() -> AgentSnapshot {
         state: AgentLifecycleState::Running,
         task: "Implement Task 1: PlanBox border fix".to_owned(),
         task_title: "Implement Task 1: PlanBox border fix".to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
         tool_count: 3,
         token_count: 25_600,
         elapsed: Duration::from_secs(24),
@@ -31,7 +38,8 @@ fn running_delegate() -> AgentSnapshot {
                     id: "read-1".to_owned(),
                     name: "Read".to_owned(),
                     summary: Some("crates/neo-tui/src/transcript/plan_box.rs".to_owned()),
-                    failed: false,
+                    phase: AgentToolActivityPhase::Done,
+                    output: None,
                 },
             },
             AgentActivityEntry {
@@ -39,7 +47,8 @@ fn running_delegate() -> AgentSnapshot {
                     id: "grep-1".to_owned(),
                     name: "Grep".to_owned(),
                     summary: Some("from_spans|pub struct Span|pub struct Line".to_owned()),
-                    failed: true,
+                    phase: AgentToolActivityPhase::Failed,
+                    output: None,
                 },
             },
             AgentActivityEntry {
@@ -102,6 +111,54 @@ fn delegate_card_renders_kimi_style_running_summary() {
 }
 
 #[test]
+fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
+    let theme = TuiTheme::default()
+        .with_text_primary(Color::Rgb(230, 230, 230))
+        .with_status_ok(Color::Rgb(1, 220, 120));
+    let mut snapshot = running_delegate();
+    snapshot.tool_count = 1;
+    snapshot.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("crates/neo-tui/src/transcript/delegate_card.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "bash-1".to_owned(),
+                name: "Bash".to_owned(),
+                summary: Some(
+                    "cargo nextest run -p neo-tui --test multi_agent_transcript".to_owned(),
+                ),
+                phase: AgentToolActivityPhase::Ongoing,
+                output: None,
+            },
+        },
+    ];
+
+    let rows = DelegateCardComponent::new(snapshot).render_with_theme(140, &theme);
+    let plain_rows = plain(rows.clone());
+    let text = plain_rows.join("\n");
+
+    assert!(text.contains("• Used Read"), "{text}");
+    assert!(text.contains("• Using Bash"), "{text}");
+    let using_line = rows
+        .iter()
+        .find(|row| strip_ansi(&row.to_ansi()).contains("Using Bash"))
+        .expect("using line")
+        .to_ansi();
+    assert_ansi_contains_color(&using_line, theme.text_primary);
+    assert!(
+        !using_line.contains("\u{1b}[38;2;1;220;120m"),
+        "pending tool marker should be neutral, not success green: {using_line:?}"
+    );
+}
+
+#[test]
 fn delegate_card_uses_short_title_and_keeps_stats_visible_for_long_prompts() {
     let mut snapshot = running_delegate();
     snapshot.task = "Look up the line count of crates/neo-agent-core/src/lib.rs using `wc -l` and report back. Reply with exactly one line: `<count> lines` where <count> is the actual number from wc -l. Do not modify any files.".to_owned();
@@ -123,6 +180,73 @@ fn delegate_card_uses_short_title_and_keeps_stats_visible_for_long_prompts() {
 }
 
 #[test]
+fn delegate_card_collapses_streamed_thinking_and_renders_single_final_body_line() {
+    let theme = TuiTheme::default()
+        .with_text_primary(Color::Rgb(210, 220, 230))
+        .with_status_ok(Color::Rgb(1, 220, 120));
+    let summary = "Acknowledged. Ready as Explorer subagent in summary mode. - Role: Explorer (read-only investigation, no edits) - Mode: summary (concise results) - Constraints: no git mutations, no destructive operations Awaiting task.";
+    let snapshot = AgentSnapshot {
+        role: AgentRole::Explorer,
+        state: AgentLifecycleState::Completed,
+        tool_count: 0,
+        token_count: 234,
+        elapsed: Duration::from_secs(2),
+        activity: vec![
+            AgentActivityEntry {
+                kind: AgentActivityKind::Text {
+                    text: "The user is asking me".to_owned(),
+                    thinking: true,
+                },
+            },
+            AgentActivityEntry {
+                kind: AgentActivityKind::Text {
+                    text: " to act as a bounded Neo subagent in Explorer role.".to_owned(),
+                    thinking: true,
+                },
+            },
+            AgentActivityEntry {
+                kind: AgentActivityKind::Text {
+                    text: summary.to_owned(),
+                    thinking: false,
+                },
+            },
+        ],
+        outcome: Some(AgentTerminalOutcome {
+            summary: summary.to_owned(),
+            is_error: false,
+        }),
+        ..running_delegate()
+    };
+
+    let rows = DelegateCardComponent::new(snapshot).render_with_theme(120, &theme);
+    let plain_rows = plain(rows.clone());
+    let text = plain_rows.join("\n");
+
+    assert!(text.contains("Gibbs Explorer Agent Completed"), "{text}");
+    assert_eq!(text.matches('\u{25cc}').count(), 1, "{text}");
+    assert_eq!(text.matches('\u{2514}').count(), 1, "{text}");
+
+    let thinking_index = plain_rows
+        .iter()
+        .position(|row| row.contains('\u{25cc}'))
+        .expect("thinking row");
+    let final_index = plain_rows
+        .iter()
+        .position(|row| row.contains('\u{2514}'))
+        .expect("final row");
+    assert!(thinking_index < final_index, "{text}");
+    assert_eq!(final_index, plain_rows.len() - 1, "{text}");
+    assert!(plain_rows[final_index].contains("..."), "{text}");
+
+    let final_ansi = rows[final_index].to_ansi();
+    assert_ansi_contains_color(&final_ansi, theme.text_primary);
+    assert!(
+        !final_ansi.contains("\u{1b}[38;2;1;220;120m"),
+        "final body row should not be rendered in success green: {final_ansi:?}"
+    );
+}
+
+#[test]
 fn delegate_card_trims_activity_to_recent_kimi_style_window() {
     let mut snapshot = running_delegate();
     snapshot.activity = (0..8)
@@ -131,7 +255,8 @@ fn delegate_card_trims_activity_to_recent_kimi_style_window() {
                 id: format!("bash-{index}"),
                 name: "Bash".to_owned(),
                 summary: Some(format!("command-{index}")),
-                failed: false,
+                phase: AgentToolActivityPhase::Done,
+                output: None,
             },
         })
         .collect();
@@ -274,6 +399,7 @@ fn swarm_card_renders_scheduling_status_when_children_are_queued() {
 #[test]
 fn swarm_card_prefers_child_activity_over_original_item_text() {
     let mut child = running_delegate();
+    child.activity.clear();
     child.latest_text = Some("34 lines".to_owned());
     child.outcome = Some(AgentTerminalOutcome {
         summary: "34 lines".to_owned(),
@@ -574,8 +700,8 @@ fn swarm_card_uses_theme_styles_and_expanded_child_details() {
     assert!(expanded_text.contains("4.2k tok"), "{expanded_text}");
     assert!(expanded_text.contains("1m 15s"), "{expanded_text}");
     assert!(
-        expanded_text.contains("Collected candidate files"),
-        "{expanded_text}"
+        !expanded_text.contains("Collected candidate files"),
+        "expanded child should prefer shared tool/thinking/final rows over stale latest_text: {expanded_text}"
     );
     assert!(
         expanded_text.contains("Found two style gaps"),
@@ -706,6 +832,12 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         state,
                         task_title: format!("Child {index}"),
                         task: format!("Child prompt {index}"),
+                        created_at_ms: 1,
+                        updated_at_ms: 1,
+                        started_at_ms: (state == AgentLifecycleState::Running).then_some(1),
+                        terminal_at_ms: state.is_terminal().then_some(2),
+                        detached_from_foreground: false,
+                        terminal_reason: terminal_reason_for_state(state),
                         tool_count: 0,
                         token_count: 0,
                         elapsed: Duration::from_secs(0),
@@ -716,6 +848,16 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                 }
             })
             .collect(),
+    }
+}
+
+fn terminal_reason_for_state(state: AgentLifecycleState) -> Option<AgentTerminalReason> {
+    match state {
+        AgentLifecycleState::Queued | AgentLifecycleState::Running => None,
+        AgentLifecycleState::Completed => Some(AgentTerminalReason::Completed),
+        AgentLifecycleState::Failed => Some(AgentTerminalReason::Error),
+        AgentLifecycleState::Cancelled => Some(AgentTerminalReason::CancelledByUser),
+        AgentLifecycleState::TimedOut => Some(AgentTerminalReason::TimedOut),
     }
 }
 
@@ -835,7 +977,8 @@ fn swarm_card_child_row_prefers_latest_activity_over_full_prompt() {
                 id: "call_1".to_owned(),
                 name: "Read".to_owned(),
                 summary: Some("crates/neo-agent-core/src/lib.rs".to_owned()),
-                failed: false,
+                phase: AgentToolActivityPhase::Done,
+                output: None,
             },
         });
 
@@ -859,4 +1002,247 @@ fn swarm_card_uses_theme_colors_for_status_and_progress() {
 
     assert_ansi_contains_color(&rendered, theme.brand);
     assert_ansi_contains_color(&rendered, theme.status_warn);
+}
+
+#[test]
+fn delegate_card_renders_ongoing_tool_from_explicit_phase_with_output_preview() {
+    let mut snapshot = running_delegate();
+    snapshot.tool_count = 0;
+    snapshot.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "call_bash".to_owned(),
+            name: "Bash".to_owned(),
+            summary: Some("cargo nextest run -p neo-tui --test multi_agent_transcript".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: Some(AgentToolOutputPreview {
+                text: "line 1\nline 2\nline 3\nline 4".to_owned(),
+                is_error: false,
+                truncated: false,
+                tail: true,
+            }),
+        },
+    }];
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("• Using Bash"), "{text}");
+    assert!(text.contains("line 3"), "{text}");
+    assert!(text.contains("line 4"), "{text}");
+    assert!(!text.contains("line 1"), "{text}");
+}
+
+#[test]
+fn delegate_card_fixed_thinking_window_renders_before_single_final_row() {
+    let mut snapshot = completed_delegate();
+    snapshot.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "thinking one\nthinking two\nthinking three".to_owned(),
+                thinking: true,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "final answer".to_owned(),
+                thinking: false,
+            },
+        },
+    ];
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: "final answer".to_owned(),
+        is_error: false,
+    });
+
+    let rows =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(90, &TuiTheme::default()));
+    let text = rows.join("\n");
+
+    assert_eq!(text.matches('◌').count(), 1, "{text}");
+    assert_eq!(text.matches('└').count(), 1, "{text}");
+    assert!(
+        rows.iter().position(|line| line.contains('◌')).unwrap()
+            < rows.iter().position(|line| line.contains('└')).unwrap()
+    );
+    assert!(rows.last().unwrap().contains("final answer"), "{text}");
+}
+
+#[test]
+fn render_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
+    let mut pane = TranscriptPane::new(120, 30);
+    let mut snapshot = running_delegate();
+    snapshot.elapsed = Duration::from_secs(0);
+    snapshot.started_at_ms = Some(1);
+    snapshot.terminal_at_ms = None;
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 7,
+        agent: snapshot,
+    });
+
+    let _ = pane.render_frame(120, 30);
+    assert!(!pane.is_dirty_for_test());
+
+    pane.render_tick_at_ms_for_test(61_000);
+    assert!(pane.is_dirty_for_test());
+    let frame = pane.render_frame(120, 30).unwrap_or_default().join("\n");
+    assert!(frame.contains("1m 0s") || frame.contains("1m"), "{frame}");
+}
+
+#[test]
+fn detached_foreground_delegate_renders_backgrounded_without_ctrl_b_hint() {
+    let mut snapshot = running_delegate();
+    snapshot.mode = AgentRunMode::Background;
+    snapshot.detached_from_foreground = true;
+    snapshot.state = AgentLifecycleState::Running;
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("Backgrounded"), "{text}");
+    assert!(!text.contains("Press Ctrl+B"), "{text}");
+    assert!(!text.contains("Completed"), "{text}");
+}
+
+#[test]
+fn lost_background_delegate_renders_failed_reason_not_completed() {
+    let mut snapshot = completed_delegate();
+    snapshot.state = AgentLifecycleState::Failed;
+    snapshot.mode = AgentRunMode::Background;
+    snapshot.terminal_reason = Some(AgentTerminalReason::Lost);
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: "Background agent lost (session restarted before completion)".to_owned(),
+        is_error: true,
+    });
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("Lost") || text.contains("Failed"), "{text}");
+    assert!(text.contains("Background agent lost"), "{text}");
+    assert!(!text.contains("Completed"), "{text}");
+}
+
+#[test]
+fn same_turn_root_delegates_render_as_one_live_group() {
+    let mut pane = TranscriptPane::new(140, 40);
+    let mut first = running_delegate();
+    first.id = AgentId::from_suffix_for_test("first");
+    first.display_name = AgentDisplayName::new("Gibbs");
+    first.task_title = "PlanBox border fix".to_owned();
+
+    let mut second = running_delegate();
+    second.id = AgentId::from_suffix_for_test("second");
+    second.display_name = AgentDisplayName::new("Ada");
+    second.path = AgentPath::root_child(&second.display_name);
+    second.role = AgentRole::Explorer;
+    second.task_title = "Trace markdown width".to_owned();
+    second.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "read_1".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("crates/neo-tui/src/markdown.rs".to_owned()),
+            phase: AgentToolActivityPhase::Done,
+            output: None,
+        },
+    }];
+    second.tool_count = 1;
+
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 9,
+        agent: first,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 9,
+        agent: second,
+    });
+
+    let frame = pane.render_frame(140, 40).unwrap_or_default().join("\n");
+
+    assert!(frame.contains("Running 2 agents"), "{frame}");
+    assert!(frame.contains("Coder · PlanBox border fix"), "{frame}");
+    assert!(frame.contains("Explorer · Trace markdown width"), "{frame}");
+    assert!(frame.contains("Used Read"), "{frame}");
+    assert_eq!(frame.matches("Agent Running").count(), 0, "{frame}");
+}
+
+#[test]
+fn swarm_progress_starts_at_zero_then_moves_after_running_activity() {
+    let mut card = SwarmCardComponent::new(swarm_with_child_states(vec![
+        AgentLifecycleState::Queued,
+        AgentLifecycleState::Queued,
+    ]));
+
+    let queued = plain(card.render_with_theme(140, &TuiTheme::default())).join("\n");
+    assert!(queued.contains("0%") || queued.contains("1%"), "{queued}");
+    assert!(!queued.contains("100%"), "{queued}");
+
+    let mut running = card.snapshot().clone();
+    running.children[0].agent.state = AgentLifecycleState::Running;
+    running.children[0].agent.started_at_ms = Some(1_000);
+    running.children[0].agent.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "call_1".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("README.md".to_owned()),
+            phase: AgentToolActivityPhase::Done,
+            output: None,
+        },
+    });
+    card.update(running);
+    card.on_render_tick(2_000);
+
+    let frame = plain(card.render_with_theme(140, &TuiTheme::default())).join("\n");
+    assert!(frame.contains("Working"), "{frame}");
+    assert!(!frame.contains("100%"), "{frame}");
+    assert!(frame.contains("Used Read"), "{frame}");
+}
+
+#[test]
+fn expanded_swarm_child_uses_delegate_activity_rules() {
+    let mut snapshot = swarm_with_child_states(vec![AgentLifecycleState::Completed]);
+    snapshot.children[0].agent.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "bash_1".to_owned(),
+                name: "Bash".to_owned(),
+                summary: Some("printf 2".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: Some(AgentToolOutputPreview {
+                    text: "1\n2\n3".to_owned(),
+                    is_error: false,
+                    truncated: false,
+                    tail: false,
+                }),
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "thinking one\nthinking two".to_owned(),
+                thinking: true,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "final child summary".to_owned(),
+                thinking: false,
+            },
+        },
+    ];
+    snapshot.children[0].agent.outcome = Some(AgentTerminalOutcome {
+        summary: "final child summary".to_owned(),
+        is_error: false,
+    });
+
+    let mut card = SwarmCardComponent::new(snapshot);
+    card.set_expanded(true);
+    let rows = card.render_with_theme(120, &TuiTheme::default());
+    let text = plain(rows).join("\n");
+
+    assert_eq!(text.matches('◌').count(), 1, "{text}");
+    assert_eq!(text.matches('└').count(), 1, "{text}");
+    assert!(text.contains("Used Bash"), "{text}");
+    assert!(text.contains("final child summary"), "{text}");
 }

@@ -1,7 +1,8 @@
 use super::{BannerData, GoalCardKind, TranscriptEntry};
 use crate::primitive::theme::TuiTheme;
 use crate::transcript::{
-    DelegateCardComponent, SwarmCardComponent, ToolCallComponent, WorkflowCardComponent,
+    DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent, ToolCallComponent,
+    WorkflowCardComponent,
 };
 
 pub(super) fn complex_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
@@ -60,6 +61,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::ShellRun { .. }
         | TranscriptEntry::Compaction { .. } => unreachable!("utility copy parts handled above"),
         TranscriptEntry::Delegate { component } => ("Agent", copy_delegate(component)),
+        TranscriptEntry::DelegateGroup { component } => ("Agents", copy_delegate_group(component)),
         TranscriptEntry::DelegateSwarm { component } => ("Swarm", copy_swarm(component)),
         TranscriptEntry::Workflow { component } => ("Workflow", copy_workflow(component)),
     }
@@ -158,6 +160,15 @@ fn copy_skill(name: &str, description: Option<&str>, args: Option<&str>) -> Stri
 }
 
 fn copy_delegate(component: &DelegateCardComponent) -> String {
+    let lines = component.render_with_theme(200, &TuiTheme::default());
+    lines
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn copy_delegate_group(component: &DelegateGroupComponent) -> String {
     let lines = component.render_with_theme(200, &TuiTheme::default());
     lines
         .into_iter()

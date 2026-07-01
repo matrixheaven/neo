@@ -1,26 +1,40 @@
-use neo_agent_core::multi_agent::{
-    AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentRole, AgentRunMode,
-    AgentSnapshot, AgentTerminalOutcome,
-};
+use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot, AgentTerminalReason};
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Component, Expandable, Finalization, Line, Style, strip_ansi};
-
-const MAX_SINGLE_AGENT_ACTIVITY_ROWS: usize = 4;
+use crate::primitive::{Component, Expandable, Finalization, Line, Span, Style};
+use crate::transcript::{
+    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed, format_elapsed,
+    format_token_count, render_child_final, render_child_thinking, render_child_tool_row,
+    role_label,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegateCardComponent {
+    turn: Option<u32>,
     snapshot: AgentSnapshot,
     expanded: bool,
+    now_ms: Option<u64>,
 }
 
 impl DelegateCardComponent {
     #[must_use]
     pub fn new(snapshot: AgentSnapshot) -> Self {
+        Self::new_with_turn(None, snapshot)
+    }
+
+    #[must_use]
+    fn new_with_turn(turn: Option<u32>, snapshot: AgentSnapshot) -> Self {
         Self {
+            turn,
             snapshot,
             expanded: false,
+            now_ms: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_turn(turn: u32, snapshot: AgentSnapshot) -> Self {
+        Self::new_with_turn(Some(turn), snapshot)
     }
 
     pub fn update(&mut self, snapshot: AgentSnapshot) {
@@ -33,63 +47,80 @@ impl DelegateCardComponent {
     }
 
     #[must_use]
+    pub const fn turn(&self) -> Option<u32> {
+        self.turn
+    }
+
+    #[must_use]
+    pub const fn snapshot(&self) -> &AgentSnapshot {
+        &self.snapshot
+    }
+
+    #[must_use]
+    pub fn into_snapshot(self) -> AgentSnapshot {
+        self.snapshot
+    }
+
+    pub fn on_render_tick(&mut self, now_ms: u64) -> bool {
+        if self.snapshot.state.is_terminal() {
+            return false;
+        }
+        if self.now_ms == Some(now_ms) {
+            return false;
+        }
+        self.now_ms = Some(now_ms);
+        true
+    }
+
+    #[must_use]
     pub fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        let accent = Style::default().fg(status_color(self.snapshot.state, theme));
+        let phase = display_phase(&self.snapshot);
+        let accent = Style::default().fg(status_color(phase, theme));
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
+        let elapsed = display_elapsed(&self.snapshot, self.now_ms);
         let mut lines = Vec::new();
 
-        let header = Line::from_spans(vec![
-            Span::styled(status_marker(self.snapshot.state), accent),
-            Span::raw(" "),
-            Span::styled(self.snapshot.display_name.as_str(), accent),
-            Span::styled(
-                format!(
-                    " {} Agent {} ({}) · {} tools · {} · {} tok",
-                    role_label(self.snapshot.role),
-                    state_label(self.snapshot.state),
-                    self.snapshot.task_title,
-                    self.snapshot.tool_count,
-                    format_elapsed(self.snapshot.elapsed.as_secs()),
-                    format_token_count(self.snapshot.token_count)
+        lines.push(
+            Line::from_spans(vec![
+                Span::styled(status_marker(phase), accent),
+                Span::raw(" "),
+                Span::styled(self.snapshot.display_name.as_str(), accent),
+                Span::styled(
+                    format!(
+                        " {} Agent {} ({}) · {} tools · {} · {} tok",
+                        role_label(self.snapshot.role),
+                        state_label(phase),
+                        self.snapshot.task_title,
+                        self.snapshot.tool_count,
+                        format_elapsed(elapsed.as_secs()),
+                        format_token_count(self.snapshot.token_count)
+                    ),
+                    primary,
                 ),
-                primary,
-            ),
-        ])
-        .truncate_to_width(width);
-        lines.push(header);
+            ])
+            .truncate_to_width(width),
+        );
 
-        if self.snapshot.state == AgentLifecycleState::Running
-            && self.snapshot.mode == AgentRunMode::Foreground
-        {
+        if can_detach(&self.snapshot) {
             lines.push(Line::styled("  Press Ctrl+B to run in background", muted));
         }
 
-        for activity in recent_activity(&self.snapshot.activity, self.snapshot.outcome.as_ref()) {
-            lines.push(render_activity(activity, width, theme));
+        let activity = child_activity_view(&self.snapshot, MAX_CHILD_TOOL_ROWS);
+        for tool in &activity.tools {
+            lines.extend(render_child_tool_row(tool, width, "  ", theme));
         }
-
-        if self.snapshot.activity.is_empty()
-            && let Some(text) = &self.snapshot.latest_text
-        {
-            lines.push(Line::styled(format!("  \u{25cc} {text}"), muted).truncate_to_width(width));
+        if let Some(thinking) = activity.thinking.as_deref() {
+            lines.extend(render_child_thinking(thinking, width, "  ", theme));
         }
-
-        if let Some(outcome) = &self.snapshot.outcome {
-            let already_rendered = lines
-                .iter()
-                .any(|line| strip_ansi(&line.to_ansi()).contains(outcome.summary.trim()));
-            if !already_rendered {
-                let outcome_style = if outcome.is_error {
-                    Style::default().fg(theme.status_error)
-                } else {
-                    Style::default().fg(theme.status_ok)
-                };
-                lines.push(
-                    Line::styled(format!("  \u{2514} {}", outcome.summary), outcome_style)
-                        .truncate_to_width(width),
-                );
-            }
+        if let Some(final_text) = activity.final_text.as_deref() {
+            lines.push(render_child_final(
+                final_text,
+                activity.final_is_error,
+                width,
+                "  ",
+                theme,
+            ));
         }
 
         lines
@@ -108,136 +139,81 @@ impl Component for DelegateCardComponent {
     }
 
     fn finalization(&self) -> Finalization {
-        match self.snapshot.state {
-            AgentLifecycleState::Completed
-            | AgentLifecycleState::Failed
-            | AgentLifecycleState::Cancelled
-            | AgentLifecycleState::TimedOut => Finalization::Finalized,
-            AgentLifecycleState::Queued | AgentLifecycleState::Running => Finalization::Live,
+        if self.snapshot.state.is_terminal() {
+            Finalization::Finalized
+        } else {
+            Finalization::Live
         }
     }
 }
 
-use crate::primitive::Span;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DelegateDisplayPhase {
+    Queued,
+    Running,
+    Backgrounded,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Lost,
+    Killed,
+}
 
-fn status_color(state: AgentLifecycleState, theme: &TuiTheme) -> crate::primitive::Color {
-    match state {
-        AgentLifecycleState::Completed => theme.status_ok,
-        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => theme.status_error,
-        AgentLifecycleState::Cancelled => theme.status_warn,
-        AgentLifecycleState::Queued | AgentLifecycleState::Running => theme.brand,
+fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
+    if snapshot.detached_from_foreground && snapshot.state == AgentLifecycleState::Running {
+        return DelegateDisplayPhase::Backgrounded;
+    }
+    match snapshot.terminal_reason {
+        Some(AgentTerminalReason::Lost) => DelegateDisplayPhase::Lost,
+        Some(AgentTerminalReason::Killed) => DelegateDisplayPhase::Killed,
+        _ => match snapshot.state {
+            AgentLifecycleState::Queued => DelegateDisplayPhase::Queued,
+            AgentLifecycleState::Running => DelegateDisplayPhase::Running,
+            AgentLifecycleState::Completed => DelegateDisplayPhase::Completed,
+            AgentLifecycleState::Failed => DelegateDisplayPhase::Failed,
+            AgentLifecycleState::Cancelled => DelegateDisplayPhase::Cancelled,
+            AgentLifecycleState::TimedOut => DelegateDisplayPhase::TimedOut,
+        },
     }
 }
 
-fn status_marker(state: AgentLifecycleState) -> &'static str {
-    match state {
-        AgentLifecycleState::Running => "\u{25cf}",
-        AgentLifecycleState::Completed => "\u{2713}",
-        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "\u{2717}",
-        AgentLifecycleState::Queued | AgentLifecycleState::Cancelled => "\u{25cc}",
+fn status_color(phase: DelegateDisplayPhase, theme: &TuiTheme) -> crate::primitive::Color {
+    match phase {
+        DelegateDisplayPhase::Completed => theme.status_ok,
+        DelegateDisplayPhase::Failed
+        | DelegateDisplayPhase::TimedOut
+        | DelegateDisplayPhase::Lost
+        | DelegateDisplayPhase::Killed => theme.status_error,
+        DelegateDisplayPhase::Cancelled => theme.status_warn,
+        DelegateDisplayPhase::Queued
+        | DelegateDisplayPhase::Running
+        | DelegateDisplayPhase::Backgrounded => theme.brand,
     }
 }
 
-fn state_label(state: AgentLifecycleState) -> &'static str {
-    match state {
-        AgentLifecycleState::Queued => "Queued",
-        AgentLifecycleState::Running => "Running",
-        AgentLifecycleState::Completed => "Completed",
-        AgentLifecycleState::Failed => "Failed",
-        AgentLifecycleState::Cancelled => "Cancelled",
-        AgentLifecycleState::TimedOut => "Timed Out",
+fn status_marker(phase: DelegateDisplayPhase) -> &'static str {
+    match phase {
+        DelegateDisplayPhase::Running | DelegateDisplayPhase::Backgrounded => "●",
+        DelegateDisplayPhase::Completed => "✓",
+        DelegateDisplayPhase::Failed
+        | DelegateDisplayPhase::TimedOut
+        | DelegateDisplayPhase::Lost
+        | DelegateDisplayPhase::Killed => "✗",
+        DelegateDisplayPhase::Queued | DelegateDisplayPhase::Cancelled => "◌",
     }
 }
 
-fn format_elapsed(seconds: u64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else {
-        format!("{}m {}s", seconds / 60, seconds % 60)
+fn state_label(phase: DelegateDisplayPhase) -> &'static str {
+    match phase {
+        DelegateDisplayPhase::Queued => "Queued",
+        DelegateDisplayPhase::Running => "Running",
+        DelegateDisplayPhase::Backgrounded => "Backgrounded",
+        DelegateDisplayPhase::Completed => "Completed",
+        DelegateDisplayPhase::Failed => "Failed",
+        DelegateDisplayPhase::Cancelled => "Cancelled",
+        DelegateDisplayPhase::TimedOut => "Timed Out",
+        DelegateDisplayPhase::Lost => "Lost",
+        DelegateDisplayPhase::Killed => "Killed",
     }
-}
-
-fn format_token_count(tokens: usize) -> String {
-    if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
-fn recent_activity<'a>(
-    activity: &'a [AgentActivityEntry],
-    outcome: Option<&AgentTerminalOutcome>,
-) -> Vec<&'a AgentActivityEntry> {
-    let duplicate_summary = outcome.map(|outcome| outcome.summary.trim());
-    let filtered = activity
-        .iter()
-        .filter(|entry| match &entry.kind {
-            AgentActivityKind::Text { text, .. } => Some(text.trim()) != duplicate_summary,
-            AgentActivityKind::Tool { .. } => true,
-        })
-        .collect::<Vec<_>>();
-    let start = filtered
-        .len()
-        .saturating_sub(MAX_SINGLE_AGENT_ACTIVITY_ROWS);
-    filtered[start..].to_vec()
-}
-
-fn role_label(role: AgentRole) -> &'static str {
-    neo_agent_core::multi_agent::AgentProfile::for_role(role).display_label
-}
-
-fn render_activity(activity: &AgentActivityEntry, width: usize, theme: &TuiTheme) -> Line {
-    match &activity.kind {
-        AgentActivityKind::Tool {
-            name,
-            summary,
-            failed,
-            ..
-        } => {
-            let marker = if *failed { "\u{2717}" } else { "\u{2022}" };
-            let marker_style = if *failed {
-                Style::default().fg(theme.status_error)
-            } else {
-                Style::default().fg(theme.status_ok)
-            };
-            let summary = summary
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| format!(" ({value})"))
-                .unwrap_or_default();
-            Line::from_spans(vec![
-                Span::raw("  "),
-                Span::styled(marker, marker_style),
-                Span::raw(" Used "),
-                Span::styled(name.as_str(), Style::default().fg(theme.brand)),
-                Span::styled(summary, Style::default().fg(theme.text_muted)),
-            ])
-            .truncate_to_width(width)
-        }
-        AgentActivityKind::Text { text, thinking } => {
-            let marker = if *thinking { "\u{25cc}" } else { "\u{2514}" };
-            Line::styled(
-                format!("  {marker} {}", compact_display_line(text)),
-                Style::default().fg(theme.text_muted),
-            )
-            .truncate_to_width(width)
-        }
-    }
-}
-
-fn compact_display_line(text: &str) -> String {
-    compact_to_chars(&text.split_whitespace().collect::<Vec<_>>().join(" "), 110)
-}
-
-fn compact_to_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    format!(
-        "{}...",
-        text.chars()
-            .take(max_chars.saturating_sub(3))
-            .collect::<String>()
-    )
 }

@@ -6,6 +6,7 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::DelegateCardComponent;
+use crate::transcript::DelegateGroupComponent;
 use crate::transcript::PlanBoxComponent;
 use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
@@ -120,6 +121,9 @@ pub enum TranscriptEntry {
     },
     Delegate {
         component: DelegateCardComponent,
+    },
+    DelegateGroup {
+        component: DelegateGroupComponent,
     },
     DelegateSwarm {
         component: SwarmCardComponent,
@@ -411,6 +415,7 @@ impl TranscriptEntry {
                 theme,
             ),
             Self::Delegate { component } => render_delegate_card(component, inner_width, theme),
+            Self::DelegateGroup { component } => component.render_with_theme(inner_width, theme),
             Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
             Self::Workflow { component } => render_workflow_card(component, inner_width, theme),
             Self::Banner(_)
@@ -419,6 +424,15 @@ impl TranscriptEntry {
             | Self::AssistantMessage { .. }
             | Self::ThinkingBlock { .. }
             | Self::QueuedMessage { .. } => unreachable!("message entries handled above"),
+        }
+    }
+
+    pub fn on_render_tick(&mut self, now_ms: u64) -> bool {
+        match self {
+            Self::Delegate { component } => component.on_render_tick(now_ms),
+            Self::DelegateGroup { component } => component.on_render_tick(now_ms),
+            Self::DelegateSwarm { component } => component.on_render_tick(now_ms),
+            _ => false,
         }
     }
 
@@ -740,10 +754,10 @@ mod tests {
         assert!(
             lines[2]
                 .text()
-                .contains("\u{2590}\u{2588}\u{259a}\u{259e}\u{2588}\u{258c}  Welcome to Neo!")
+                .contains("\u{2590}\u{2588}\u{2598} \u{2588}\u{258c}  Welcome to Neo!")
         );
         assert!(lines[3].text().contains(
-            "\u{2590}\u{2588}\u{2597}\u{2596}\u{2588}\u{258c}  Send /help for help information."
+            "\u{2590}\u{2588} \u{2597}\u{2588}\u{258c}  Send /help for help information."
         ));
         let ansi = lines[2].to_ansi();
         assert!(ansi.contains("\x1b[38;2;63;247;255m"));
