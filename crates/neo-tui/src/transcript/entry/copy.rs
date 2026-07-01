@@ -150,12 +150,11 @@ fn copy_goal(
     )
 }
 
-fn copy_skill(name: &str, description: Option<&str>, args: Option<&str>) -> String {
-    let body = super::skill_body(description, args).unwrap_or_default();
-    if body.is_empty() {
-        format!("Used Skill: {name}")
-    } else {
-        format!("Used Skill: {name}\n{body}")
+fn copy_skill(name: &str, _description: Option<&str>, args: Option<&str>) -> String {
+    let header = format!("Skill activated: {name}");
+    match args.map(str::trim).filter(|body| !body.is_empty()) {
+        Some(body) => format!("{header}\n{body}"),
+        None => header,
     }
 }
 
