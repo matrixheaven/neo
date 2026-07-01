@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
@@ -16,6 +16,55 @@ use crate::transcript::{
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum AbsorbedToolKind {
+    Delegate,
+    DelegateSwarm,
+}
+
+impl AbsorbedToolKind {
+    const fn tool_name(self) -> &'static str {
+        match self {
+            Self::Delegate => "Delegate",
+            Self::DelegateSwarm => "DelegateSwarm",
+        }
+    }
+
+    fn from_tool_name(name: &str) -> Option<Self> {
+        match name {
+            "Delegate" => Some(Self::Delegate),
+            "DelegateSwarm" => Some(Self::DelegateSwarm),
+            _ => None,
+        }
+    }
+
+    fn details_match_target(self, details: &serde_json::Value, targets: &BTreeSet<String>) -> bool {
+        match self {
+            Self::Delegate => {
+                details.get("kind").and_then(serde_json::Value::as_str) == Some("delegate")
+                    && ["agent_id", "id"]
+                        .iter()
+                        .filter_map(|key| details.get(*key).and_then(serde_json::Value::as_str))
+                        .any(|id| targets.contains(id))
+            }
+            Self::DelegateSwarm => {
+                details.get("kind").and_then(serde_json::Value::as_str) == Some("delegate_swarm")
+                    && [
+                        details.get("swarm_id").and_then(serde_json::Value::as_str),
+                        details.get("id").and_then(serde_json::Value::as_str),
+                        details
+                            .get("swarm")
+                            .and_then(|swarm| swarm.get("swarm_id"))
+                            .and_then(serde_json::Value::as_str),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| targets.contains(id))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TranscriptPane {
     width: usize,
@@ -25,6 +74,8 @@ pub struct TranscriptPane {
     dirty: bool,
     tool_output_expanded: bool,
     pub(super) streaming_tool_args: BTreeMap<String, String>,
+    tool_call_metadata: BTreeMap<String, (u32, String)>,
+    delegate_absorption_targets: BTreeMap<(u32, AbsorbedToolKind), BTreeSet<String>>,
     pub(super) queued_approvals: VecDeque<ApprovalPromptData>,
     pub(super) completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
@@ -53,6 +104,8 @@ impl TranscriptPane {
             dirty: false,
             tool_output_expanded: false,
             streaming_tool_args: BTreeMap::new(),
+            tool_call_metadata: BTreeMap::new(),
+            delegate_absorption_targets: BTreeMap::new(),
             queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
@@ -624,6 +677,125 @@ impl TranscriptPane {
         self.transcript.push(TranscriptEntry::tool_run(component));
     }
 
+    pub(super) fn remember_tool_call(&mut self, turn: u32, id: &str, name: &str) {
+        self.tool_call_metadata
+            .insert(id.to_owned(), (turn, name.to_owned()));
+        if let Some(kind) = AbsorbedToolKind::from_tool_name(name)
+            && self.should_suppress_delegate_tool_run(turn, kind, id)
+        {
+            self.transcript.suppress_tool_run(id);
+        }
+    }
+
+    pub(super) fn suppress_delegate_tool_runs_for_turn(
+        &mut self,
+        turn: u32,
+        kind: AbsorbedToolKind,
+    ) {
+        let ids = self
+            .tool_call_metadata
+            .iter()
+            .filter_map(|(id, (tool_turn, tool_name))| {
+                (*tool_turn == turn && tool_name == kind.tool_name()).then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            if self.should_suppress_delegate_tool_run(turn, kind, &id) {
+                self.transcript.suppress_tool_run(&id);
+            }
+        }
+    }
+
+    pub(super) fn record_delegate_absorption_target(
+        &mut self,
+        turn: u32,
+        kind: AbsorbedToolKind,
+        target_id: &str,
+    ) {
+        self.delegate_absorption_targets
+            .entry((turn, kind))
+            .or_default()
+            .insert(target_id.to_owned());
+        self.suppress_delegate_tool_runs_for_turn(turn, kind);
+    }
+
+    pub(super) fn reconcile_delegate_tool_result(
+        &mut self,
+        turn: u32,
+        id: &str,
+        name: &str,
+        is_error: bool,
+        details: Option<&serde_json::Value>,
+    ) {
+        if is_error {
+            self.transcript.unsuppress_tool_run(id);
+            return;
+        }
+        let Some(kind) = AbsorbedToolKind::from_tool_name(name) else {
+            return;
+        };
+        let Some(targets) = self.delegate_absorption_targets.get(&(turn, kind)) else {
+            self.transcript.unsuppress_tool_run(id);
+            return;
+        };
+        let Some(details) = details else {
+            self.transcript.unsuppress_tool_run(id);
+            return;
+        };
+        if kind.details_match_target(details, targets) {
+            self.transcript.suppress_tool_run(id);
+        } else {
+            self.transcript.unsuppress_tool_run(id);
+        }
+    }
+
+    fn should_suppress_delegate_tool_run(
+        &self,
+        turn: u32,
+        kind: AbsorbedToolKind,
+        id: &str,
+    ) -> bool {
+        let Some(targets) = self.delegate_absorption_targets.get(&(turn, kind)) else {
+            return false;
+        };
+        let Some(tool) = self
+            .transcript
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
+                _ => None,
+            })
+        else {
+            return self.has_absorption_target_for_each_tool_call(turn, kind, targets);
+        };
+        match tool.status() {
+            ToolStatusKind::Pending | ToolStatusKind::Running => {
+                self.has_absorption_target_for_each_tool_call(turn, kind, targets)
+            }
+            ToolStatusKind::Succeeded => tool
+                .state()
+                .details
+                .as_ref()
+                .is_some_and(|details| kind.details_match_target(details, targets)),
+            ToolStatusKind::Failed | ToolStatusKind::Cancelled => false,
+        }
+    }
+
+    fn has_absorption_target_for_each_tool_call(
+        &self,
+        turn: u32,
+        kind: AbsorbedToolKind,
+        targets: &BTreeSet<String>,
+    ) -> bool {
+        let tool_call_count = self
+            .tool_call_metadata
+            .values()
+            .filter(|(tool_turn, tool_name)| *tool_turn == turn && tool_name == kind.tool_name())
+            .count();
+        tool_call_count > 0 && targets.len() >= tool_call_count
+    }
+
     fn apply_expand_state_to_entry(&self, mut entry: TranscriptEntry) -> TranscriptEntry {
         if let TranscriptEntry::ThinkingBlock { expanded, .. } = &mut entry {
             *expanded = self.tool_output_expanded;
@@ -715,7 +887,16 @@ impl TranscriptPane {
 
         for entry in entries {
             match entry {
-                TranscriptEntry::ToolRun { component } => tool_run.push(component),
+                TranscriptEntry::ToolRun { component } => {
+                    if self.transcript.is_tool_run_suppressed(component.id()) {
+                        append_transcript_block(
+                            &mut rows,
+                            self.flush_tool_run(&mut tool_run, width),
+                        );
+                    } else {
+                        tool_run.push(component);
+                    }
+                }
                 entry => {
                     append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
                     append_transcript_block(

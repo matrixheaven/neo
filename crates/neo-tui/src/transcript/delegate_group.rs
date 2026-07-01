@@ -143,7 +143,7 @@ impl DelegateGroupComponent {
         };
         Line::from_spans(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
-            Span::raw(" "),
+            Span::styled(" Delegate group · ", Style::default().fg(theme.text_muted)),
             Span::styled(label, Style::default().fg(theme.brand)),
             Span::styled(tail, Style::default().fg(theme.text_muted)),
         ])

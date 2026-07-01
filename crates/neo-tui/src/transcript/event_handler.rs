@@ -10,7 +10,7 @@ use crate::transcript::ShellRunComponent;
 use crate::transcript::TranscriptEntry;
 use crate::transcript::entry::GoalCardKind;
 
-use super::pane::TranscriptPane;
+use super::pane::{AbsorbedToolKind, TranscriptPane};
 
 impl TranscriptPane {
     pub fn apply_agent_event<E>(&mut self, event: E)
@@ -82,14 +82,24 @@ impl TranscriptPane {
             | AgentEvent::DelegateFinished { turn, agent } => {
                 self.finish_active_text_blocks();
                 self.transcript.upsert_delegate(*turn, agent.clone());
+                self.record_delegate_absorption_target(
+                    *turn,
+                    AbsorbedToolKind::Delegate,
+                    agent.id.as_str(),
+                );
                 self.mark_dirty();
                 true
             }
-            AgentEvent::DelegateSwarmStarted { swarm, .. }
-            | AgentEvent::DelegateSwarmUpdated { swarm, .. }
-            | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+            AgentEvent::DelegateSwarmStarted { turn, swarm }
+            | AgentEvent::DelegateSwarmUpdated { turn, swarm }
+            | AgentEvent::DelegateSwarmFinished { turn, swarm } => {
                 self.finish_active_text_blocks();
                 self.transcript.upsert_delegate_swarm(swarm.clone());
+                self.record_delegate_absorption_target(
+                    *turn,
+                    AbsorbedToolKind::DelegateSwarm,
+                    &swarm.swarm_id,
+                );
                 self.mark_dirty();
                 true
             }
@@ -107,8 +117,8 @@ impl TranscriptPane {
 
     fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::ToolCallStarted { id, name, .. } => {
-                self.start_tool_call(id, name.clone());
+            AgentEvent::ToolCallStarted { turn, id, name } => {
+                self.start_tool_call(*turn, id, name.clone());
                 true
             }
             AgentEvent::ToolCallArgumentsDelta {
@@ -117,17 +127,17 @@ impl TranscriptPane {
                 self.append_tool_call_arguments(id, json_fragment);
                 true
             }
-            AgentEvent::ToolCallFinished { tool_call, .. } => {
-                self.finish_tool_call(tool_call.clone());
+            AgentEvent::ToolCallFinished { turn, tool_call } => {
+                self.finish_tool_call(*turn, tool_call.clone());
                 true
             }
             AgentEvent::ToolExecutionStarted {
+                turn,
                 id,
                 name,
                 arguments,
-                ..
             } => {
-                self.start_tool_execution(id, name.clone(), arguments);
+                self.start_tool_execution(*turn, id, name.clone(), arguments);
                 true
             }
             AgentEvent::ApprovalRequested {
@@ -168,22 +178,26 @@ impl TranscriptPane {
                 true
             }
             AgentEvent::ToolExecutionUpdate {
+                turn,
                 id,
                 name,
                 partial_result,
-                ..
             } => {
                 if self.transcript.has_shell_run(id) {
                     self.update_shell_run(id, partial_result.clone());
                 } else {
+                    self.remember_tool_call(*turn, id, name);
                     self.update_tool_execution(id, name.clone(), partial_result.clone());
                 }
                 true
             }
             AgentEvent::ToolExecutionFinished {
-                id, name, result, ..
+                turn,
+                id,
+                name,
+                result,
             } => {
-                self.finish_tool_execution(id.clone(), name.clone(), result.clone());
+                self.finish_tool_execution(*turn, id.clone(), name.clone(), result.clone());
                 true
             }
             AgentEvent::ShellCommandStarted {
@@ -414,11 +428,6 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn start_tool_call(&mut self, id: &str, name: String) {
-        self.upsert_tool(id, name, None, ToolStatusKind::Pending);
-        self.mark_dirty();
-    }
-
     fn append_tool_call_arguments(&mut self, id: &str, json_fragment: &str) {
         let arguments = self.streaming_tool_args.entry(id.to_owned()).or_default();
         arguments.push_str(json_fragment);
@@ -428,10 +437,11 @@ impl TranscriptPane {
         }
     }
 
-    fn finish_tool_call(&mut self, tool_call: AgentToolCall) {
+    fn finish_tool_call(&mut self, turn: u32, tool_call: AgentToolCall) {
         let arguments = tool_call.arguments.to_string();
         self.streaming_tool_args
             .insert(tool_call.id.clone(), arguments.clone());
+        self.remember_tool_call(turn, &tool_call.id, &tool_call.name);
         self.upsert_tool(
             &tool_call.id,
             tool_call.name,
@@ -441,12 +451,25 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn start_tool_execution(&mut self, id: &str, name: String, arguments: &serde_json::Value) {
+    fn start_tool_call(&mut self, turn: u32, id: &str, name: String) {
+        self.remember_tool_call(turn, id, &name);
+        self.upsert_tool(id, name, None, ToolStatusKind::Pending);
+        self.mark_dirty();
+    }
+
+    fn start_tool_execution(
+        &mut self,
+        turn: u32,
+        id: &str,
+        name: String,
+        arguments: &serde_json::Value,
+    ) {
         let arguments = self
             .streaming_tool_args
             .get(id)
             .cloned()
             .unwrap_or_else(|| arguments.to_string());
+        self.remember_tool_call(turn, id, &name);
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
         self.mark_dirty();
     }
@@ -486,9 +509,13 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn finish_tool_execution(&mut self, id: String, name: String, result: ToolResult) {
+    fn finish_tool_execution(&mut self, turn: u32, id: String, name: String, result: ToolResult) {
+        self.remember_tool_call(turn, &id, &name);
+        let tool_name = name.clone();
         self.upsert_tool(&id, name, None, ToolStatusKind::Running);
         self.streaming_tool_args.remove(&id);
+        let is_error = result.is_error;
+        let details_for_check = result.details.clone();
         if let Some(tool) = self.transcript.tool_mut(&id) {
             let details = result.details;
             let exit_code = details
@@ -496,8 +523,15 @@ impl TranscriptPane {
                 .and_then(|details| details.get("exit_code"))
                 .and_then(serde_json::Value::as_i64)
                 .and_then(|code| i32::try_from(code).ok());
-            tool.set_result(Some(result.content), details, result.is_error, exit_code);
+            tool.set_result(Some(result.content), details, is_error, exit_code);
         }
+        self.reconcile_delegate_tool_result(
+            turn,
+            &id,
+            &tool_name,
+            is_error,
+            details_for_check.as_ref(),
+        );
         self.completed_tool_result_ids.push(id);
         self.mark_dirty();
     }

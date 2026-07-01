@@ -88,7 +88,10 @@ impl SwarmCardComponent {
 
         lines.push(
             Line::from_spans(vec![
-                Span::styled("● Swarm: ", brand),
+                Span::styled(marker(self.snapshot.state), brand),
+                Span::styled(" DelegateSwarm · ", muted),
+                Span::styled(state_label(self.snapshot.state), brand),
+                Span::styled(" · ", muted),
                 Span::styled(self.snapshot.description.as_str(), primary),
                 Span::styled(
                     format!(" · {total} agents · {running} run · {completed} done · {queued} wait · progress ["),
@@ -108,6 +111,9 @@ impl SwarmCardComponent {
                 ),
             ])
             .truncate_to_width(width),
+        );
+        lines.push(
+            Line::styled(format!("│ {}", self.snapshot.swarm_id), muted).truncate_to_width(width),
         );
 
         let mut children = self

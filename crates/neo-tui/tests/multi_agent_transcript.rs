@@ -196,10 +196,10 @@ fn assert_ansi_contains_color(ansi: &str, color: Color) {
 fn delegate_card_renders_kimi_style_running_summary() {
     let mut card = DelegateCardComponent::new(running_delegate());
 
-    let rows = plain(card.render(120));
+    let rows = plain(card.render(180));
     let text = rows.join("\n");
 
-    assert!(text.contains("\u{25cf} Gibbs  [Coder]"), "{text}");
+    assert!(text.contains("● Gibbs  [Coder] · Delegate"), "{text}");
     assert!(text.contains("running"), "{text}");
     assert!(text.contains("3 tools"), "{text}");
     assert!(text.contains("24s"), "{text}");
@@ -220,7 +220,7 @@ fn option_b_single_delegate_shows_name_first_and_role_badge() {
     let text = rows.join("\n");
     let header = rows.first().expect("delegate header");
 
-    assert!(header.contains("● Nova  [Coder]"), "{text}");
+    assert!(header.contains("● Nova  [Coder] · Delegate"), "{text}");
     assert!(header.contains("角色对比测试 coder"), "{text}");
     assert!(header.contains("running"), "{text}");
     assert!(header.contains("21s"), "{text}");
@@ -276,11 +276,14 @@ fn option_b_state_markers_do_not_depend_on_color_only() {
             .join("\n");
 
     assert!(
-        completed_text.contains("✓ Nova  [Coder]"),
+        completed_text.contains("✓ Nova  [Coder] · Delegate"),
         "{completed_text}"
     );
     assert!(completed_text.contains("done"), "{completed_text}");
-    assert!(failed_text.contains("✗ Nova  [Coder]"), "{failed_text}");
+    assert!(
+        failed_text.contains("✗ Nova  [Coder] · Delegate"),
+        "{failed_text}"
+    );
     assert!(failed_text.contains("failed"), "{failed_text}");
 }
 
@@ -393,7 +396,10 @@ fn option_b_collapsed_swarm_shows_names_badges_and_bayes_progress() {
     let text = rows.join("\n");
     let header = rows.first().expect("swarm header");
 
-    assert!(text.contains("Swarm: 角色对比测试"), "{text}");
+    assert!(
+        text.contains("DelegateSwarm · running · 角色对比测试"),
+        "{text}"
+    );
     assert!(header.contains("progress ["), "{text}");
     assert!(header.contains("bayes estimate"), "{text}");
     assert!(
@@ -509,7 +515,7 @@ fn option_b_completed_delegate_uses_name_badge_and_final_row() {
         plain(DelegateCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()))
             .join("\n");
 
-    assert!(text.contains("✓ Nova  [Coder]"), "{text}");
+    assert!(text.contains("✓ Nova  [Coder] · Delegate"), "{text}");
     assert!(text.contains("done"), "{text}");
     assert!(text.contains("3 tools"), "{text}");
     assert!(text.contains("└ All edits applied"), "{text}");
@@ -525,7 +531,7 @@ fn option_b_backgrounded_delegate_uses_backgrounded_label_without_detach_hint() 
         plain(DelegateCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()))
             .join("\n");
 
-    assert!(text.contains("● Nova  [Coder]"), "{text}");
+    assert!(text.contains("● Nova  [Coder] · Delegate"), "{text}");
     assert!(text.contains("backgrounded"), "{text}");
     assert!(!text.contains("Ctrl+B"), "{text}");
 }
@@ -858,11 +864,11 @@ fn swarm_card_renders_orchestrating_before_children_run() {
     };
     let mut card = SwarmCardComponent::new(snapshot);
 
-    let rows = plain(card.render(120));
+    let rows = plain(card.render(180));
     let text = rows.join("\n");
 
     assert!(
-        text.contains("Swarm: Audit and fix Neo tool schemas"),
+        text.contains("DelegateSwarm · queued · Audit and fix Neo tool schemas"),
         "{text}"
     );
     assert!(text.contains("progress ["), "{text}");
@@ -1012,6 +1018,536 @@ fn transcript_pane_upserts_delegate_card_from_events() {
 
     assert!(text.contains("Gibbs  [Coder]"), "{text}");
     assert!(text.contains("running"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_transcript_absorbs_matching_tool_header() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 11,
+        id: "tool_delegate_single".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 11,
+        agent: running_delegate(),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using Delegate"), "{text}");
+    assert!(!text.contains("Used Delegate"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+    assert!(text.contains("agent_test"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_transcript_absorbs_late_tool_header_after_snapshot() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 16,
+        agent: running_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 16,
+        id: "tool_delegate_late".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using Delegate"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 20,
+        id: "tool_delegate_matched_result".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 20,
+        agent: running_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 20,
+        id: "tool_delegate_matched_result".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::ok("agent_id: agent_test").with_details(
+            serde_json::json!({
+                "kind": "delegate",
+                "agent_id": "agent_test"
+            }),
+        ),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using Delegate"), "{text}");
+    assert!(!text.contains("Used Delegate"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+    assert!(text.contains("agent_test"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_absorption_restores_failed_tool_result() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 14,
+        id: "tool_delegate_failed".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 14,
+        agent: running_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 14,
+        id: "tool_delegate_failed".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::error("delegate failed before snapshot settled"),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Failed Delegate"), "{text}");
+    assert!(
+        text.contains("delegate failed before snapshot settled"),
+        "{text}"
+    );
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 15,
+        id: "tool_delegate_mismatch".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 15,
+        agent: running_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 15,
+        id: "tool_delegate_mismatch".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::ok("agent_id: agent_other").with_details(
+            serde_json::json!({
+                "kind": "delegate",
+                "agent_id": "agent_other"
+            }),
+        ),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Used Delegate"), "{text}");
+    assert!(text.contains("agent_id: agent_other"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_arrives_late() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 17,
+        id: "tool_delegate_mismatch_before_snapshot".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 17,
+        id: "tool_delegate_mismatch_before_snapshot".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::ok("agent_id: agent_other").with_details(
+            serde_json::json!({
+                "kind": "delegate",
+                "agent_id": "agent_other"
+            }),
+        ),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 17,
+        agent: running_delegate(),
+    });
+
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Used Delegate"), "{text}");
+    assert!(text.contains("agent_id: agent_other"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_group_keeps_unmatched_running_tool_header() {
+    let mut pane = TranscriptPane::new(160, 40);
+    let mut first = running_delegate();
+    first.id = AgentId::from_suffix_for_test("first_partial_group_absorb");
+    first.display_name = AgentDisplayName::new("Pascal");
+    first.path = AgentPath::root_child(&first.display_name);
+    first.task_title = "resume 一个 completed agent".to_owned();
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 22,
+        id: "tool_delegate_partial_pascal".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "6*7"}),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 22,
+        id: "tool_delegate_partial_huygens".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "7*8"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 22,
+        agent: first,
+    });
+
+    let _ = pane.render_frame(160, 40);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Using Delegate"), "{text}");
+    assert!(text.contains("Pascal  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_one() {
+    let mut pane = TranscriptPane::new(160, 40);
+    let mut first = running_delegate();
+    first.id = AgentId::from_suffix_for_test("first_mixed_group_absorb");
+    first.display_name = AgentDisplayName::new("Pascal");
+    first.path = AgentPath::root_child(&first.display_name);
+    first.task_title = "resume 一个 completed agent".to_owned();
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 23,
+        id: "tool_delegate_mixed_pascal".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "6*7"}),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 23,
+        id: "tool_delegate_mixed_huygens".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "7*8"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 23,
+        agent: first,
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 23,
+        id: "tool_delegate_mixed_pascal".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::ok("matched delegate result should hide").with_details(
+            serde_json::json!({
+                "kind": "delegate",
+                "agent_id": "agent_first_mixed_group_absorb"
+            }),
+        ),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 23,
+        id: "tool_delegate_mixed_huygens".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::error("second delegate failed before starting"),
+    });
+
+    let _ = pane.render_frame(160, 40);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Used Delegate"), "{text}");
+    assert!(
+        !text.contains("matched delegate result should hide"),
+        "{text}"
+    );
+    assert!(text.contains("Failed Delegate"), "{text}");
+    assert!(
+        text.contains("second delegate failed before starting"),
+        "{text}"
+    );
+    assert!(text.contains("Pascal  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
+fn option_b_delegate_group_absorbs_matching_tool_headers() {
+    let mut pane = TranscriptPane::new(160, 40);
+    let mut first = running_delegate();
+    first.id = AgentId::from_suffix_for_test("first_group_absorb");
+    first.display_name = AgentDisplayName::new("Pascal");
+    first.path = AgentPath::root_child(&first.display_name);
+    first.task_title = "resume 一个 completed agent".to_owned();
+
+    let mut second = running_delegate();
+    second.id = AgentId::from_suffix_for_test("second_group_absorb");
+    second.display_name = AgentDisplayName::new("Huygens");
+    second.path = AgentPath::root_child(&second.display_name);
+    second.role = AgentRole::Explorer;
+    second.task_title = "resume 另一个 completed agent".to_owned();
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 12,
+        id: "tool_delegate_pascal".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "6*7"}),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 12,
+        id: "tool_delegate_huygens".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "7*8"}),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 12,
+        agent: first,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 12,
+        agent: second,
+    });
+
+    let _ = pane.render_frame(160, 40);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using Delegate"), "{text}");
+    assert!(!text.contains("Used Delegate"), "{text}");
+    assert!(text.contains("Delegate group · Running 2 agents"), "{text}");
+    assert!(text.contains("├─ Pascal  [Coder]"), "{text}");
+    assert!(text.contains("└─ Huygens  [Explorer]"), "{text}");
+}
+
+#[test]
+fn option_b_swarm_transcript_absorbs_matching_tool_header() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Running,
+        AgentLifecycleState::Queued,
+    ]);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 13,
+        id: "tool_delegate_swarm".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        arguments: serde_json::json!({
+            "description": "Test swarm",
+            "max_concurrency": 2
+        }),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 13,
+        swarm: snapshot,
+    });
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using DelegateSwarm"), "{text}");
+    assert!(!text.contains("Used DelegateSwarm"), "{text}");
+    assert!(text.contains("DelegateSwarm · running"), "{text}");
+    assert!(text.contains("progress ["), "{text}");
+    assert!(text.contains("bayes estimate"), "{text}");
+}
+
+#[test]
+fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Running,
+        AgentLifecycleState::Queued,
+    ]);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 21,
+        id: "tool_swarm_matched_result".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        arguments: serde_json::json!({
+            "description": "Test swarm",
+            "max_concurrency": 2
+        }),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 21,
+        swarm: snapshot,
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 21,
+        id: "tool_swarm_matched_result".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        result: neo_agent_core::ToolResult::ok("swarm_id: swarm_test").with_details(
+            serde_json::json!({
+                "kind": "delegate_swarm",
+                "swarm_id": "swarm_test"
+            }),
+        ),
+    });
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("Using DelegateSwarm"), "{text}");
+    assert!(!text.contains("Used DelegateSwarm"), "{text}");
+    assert!(text.contains("DelegateSwarm · running"), "{text}");
+    assert!(text.contains("swarm_test"), "{text}");
+}
+
+#[test]
+fn option_b_swarm_absorption_restores_failed_tool_result() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Running,
+        AgentLifecycleState::Queued,
+    ]);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 18,
+        id: "tool_swarm_failed".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        arguments: serde_json::json!({
+            "description": "Test swarm",
+            "max_concurrency": 2
+        }),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 18,
+        swarm: snapshot,
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 18,
+        id: "tool_swarm_failed".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        result: neo_agent_core::ToolResult::error("swarm failed before returning ids"),
+    });
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Failed DelegateSwarm"), "{text}");
+    assert!(text.contains("swarm failed before returning ids"), "{text}");
+    assert!(text.contains("DelegateSwarm · running"), "{text}");
+}
+
+#[test]
+fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arrives_late() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Running,
+        AgentLifecycleState::Queued,
+    ]);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 19,
+        id: "tool_swarm_mismatch_before_snapshot".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        arguments: serde_json::json!({
+            "description": "Test swarm",
+            "max_concurrency": 2
+        }),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 19,
+        id: "tool_swarm_mismatch_before_snapshot".to_owned(),
+        name: "DelegateSwarm".to_owned(),
+        result: neo_agent_core::ToolResult::ok("swarm_id: swarm_other").with_details(
+            serde_json::json!({
+                "kind": "delegate_swarm",
+                "swarm_id": "swarm_other"
+            }),
+        ),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 19,
+        swarm: snapshot,
+    });
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Used DelegateSwarm"), "{text}");
+    assert!(text.contains("swarm_id: swarm_other"), "{text}");
+    assert!(text.contains("DelegateSwarm · running"), "{text}");
 }
 
 #[test]
@@ -1480,7 +2016,7 @@ fn delegate_card_header_uses_task_title_not_full_prompt() {
             .join("\n");
 
     assert!(
-        text.contains("Gibbs  [Coder]  Count public modules"),
+        text.contains("Gibbs  [Coder] · Delegate · Count public modules"),
         "{text}"
     );
     assert!(!text.contains("explain every module in detail"), "{text}");

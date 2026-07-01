@@ -143,6 +143,7 @@ impl Default for TranscriptViewport {
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptStore {
     entries: Vec<TranscriptEntry>,
+    suppressed_tool_run_ids: Vec<String>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
     viewport: TranscriptViewport,
@@ -234,6 +235,28 @@ impl TranscriptStore {
             TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
             _ => None,
         })
+    }
+
+    pub fn suppress_tool_run(&mut self, id: &str) {
+        if !self
+            .suppressed_tool_run_ids
+            .iter()
+            .any(|existing| existing == id)
+        {
+            self.suppressed_tool_run_ids.push(id.to_owned());
+        }
+    }
+
+    pub fn unsuppress_tool_run(&mut self, id: &str) {
+        self.suppressed_tool_run_ids
+            .retain(|existing| existing != id);
+    }
+
+    #[must_use]
+    pub fn is_tool_run_suppressed(&self, id: &str) -> bool {
+        self.suppressed_tool_run_ids
+            .iter()
+            .any(|existing| existing == id)
     }
 
     pub fn shell_run_mut(&mut self, id: &str) -> Option<&mut ShellRunComponent> {

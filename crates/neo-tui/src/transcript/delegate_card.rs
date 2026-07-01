@@ -88,9 +88,14 @@ impl DelegateCardComponent {
                 Span::styled(self.snapshot.display_name.as_str(), accent),
                 Span::raw("  "),
                 Span::styled(role_badge(&self.snapshot), muted),
+                Span::styled(" · Delegate", muted),
                 Span::styled(delegate_stats_line(&self.snapshot, phase, elapsed), primary),
             ])
             .truncate_to_width(width),
+        );
+        lines.push(
+            Line::styled(format!("│ {}", self.snapshot.id.as_str()), muted)
+                .truncate_to_width(width),
         );
 
         if can_detach(&self.snapshot) {
@@ -173,7 +178,7 @@ fn delegate_stats_line(
     if let Some(cache) = format_cache_token_usage(snapshot) {
         parts.push(cache);
     }
-    format!("  {}", parts.join(" · "))
+    format!(" · {}", parts.join(" · "))
 }
 
 fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
