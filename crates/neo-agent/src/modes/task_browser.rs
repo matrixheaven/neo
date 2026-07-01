@@ -244,15 +244,19 @@ fn format_elapsed(elapsed: Duration) -> String {
 }
 
 fn format_agent_activity(activity: &neo_agent_core::multi_agent::AgentActivityEntry) -> String {
-    use neo_agent_core::multi_agent::AgentActivityKind;
+    use neo_agent_core::multi_agent::{AgentActivityKind, AgentToolActivityPhase};
     match &activity.kind {
         AgentActivityKind::Tool {
             name,
             summary,
-            failed,
+            phase,
             ..
         } => {
-            let verb = if *failed { "Failed" } else { "Used" };
+            let verb = if *phase == AgentToolActivityPhase::Failed {
+                "Failed"
+            } else {
+                "Used"
+            };
             match summary {
                 Some(summary) => format!("{verb} {name} ({summary})"),
                 None => format!("{verb} {name}"),
@@ -394,6 +398,12 @@ mod tests {
             state: AgentLifecycleState::Running,
             task: "fix the border".to_owned(),
             task_title: "fix the border".to_owned(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            terminal_at_ms: None,
+            detached_from_foreground: true,
+            terminal_reason: None,
             tool_count: 2,
             token_count: 1000,
             elapsed: Duration::from_secs(10),
@@ -434,6 +444,12 @@ mod tests {
             state: AgentLifecycleState::Running,
             task: "item 0".to_owned(),
             task_title: "item 0".to_owned(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            terminal_at_ms: None,
+            detached_from_foreground: true,
+            terminal_reason: None,
             tool_count: 0,
             token_count: 0,
             elapsed: Duration::from_secs(5),
@@ -489,6 +505,12 @@ mod tests {
             state: AgentLifecycleState::Completed,
             task: "child A prompt".to_owned(),
             task_title: "Child A".to_owned(),
+            created_at_ms: 1,
+            updated_at_ms: 11,
+            started_at_ms: Some(1),
+            terminal_at_ms: Some(11),
+            detached_from_foreground: true,
+            terminal_reason: None,
             tool_count: 2,
             token_count: 500,
             elapsed: Duration::from_secs(10),
@@ -508,6 +530,12 @@ mod tests {
             state: AgentLifecycleState::Completed,
             task: "child B prompt".to_owned(),
             task_title: "Child B".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 10,
+            started_at_ms: Some(2),
+            terminal_at_ms: Some(10),
+            detached_from_foreground: true,
+            terminal_reason: None,
             tool_count: 1,
             token_count: 300,
             elapsed: Duration::from_secs(8),
