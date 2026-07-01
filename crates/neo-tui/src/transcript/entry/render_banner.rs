@@ -8,8 +8,9 @@ const NEON_VIOLET: Color = Color::Rgb(138, 92, 255);
 
 fn neon_logo_row(row: usize) -> String {
     let (left, center, right) = match row {
-        0 => ("\u{2590}\u{2588}", "\u{2598} ", "\u{2588}\u{258c}"),
-        1 => ("\u{2590}\u{2588}", " \u{2597}", "\u{2588}\u{258c}"),
+        0 => ("\u{2590}\u{2588}", "\u{259b}  ", "\u{2588}\u{258c}"),
+        1 => ("\u{2590}\u{2588}", " \u{2588} ", "\u{2588}\u{258c}"),
+        2 => ("\u{2590}\u{2588}", "  \u{2599}", "\u{2588}\u{258c}"),
         _ => return String::new(),
     };
     format!(
@@ -54,8 +55,9 @@ fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Li
 /// ```text
 /// ╭──────╮
 /// │      │
-/// │  ▐█▘ █▌  Welcome to Neo!
-/// │  ▐█ ▗█▌  Send /help for help.
+/// │  ▐█▛  █▌  Welcome to Neo!
+/// │  ▐█ █ █▌  Send /help for help.
+/// │  ▐█  ▙█▌
 /// │      │
 /// │  Directory: /path
 /// │  Session:   abc
@@ -96,6 +98,9 @@ pub(super) fn render_welcome_banner(
         rest1.push_str(&paint(&data.subtitle, subtitle_style));
     }
     content.push(format!("{line1}{rest1}"));
+    let mut line2 = String::new();
+    let _ = write!(line2, "{}", neon_logo_row(2));
+    content.push(line2);
     // blank line between logo and metadata
     content.push(String::new());
 
