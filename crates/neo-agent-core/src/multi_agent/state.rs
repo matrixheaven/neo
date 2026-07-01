@@ -3,6 +3,8 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::AgentMessage;
+
 use super::{AgentDisplayName, AgentId, AgentPath, AgentRole};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -123,6 +125,11 @@ pub struct AgentSnapshot {
     pub latest_text: Option<String>,
     #[serde(default)]
     pub activity: Vec<AgentActivityEntry>,
+    /// Prior conversation messages accumulated across previous runs of this
+    /// agent. On resume, these are replayed into the fresh `AgentContext` so
+    /// the model retains conversation history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_messages: Vec<AgentMessage>,
     pub outcome: Option<AgentTerminalOutcome>,
 }
 

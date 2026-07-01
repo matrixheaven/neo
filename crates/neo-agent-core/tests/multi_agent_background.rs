@@ -89,6 +89,7 @@ async fn background_manager_lists_swarm_tasks() {
         elapsed: Duration::ZERO,
         latest_text: None,
         activity: Vec::new(),
+        prior_messages: Vec::new(),
         outcome: None,
     };
     let children = vec![SwarmChildSnapshot {
@@ -765,6 +766,7 @@ fn running_agent_snapshot(id: &str) -> AgentSnapshot {
         elapsed: Duration::from_secs(0),
         latest_text: None,
         activity: Vec::new(),
+        prior_messages: Vec::new(),
         outcome: None,
     }
 }

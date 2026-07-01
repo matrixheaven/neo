@@ -237,6 +237,37 @@ impl MultiAgentRuntime {
         self.update_terminal_delegate(id, AgentLifecycleState::Completed, update, false)
     }
 
+    /// Like `complete_delegate` but also stores the accumulated conversation
+    /// messages on the snapshot so they survive a future resume.
+    fn complete_delegate_with_messages(
+        &self,
+        id: &AgentId,
+        update: AgentRunUpdate,
+        messages: &[AgentMessage],
+    ) -> AgentSnapshot {
+        let mut locked = self.state.lock().expect("multi-agent state poisoned");
+        let snapshot = locked
+            .agents
+            .get_mut(id.as_str())
+            .expect("agent should exist");
+        let now = now_ms();
+        snapshot.state = AgentLifecycleState::Completed;
+        snapshot.tool_count = update.tool_count;
+        snapshot.token_count = update.token_count;
+        snapshot.elapsed = update.elapsed;
+        snapshot.latest_text.clone_from(&update.latest_text);
+        snapshot.activity = update.activity;
+        snapshot.prior_messages = messages.to_vec();
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        snapshot.terminal_reason = Some(terminal_reason_for_state(AgentLifecycleState::Completed));
+        snapshot.outcome = Some(AgentTerminalOutcome {
+            summary: update.summary,
+            is_error: false,
+        });
+        snapshot.clone()
+    }
+
     pub fn fail_delegate(&self, id: &AgentId, update: AgentRunUpdate) -> AgentSnapshot {
         self.update_terminal_delegate(id, AgentLifecycleState::Failed, update, true)
     }
@@ -780,6 +811,7 @@ pub struct AgentRunUpdate {
 pub struct ChildRunOutput {
     pub snapshot: AgentSnapshot,
     pub events: Vec<AgentEvent>,
+    pub messages: Vec<AgentMessage>,
 }
 
 type LiveSwarmMessageResult = Result<(Vec<String>, Vec<(String, AgentLifecycleState)>), String>;
@@ -821,6 +853,7 @@ fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
         elapsed: Duration::ZERO,
         latest_text: None,
         activity: Vec::new(),
+        prior_messages: Vec::new(),
         outcome: None,
     }
 }
@@ -887,7 +920,8 @@ impl MultiAgentRuntime {
         );
         let started_at = Instant::now();
         let prompt = child_prompt(&request.task, request.context, request.actual_role());
-        let run = run_agent_snapshot(deps, prompt, SteerInputHandle::new(), |_| {}).await;
+        let run =
+            run_agent_snapshot(deps, prompt, Vec::new(), SteerInputHandle::new(), |_| {}).await;
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
 
@@ -905,10 +939,11 @@ impl MultiAgentRuntime {
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
+        let prior_messages = snapshot.prior_messages.clone();
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let steer_input = self.register_live_steer(agent_id.as_str());
-        let run = run_agent_snapshot(deps, prompt, steer_input, |event| {
+        let run = run_agent_snapshot(deps, prompt, prior_messages, steer_input, |event| {
             if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
                 on_update(updated);
             }
@@ -936,7 +971,8 @@ impl MultiAgentRuntime {
         );
         let started_at = Instant::now();
         let prompt = child_prompt(&task, DelegateContext::None, request.role);
-        let run = run_agent_snapshot(deps, prompt, SteerInputHandle::new(), |_| {}).await;
+        let run =
+            run_agent_snapshot(deps, prompt, Vec::new(), SteerInputHandle::new(), |_| {}).await;
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
 
@@ -954,10 +990,11 @@ impl MultiAgentRuntime {
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
+        let prior_messages = snapshot.prior_messages.clone();
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let steer_input = self.register_live_steer(agent_id.as_str());
-        let run = run_agent_snapshot(deps, prompt, steer_input, |event| {
+        let run = run_agent_snapshot(deps, prompt, prior_messages, steer_input, |event| {
             if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
                 on_update(updated);
             }
@@ -1049,7 +1086,11 @@ impl MultiAgentRuntime {
                 if !text.trim().is_empty() {
                     changed = true;
                     snapshot.latest_text = Some(text.clone());
-                    push_text_activity(snapshot, &text, false);
+                    if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
+                        != Some(text.trim())
+                    {
+                        push_text_activity(snapshot, &text, false);
+                    }
                 }
             }
             AgentEvent::TokenUsage { usage, .. } => {
@@ -1081,28 +1122,32 @@ impl MultiAgentRuntime {
         &self,
         snapshot: AgentSnapshot,
         started_at: Instant,
-        run: Result<Vec<AgentEvent>, String>,
+        run: Result<(Vec<AgentEvent>, Vec<AgentMessage>), String>,
     ) -> ChildRunOutput {
         match run {
-            Ok(events) => {
+            Ok((events, messages)) => {
                 if self
                     .snapshot(&snapshot.id)
                     .is_some_and(|current| current.state == AgentLifecycleState::Cancelled)
                 {
+                    let mut current = self.snapshot(&snapshot.id).unwrap_or(snapshot);
+                    current.prior_messages = messages.clone();
                     return ChildRunOutput {
-                        snapshot: self.snapshot(&snapshot.id).unwrap_or(snapshot),
+                        snapshot: current,
                         events,
+                        messages,
                     };
                 }
                 let update = summarize_child_events(&events, started_at.elapsed());
                 let completed = if child_events_have_error(&events) {
                     self.fail_delegate(&snapshot.id, update)
                 } else {
-                    self.complete_delegate(&snapshot.id, update)
+                    self.complete_delegate_with_messages(&snapshot.id, update, &messages)
                 };
                 ChildRunOutput {
                     snapshot: completed,
                     events,
+                    messages,
                 }
             }
             Err(error) => {
@@ -1118,6 +1163,7 @@ impl MultiAgentRuntime {
                 ChildRunOutput {
                     snapshot: failed,
                     events: Vec::new(),
+                    messages: Vec::new(),
                 }
             }
         }
@@ -1145,15 +1191,19 @@ impl MultiAgentRuntime {
 async fn run_agent_snapshot(
     deps: ChildRuntimeDeps,
     prompt: String,
+    prior_messages: Vec<AgentMessage>,
     steer_input: SteerInputHandle,
     mut on_event: impl FnMut(&AgentEvent) + Send,
-) -> Result<Vec<AgentEvent>, String> {
+) -> Result<(Vec<AgentEvent>, Vec<AgentMessage>), String> {
     let child_config = child_config(deps.config, deps.role);
     let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
     let child_runtime =
         AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);
     let mut context = AgentContext::new();
+    for message in prior_messages {
+        context.append_message(message);
+    }
     let mut stream = child_runtime.run_turn(&mut context, AgentMessage::user_text(prompt));
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
@@ -1161,7 +1211,11 @@ async fn run_agent_snapshot(
         on_event(&event);
         events.push(event);
     }
-    Ok(events)
+    drop(stream);
+    // Extract the accumulated messages (prior + this turn) so they can be
+    // stored on the snapshot for future resume.
+    let messages = context.messages().to_vec();
+    Ok((events, messages))
 }
 
 fn child_config(mut config: AgentConfig, role: AgentRole) -> AgentConfig {
@@ -1362,22 +1416,18 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                 message: AgentMessage::Assistant { content, .. },
             } => {
                 let text = content_text(content);
-                if !text.trim().is_empty() {
-                    activity.push(AgentActivityEntry {
-                        kind: AgentActivityKind::Text {
-                            text,
-                            thinking: false,
-                        },
-                    });
+                if !text.trim().is_empty()
+                    && latest_text_activity(activity.as_slice(), false).as_deref()
+                        != Some(text.trim())
+                {
+                    append_text_activity(&mut activity, &text, false);
                 }
             }
             AgentEvent::ThinkingDelta { text, .. } if !text.trim().is_empty() => {
-                activity.push(AgentActivityEntry {
-                    kind: AgentActivityKind::Text {
-                        text: text.clone(),
-                        thinking: true,
-                    },
-                });
+                append_text_activity(&mut activity, text, true);
+            }
+            AgentEvent::TextDelta { text, .. } if !text.trim().is_empty() => {
+                append_text_activity(&mut activity, text, false);
             }
             _ => {}
         }
@@ -1387,19 +1437,58 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
 }
 
 fn push_text_activity(snapshot: &mut AgentSnapshot, text: &str, thinking: bool) {
-    let text = text.trim();
-    if text.is_empty() {
+    let Some(accumulated) = append_text_activity(&mut snapshot.activity, text, thinking) else {
         return;
-    }
+    };
+
     if !thinking {
-        snapshot.latest_text = Some(text.to_owned());
+        snapshot.latest_text = Some(accumulated);
     }
-    snapshot.activity.push(AgentActivityEntry {
+}
+
+fn append_text_activity(
+    activity: &mut Vec<AgentActivityEntry>,
+    text: &str,
+    thinking: bool,
+) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    if let Some(AgentActivityEntry {
+        kind:
+            AgentActivityKind::Text {
+                text: previous,
+                thinking: previous_thinking,
+            },
+    }) = activity.last_mut()
+        && *previous_thinking == thinking
+    {
+        previous.push_str(text);
+        return Some(previous.trim().to_owned());
+    }
+
+    activity.push(AgentActivityEntry {
         kind: AgentActivityKind::Text {
             text: text.to_owned(),
             thinking,
         },
     });
+    Some(text.trim().to_owned())
+}
+
+fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
+    activity
+        .iter()
+        .rev()
+        .filter_map(|entry| match &entry.kind {
+            AgentActivityKind::Text {
+                text,
+                thinking: entry_thinking,
+            } if *entry_thinking == thinking => Some(text.trim()),
+            _ => None,
+        })
+        .find(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn upsert_tool_activity(

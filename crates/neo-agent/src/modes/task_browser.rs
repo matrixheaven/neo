@@ -409,6 +409,7 @@ mod tests {
             elapsed: Duration::from_secs(10),
             latest_text: Some("reading file...".to_owned()),
             activity: Vec::new(),
+            prior_messages: Vec::new(),
             outcome: None,
         };
         let snapshot = BackgroundTaskSnapshot {
@@ -455,6 +456,7 @@ mod tests {
             elapsed: Duration::from_secs(5),
             latest_text: None,
             activity: Vec::new(),
+            prior_messages: Vec::new(),
             outcome: None,
         };
         let children = vec![SwarmChildSnapshot {

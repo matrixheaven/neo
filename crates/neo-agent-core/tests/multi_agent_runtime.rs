@@ -138,6 +138,121 @@ fn background_terminal_reason_records_lost_without_claiming_completion() {
 }
 
 #[test]
+fn child_activity_trim_preserves_visible_ongoing_tool_and_latest_text() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("long running bash");
+    let started_at = std::time::Instant::now();
+
+    let _ = runtime.apply_child_event(
+        &snapshot.id,
+        started_at,
+        &AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "bash-live".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"cmd": "cargo nextest run -p neo-tui --test multi_agent_transcript"}),
+        },
+    );
+    for index in 0..32 {
+        let _ = runtime.apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: format!("thinking chunk {index}"),
+            },
+        );
+        let _ = runtime.apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::TextDelta {
+                turn: 1,
+                text: format!("body chunk {index}"),
+            },
+        );
+    }
+
+    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    assert_eq!(updated.activity.len(), 24);
+    assert_eq!(
+        latest_tool_phase(&updated, "bash-live"),
+        Some(AgentToolActivityPhase::Ongoing)
+    );
+    let latest_thinking = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
+        AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(latest_thinking, Some("thinking chunk 31"));
+}
+
+#[test]
+fn child_text_and_thinking_deltas_accumulate_into_live_activity() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("stream text");
+    let started_at = std::time::Instant::now();
+
+    for text in ["All ", "edits ", "applied."] {
+        let _ = runtime.apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::TextDelta {
+                turn: 1,
+                text: text.to_owned(),
+            },
+        );
+    }
+    for text in ["Let ", "me ", "verify."] {
+        let _ = runtime.apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    assert_eq!(updated.latest_text.as_deref(), Some("All edits applied."));
+    let latest_body = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
+        AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+        _ => None,
+    });
+    let latest_thinking = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
+        AgentActivityKind::Text { text, thinking } if *thinking => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(latest_body, Some("All edits applied."));
+    assert_eq!(latest_thinking, Some("Let me verify."));
+}
+
+#[test]
+fn child_text_delta_accumulation_preserves_repeated_fragments() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("stream repeated text");
+    let started_at = std::time::Instant::now();
+
+    for text in ["ha", "ha", "!"] {
+        let _ = runtime.apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::TextDelta {
+                turn: 1,
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    let updated = runtime.snapshot(&snapshot.id).expect("snapshot remains present");
+    assert_eq!(updated.latest_text.as_deref(), Some("haha!"));
+    let latest_body = updated.activity.iter().rev().find_map(|entry| match &entry.kind {
+        AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(latest_body, Some("haha!"));
+}
+
+#[test]
 fn builtin_tools_register_delegate_tools() {
     let specs = ToolRegistry::with_builtin_tools()
         .specs()
