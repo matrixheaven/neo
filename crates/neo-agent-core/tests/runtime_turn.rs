@@ -1162,10 +1162,7 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
         "Summarizing should make progress beyond its starting percent: {lifecycle:?}"
     );
     assert_eq!(
-        lifecycle
-            .iter()
-            .filter(|e| e.starts_with("progress:"))
-            .last(),
+        lifecycle.iter().rfind(|e| e.starts_with("progress:")),
         Some(&"progress:Applying:100".to_owned()),
         "last progress should reach 100%: {lifecycle:?}"
     );
