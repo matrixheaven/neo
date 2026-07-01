@@ -75,14 +75,36 @@ short `description` to start a background task and receive a `bash-*` task id.
 task id while the TUI keeps the question visible for the user.
 
 Background tasks are managed by the shared Background Task System. `TaskList`
-lists active or historical tasks, `TaskOutput` returns the current status and
-captured output/answers, and `TaskStop` terminates a background shell process
-group or cancels a pending question. Status values are `running`,
-`waiting_for_user`, `completed`, `failed`, `stopped`, and `timed_out`.
+is the general index for active background work: it lists bash/question tasks
+plus active delegate agents and delegate swarms. `TaskOutput` returns the
+current status and captured output/answers, and `TaskStop` terminates a
+background shell process group or cancels a pending question. Status values are
+`running`, `waiting_for_user`, `completed`, `failed`, `cancelled`, and
+`timed_out`.
 Foreground timeout/cancellation and background stop clean up the shell process
 group on Unix, but commands that daemonize into a new session or process group
 are outside this compact cleanup contract. It is not a PTY and does not support
 interactive stdin.
+
+## Multi-Agent Tools
+
+`Delegate`, `DelegateSwarm`, `ListDelegates`, `WaitDelegate`,
+`MessageDelegate`, and `InterruptDelegate` are the canonical multi-agent tools.
+Use `TaskList` when the model needs a general active-work index, and use
+`ListDelegates` when it needs detailed multi-agent state.
+
+- `ListDelegates` supports `include_completed`, `kind`, `state`,
+  `state_scope`, `order`, `limit`, `cursor`, and `include`.
+- `state_scope` defaults to `current`; use `any_run` with `state` to match
+  terminal statuses recorded before a delegate was resumed.
+- `DelegateSwarm.items` uses object items:
+  `{ "title": "short label", "value": "item inserted into {{item}}" }`.
+- `DelegateSwarm.resume_agent_ids` is a JSON object map:
+  `{ "agent_xxx": "per-agent resume prompt" }`.
+- `MessageDelegate` sends live messages only to running agents or running swarm
+  children.
+- `InterruptDelegate` interrupts non-terminal delegates or swarms. Unknown
+  delegate IDs return `unknown delegate target`.
 
 Foreground `Bash` content is raw terminal text: stdout followed by stderr. The
 structured `details` still carry `exit_code`, capped stdout/stderr, and

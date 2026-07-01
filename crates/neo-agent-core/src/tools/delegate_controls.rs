@@ -935,7 +935,10 @@ mod tests {
         assert!(result.content.contains("No delegates found."));
         assert!(result.content.contains("No cancelled delegates found"));
         assert!(!result.content.contains("Pass include_completed=true"));
-        assert_eq!(result.details.as_ref().unwrap()["query"]["state"], "cancelled");
+        assert_eq!(
+            result.details.as_ref().unwrap()["query"]["state"],
+            "cancelled"
+        );
         assert_eq!(result.details.as_ref().unwrap()["include_completed"], true);
     }
 
@@ -944,10 +947,7 @@ mod tests {
         let ctx = test_context();
         let tool = ListDelegatesTool;
 
-        let result = tool
-            .execute(&ctx, json!({}))
-            .await
-            .expect("list result");
+        let result = tool.execute(&ctx, json!({})).await.expect("list result");
 
         assert!(!result.is_error);
         assert!(result.content.contains("No active delegates found."));
@@ -975,7 +975,9 @@ mod tests {
     #[tokio::test]
     async fn terminal_delegate_errors_are_action_specific() {
         let ctx = test_context();
-        let agent = ctx.multi_agent.start_foreground_delegate_for_test("calculate 2 + 2");
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("calculate 2 + 2");
         ctx.multi_agent
             .complete_delegate_for_test(&agent.id, "The answer is 4.");
 
@@ -987,9 +989,16 @@ mod tests {
             .await
             .expect("message result");
         assert!(message_result.is_error);
-        assert!(message_result.content.contains("cannot receive live messages"));
+        assert!(
+            message_result
+                .content
+                .contains("cannot receive live messages")
+        );
         assert!(!message_result.content.contains("be interrupted"));
-        assert_eq!(message_result.details.as_ref().unwrap()["action"], "message");
+        assert_eq!(
+            message_result.details.as_ref().unwrap()["action"],
+            "message"
+        );
 
         let interrupt_result = InterruptDelegateTool
             .execute(&ctx, json!({ "id": agent.id.as_str() }))
@@ -998,13 +1007,18 @@ mod tests {
         assert!(interrupt_result.is_error);
         assert!(interrupt_result.content.contains("cannot be interrupted"));
         assert!(!interrupt_result.content.contains("live messages"));
-        assert_eq!(interrupt_result.details.as_ref().unwrap()["action"], "interrupt");
+        assert_eq!(
+            interrupt_result.details.as_ref().unwrap()["action"],
+            "interrupt"
+        );
     }
 
     #[tokio::test]
     async fn list_delegates_any_run_state_finds_resumed_cancelled_agent() {
         let ctx = test_context();
-        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("first run");
         let cancelled = ctx
             .multi_agent
             .cancel_agent_by_id(agent.id.as_str())
@@ -1045,13 +1059,18 @@ mod tests {
         assert_eq!(details["query"]["state"], "cancelled");
         assert_eq!(details["query"]["state_scope"], "any_run");
         assert_eq!(details["delegates"][0]["current_status"], "completed");
-        assert_eq!(details["delegates"][0]["terminal_status_history"][0], "cancelled");
+        assert_eq!(
+            details["delegates"][0]["terminal_status_history"][0],
+            "cancelled"
+        );
     }
 
     #[tokio::test]
     async fn list_delegates_current_state_does_not_match_resumed_cancelled_agent() {
         let ctx = test_context();
-        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("first run");
         ctx.multi_agent
             .cancel_agent_by_id(agent.id.as_str())
             .expect("agent cancelled");
@@ -1089,7 +1108,9 @@ mod tests {
     #[tokio::test]
     async fn list_delegates_any_run_history_preserves_repeated_terminal_states() {
         let ctx = test_context();
-        let agent = ctx.multi_agent.start_foreground_delegate_for_test("first run");
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("first run");
         ctx.multi_agent
             .complete_delegate_for_test(&agent.id, "first run done");
 
