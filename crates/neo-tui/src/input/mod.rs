@@ -115,6 +115,10 @@ impl InputParser {
             return Vec::new();
         }
 
+        if let Some(event) = parse_sgr_mouse_scroll(seq) {
+            return vec![event];
+        }
+
         // Try printable key first (for text insertion)
         if let Some(ch) = decode_printable_key(seq) {
             return vec![InputEvent::Insert(ch)];
@@ -205,6 +209,26 @@ fn is_plain_printable_key_id(key_id: &str) -> bool {
     !key_id.contains('+')
         && key_id.chars().count() == 1
         && key_id.chars().next().is_some_and(|c| !c.is_control())
+}
+
+fn parse_sgr_mouse_scroll(seq: &str) -> Option<InputEvent> {
+    let payload = seq.strip_prefix("\x1b[<")?;
+    if payload.ends_with('m') {
+        return None;
+    }
+    let payload = payload.strip_suffix('M')?;
+    let mut parts = payload.split(';');
+    let button = parts.next()?.parse::<u16>().ok()?;
+    let _x = parts.next()?.parse::<u16>().ok()?;
+    let _y = parts.next()?.parse::<u16>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match button {
+        64 => Some(InputEvent::ScrollUp(3)),
+        65 => Some(InputEvent::ScrollDown(3)),
+        _ => None,
+    }
 }
 
 /// Max time between an ESC and the following Enter for the pair to be treated
@@ -406,6 +430,33 @@ mod tests {
         let mut parser = InputParser::new();
         // ESC + CR = alt+enter in legacy mode
         assert_eq!(parser.feed_bytes(b"\x1b\r"), vec![InputEvent::NewLine]);
+    }
+
+    #[test]
+    fn raw_sgr_mouse_wheel_up_produces_scroll_up() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<64;20;10M"),
+            vec![InputEvent::ScrollUp(3)]
+        );
+    }
+
+    #[test]
+    fn raw_sgr_mouse_wheel_down_produces_scroll_down() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<65;20;10M"),
+            vec![InputEvent::ScrollDown(3)]
+        );
+    }
+
+    #[test]
+    fn raw_sgr_mouse_release_is_ignored() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<64;20;10m"),
+            Vec::<InputEvent>::new()
+        );
     }
 
     #[test]
