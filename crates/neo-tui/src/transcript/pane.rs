@@ -10,8 +10,8 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
-    ApprovalPromptData, InlineImageRender, ShellRunComponent, ToolCallComponent, ToolCallState,
-    TranscriptEntry, TranscriptStore,
+    ApprovalPromptData, InlineImageRender, McpStartupStatusData, ShellRunComponent,
+    ToolCallComponent, ToolCallState, TranscriptEntry, TranscriptStore,
 };
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
@@ -249,6 +249,20 @@ impl TranscriptPane {
             text: content.into(),
             severity: Some(severity),
         });
+    }
+
+    pub fn upsert_mcp_startup_status(&mut self, data: McpStartupStatusData) {
+        let existing_index = self
+            .transcript
+            .entries()
+            .iter()
+            .position(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { data: existing } if existing.id == data.id));
+        if let Some(index) = existing_index {
+            self.transcript.entries_mut()[index] = TranscriptEntry::mcp_startup_status(data);
+            self.mark_dirty();
+        } else {
+            self.push_transcript(TranscriptEntry::mcp_startup_status(data));
+        }
     }
 
     pub fn replay_message(&mut self, message: &AgentMessage) {

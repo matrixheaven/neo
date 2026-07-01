@@ -12,6 +12,7 @@ use neo_agent_core::{
     build_authorization_manager,
     oauth::{callback_server::CallbackServer, store::OAuthStore},
 };
+use neo_tui::transcript::{McpStartupPhase, McpStartupStatusData};
 
 use crate::config::{McpServerConfig, McpTransport, neo_home};
 
@@ -341,6 +342,80 @@ pub fn summarize_mcp_servers_from_snapshots(
         };
     }
     summaries
+}
+
+#[must_use]
+pub fn mcp_startup_connecting_status(server: &McpServerConfig) -> Option<McpStartupStatusData> {
+    server.enabled.then(|| McpStartupStatusData {
+        id: server.id.clone(),
+        transport: display_mcp_kind(server.transport).to_owned(),
+        phase: McpStartupPhase::Connecting,
+    })
+}
+
+#[must_use]
+pub fn mcp_startup_connecting_statuses(
+    config: &crate::config::AppConfig,
+) -> Vec<McpStartupStatusData> {
+    config
+        .mcp
+        .servers
+        .iter()
+        .filter_map(mcp_startup_connecting_status)
+        .collect()
+}
+
+#[must_use]
+pub fn mcp_startup_status_from_snapshot(snapshot: &McpServerSnapshot) -> McpStartupStatusData {
+    let phase = match snapshot.status {
+        McpServerStatus::Connected => McpStartupPhase::Connected {
+            tool_count: snapshot.tool_count,
+        },
+        McpServerStatus::NeedsAuth => McpStartupPhase::NeedsAuth {
+            hint: snapshot.error.as_ref().map_or_else(
+                || "Run /mcp to authenticate.".to_owned(),
+                |diagnostic| {
+                    diagnostic
+                        .hint
+                        .clone()
+                        .unwrap_or_else(|| diagnostic.message.clone())
+                },
+            ),
+        },
+        McpServerStatus::Failed => McpStartupPhase::Failed {
+            message: snapshot
+                .error
+                .as_ref()
+                .map_or_else(|| "connection failed".to_owned(), |d| d.message.clone()),
+        },
+        McpServerStatus::Pending | McpServerStatus::Reconnecting => McpStartupPhase::Connecting,
+        McpServerStatus::Disabled => McpStartupPhase::Disabled,
+    };
+    McpStartupStatusData {
+        id: snapshot.id.clone(),
+        transport: snapshot.transport.clone(),
+        phase,
+    }
+}
+
+#[must_use]
+pub fn mcp_startup_failed_statuses(
+    config: &crate::config::AppConfig,
+    message: &str,
+) -> Vec<McpStartupStatusData> {
+    config
+        .mcp
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .map(|server| McpStartupStatusData {
+            id: server.id.clone(),
+            transport: display_mcp_kind(server.transport).to_owned(),
+            phase: McpStartupPhase::Failed {
+                message: message.to_owned(),
+            },
+        })
+        .collect()
 }
 
 #[must_use]
@@ -963,6 +1038,30 @@ mod tests {
         assert_eq!(
             format_mcp_startup_message(&snapshot),
             "MCP server \"linear\" connected · 38 tools (http)"
+        );
+    }
+
+    #[test]
+    fn startup_status_data_maps_connected_snapshot() {
+        let snapshot = McpServerSnapshot {
+            id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            status: McpServerStatus::Connected,
+            tool_count: 38,
+            tool_names: Vec::new(),
+            resource_count: None,
+            error: None,
+            reconnect_attempt: 0,
+            next_retry_ms: None,
+        };
+
+        assert_eq!(
+            mcp_startup_status_from_snapshot(&snapshot),
+            neo_tui::transcript::McpStartupStatusData {
+                id: "linear".to_owned(),
+                transport: "http".to_owned(),
+                phase: neo_tui::transcript::McpStartupPhase::Connected { tool_count: 38 },
+            }
         );
     }
 

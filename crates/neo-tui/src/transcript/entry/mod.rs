@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 mod copy;
 mod render_banner;
 mod render_goal;
+mod render_mcp_startup;
 mod render_status;
 mod render_thinking;
 
@@ -100,6 +101,9 @@ pub enum TranscriptEntry {
         /// line with no prefix.
         severity: Option<StatusSeverity>,
     },
+    McpStartupStatus {
+        data: McpStartupStatusData,
+    },
     /// A user message that was queued (Enter while busy) or steered (Ctrl+S)
     /// into a running turn. Rendered with a distinct prefix so the user can tell
     /// it apart from a normal delivered user message. `is_steer` selects the
@@ -155,6 +159,49 @@ pub enum StatusSeverity {
     Info,
     Warning,
     Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpStartupStatusData {
+    pub id: String,
+    pub transport: String,
+    pub phase: McpStartupPhase,
+}
+
+impl McpStartupStatusData {
+    #[must_use]
+    pub fn message(&self) -> String {
+        match &self.phase {
+            McpStartupPhase::Connecting => {
+                format!(
+                    "MCP server \"{}\" connecting... ({})",
+                    self.id, self.transport
+                )
+            }
+            McpStartupPhase::Connected { tool_count } => format!(
+                "MCP server \"{}\" connected · {} tools ({})",
+                self.id, tool_count, self.transport
+            ),
+            McpStartupPhase::NeedsAuth { hint } => {
+                format!("MCP server \"{}\" needs OAuth · {hint}", self.id)
+            }
+            McpStartupPhase::Failed { message } => {
+                format!("MCP server \"{}\" failed · {message}", self.id)
+            }
+            McpStartupPhase::Disabled => {
+                format!("MCP server \"{}\" disabled ({})", self.id, self.transport)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpStartupPhase {
+    Connecting,
+    Connected { tool_count: usize },
+    NeedsAuth { hint: String },
+    Failed { message: String },
+    Disabled,
 }
 
 impl TranscriptEntry {
@@ -256,6 +303,11 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub const fn mcp_startup_status(data: McpStartupStatusData) -> Self {
+        Self::McpStartupStatus { data }
+    }
+
+    #[must_use]
     pub fn queued_message(content: impl Into<String>, is_steer: bool) -> Self {
         Self::QueuedMessage {
             text: content.into(),
@@ -338,6 +390,12 @@ impl TranscriptEntry {
             Self::Status { text, severity } => {
                 render_status::render_status(text, *severity, inner_width, theme)
             }
+            Self::McpStartupStatus { data } => render_mcp_startup::render_mcp_startup_status(
+                data,
+                inner_width,
+                theme,
+                activity_frame,
+            ),
             Self::QueuedMessage { text, is_steer } => {
                 render_banner::render_queued_message(text, *is_steer, inner_width, theme)
             }
@@ -421,6 +479,7 @@ impl TranscriptEntry {
             Self::Banner(_)
             | Self::UserMessage(_)
             | Self::Status { .. }
+            | Self::McpStartupStatus { .. }
             | Self::AssistantMessage { .. }
             | Self::ThinkingBlock { .. }
             | Self::QueuedMessage { .. } => unreachable!("message entries handled above"),
@@ -432,6 +491,9 @@ impl TranscriptEntry {
             Self::Delegate { component } => component.on_render_tick(now_ms),
             Self::DelegateGroup { component } => component.on_render_tick(now_ms),
             Self::DelegateSwarm { component } => component.on_render_tick(now_ms),
+            Self::McpStartupStatus { data } => {
+                matches!(data.phase, McpStartupPhase::Connecting)
+            }
             _ => false,
         }
     }

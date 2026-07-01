@@ -29,8 +29,8 @@ pub use chrome_render::{
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
 pub use entry::{
-    ApprovalPromptData, BannerData, InlineImageRender, StatusSeverity, ThinkingPhase,
-    TranscriptEntry,
+    ApprovalPromptData, BannerData, InlineImageRender, McpStartupPhase, McpStartupStatusData,
+    StatusSeverity, ThinkingPhase, TranscriptEntry,
 };
 pub use pane::TranscriptPane;
 pub use plan_box::PlanBoxComponent;

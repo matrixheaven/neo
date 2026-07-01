@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, McpOAuthService,
-    McpOAuthServiceConfig, PendingQuestion, PermissionApprovalDecision, PermissionMode,
-    ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
+    McpOAuthServiceConfig, McpServerStatus, PendingQuestion, PermissionApprovalDecision,
+    PermissionMode, ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
@@ -262,7 +262,9 @@ pub async fn execute_tty_with_startup(
     } else {
         controller.apply_startup_action(&startup);
     }
-    controller.connect_mcp_at_startup().await;
+    controller
+        .connect_mcp_at_startup(|tui| terminal.borrow_mut().draw_tui(tui))
+        .await?;
     let events = RawStdinEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
@@ -938,24 +940,61 @@ impl InteractiveController {
         self.transcript_mut().push_status(message);
     }
 
-    async fn connect_mcp_at_startup(&mut self) {
+    async fn connect_mcp_at_startup(
+        &mut self,
+        mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
+    ) -> Result<()> {
         let Some(config) = self.local_config.clone() else {
-            return;
+            return Ok(());
         };
         let Some(manager) = self.mcp_manager.clone() else {
-            return;
+            return Ok(());
         };
-        match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
-            Ok(_) => {
-                let snapshots = mcp_ops::wait_for_mcp_manager_probe(&manager, &config).await;
-                for snapshot in snapshots {
-                    self.push_status(mcp_ops::format_mcp_startup_message(&snapshot));
-                }
+
+        let startup_statuses = mcp_ops::mcp_startup_connecting_statuses(&config);
+        if !startup_statuses.is_empty() {
+            for status in startup_statuses {
+                self.transcript_mut().upsert_mcp_startup_status(status);
             }
+            render(&mut self.tui)?;
+        }
+
+        match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
+            Ok(_) => loop {
+                let snapshots = manager.snapshots().await;
+                let settled = snapshots.iter().all(|snapshot| {
+                    !matches!(
+                        snapshot.status,
+                        McpServerStatus::Pending | McpServerStatus::Reconnecting
+                    )
+                });
+                for snapshot in snapshots.iter().filter(|snapshot| {
+                    config
+                        .mcp
+                        .servers
+                        .iter()
+                        .any(|server| server.enabled && server.id == snapshot.id)
+                }) {
+                    self.transcript_mut().upsert_mcp_startup_status(
+                        mcp_ops::mcp_startup_status_from_snapshot(snapshot),
+                    );
+                }
+                self.tui.transcript_mut().render_tick();
+                render(&mut self.tui)?;
+                if settled {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            },
             Err(error) => {
+                for status in mcp_ops::mcp_startup_failed_statuses(&config, &error.to_string()) {
+                    self.transcript_mut().upsert_mcp_startup_status(status);
+                }
                 self.push_status(format!("MCP startup failed: {error}"));
+                render(&mut self.tui)?;
             }
         }
+        Ok(())
     }
 
     #[cfg(test)]

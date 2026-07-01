@@ -1,8 +1,7 @@
 use neo_tui::primitive::theme::TuiTheme;
-use neo_tui::primitive::{strip_ansi, visible_width};
+use neo_tui::primitive::{Color, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
-use neo_tui::transcript::TranscriptEntry;
-use neo_tui::transcript::TranscriptPane;
+use neo_tui::transcript::{McpStartupPhase, McpStartupStatusData, TranscriptEntry, TranscriptPane};
 
 /// Strip ANSI + trim from a frame line, for content assertions.
 fn plain(line: &str) -> String {
@@ -17,6 +16,17 @@ fn plain_frame(transcript: &mut TranscriptPane, width: usize, height: usize) -> 
         .iter()
         .map(|line| plain(line))
         .collect()
+}
+
+fn ansi_for_color(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
+        Color::Indexed(index) => format!("\x1b[38;5;{index}m"),
+        Color::Green => "\x1b[32m".to_owned(),
+        Color::Yellow => "\x1b[33m".to_owned(),
+        Color::Red => "\x1b[31m".to_owned(),
+        other => panic!("test helper does not support color {other:?}"),
+    }
 }
 
 #[test]
@@ -88,6 +98,64 @@ fn transcript_pane_exposes_frame_ansi_lines_for_inspection() {
     assert!(
         lines.iter().any(|line| plain(line).contains("Using Bash")),
         "frame lines: {lines:?}"
+    );
+}
+
+#[test]
+fn mcp_startup_status_updates_pending_spinner_to_green_connected_row() {
+    let theme = TuiTheme::default().with_status_ok(Color::Rgb(1, 180, 90));
+    let mut transcript_pane = TranscriptPane::new(100, 12);
+    transcript_pane.set_theme(theme);
+
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Connecting,
+    });
+    transcript_pane.render_tick_at_ms_for_test(80);
+
+    let pending = plain_frame(&mut transcript_pane, 100, 12);
+    assert!(
+        pending
+            .iter()
+            .any(|line| line.contains("MCP server \"linear\" connecting")),
+        "pending frame: {pending:?}"
+    );
+    assert_eq!(
+        transcript_pane
+            .transcript()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
+            .count(),
+        1
+    );
+
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Connected { tool_count: 47 },
+    });
+    let _ = transcript_pane.render_frame(100, 12);
+
+    let connected_ansi = transcript_pane.frame_ansi_lines().join("\n");
+    let connected_plain = strip_ansi(&connected_ansi);
+    assert!(
+        connected_plain.contains("MCP server \"linear\" connected · 47 tools (http)"),
+        "{connected_plain}"
+    );
+    assert!(
+        connected_ansi.contains(&ansi_for_color(theme.status_ok)),
+        "{connected_ansi}"
+    );
+    assert_eq!(
+        transcript_pane
+            .transcript()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
+            .count(),
+        1
     );
 }
 
