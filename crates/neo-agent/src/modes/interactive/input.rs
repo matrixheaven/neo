@@ -46,6 +46,7 @@ impl InteractiveController {
             InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
             InputEvent::Submit => {
                 self.clear_pending_exit_confirmation();
+                self.follow_transcript_tail();
                 self.submit_current_prompt().await?;
             }
             InputEvent::ScrollUp(rows) => self.scroll_transcript_up(rows),
@@ -65,6 +66,13 @@ impl InteractiveController {
         }
 
         Ok(false)
+    }
+
+    fn follow_transcript_tail(&mut self) {
+        self.transcript_mut()
+            .transcript_mut()
+            .viewport_mut()
+            .follow_bottom();
     }
 
     pub(super) async fn handle_pending_approval_event(
@@ -511,6 +519,7 @@ impl InteractiveController {
         match action {
             KeybindingAction::InputSubmit => {
                 self.clear_pending_exit_confirmation();
+                self.follow_transcript_tail();
                 self.submit_current_prompt().await?;
             }
             KeybindingAction::SelectUp => {

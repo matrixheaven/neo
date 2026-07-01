@@ -2418,6 +2418,41 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
 }
 
 #[tokio::test]
+async fn event_loop_submit_restores_transcript_follow_tail() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.transcript_mut().sync_transcript_view(30, 6);
+
+    controller
+        .handle_input_event(InputEvent::ScrollUp(5))
+        .await
+        .expect("wheel up scrolls transcript");
+    assert!(transcript_scrollback(&controller) > 0);
+    assert!(!controller.transcript().transcript().viewport().is_following_tail());
+
+    controller
+        .handle_input_event(InputEvent::Insert('h'))
+        .await
+        .expect("typing works");
+    controller
+        .handle_input_event(InputEvent::Insert('i'))
+        .await
+        .expect("typing works");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit restores tail before sending");
+
+    assert_eq!(transcript_scrollback(&controller), 0);
+    assert!(controller.transcript().transcript().viewport().is_following_tail());
+}
+
+#[tokio::test]
 async fn event_loop_ctrl_o_toggles_tool_detail() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
