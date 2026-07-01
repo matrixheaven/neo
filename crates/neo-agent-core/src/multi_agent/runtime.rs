@@ -19,6 +19,7 @@ use super::{
     AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DisplayNamePool,
     SwarmAggregate,
 };
+use super::{AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DelegateRequest {
@@ -148,22 +149,16 @@ impl MultiAgentRuntime {
         let display_name: AgentDisplayName = state.names.next_name();
         let id = AgentId::new();
         let path = AgentPath::root_child(&display_name);
-        let snapshot = AgentSnapshot {
+        let snapshot = new_agent_snapshot(AgentSnapshotSeed {
             id: id.clone(),
             display_name,
             path,
             role: AgentRole::Coder,
             mode: AgentRunMode::Foreground,
             state: AgentLifecycleState::Running,
-            task: task.to_owned(),
-            task_title: derive_title(task, None),
-            tool_count: 0,
-            token_count: 0,
-            elapsed: std::time::Duration::ZERO,
-            latest_text: None,
-            activity: Vec::new(),
-            outcome: None,
-        };
+            task,
+            title: None,
+        });
         state.register_agent_order(id.as_str());
         state
             .agents
@@ -209,22 +204,16 @@ impl MultiAgentRuntime {
             AgentPathKind::Root => AgentPath::root_child(&display_name),
             AgentPathKind::SwarmChild(swarm_id) => AgentPath::swarm_child(swarm_id, &display_name),
         };
-        let snapshot = AgentSnapshot {
+        let snapshot = new_agent_snapshot(AgentSnapshotSeed {
             id: id.clone(),
             display_name,
             path: agent_path,
             role,
             mode,
             state: lifecycle_state,
-            task: task.to_owned(),
-            task_title: derive_title(task, title),
-            tool_count: 0,
-            token_count: 0,
-            elapsed: Duration::ZERO,
-            latest_text: None,
-            activity: Vec::new(),
-            outcome: None,
-        };
+            task,
+            title,
+        });
         state.register_agent_order(id.as_str());
         state
             .agents
@@ -235,7 +224,12 @@ impl MultiAgentRuntime {
     pub fn mark_delegate_running(&self, id: &AgentId) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
+        let now = now_ms();
         snapshot.state = AgentLifecycleState::Running;
+        snapshot.started_at_ms.get_or_insert(now);
+        snapshot.terminal_at_ms = None;
+        snapshot.terminal_reason = None;
+        snapshot.updated_at_ms = now;
         Some(snapshot.clone())
     }
 
@@ -245,6 +239,33 @@ impl MultiAgentRuntime {
 
     pub fn fail_delegate(&self, id: &AgentId, update: AgentRunUpdate) -> AgentSnapshot {
         self.update_terminal_delegate(id, AgentLifecycleState::Failed, update, true)
+    }
+
+    pub fn mark_background_terminal_reason(
+        &self,
+        id: &AgentId,
+        state: AgentLifecycleState,
+        reason: AgentTerminalReason,
+        message: Option<String>,
+    ) -> Option<AgentSnapshot> {
+        let mut locked = self.state.lock().expect("multi-agent state poisoned");
+        let snapshot = locked.agents.get_mut(id.as_str())?;
+        if snapshot.state.is_terminal() {
+            return Some(snapshot.clone());
+        }
+        let now = now_ms();
+        snapshot.state = state;
+        snapshot.terminal_reason = Some(reason);
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+            snapshot.latest_text = Some(message.clone());
+            snapshot.outcome = Some(AgentTerminalOutcome {
+                summary: message,
+                is_error: state != AgentLifecycleState::Completed,
+            });
+        }
+        Some(snapshot.clone())
     }
 
     fn update_terminal_delegate(
@@ -259,12 +280,16 @@ impl MultiAgentRuntime {
             .agents
             .get_mut(id.as_str())
             .expect("agent should exist");
+        let now = now_ms();
         snapshot.state = state;
         snapshot.tool_count = update.tool_count;
         snapshot.token_count = update.token_count;
         snapshot.elapsed = update.elapsed;
         snapshot.latest_text.clone_from(&update.latest_text);
         snapshot.activity = update.activity;
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        snapshot.terminal_reason = Some(terminal_reason_for_state(state));
         snapshot.outcome = Some(AgentTerminalOutcome {
             summary: update.summary,
             is_error,
@@ -278,7 +303,11 @@ impl MultiAgentRuntime {
             .agents
             .get_mut(id.as_str())
             .expect("test agent should exist");
+        let now = now_ms();
         snapshot.state = AgentLifecycleState::Completed;
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        snapshot.terminal_reason = Some(AgentTerminalReason::Completed);
         snapshot.outcome = Some(AgentTerminalOutcome {
             summary: summary.to_owned(),
             is_error: false,
@@ -303,6 +332,8 @@ impl MultiAgentRuntime {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
         snapshot.mode = AgentRunMode::Background;
+        snapshot.detached_from_foreground = true;
+        snapshot.updated_at_ms = now_ms();
         Some(snapshot.clone())
     }
 
@@ -315,6 +346,8 @@ impl MultiAgentRuntime {
         snapshot.mode = AgentRunMode::Background;
         for child in &mut snapshot.children {
             child.agent.mode = AgentRunMode::Background;
+            child.agent.detached_from_foreground = true;
+            child.agent.updated_at_ms = now_ms();
         }
         Some(snapshot.clone())
     }
@@ -347,7 +380,11 @@ impl MultiAgentRuntime {
         if snapshot.state.is_terminal() {
             return None;
         }
+        let now = now_ms();
         snapshot.state = AgentLifecycleState::Cancelled;
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        snapshot.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
         Some(snapshot.clone())
     }
 
@@ -361,7 +398,11 @@ impl MultiAgentRuntime {
         if snapshot.state.is_terminal() {
             return None;
         }
+        let now = now_ms();
         snapshot.state = AgentLifecycleState::Cancelled;
+        snapshot.terminal_at_ms.get_or_insert(now);
+        snapshot.updated_at_ms = now;
+        snapshot.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
         Some(snapshot.clone())
     }
 
@@ -377,9 +418,16 @@ impl MultiAgentRuntime {
             if child.agent.state.is_terminal() {
                 continue;
             }
+            let now = now_ms();
             child.agent.state = AgentLifecycleState::Cancelled;
+            child.agent.terminal_at_ms.get_or_insert(now);
+            child.agent.updated_at_ms = now;
+            child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
             if let Some(agent) = state.agents.get_mut(child.agent.id.as_str()) {
                 agent.state = AgentLifecycleState::Cancelled;
+                agent.terminal_at_ms.get_or_insert(now);
+                agent.updated_at_ms = now;
+                agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
                 child.agent = agent.clone();
             }
             changed = true;
@@ -460,6 +508,11 @@ impl MultiAgentRuntime {
         agent.latest_text = None;
         agent.activity.clear();
         agent.outcome = None;
+        let now = now_ms();
+        agent.started_at_ms = Some(now);
+        agent.terminal_at_ms = None;
+        agent.terminal_reason = None;
+        agent.updated_at_ms = now;
         Ok(agent.clone())
     }
 
@@ -550,22 +603,16 @@ impl MultiAgentRuntime {
                 super::SwarmChildSnapshot {
                     item_index: index,
                     item: item.to_owned(),
-                    agent: AgentSnapshot {
+                    agent: new_agent_snapshot(AgentSnapshotSeed {
                         id: AgentId::from_suffix_for_test(&format!("{swarm_id}-{index}")),
                         display_name: name.clone(),
                         path: AgentPath::swarm_child(&swarm_id, &name),
                         role: AgentRole::Coder,
                         mode: AgentRunMode::Foreground,
                         state: lifecycle_state,
-                        task: item.to_owned(),
-                        task_title: derive_title(item, None),
-                        tool_count: 0,
-                        token_count: 0,
-                        elapsed: std::time::Duration::ZERO,
-                        latest_text: None,
-                        activity: Vec::new(),
-                        outcome: None,
-                    },
+                        task: item,
+                        title: None,
+                    }),
                 }
             })
             .collect();
@@ -637,7 +684,11 @@ impl MultiAgentRuntime {
             .collect();
         for child in &mut swarm.children {
             if !child.agent.state.is_terminal() {
+                let now = now_ms();
                 child.agent.state = AgentLifecycleState::Cancelled;
+                child.agent.terminal_at_ms.get_or_insert(now);
+                child.agent.updated_at_ms = now;
+                child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
                 child.agent.outcome = Some(AgentTerminalOutcome {
                     summary: "Cancelled by user.".to_owned(),
                     is_error: true,
@@ -646,7 +697,11 @@ impl MultiAgentRuntime {
         }
         for agent_id in &cancelled_ids {
             if let Some(agent) = state.agents.get_mut(agent_id) {
+                let now = now_ms();
                 agent.state = AgentLifecycleState::Cancelled;
+                agent.terminal_at_ms.get_or_insert(now);
+                agent.updated_at_ms = now;
+                agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
                 agent.outcome = Some(AgentTerminalOutcome {
                     summary: "Cancelled by user.".to_owned(),
                     is_error: true,
@@ -728,6 +783,66 @@ pub struct ChildRunOutput {
 }
 
 type LiveSwarmMessageResult = Result<(Vec<String>, Vec<(String, AgentLifecycleState)>), String>;
+
+struct AgentSnapshotSeed<'a> {
+    id: AgentId,
+    display_name: AgentDisplayName,
+    path: AgentPath,
+    role: AgentRole,
+    mode: AgentRunMode,
+    state: AgentLifecycleState,
+    task: &'a str,
+    title: Option<&'a str>,
+}
+
+fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
+    let now = now_ms();
+    let terminal_reason = seed
+        .state
+        .is_terminal()
+        .then(|| terminal_reason_for_state(seed.state));
+    AgentSnapshot {
+        id: seed.id,
+        display_name: seed.display_name,
+        path: seed.path,
+        role: seed.role,
+        mode: seed.mode,
+        state: seed.state,
+        task: seed.task.to_owned(),
+        task_title: derive_title(seed.task, seed.title),
+        created_at_ms: now,
+        updated_at_ms: now,
+        started_at_ms: (seed.state == AgentLifecycleState::Running).then_some(now),
+        terminal_at_ms: seed.state.is_terminal().then_some(now),
+        detached_from_foreground: false,
+        terminal_reason,
+        tool_count: 0,
+        token_count: 0,
+        elapsed: Duration::ZERO,
+        latest_text: None,
+        activity: Vec::new(),
+        outcome: None,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+const fn terminal_reason_for_state(state: AgentLifecycleState) -> AgentTerminalReason {
+    match state {
+        AgentLifecycleState::Completed => AgentTerminalReason::Completed,
+        AgentLifecycleState::Failed => AgentTerminalReason::Error,
+        AgentLifecycleState::Cancelled => AgentTerminalReason::CancelledByUser,
+        AgentLifecycleState::TimedOut => AgentTerminalReason::TimedOut,
+        AgentLifecycleState::Queued | AgentLifecycleState::Running => AgentTerminalReason::Error,
+    }
+}
 
 #[derive(Clone)]
 pub struct ChildRuntimeDeps {
@@ -861,6 +976,7 @@ impl MultiAgentRuntime {
         let mut locked = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = locked.agents.get_mut(id.as_str())?;
         snapshot.elapsed = started_at.elapsed();
+        snapshot.updated_at_ms = now_ms();
         let mut changed = false;
         match event {
             AgentEvent::ToolExecutionStarted {
@@ -870,24 +986,35 @@ impl MultiAgentRuntime {
                 ..
             } => {
                 changed = true;
-                snapshot.activity.push(AgentActivityEntry {
-                    kind: AgentActivityKind::Tool {
-                        id: id.clone(),
-                        name: name.clone(),
-                        summary: summarize_tool_arguments(arguments),
-                        failed: false,
-                    },
-                });
+                upsert_tool_activity(
+                    &mut snapshot.activity,
+                    id,
+                    name,
+                    summarize_tool_arguments(arguments),
+                    AgentToolActivityPhase::Ongoing,
+                    None,
+                );
             }
             AgentEvent::ToolExecutionFinished {
                 id, name, result, ..
             } => {
                 changed = true;
                 snapshot.tool_count = snapshot.tool_count.saturating_add(1);
-                let failed = result.is_error;
+                let phase = if result.is_error {
+                    AgentToolActivityPhase::Failed
+                } else {
+                    AgentToolActivityPhase::Done
+                };
                 let summary = summarize_tool_result(name, result)
                     .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
-                upsert_tool_activity(&mut snapshot.activity, id, name, summary, failed);
+                upsert_tool_activity(
+                    &mut snapshot.activity,
+                    id,
+                    name,
+                    summary,
+                    phase,
+                    tool_output_preview(name, result, false),
+                );
             }
             AgentEvent::ToolExecutionUpdate {
                 id,
@@ -896,12 +1023,15 @@ impl MultiAgentRuntime {
                 ..
             } => {
                 changed = true;
+                let summary = summarize_tool_result(name, partial_result)
+                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
                 upsert_tool_activity(
                     &mut snapshot.activity,
                     id,
                     name,
-                    summarize_tool_result(name, partial_result),
-                    partial_result.is_error,
+                    summary,
+                    AgentToolActivityPhase::Ongoing,
+                    tool_output_preview(name, partial_result, true),
                 );
             }
             AgentEvent::TextDelta { text, .. } => {
@@ -1096,52 +1226,19 @@ fn block_forbidden_subagent_tool_call(
     tool_call: &AgentToolCall,
     profile: &super::profile::AgentProfile,
 ) -> Option<crate::ToolResult> {
-    // Deny git mutation for ALL subagents regardless of role.
-    let command = tool_call
-        .arguments
-        .get("command")
-        .and_then(serde_json::Value::as_str);
-    if let Some(cmd) = command
-        && super::profile::is_git_mutation_command(cmd)
-    {
+    // Shell access (Bash/Terminal): denied unless the role's policy allows it.
+    // Read-only behavior for Explorer/Reviewer is enforced by the profile's
+    // `prompt_addendum`, not by command-syntax classification — see profile.rs.
+    let is_shell = matches!(tool_call.name.as_str(), "Bash" | "Terminal");
+    if is_shell && !profile.tool_policy.allow_shell {
         return Some(crate::ToolResult::error(format!(
-            "subagents may not mutate git state: {cmd}"
+            "{} agents may not run shell commands",
+            profile.display_label
         )));
     }
 
-    // Enforce tool policy for Bash/Terminal.
-    let is_shell = matches!(tool_call.name.as_str(), "Bash" | "Terminal");
-    if is_shell {
-        match profile.tool_policy {
-            super::profile::ToolPolicy::ReadOnlyShell => {
-                if let Some(cmd) = command
-                    && !super::profile::is_read_only_shell_command(cmd)
-                {
-                    return Some(crate::ToolResult::error(format!(
-                        "{} agents may only run read-only shell commands: {cmd}",
-                        profile.display_label
-                    )));
-                }
-            }
-            super::profile::ToolPolicy::NoShell => {
-                return Some(crate::ToolResult::error(format!(
-                    "{} agents may not run shell commands",
-                    profile.display_label
-                )));
-            }
-            super::profile::ToolPolicy::Orchestrator => {
-                return Some(crate::ToolResult::error(format!(
-                    "{} agents may not run shell commands directly",
-                    profile.display_label
-                )));
-            }
-            super::profile::ToolPolicy::FullCoder => {}
-        }
-    }
-
-    // Block Write/Edit for non-coder roles.
-    if matches!(tool_call.name.as_str(), "Write" | "Edit")
-        && profile.tool_policy != super::profile::ToolPolicy::FullCoder
+    // File writes (Write/Edit): denied unless the role's policy allows it.
+    if matches!(tool_call.name.as_str(), "Write" | "Edit") && !profile.tool_policy.allow_file_writes
     {
         return Some(crate::ToolResult::error(format!(
             "{} agents may not edit or write files",
@@ -1216,21 +1313,50 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                 ..
             } => {
                 tool_args.insert(id.clone(), arguments.clone());
-                activity.push(AgentActivityEntry {
-                    kind: AgentActivityKind::Tool {
-                        id: id.clone(),
-                        name: name.clone(),
-                        summary: summarize_tool_arguments(arguments),
-                        failed: false,
-                    },
-                });
+                upsert_tool_activity(
+                    &mut activity,
+                    id,
+                    name,
+                    summarize_tool_arguments(arguments),
+                    AgentToolActivityPhase::Ongoing,
+                    None,
+                );
             }
             AgentEvent::ToolExecutionFinished {
                 id, name, result, ..
             } => {
+                let phase = if result.is_error {
+                    AgentToolActivityPhase::Failed
+                } else {
+                    AgentToolActivityPhase::Done
+                };
                 let summary = summarize_tool_result(name, result)
                     .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
-                upsert_tool_activity(&mut activity, id, name, summary, result.is_error);
+                upsert_tool_activity(
+                    &mut activity,
+                    id,
+                    name,
+                    summary,
+                    phase,
+                    tool_output_preview(name, result, false),
+                );
+            }
+            AgentEvent::ToolExecutionUpdate {
+                id,
+                name,
+                partial_result,
+                ..
+            } => {
+                let summary = summarize_tool_result(name, partial_result)
+                    .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
+                upsert_tool_activity(
+                    &mut activity,
+                    id,
+                    name,
+                    summary,
+                    AgentToolActivityPhase::Ongoing,
+                    tool_output_preview(name, partial_result, true),
+                );
             }
             AgentEvent::MessageAppended {
                 message: AgentMessage::Assistant { content, .. },
@@ -1281,14 +1407,16 @@ fn upsert_tool_activity(
     id: &str,
     name: &str,
     summary: Option<String>,
-    failed: bool,
+    phase: AgentToolActivityPhase,
+    output: Option<AgentToolOutputPreview>,
 ) {
     for entry in activity.iter_mut().rev() {
         let AgentActivityKind::Tool {
             id: entry_id,
             name: entry_name,
             summary: entry_summary,
-            failed: entry_failed,
+            phase: entry_phase,
+            output: entry_output,
         } = &mut entry.kind
         else {
             continue;
@@ -1298,7 +1426,10 @@ fn upsert_tool_activity(
                 *entry_summary = summary;
             }
             *entry_name = name.to_owned();
-            *entry_failed = failed;
+            *entry_phase = phase;
+            if output.is_some() {
+                *entry_output = output;
+            }
             return;
         }
     }
@@ -1307,7 +1438,8 @@ fn upsert_tool_activity(
             id: id.to_owned(),
             name: name.to_owned(),
             summary,
-            failed,
+            phase,
+            output,
         },
     });
 }
@@ -1367,6 +1499,42 @@ fn summarize_tool_result(name: &str, result: &crate::ToolResult) -> Option<Strin
     }
 }
 
+const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 50_000;
+
+fn tool_output_preview(
+    name: &str,
+    result: &crate::ToolResult,
+    tail: bool,
+) -> Option<AgentToolOutputPreview> {
+    if !should_preview_tool_output(name) || result.content.trim().is_empty() {
+        return None;
+    }
+    let (text, truncated) = cap_preview_text(&result.content, MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES);
+    Some(AgentToolOutputPreview {
+        text,
+        is_error: result.is_error,
+        truncated,
+        tail,
+    })
+}
+
+fn should_preview_tool_output(name: &str) -> bool {
+    matches!(name, "Bash" | "Terminal")
+        || name.starts_with("mcp__")
+        || name.starts_with("extension__")
+}
+
+fn cap_preview_text(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_owned(), false);
+    }
+    let mut start = text.len().saturating_sub(max_bytes);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    (format!("[...truncated]\n{}", &text[start..]), true)
+}
+
 fn content_text(content: &[Content]) -> String {
     content
         .iter()
@@ -1391,10 +1559,38 @@ fn compact_line(text: &str) -> String {
 
 fn trim_activity(activity: &mut Vec<AgentActivityEntry>) {
     const MAX_AGENT_ACTIVITY: usize = 24;
-    if activity.len() > MAX_AGENT_ACTIVITY {
-        let remove = activity.len() - MAX_AGENT_ACTIVITY;
-        activity.drain(0..remove);
+    if activity.len() <= MAX_AGENT_ACTIVITY {
+        return;
     }
+    let mut keep = vec![false; activity.len()];
+    for (index, entry) in activity.iter().enumerate().rev() {
+        if matches!(
+            entry.kind,
+            AgentActivityKind::Tool {
+                phase: AgentToolActivityPhase::Ongoing,
+                ..
+            }
+        ) {
+            keep[index] = true;
+        }
+    }
+    let ongoing_count = keep.iter().filter(|value| **value).count();
+    let mut remaining = MAX_AGENT_ACTIVITY.saturating_sub(ongoing_count);
+    for index in (0..activity.len()).rev() {
+        if keep[index] {
+            continue;
+        }
+        if remaining > 0 {
+            keep[index] = true;
+            remaining -= 1;
+        }
+    }
+    let mut index = 0usize;
+    activity.retain(|_| {
+        let retain = keep[index];
+        index += 1;
+        retain
+    });
 }
 
 fn child_prompt(task: &str, context: DelegateContext, role: AgentRole) -> String {
@@ -1428,13 +1624,6 @@ pub fn apply_swarm_template(template: &str, item: &str, description: &str) -> St
     template
         .replace("{{item}}", item)
         .replace("{{description}}", description)
-}
-
-/// Deny git subcommands that mutate state when issued by a subagent.
-/// Read-only commands (`status`, `diff`, `log`, `blame`, etc.) are allowed.
-#[must_use]
-pub fn is_forbidden_subagent_git_command(command: &str) -> bool {
-    super::profile::is_git_mutation_command(command)
 }
 
 // Keep `Instant` imported for future elapsed-time tracking in P2.

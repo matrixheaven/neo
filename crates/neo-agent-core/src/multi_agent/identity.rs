@@ -58,6 +58,13 @@ impl AgentPath {
     }
 
     #[must_use]
+    pub fn is_root_child(&self) -> bool {
+        self.0
+            .strip_prefix("/root/")
+            .is_some_and(|tail| !tail.contains('/'))
+    }
+
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -71,5 +78,25 @@ pub enum AgentRole {
     Explorer,
     Planner,
     Reviewer,
-    Orchestrator,
+}
+
+impl AgentRole {
+    /// All variants in the order presented to the model.
+    pub const ALL: [AgentRole; 4] = [
+        AgentRole::Coder,
+        AgentRole::Explorer,
+        AgentRole::Planner,
+        AgentRole::Reviewer,
+    ];
+
+    /// The snake_case identifier used in tool schemas and persisted snapshots.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentRole::Coder => "coder",
+            AgentRole::Explorer => "explorer",
+            AgentRole::Planner => "planner",
+            AgentRole::Reviewer => "reviewer",
+        }
+    }
 }

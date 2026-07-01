@@ -6,9 +6,39 @@ use super::{
 };
 use crate::AgentEvent;
 use crate::multi_agent::{
-    AgentLifecycleState, AgentRunMode, ChildRuntimeDeps, DelegateContext, DelegateRequest,
-    DelegateSwarmRequest, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot, apply_swarm_template,
+    AgentLifecycleState, AgentProfile, AgentRunMode, ChildRuntimeDeps, DelegateContext,
+    DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    apply_swarm_template,
 };
+
+/// Build the Delegate/DelegateSwarm input schema with the per-role selection
+/// guide appended to the `role` field description, so the main agent knows when
+/// to pick Coder vs Explorer vs Planner vs Reviewer. Without this the model
+/// defaults to Coder and the specialisms are never used.
+fn schema_with_role_guide<T>() -> serde_json::Value
+where
+    T: schemars::JsonSchema,
+{
+    let mut schema = schema::<T>();
+    let Some(props) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return schema;
+    };
+    let Some(role) = props.get_mut("role") else {
+        return schema;
+    };
+    // Read the existing description out, then overwrite — done as two steps so
+    // the shared borrow from the read ends before the mutable assign.
+    let old = role
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let merged = format!("{old}\n\n{}", AgentProfile::role_selection_guide());
+    role["description"] = serde_json::Value::String(merged);
+    schema
+}
 
 pub struct DelegateTool;
 
@@ -25,7 +55,7 @@ impl Tool for DelegateTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        schema::<DelegateRequest>()
+        schema_with_role_guide::<DelegateRequest>()
     }
 
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
@@ -165,7 +195,7 @@ impl Tool for DelegateSwarmTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        schema::<DelegateSwarmRequest>()
+        schema_with_role_guide::<DelegateSwarmRequest>()
     }
 
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {

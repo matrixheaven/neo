@@ -52,6 +52,33 @@ pub struct AgentTerminalOutcome {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolActivityPhase {
+    Ongoing,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentToolOutputPreview {
+    pub text: String,
+    pub is_error: bool,
+    pub truncated: bool,
+    pub tail: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTerminalReason {
+    Completed,
+    Error,
+    CancelledByUser,
+    TimedOut,
+    Killed,
+    Lost,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentActivityKind {
@@ -59,7 +86,8 @@ pub enum AgentActivityKind {
         id: String,
         name: String,
         summary: Option<String>,
-        failed: bool,
+        phase: AgentToolActivityPhase,
+        output: Option<AgentToolOutputPreview>,
     },
     Text {
         text: String,
@@ -83,6 +111,12 @@ pub struct AgentSnapshot {
     pub task: String,
     #[serde(default)]
     pub task_title: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub terminal_at_ms: Option<u64>,
+    pub detached_from_foreground: bool,
+    pub terminal_reason: Option<AgentTerminalReason>,
     pub tool_count: usize,
     pub token_count: usize,
     pub elapsed: Duration,

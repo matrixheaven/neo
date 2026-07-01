@@ -50,15 +50,23 @@ struct ListDelegatesInput {
     )]
     include_completed: bool,
     #[serde(default)]
+    #[schemars(description = "Filter by delegate kind: agent, swarm, or all. Defaults to all.")]
     kind: DelegateListKind,
     #[serde(default)]
+    #[schemars(
+        description = "Filter by lifecycle state (e.g. running, completed, cancelled). Omit for any state."
+    )]
     state: Option<AgentLifecycleState>,
     #[serde(default = "default_delegate_list_limit")]
     #[schemars(description = "Maximum number of rows to return. Defaults to 20.")]
     limit: usize,
     #[serde(default)]
+    #[schemars(
+        description = "Pagination cursor from a previous response's next_cursor. Omit for the first page."
+    )]
     cursor: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Row ordering: newest (default) or oldest.")]
     order: DelegateListOrder,
 }
 

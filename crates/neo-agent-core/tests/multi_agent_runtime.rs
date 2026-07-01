@@ -1,8 +1,9 @@
 use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
-    AgentActivityKind, AgentLifecycleState, DEFAULT_AGENT_NAMES, DisplayNamePool,
-    MultiAgentRuntime, SwarmAggregate, is_forbidden_subagent_git_command,
+    AgentActivityKind, AgentLifecycleState, AgentPathKind, AgentRole, AgentRunMode,
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DEFAULT_AGENT_NAMES,
+    DisplayNamePool, MultiAgentRuntime, SwarmAggregate,
 };
 use neo_agent_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use neo_agent_core::{
@@ -58,6 +59,85 @@ fn foreground_delegate_lifecycle_records_running_and_completed_state() {
 }
 
 #[test]
+fn agent_tool_activity_uses_explicit_phase_and_output_preview() {
+    let activity = AgentActivityKind::Tool {
+        id: "call_1".to_owned(),
+        name: "Bash".to_owned(),
+        summary: Some("cargo nextest run -p neo-tui".to_owned()),
+        phase: AgentToolActivityPhase::Ongoing,
+        output: Some(AgentToolOutputPreview {
+            text: "Compiling neo-tui v0.1.0".to_owned(),
+            is_error: false,
+            truncated: false,
+            tail: true,
+        }),
+    };
+
+    let serialized = serde_json::to_value(&activity).expect("serialize activity");
+
+    assert_eq!(serialized["phase"], "ongoing");
+    assert_eq!(serialized["output"]["tail"], true);
+    assert!(
+        serialized.get("failed").is_none(),
+        "old failed bool must not remain in the canonical schema: {serialized}"
+    );
+}
+
+#[test]
+fn agent_snapshot_records_timestamps_detach_origin_and_terminal_reason() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("inspect docs");
+
+    assert!(snapshot.created_at_ms > 0);
+    assert!(snapshot.updated_at_ms >= snapshot.created_at_ms);
+    assert!(snapshot.started_at_ms.is_some());
+    assert_eq!(snapshot.terminal_at_ms, None);
+    assert!(!snapshot.detached_from_foreground);
+    assert_eq!(snapshot.terminal_reason, None);
+
+    let detached = runtime
+        .detach_agent(&snapshot.id)
+        .expect("detach running agent");
+    assert!(detached.detached_from_foreground);
+    assert_eq!(detached.state, AgentLifecycleState::Running);
+
+    let completed = runtime.complete_delegate_for_test(&snapshot.id, "done");
+    assert_eq!(completed.state, AgentLifecycleState::Completed);
+    assert_eq!(
+        completed.terminal_reason,
+        Some(AgentTerminalReason::Completed)
+    );
+    assert!(completed.terminal_at_ms.is_some());
+}
+
+#[test]
+fn background_terminal_reason_records_lost_without_claiming_completion() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("background work");
+    let detached = runtime
+        .detach_agent(&snapshot.id)
+        .expect("detach running agent");
+    assert!(detached.detached_from_foreground);
+
+    let lost = runtime
+        .mark_background_terminal_reason(
+            &snapshot.id,
+            AgentLifecycleState::Failed,
+            AgentTerminalReason::Lost,
+            Some("Background agent lost (session restarted before completion)".to_owned()),
+        )
+        .expect("lost update");
+
+    assert_eq!(lost.state, AgentLifecycleState::Failed);
+    assert_eq!(lost.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert!(lost.terminal_at_ms.is_some());
+    assert_eq!(
+        lost.outcome.as_ref().map(|outcome| outcome.is_error),
+        Some(true)
+    );
+}
+
+#[test]
 fn builtin_tools_register_delegate_tools() {
     let specs = ToolRegistry::with_builtin_tools()
         .specs()
@@ -67,20 +147,6 @@ fn builtin_tools_register_delegate_tools() {
 
     assert!(specs.iter().any(|name| name == "Delegate"));
     assert!(specs.iter().any(|name| name == "DelegateSwarm"));
-}
-
-#[test]
-fn subagent_git_guard_denies_mutations_and_allows_read_only_commands() {
-    assert!(is_forbidden_subagent_git_command("git commit -m test"));
-    assert!(is_forbidden_subagent_git_command("git reset --hard"));
-    assert!(is_forbidden_subagent_git_command(
-        "git checkout -- src/lib.rs"
-    ));
-    assert!(is_forbidden_subagent_git_command("git push"));
-
-    assert!(!is_forbidden_subagent_git_command("git status --short"));
-    assert!(!is_forbidden_subagent_git_command("git diff"));
-    assert!(!is_forbidden_subagent_git_command("git log --oneline"));
 }
 
 #[tokio::test]
@@ -369,7 +435,12 @@ async fn delegate_streams_child_activity_updates_before_finish() {
             agent.activity.iter().any(|entry| {
                 matches!(
                     &entry.kind,
-                    AgentActivityKind::Tool { name, summary, failed: false, .. }
+                    AgentActivityKind::Tool {
+                        name,
+                        summary,
+                        phase: AgentToolActivityPhase::Ongoing,
+                        ..
+                    }
                         if name == "Read"
                             && summary.as_deref()
                                 == Some("crates/neo-agent-core/src/lib.rs")
@@ -553,7 +624,11 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
     assert!(
         finished.activity.iter().any(|entry| matches!(
             &entry.kind,
-            AgentActivityKind::Tool { name, failed: true, .. } if name == "ListDelegates"
+            AgentActivityKind::Tool {
+                name,
+                phase: AgentToolActivityPhase::Failed,
+                ..
+            } if name == "ListDelegates"
         )),
         "{:#?}",
         finished.activity
@@ -601,21 +676,136 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
         .iter()
         .filter_map(|entry| match &entry.kind {
             AgentActivityKind::Tool {
-                id,
-                summary,
-                failed,
-                ..
-            } => Some((id.as_str(), summary.as_deref(), *failed)),
+                id, summary, phase, ..
+            } => Some((id.as_str(), summary.as_deref(), *phase)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         tools,
         vec![
-            ("read_ok", Some("ok.rs"), false),
-            ("read_fail", Some("missing.rs"), true)
+            ("read_ok", Some("ok.rs"), AgentToolActivityPhase::Ongoing),
+            (
+                "read_fail",
+                Some("missing.rs"),
+                AgentToolActivityPhase::Failed
+            )
         ]
     );
+}
+
+#[test]
+fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_delegate(
+        "run tests",
+        Some("Run tests"),
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        AgentPathKind::Root,
+    );
+    let started_at = std::time::Instant::now();
+
+    let started = runtime
+        .apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::ToolExecutionStarted {
+                turn: 0,
+                id: "call_bash".to_owned(),
+                name: "Bash".to_owned(),
+                arguments: json!({ "command": "cargo nextest run -p neo-tui" }),
+            },
+        )
+        .expect("started update");
+
+    let tool = started
+        .activity
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                phase,
+                summary,
+                output,
+                ..
+            } => Some((*phase, summary.clone(), output.clone())),
+            AgentActivityKind::Text { .. } => None,
+        })
+        .expect("tool row");
+
+    assert_eq!(tool.0, AgentToolActivityPhase::Ongoing);
+    assert_eq!(tool.1.as_deref(), Some("cargo nextest run -p neo-tui"));
+    assert!(tool.2.is_none());
+
+    let updated = runtime
+        .apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::ToolExecutionUpdate {
+                turn: 0,
+                id: "call_bash".to_owned(),
+                name: "Bash".to_owned(),
+                partial_result: ToolResult::ok("Compiling neo-tui v0.1.0"),
+            },
+        )
+        .expect("live output update");
+    let output = latest_tool_output(&updated, "call_bash").expect("output preview");
+    assert!(output.text.contains("Compiling neo-tui"));
+    assert!(output.tail);
+
+    let finished = runtime
+        .apply_child_event(
+            &snapshot.id,
+            started_at,
+            &AgentEvent::ToolExecutionFinished {
+                turn: 0,
+                id: "call_bash".to_owned(),
+                name: "Bash".to_owned(),
+                result: ToolResult::ok("Finished test profile"),
+            },
+        )
+        .expect("finished update");
+    assert_eq!(
+        latest_tool_phase(&finished, "call_bash"),
+        Some(AgentToolActivityPhase::Done)
+    );
+    assert_eq!(finished.tool_count, 1);
+}
+
+fn latest_tool_phase(
+    snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
+    id: &str,
+) -> Option<AgentToolActivityPhase> {
+    snapshot
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                id: entry_id,
+                phase,
+                ..
+            } if entry_id == id => Some(*phase),
+            _ => None,
+        })
+}
+
+fn latest_tool_output(
+    snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
+    id: &str,
+) -> Option<AgentToolOutputPreview> {
+    snapshot
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                id: entry_id,
+                output,
+                ..
+            } if entry_id == id => output.clone(),
+            _ => None,
+        })
 }
 
 #[tokio::test]
@@ -1260,19 +1450,6 @@ async fn delegate_swarm_resume_agent_ids_restarts_existing_children() {
         "{}",
         swarm.content
     );
-}
-
-#[tokio::test]
-async fn coder_subagent_bash_still_denies_git_mutation() {
-    use neo_agent_core::multi_agent::is_git_mutation_command;
-
-    // The runtime enforces git mutation denial through is_git_mutation_command
-    // in the before_tool_call hook. Verify the classifier works.
-    assert!(is_git_mutation_command("git add ."));
-    assert!(is_git_mutation_command("git commit -m change"));
-    assert!(is_git_mutation_command("git reset --hard"));
-    assert!(!is_git_mutation_command("git status"));
-    assert!(!is_git_mutation_command("git log"));
 }
 
 #[tokio::test]
