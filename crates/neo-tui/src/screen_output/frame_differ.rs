@@ -252,6 +252,16 @@ fn write_enter_output(output: &mut dyn Write) -> std::io::Result<()> {
     )
 }
 
+fn write_leave_terminal_output(output: &mut dyn Write) -> std::io::Result<()> {
+    let mut output = output;
+    execute!(
+        &mut output,
+        DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+    )
+}
+
 impl TuiRenderer {
     /// Enable raw mode + bracketed paste + mouse capture + keyboard enhancement.
     /// Does NOT enter alternate screen.
@@ -283,12 +293,7 @@ impl TuiRenderer {
         self.write_leave_output(&mut output);
         let _ = output.flush();
 
-        let _ = execute!(
-            output,
-            DisableMouseCapture,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        );
+        let _ = write_leave_terminal_output(&mut output);
         let _ = disable_raw_mode();
     }
 
@@ -964,12 +969,7 @@ mod tests {
         let mut renderer = test_renderer(Vec::new());
         let mut buf = Vec::new();
         renderer.write_leave_output(&mut buf);
-        let _ = execute!(
-            &mut buf,
-            DisableMouseCapture,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        );
+        write_leave_terminal_output(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(
             output.contains("\x1b[?1000l")
