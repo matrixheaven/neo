@@ -2,8 +2,8 @@
 
 Date: 2026-07-01
 
-Status: Ready for implementation; requester waived the user-review gate for this
-document and asked for self-review.
+Status: Option B approved by the requester; written spec ready for review before
+implementation planning.
 
 ## 1. Purpose
 
@@ -14,9 +14,11 @@ first visual regression, but it does not yet match the deeper Kimi behavior:
 sub-tool phases, output previews, elapsed-time ticking, grouped same-step
 delegates, backgrounded state, and animated swarm progress.
 
-This spec closes all nine gaps found during the Kimi parity study. The target is
-not a TypeScript port. The target is a Rust-native Neo contract that borrows the
-same product semantics:
+This spec closes all nine gaps found during the Kimi parity study and locks the
+approved Option B visual direction: Multi-Agent entries are chat-native
+transcript cards, not tool-group-like progress rows. The target is not a
+TypeScript port. The target is a Rust-native Neo contract that borrows the same
+product semantics:
 
 - child agents feel alive while they run;
 - the transcript stays the single source of visible state;
@@ -24,6 +26,9 @@ same product semantics:
 - background execution is explicit and visible;
 - swarm progress moves through real intermediate states rather than prompt
   snapshots or sudden jumps.
+- random child-agent display names such as `Nova`, `Iris`, `Vega`, and `Rune`
+  are primary visible identity; roles such as `Coder`, `Planner`, and
+  `Explorer` are secondary badges and never replace the name.
 
 This is a canonicalization pass. Do not keep dual data models such as
 `failed: bool` plus a new phase enum. Replace the old shape with the new
@@ -255,7 +260,6 @@ pub struct ChildActivityView<'a> {
 }
 
 pub struct ChildToolRow<'a> {
-    pub id: &'a str,
     pub name: &'a str,
     pub summary: Option<&'a str>,
     pub phase: AgentToolActivityPhase,
@@ -268,6 +272,8 @@ The view model owns these display rules:
 - show at most four tool rows in collapsed single delegate cards;
 - show at most two output preview rows under each visible tool;
 - show one thinking block after tool rows;
+- preserve recent thinking chunks as a coherent preview, while normal body text
+  uses the latest non-thinking child text;
 - show one final body row after thinking;
 - suppress duplicate final text when `outcome.summary`, `latest_text`, and a
   final text activity carry the same content;
@@ -276,52 +282,151 @@ The view model owns these display rules:
 - render failed final body text with `theme.status_error`;
 - make final body the last row in the card.
 
-## 9. Delegate Card UI Contract
+## 9. Option B Visual System
 
-Single delegate card header:
+Option B is the canonical design. Multi-Agent rendering must feel like a set of
+living child conversations embedded in the main chat transcript. The card may
+show progress, but progress is secondary to readable child-agent activity:
+tools, thinking, body text, errors, and final summaries.
+
+The rejected alternatives are documented here so the implementation does not
+drift back:
+
+```text
+┌─ Multi Agents Card 设计方向 ───────────────────────────────┐
+│ A. 进度列表型     Dense, but tool-group-like              │
+│ B. Transcript 型  Canonical: child-agent dialogue         │
+│ C. Timeline 型    Useful for audit, too cold for live     │
+└────────────────────────────────────────────────────────────┘
+```
+
+Global visual rules:
+
+- Agent `display_name` is the first human-readable identity in every agent row.
+- `role_label` is rendered as a compact secondary badge: `[Coder]`,
+  `[Planner]`, `[Explorer]`, etc.
+- `task_title` is descriptive metadata. It must never replace or visually
+  outrank `display_name`.
+- Child tool rows, thinking rows, body rows, and final rows share the same
+  grammar across single delegate cards, delegate groups, and expanded swarm
+  children.
+- Collapsed swarm rows may summarize activity, but expanded swarm rows must use
+  the same child transcript renderer as single delegates.
+- Width truncation drops task title and optional stats before it drops the
+  agent name.
+- No separate page, side panel, or `/tasks` view is introduced for this
+  foreground transcript experience.
+
+## 10. Child Activity Grammar
+
+All Multi-Agent card bodies use this grammar:
+
+```text
+┌─ Child Activity Grammar ───────────────────────────────────┐
+│   • Used  Read  path-or-summary                            │
+│   • Using Bash  command                                    │
+│       live stdout/stderr preview line                      │
+│   ✗ Used  Bash  command · exit 101                         │
+│       error preview line                                   │
+│   ◌ thinking                                               │
+│     last 1-2 thinking lines, muted theme                   │
+│   │ assistant body / streaming child text                  │
+│   └ final child answer or error summary                    │
+└────────────────────────────────────────────────────────────┘
+```
+
+Rules:
+
+- `Using` is reserved for `AgentToolActivityPhase::Ongoing`.
+- `Used` is used for `Done` and `Failed`; failed rows use the error marker and
+  error color.
+- Tool names are theme brand color.
+- Tool summaries and output previews are muted unless the output is an error.
+- Thinking is a distinct muted block, not folded into final body text.
+- Streaming child body text uses a leading `│`.
+- Final child output uses a leading `└` and is the last row for that child.
+- The renderer shows the newest useful rows, bounded by
+  `MAX_CHILD_TOOL_ROWS`, output preview line limits, and width truncation.
+
+## 11. Delegate Card UI Contract
+
+Single delegate cards are standalone transcript entries for one foreground or
+background child agent. The name comes first, the role is a badge, and the
+header carries state, task, elapsed time, tool count, and tokens.
+
+Running single delegate:
+
+```text
+┌─ Delegate · Single Agent · Running ────────────────────────┐
+│ ● Nova  [Coder]  角色对比测试 coder · running · 21s · 22.7k │
+│   • Used Read  crates/neo-agent-core/src/tools/delegate.rs │
+│   • Used Read  crates/neo-agent-core/src/multi_agent/rt.rs │
+│   • Using Bash cargo nextest run -p neo-agent-core ...     │
+│       running: cargo nextest run -p neo-agent-core ...     │
+│       Compiling neo-agent-core v0.1.0                      │
+│   ◌ thinking                                               │
+│     Let me verify the state mutation path before editing.  │
+│   │ I found the foreground aggregation issue. Next I will...│
+│   Ctrl+B detach to background                              │
+└────────────────────────────────────────────────────────────┘
+```
+
+Completed single delegate:
+
+```text
+┌─ Delegate · Single Agent · Completed ──────────────────────┐
+│ ✓ Nova  [Coder]  角色对比测试 coder · done · 4 tools · 31s │
+│   • Used Read  crates/neo-tui/src/transcript/swarm_card.rs │
+│   • Used Edit  crates/neo-tui/src/transcript/swarm_card.rs │
+│   • Used Bash  cargo nextest run -p neo-tui --test ...     │
+│   └ All edits applied. The card now shows agent name first.│
+└────────────────────────────────────────────────────────────┘
+```
+
+Rules:
+
+- Header status labels are lowercase display text: `queued`, `running`,
+  `backgrounded`, `done`, `failed`, `cancelled`, `timed out`, `lost`, `killed`.
+- The marker communicates state without relying on color:
+  `●` running/backgrounded, `◌` queued/thinking, `✓` completed, `✗` failed-like.
+- The detach hint appears only when the agent is a running foreground delegate
+  that can still be detached.
+- A detached foreground agent shows `backgrounded` and does not show the detach
+  hint.
+- A started-in-background agent may still show `running` while active.
+- Long task titles are truncated before stats and before agent identity.
+- Successful final body text uses `theme.text_primary`, not success green.
+
+The previous abstract header shape is no longer canonical:
 
 ```text
 ● Gibbs Coder Agent Running (Implement Task 1: PlanBox border fix) · 3 tools · 24s · 25.6k tok
 ```
 
-Running foreground body:
+It may remain useful as a test fixture reference, but implementation should
+render the Option B shape where `Gibbs` is the primary identity and `Coder` is a
+badge.
 
-```text
-  Press Ctrl+B to run in background
-  • Used Read (crates/neo-tui/src/transcript/plan_box.rs)
-  ✗ Used Grep (from_spans|pub struct Span|pub struct Line)
-  • Using Bash (cargo nextest run -p neo-tui --test multi_agent_transcript)
-      Checking neo-tui v0.1.0 ...
-  ◌ Let me start by reading the current file...
-  └ I'll implement this TDD task...
-```
-
-Rules:
-
-- `Using` marker is neutral text color.
-- `Used` marker is success color.
-- Failed marker is error color.
-- The hint appears when `state = Running`, `mode = Foreground`, and the agent is
-  detachable.
-- A detached foreground agent shows `Backgrounded` in the status position and
-  does not show the detach hint.
-- A started-in-background agent may still show `Running` while active.
-- Header stats remain visible; long titles are truncated before stats.
-
-## 10. Agent Group UI Contract
+## 12. Delegate Group UI Contract
 
 When the same parent turn starts two or more root foreground delegates, replace
-the separate standalone cards with one group entry:
+the separate standalone cards with one group entry. A group is still a chat
+transcript card, not a tool group. Each child row is a miniature agent
+transcript with visible name, role badge, stats, and recent activity.
 
 ```text
-● Running 3 agents (2 running, 1 waiting) · 1m 04s
-  ├─ Coder · PlanBox border fix · 2 tools · 28.5k tok
-  │     Using Bash (cargo nextest run ...)
-  ├─ Explorer · Trace markdown width · 1 tool · 16.2k tok
-  │     Used Read (crates/neo-tui/src/markdown.rs)
-  └─ Reviewer · Review test coverage · waiting
-        Waiting...
-  Press Ctrl+B to run in background
+┌─ Delegate Group · Same Turn Multiple Agents ───────────────┐
+│ ● Running 2 agents · 1 running · 1 queued · 21s            │
+│ ├─ Nova  [Coder]  角色对比测试 coder · 21s · 22.7k tok     │
+│ │  • Used Read  crates/neo-agent-core/src/tools/delegate.rs│
+│ │  • Using Bash cargo run -p xtask -- test ...             │
+│ │      ... 2 earlier lines                                 │
+│ │  ◌ thinking                                              │
+│ │    The interrupt path needs one narrow assertion.         │
+│ │  │ Let me make these edits.                              │
+│ └─ Vega  [Explorer]  搜索历史卡片回归点 · queued            │
+│    ◌ Waiting for scheduler slot                            │
+└────────────────────────────────────────────────────────────┘
 ```
 
 Rules:
@@ -331,25 +436,64 @@ Rules:
 - The group persists once formed. It does not split back into standalone cards.
 - Phase transitions update immediately.
 - Text/tool/token churn may update on render ticks; no unbounded re-render storm.
-- Completed/backgrounded group children omit the second activity line unless an
-  error line is needed.
+- Completed/backgrounded group children may collapse to one final row when no
+  useful activity preview exists, but name and role remain visible.
 - The group header totals tools/tokens for terminal children and shows the max
   elapsed among children.
+- If any child can detach, the group may show one shared detach hint at the end.
 
-## 11. Swarm UI Contract
+## 13. Swarm UI Contract
 
 Swarm cards remain transcript-native. They do not move to `/tasks`.
+Collapsed swarm keeps the Bayesian progress semantics, but the rows still read
+as agents with identities and current activity rather than anonymous progress
+items.
 
 Collapsed swarm:
 
 ```text
-─ Agent Swarm ─ Read-only codebase investigations ─ Running ─ 46%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-001 [⣶⣶⣄⣀⣀⣀] ● Zeno running · 2 tools · 19s · 31.7k tok · Using Bash (find crates -name '*.rs')
-002 [⣀⣀⣀⣀⣀⣀] ◌ Gibbs queued · 0 tools · 0s · 0 tok · Search debt markers
-003 [⣿⣿⣿⣿⣿⣿] ✓ Hokke done · 5 tools · 13s · 32.5k tok · crates/neo-agent-core/src/lib.rs
+┌─ DelegateSwarm · Collapsed Live ───────────────────────────┐
+│ ● Swarm: 角色对比测试 · 4 agents · 2 run · 1 done · 1 wait │
+│   progress [■■■■■·····] 54% · bayes estimate · max 2       │
+│ ├─ Nova  [Coder]    ● [■■■■■■··] 68% · Using Bash · 22.7k  │
+│ ├─ Iris  [Planner]  ✓ [■■■■■■■■] done · 3 tools · 8.2k     │
+│ ├─ Vega  [Explorer] ● [■■■■····] 43% · thinking · 14.1k    │
+│ └─ Rune  [Coder]    ◌ [········] queued                    │
+│   ◌ Working... some agents are still streaming             │
+└────────────────────────────────────────────────────────────┘
+```
 
- ● Working... 46% ━━━━━━━━━━━━━┄┄┄┄┄┄┄┄┄┄┄
+Expanded swarm:
+
+```text
+┌─ DelegateSwarm · Expanded Live ────────────────────────────┐
+│ ● Swarm: 角色对比测试 · 4 agents · 54% · 41s               │
+│   schedule: max 2 concurrent · completed 1/4 · failed 0    │
+│                                                            │
+│ ├─ Nova  [Coder]  ● running · 21s · 4 tools · 22.7k tok    │
+│ │  • Used Read  crates/neo-agent-core/src/tools/delegate.rs│
+│ │  • Used Read  crates/neo-agent-core/src/multi_agent/rt.rs│
+│ │  • Using Bash cargo nextest run -p neo-agent-core ...    │
+│ │      running: cargo nextest run -p neo-agent-core ...    │
+│ │      Finished test profile in 38.23s                     │
+│ │  ◌ thinking                                              │
+│ │    Now I can apply the minimal renderer change.           │
+│ │  │ All edits applied. Now let me verify the paths.        │
+│ │                                                         │
+│ ├─ Iris  [Planner]  ✓ done · 3 tools · 12s · 8.2k tok      │
+│ │  • Used Read  docs/superpowers/plans/...                 │
+│ │  • Used Read  crates/neo-tui/src/transcript/store.rs     │
+│ │  └ The implementation should stay inside transcript cards.│
+│ │                                                         │
+│ ├─ Vega  [Explorer]  ● running · 19s · 2 tools · 14.1k tok │
+│ │  • Used RG  "DelegateGroupComponent|SwarmCardComponent"  │
+│ │  ◌ thinking                                              │
+│ │    I am checking whether grouped delegates already expose │
+│ │    display_name separately from role_label.               │
+│ │                                                         │
+│ └─ Rune  [Coder]  ◌ queued                                 │
+│    ◌ Waiting for scheduler slot                            │
+└────────────────────────────────────────────────────────────┘
 ```
 
 Rules:
@@ -365,15 +509,53 @@ Rules:
 - The bottom status bar is segmented by completed, working, suspended, queued,
   cancelled, and failed counts.
 - Progress never reaches 100% while any child is non-terminal.
-
-Expanded swarm:
-
 - Uses the shared child activity renderer from section 8.
 - Does not duplicate final text.
 - Does not render success summaries in green body text.
 - Shows output previews under child Bash/Terminal/generic tool rows.
+- Collapsed rows show `display_name` first and role badge second.
+- Expanded rows must preserve full child activity, not only the latest summary.
 
-## 12. Stateful Swarm Progress Estimator
+## 14. Status, Theme, And Width Rules
+
+```text
+┌─ Status / Theme Rules ─────────────────────────────────────┐
+│ ● running/backgrounded: brand color                        │
+│ ◌ queued/thinking: muted or warn                           │
+│ ✓ completed: status_ok                                     │
+│ ✗ failed/timed out/lost/killed: status_error               │
+│ Agent display_name: primary identity, colored by status    │
+│ [Coder]/[Planner]/[Explorer]: small secondary role badge   │
+│ task_title: secondary, never replaces display_name         │
+│ tool name: brand, tool result preview: muted/error         │
+│ child body: primary, thinking: muted, final error: error   │
+└────────────────────────────────────────────────────────────┘
+```
+
+Compact width rule:
+
+```text
+┌─ Compact Width Rule ───────────────────────────────────────┐
+│ ● Nova [Coder] running · 21s · 22.7k                       │
+│   • Using Bash cargo nextest run ...                       │
+│   ◌ thinking: checking renderer state                      │
+│   │ Let me make these edits.                               │
+│                                                            │
+│ Rule: narrow screens drop task_title first, never drop name.│
+└────────────────────────────────────────────────────────────┘
+```
+
+Additional rules:
+
+- Every visible row must truncate to the available terminal width.
+- Tool output previews use hanging indentation under their tool row.
+- Wide CJK or Unicode bar characters must be measured through existing
+  `visible_width`/`truncate_to_width` helpers.
+- Header stats must survive long titles by truncating the title area first.
+- Color is meaningful but not the only state signal; markers and labels must
+  also communicate state.
+
+## 15. Stateful Swarm Progress Estimator
 
 Replace the current static-only estimate with a stateful estimator that mirrors
 the Kimi shape in Rust:
@@ -404,7 +586,7 @@ Behavior:
 - Display ticks catch up gradually so progress does not jump abruptly.
 - `has_pending_catchup()` tells the TUI whether render ticks should continue.
 
-## 13. Transcript Tick Contract
+## 16. Transcript Tick Contract
 
 `TranscriptPane::render_tick()` already advances an activity frame. Extend it so
 live delegate, group, and swarm entries can request redraws:
@@ -424,17 +606,7 @@ than a public trait. The requirement is:
 - finalized entries do not request redraws;
 - active thinking behavior remains intact.
 
-## 14. Accessibility And Width Rules
-
-- Every visible row must truncate to the available terminal width.
-- Tool output previews use hanging indentation under their tool row.
-- Wide CJK or Unicode braille/bar characters must be measured through existing
-  `visible_width`/`truncate_to_width` helpers.
-- Header stats must survive long titles by truncating the title area first.
-- Color is meaningful but not the only state signal; markers and labels must
-  also communicate state.
-
-## 15. Test Strategy
+## 17. Test Strategy
 
 Core tests:
 
@@ -456,8 +628,11 @@ TUI tests:
   - final summary is one body-colored row;
   - backgrounded state suppresses the detach hint;
   - same-turn delegates form an agent group;
+  - agent display names render before role badges in single, group, and swarm
+    cards;
   - swarm rows show latest activity instead of full prompt;
   - expanded swarm children match single delegate rendering rules;
+  - narrow widths preserve agent name and role while truncating task title;
   - live ticks mark transcript dirty for elapsed/progress updates.
 
 Focused commands:
@@ -470,9 +645,13 @@ cargo clippy -p neo-agent-core --test multi_agent_runtime -- -D warnings -A clip
 cargo clippy -p neo-tui --test multi_agent_transcript -- -D warnings -A clippy::pedantic
 ```
 
-## 16. Acceptance Criteria
+## 18. Acceptance Criteria
 
 - The nine gaps in section 3 each have a passing regression test.
+- Single delegate, delegate group, collapsed swarm, and expanded swarm all use
+  Option B transcript-card composition.
+- Random agent names are visible as the primary identity in every agent row;
+  `Coder`, `Planner`, and `Explorer` never appear as the only visible name.
 - No source file keeps both `failed: bool` and `AgentToolActivityPhase` for
   agent activity.
 - A long-running foreground delegate continues to show changing elapsed time
@@ -487,16 +666,18 @@ cargo clippy -p neo-tui --test multi_agent_transcript -- -D warnings -A clippy::
   intermediate states, and does not hit 100% before all children are terminal.
 - Expanded swarm child cards and single delegate cards use the same row
   semantics.
+- Theme colors follow the section 14 state mapping and every state also has a
+  non-color marker or label.
 
-## 17. Self-Review
+## 19. Self-Review
 
 - Placeholder scan: no placeholder token or incomplete requirement remains.
 - Scope check: all requirements are within Multi-Agent runtime state,
   transcript rendering, and focused tests. No provider/model rewrite is
   included.
-- Consistency check: sections 6, 8, 9, and 11 all depend on the same canonical
+- Consistency check: sections 6, 8, 10, 11, 12, and 13 all depend on the same canonical
   `AgentToolActivityPhase` and `AgentToolOutputPreview` model.
 - Ambiguity check: "backgrounded" is a display phase derived from
   `detached_from_foreground`, not a lifecycle terminal state.
-- User-review gate: intentionally skipped because the requester explicitly
-  instructed self-review only.
+- User-review gate: this file is ready for requester review before the
+  implementation plan is written.
