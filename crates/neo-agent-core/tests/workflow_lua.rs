@@ -225,8 +225,8 @@ async fn run_workflow_delegate_runs_child_model_turn_and_returns_summary() {
     let steps = details["steps"].as_array().expect("steps array");
     assert_eq!(steps[0]["state"], json!(WorkflowState::Completed));
     assert_eq!(steps[0]["summary"], "child inspected workflow");
-    assert_eq!(steps[0]["agent"]["latest_text"], "child inspected workflow");
-    assert_eq!(steps[0]["agent"]["role"], "reviewer");
+    assert_eq!(steps[0]["details"]["summary"], "child inspected workflow");
+    assert_eq!(steps[0]["details"]["role"], "reviewer");
 }
 
 #[tokio::test]
@@ -320,11 +320,8 @@ async fn run_workflow_swarm_has_failures_reflects_child_failure() {
     let steps = details["steps"].as_array().expect("steps array");
     assert_eq!(steps[0]["state"], json!(WorkflowState::Failed));
     assert_eq!(steps[0]["has_failures"], true);
-    assert_eq!(
-        steps[0]["swarm"]["children"][0]["agent"]["latest_text"],
-        "alpha ok"
-    );
-    assert_eq!(steps[0]["swarm"]["children"][1]["agent"]["state"], "failed");
+    assert_eq!(steps[0]["details"]["items"][0]["summary"], "alpha ok");
+    assert_eq!(steps[0]["details"]["items"][1]["status"], "failed");
 }
 
 fn workflow_ctx(path: &std::path::Path, harness: &FakeHarness) -> ToolContext {

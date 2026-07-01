@@ -4,7 +4,7 @@ use serde_json::json;
 use super::host_api::WorkflowHostRecorder;
 use super::{WorkflowError, WorkflowId, WorkflowSnapshot, WorkflowState, WorkflowStepRecord};
 use crate::AgentEvent;
-use crate::multi_agent::{AgentLifecycleState, AgentSnapshot, SwarmSnapshot};
+use crate::multi_agent::{AgentSnapshot, SwarmSnapshot};
 use crate::tools::{ToolContext, ToolError, ToolResult};
 
 /// Runs Lua workflow scripts in a sandboxed `mlua` VM. The `neo` table
@@ -162,20 +162,13 @@ impl LuaWorkflowRunner {
                         .to_owned();
                     recorder.record(format!("delegate: {task}"));
                     let result = run_tool(&ctx, "Delegate", input).await?;
-                    let agent = result
-                        .details
-                        .as_ref()
-                        .and_then(|details| details.get("agent"))
-                        .and_then(|agent| {
-                            serde_json::from_value::<AgentSnapshot>(agent.clone()).ok()
-                        });
-                    let handle = delegate_handle_from_result(&result, agent.as_ref());
+                    let handle = delegate_handle_from_result(&result, None);
                     recorder.push_step(workflow_step(
                         format!("delegate: {task}"),
-                        workflow_state_from_tool_and_agent(&result, agent.as_ref()),
+                        workflow_state_from_tool_and_agent(&result, None),
                         Some(handle.summary.clone()),
                         result.details.clone(),
-                        agent,
+                        None,
                         None,
                         None,
                     ));
@@ -208,16 +201,7 @@ impl LuaWorkflowRunner {
                         .map_or(0, Vec::len);
                     recorder.record(format!("swarm: {description} ({item_count} items)"));
                     let result = run_tool(&ctx, "DelegateSwarm", input).await?;
-                    let swarm = result
-                        .details
-                        .as_ref()
-                        .and_then(|details| details.get("swarm"))
-                        .and_then(|swarm| {
-                            serde_json::from_value::<SwarmSnapshot>(swarm.clone()).ok()
-                        });
-                    let has_failures =
-                        swarm.as_ref().is_some_and(swarm_has_failures) || result.is_error;
-                    let summary = swarm_summary(&result, swarm.as_ref(), has_failures);
+                    let details = result.details.as_ref();
                     let items = result
                         .details
                         .as_ref()
@@ -225,16 +209,16 @@ impl LuaWorkflowRunner {
                         .and_then(serde_json::Value::as_array)
                         .cloned()
                         .unwrap_or_default();
+                    let has_failures = result.is_error || swarm_items_have_failures(&items);
+                    let summary = swarm_summary(&result, details, has_failures);
                     let swarm_id = result
                         .details
                         .as_ref()
                         .and_then(|details| details.get("swarm_id"))
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned);
-                    let status = swarm.as_ref().map_or_else(
-                        || status_from_result(&result).to_owned(),
-                        |swarm| swarm.state.as_str().to_owned(),
-                    );
+                    let status = details_string(&result, "status")
+                        .unwrap_or_else(|| status_from_result(&result).to_owned());
                     recorder.push_step(workflow_step(
                         format!("swarm: {description}"),
                         if has_failures {
@@ -245,7 +229,7 @@ impl LuaWorkflowRunner {
                         Some(summary.clone()),
                         result.details.clone(),
                         None,
-                        swarm,
+                        None,
                         Some(has_failures),
                     ));
                     emit_workflow_update(&ctx, &event_context, &recorder);
@@ -574,13 +558,22 @@ fn delegate_handle_from_result(
 ) -> DelegateHandle {
     let summary = agent
         .and_then(|agent| agent.outcome.as_ref())
-        .map_or_else(|| result.content.clone(), |outcome| outcome.summary.clone());
+        .map(|outcome| outcome.summary.clone())
+        .or_else(|| details_string(result, "summary"))
+        .unwrap_or_else(|| result.content.clone());
     DelegateHandle {
         kind: "delegate",
-        agent_id: agent.map(|agent| agent.id.as_str().to_owned()),
-        name: agent.map(|agent| agent.display_name.as_str().to_owned()),
+        agent_id: agent
+            .map(|agent| agent.id.as_str().to_owned())
+            .or_else(|| details_string(result, "agent_id")),
+        name: agent
+            .map(|agent| agent.display_name.as_str().to_owned())
+            .or_else(|| details_string(result, "display_name")),
         status: agent.map_or_else(
-            || status_from_result(result).to_owned(),
+            || {
+                details_string(result, "status")
+                    .unwrap_or_else(|| status_from_result(result).to_owned())
+            },
             |agent| agent.state.as_str().to_owned(),
         ),
         summary,
@@ -595,46 +588,59 @@ fn workflow_state_from_tool_and_agent(
     if result.is_error {
         return WorkflowState::Failed;
     }
-    match agent.map(|agent| agent.state) {
-        Some(
-            AgentLifecycleState::Failed
-            | AgentLifecycleState::Cancelled
-            | AgentLifecycleState::TimedOut,
-        ) => WorkflowState::Failed,
-        Some(AgentLifecycleState::Queued | AgentLifecycleState::Running) => WorkflowState::Running,
+    let status = agent
+        .map(|agent| agent.state.as_str().to_owned())
+        .or_else(|| details_string(result, "status"));
+    match status.as_deref() {
+        Some("failed" | "cancelled" | "timed_out") => WorkflowState::Failed,
+        Some("queued" | "running") => WorkflowState::Running,
         _ => WorkflowState::Completed,
     }
 }
 
-fn swarm_has_failures(swarm: &SwarmSnapshot) -> bool {
-    swarm.children.iter().any(|child| {
+fn swarm_items_have_failures(items: &[serde_json::Value]) -> bool {
+    items.iter().any(|item| {
         matches!(
-            child.agent.state,
-            AgentLifecycleState::Failed
-                | AgentLifecycleState::Cancelled
-                | AgentLifecycleState::TimedOut
-        ) || child
-            .agent
-            .outcome
-            .as_ref()
-            .is_some_and(|outcome| outcome.is_error)
+            item.get("status").and_then(serde_json::Value::as_str),
+            Some("failed" | "cancelled" | "timed_out")
+        )
     })
 }
 
-fn swarm_summary(result: &ToolResult, swarm: Option<&SwarmSnapshot>, has_failures: bool) -> String {
-    if let Some(swarm) = swarm {
+fn swarm_summary(
+    result: &ToolResult,
+    details: Option<&serde_json::Value>,
+    has_failures: bool,
+) -> String {
+    if let Some(details) = details {
         let status = if has_failures {
             "failed"
         } else {
-            swarm.state.as_str()
+            details
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(status_from_result(result))
         };
-        return format!(
-            "{}: {status} ({} items)",
-            swarm.description,
-            swarm.children.len()
-        );
+        let description = details
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("swarm");
+        let item_count = details
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        return format!("{description}: {status} ({item_count} items)");
     }
     result.content.clone()
+}
+
+fn details_string(result: &ToolResult, key: &str) -> Option<String> {
+    result
+        .details
+        .as_ref()
+        .and_then(|details| details.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn status_from_result(result: &ToolResult) -> &'static str {
