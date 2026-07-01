@@ -8,16 +8,52 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::multi_agent::{AgentLifecycleState, SwarmSnapshot};
 
-fn terminal_delegate_error(agent_id: &str, state: AgentLifecycleState) -> ToolResult {
+#[derive(Debug, Clone, Copy)]
+enum DelegateTerminalAction {
+    Message,
+    Interrupt,
+}
+
+impl DelegateTerminalAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Interrupt => "interrupt",
+        }
+    }
+
+    const fn terminal_clause(self) -> &'static str {
+        match self {
+            Self::Message => "terminal agents cannot receive live messages",
+            Self::Interrupt => "terminal agents cannot be interrupted",
+        }
+    }
+}
+
+fn delegate_target_not_found(id: &str) -> ToolResult {
+    ToolResult::error(format!("unknown delegate target `{id}`")).with_details(json!({
+        "kind": "delegate_target",
+        "id": id,
+        "outcome": "not_found",
+    }))
+}
+
+fn terminal_delegate_error(
+    agent_id: &str,
+    state: AgentLifecycleState,
+    action: DelegateTerminalAction,
+) -> ToolResult {
     ToolResult::error(format!(
-        "agent already {}; terminal agents cannot receive live messages or be interrupted. To continue this agent, call Delegate with resume=\"{}\".",
+        "agent already {}; {}. To continue this agent, call Delegate with resume=\"{}\".",
         state.as_str(),
+        action.terminal_clause(),
         agent_id
     ))
-    .with_details(serde_json::json!({
+    .with_details(json!({
         "agent_id": agent_id,
         "status": state.as_str(),
         "terminal": true,
+        "action": action.as_str(),
         "resume_hint": format!("Delegate with resume=\"{agent_id}\""),
     }))
 }
@@ -615,10 +651,18 @@ impl Tool for InterruptDelegateTool {
             if let Some(agent) = agents.iter().find(|a| a.id.as_str() == input.id).cloned() {
                 let agent_id = agent.id.clone();
                 if agent.state.is_terminal() {
-                    return Ok(terminal_delegate_error(agent.id.as_str(), agent.state));
+                    return Ok(terminal_delegate_error(
+                        agent.id.as_str(),
+                        agent.state,
+                        DelegateTerminalAction::Interrupt,
+                    ));
                 }
                 let Some(snapshot) = ctx.multi_agent.cancel_agent(&agent_id) else {
-                    return Ok(terminal_delegate_error(agent.id.as_str(), agent.state));
+                    return Ok(terminal_delegate_error(
+                        agent.id.as_str(),
+                        agent.state,
+                        DelegateTerminalAction::Interrupt,
+                    ));
                 };
                 let _ = ctx
                     .background_tasks
@@ -637,17 +681,18 @@ impl Tool for InterruptDelegateTool {
             }
 
             // Fall back to background task stop.
-            match ctx
-                .background_tasks
-                .stop(&input.id, "Interrupted by InterruptDelegate", 1024)
-                .await
-            {
-                Ok(result) => Ok(result),
-                Err(err) => Ok(ToolResult::error(format!(
-                    "id: {}\nerror: {}",
-                    input.id, err
-                ))),
+            if ctx.background_tasks.snapshot(&input.id).await.is_ok() {
+                return match ctx
+                    .background_tasks
+                    .stop(&input.id, "Interrupted by InterruptDelegate", 1024)
+                    .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(_) => Ok(delegate_target_not_found(&input.id)),
+                };
             }
+
+            Ok(delegate_target_not_found(&input.id))
         })
     }
 }
@@ -720,7 +765,11 @@ impl Tool for MessageDelegateTool {
             if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.id)
                 && agent.state.is_terminal()
             {
-                return Ok(terminal_delegate_error(agent.id.as_str(), agent.state));
+                return Ok(terminal_delegate_error(
+                    agent.id.as_str(),
+                    agent.state,
+                    DelegateTerminalAction::Message,
+                ));
             }
 
             match ctx
@@ -770,4 +819,62 @@ fn format_swarm_result(swarm: &SwarmSnapshot) -> ToolResult {
         ));
     }
     ToolResult::ok(content).with_details(super::multi_agent_format::swarm_details(swarm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_context() -> ToolContext {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ToolContext::new(dir.path()).expect("tool context")
+    }
+
+    #[tokio::test]
+    async fn interrupt_delegate_unknown_id_uses_delegate_error() {
+        let ctx = test_context();
+        let tool = InterruptDelegateTool;
+
+        let result = tool
+            .execute(&ctx, json!({ "id": "agent_missing" }))
+            .await
+            .expect("tool should return result");
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "unknown delegate target `agent_missing`");
+        assert!(!result.content.contains("TaskStop"));
+        assert!(!result.content.contains("background task"));
+        assert_eq!(result.details.as_ref().unwrap()["kind"], "delegate_target");
+        assert_eq!(result.details.as_ref().unwrap()["outcome"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn terminal_delegate_errors_are_action_specific() {
+        let ctx = test_context();
+        let agent = ctx.multi_agent.start_foreground_delegate_for_test("calculate 2 + 2");
+        ctx.multi_agent
+            .complete_delegate_for_test(&agent.id, "The answer is 4.");
+
+        let message_result = MessageDelegateTool
+            .execute(
+                &ctx,
+                json!({ "id": agent.id.as_str(), "message": "another question" }),
+            )
+            .await
+            .expect("message result");
+        assert!(message_result.is_error);
+        assert!(message_result.content.contains("cannot receive live messages"));
+        assert!(!message_result.content.contains("be interrupted"));
+        assert_eq!(message_result.details.as_ref().unwrap()["action"], "message");
+
+        let interrupt_result = InterruptDelegateTool
+            .execute(&ctx, json!({ "id": agent.id.as_str() }))
+            .await
+            .expect("interrupt result");
+        assert!(interrupt_result.is_error);
+        assert!(interrupt_result.content.contains("cannot be interrupted"));
+        assert!(!interrupt_result.content.contains("live messages"));
+        assert_eq!(interrupt_result.details.as_ref().unwrap()["action"], "interrupt");
+    }
 }
