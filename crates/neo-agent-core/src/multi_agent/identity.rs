@@ -17,6 +17,11 @@ impl AgentId {
     }
 
     #[must_use]
+    pub fn from_existing(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -3,9 +3,9 @@ use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot, AgentTermi
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed, format_elapsed,
-    format_token_count, render_child_body, render_child_final, render_child_thinking,
-    render_child_tool_row, role_label,
+    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
+    format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
+    render_child_final, render_child_thinking, render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,17 +88,7 @@ impl DelegateCardComponent {
                 Span::styled(self.snapshot.display_name.as_str(), accent),
                 Span::raw("  "),
                 Span::styled(role_badge(&self.snapshot), muted),
-                Span::styled(
-                    format!(
-                        "  {} · {} · {} tools · {} · {} tok",
-                        self.snapshot.task_title,
-                        status_text(phase),
-                        self.snapshot.tool_count,
-                        format_elapsed(elapsed.as_secs()),
-                        format_token_count(self.snapshot.token_count)
-                    ),
-                    primary,
-                ),
+                Span::styled(delegate_stats_line(&self.snapshot, phase, elapsed), primary),
             ])
             .truncate_to_width(width),
         );
@@ -166,6 +156,24 @@ enum DelegateDisplayPhase {
     TimedOut,
     Lost,
     Killed,
+}
+
+fn delegate_stats_line(
+    snapshot: &AgentSnapshot,
+    phase: DelegateDisplayPhase,
+    elapsed: std::time::Duration,
+) -> String {
+    let mut parts = vec![
+        snapshot.task_title.clone(),
+        status_text(phase).to_owned(),
+        format!("{} tools", snapshot.tool_count),
+        format_elapsed(elapsed.as_secs()),
+        format!("{} tok", format_token_count(snapshot.token_count)),
+    ];
+    if let Some(cache) = format_cache_token_usage(snapshot) {
+        parts.push(cache);
+    }
+    format!("  {}", parts.join(" · "))
 }
 
 fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {

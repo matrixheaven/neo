@@ -527,16 +527,17 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     }
 
     let left_text = left_parts.join(" ");
-    let row = if let Some(context) = app.context_window_label() {
-        let context = paint(&context, Style::default().fg(app.context_color()));
-        let total = visible_width(&left_text) + visible_width(&context);
+    let row = if let Some(context_usage) = app.footer_context_usage_label() {
+        let context_usage = paint(&context_usage, Style::default().fg(app.context_color()));
+        let context_usage_width = visible_width(&context_usage);
+        let total = visible_width(&left_text) + context_usage_width;
         if total < width {
-            format!("{left_text}{}{context}", " ".repeat(width - total))
+            format!("{left_text}{}{context_usage}", " ".repeat(width - total))
+        } else if context_usage_width >= width {
+            truncate_to_width(&context_usage, width)
         } else {
-            let room = width
-                .saturating_sub(visible_width(&context))
-                .saturating_sub(1);
-            format!("{} {context}", truncate_to_width(&left_text, room))
+            let room = width.saturating_sub(context_usage_width).saturating_sub(1);
+            format!("{} {context_usage}", truncate_to_width(&left_text, room))
         }
     } else {
         truncate_to_width(&left_text, width)

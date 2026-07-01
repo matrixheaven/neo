@@ -306,6 +306,8 @@ impl MultiAgentRuntime {
         snapshot.state = AgentLifecycleState::Completed;
         snapshot.tool_count = update.tool_count;
         snapshot.token_count = update.token_count;
+        snapshot.cache_read_token_count = update.cache_read_token_count;
+        snapshot.cache_write_token_count = update.cache_write_token_count;
         snapshot.elapsed = update.elapsed;
         snapshot.latest_text.clone_from(&update.latest_text);
         snapshot.activity = update.activity;
@@ -367,6 +369,8 @@ impl MultiAgentRuntime {
         snapshot.state = state;
         snapshot.tool_count = update.tool_count;
         snapshot.token_count = update.token_count;
+        snapshot.cache_read_token_count = update.cache_read_token_count;
+        snapshot.cache_write_token_count = update.cache_write_token_count;
         snapshot.elapsed = update.elapsed;
         snapshot.latest_text.clone_from(&update.latest_text);
         snapshot.activity = update.activity;
@@ -583,10 +587,15 @@ impl MultiAgentRuntime {
                 "agent is already running; use MessageDelegate for live follow-up".to_owned(),
             );
         }
+        let previous_status = agent.state;
         agent.state = AgentLifecycleState::Running;
         agent.mode = request.mode;
         agent.task = request.task.clone();
         agent.task_title = derive_title(&request.task, request.title.as_deref());
+        agent.run_count = agent.run_count.saturating_add(1);
+        agent.live_messages_received = 0;
+        agent.previous_status = Some(previous_status);
+        agent.resumed_from = Some(AgentId::from_existing(agent_id));
         agent.elapsed = Duration::ZERO;
         agent.latest_text = None;
         agent.activity.clear();
@@ -609,7 +618,8 @@ impl MultiAgentRuntime {
         };
         if !matches!(agent.state, AgentLifecycleState::Running) {
             return Err(format!(
-                "agent is not running; use Delegate with resume=\"{}\" to continue it",
+                "agent already {}; terminal agents cannot receive live messages. To continue this agent, call Delegate with resume=\"{}\".",
+                agent.state.as_str(),
                 agent.id.as_str()
             ));
         }
@@ -619,6 +629,7 @@ impl MultiAgentRuntime {
             delivered: false,
         };
         if self.deliver_live_message(agent_id, &mailbox_message) {
+            self.record_live_message(agent_id);
             Ok(())
         } else {
             Err(format!(
@@ -648,6 +659,19 @@ impl MultiAgentRuntime {
             message.id, message.text
         ))));
         true
+    }
+
+    fn record_live_message(&self, agent_id: &str) {
+        if let Some(agent) = self
+            .state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .agents
+            .get_mut(agent_id)
+        {
+            agent.live_messages_received = agent.live_messages_received.saturating_add(1);
+            agent.updated_at_ms = now_ms();
+        }
     }
 
     /// Return the item indices of children that can be resumed (queued, failed,
@@ -819,6 +843,7 @@ impl MultiAgentRuntime {
                 };
                 if self.deliver_live_message(child.agent.id.as_str(), &mailbox_message) {
                     delivered.push(child.agent.id.as_str().to_owned());
+                    self.record_live_message(child.agent.id.as_str());
                 } else {
                     skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
                 }
@@ -854,6 +879,8 @@ pub struct AgentRunUpdate {
     pub summary: String,
     pub tool_count: usize,
     pub token_count: usize,
+    pub cache_read_token_count: usize,
+    pub cache_write_token_count: usize,
     pub elapsed: Duration,
     pub latest_text: Option<String>,
     pub activity: Vec<AgentActivityEntry>,
@@ -900,8 +927,14 @@ fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
         terminal_at_ms: seed.state.is_terminal().then_some(now),
         detached_from_foreground: false,
         terminal_reason,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
         elapsed: Duration::ZERO,
         latest_text: None,
         activity: Vec::new(),
@@ -1150,6 +1183,12 @@ impl MultiAgentRuntime {
                 snapshot.token_count = snapshot
                     .token_count
                     .saturating_add((usage.input_tokens + usage.output_tokens) as usize);
+                snapshot.cache_read_token_count = snapshot
+                    .cache_read_token_count
+                    .saturating_add(usage.input_cache_read_tokens as usize);
+                snapshot.cache_write_token_count = snapshot
+                    .cache_write_token_count
+                    .saturating_add(usage.input_cache_write_tokens as usize);
             }
             AgentEvent::Error { message, .. } => {
                 changed = true;
@@ -1207,6 +1246,8 @@ impl MultiAgentRuntime {
                     summary: error,
                     tool_count: 0,
                     token_count: 0,
+                    cache_read_token_count: 0,
+                    cache_write_token_count: 0,
                     elapsed: started_at.elapsed(),
                     latest_text: None,
                     activity: Vec::new(),
@@ -1372,6 +1413,24 @@ fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunU
             .filter_map(|event| match event {
                 AgentEvent::TokenUsage { usage, .. } => {
                     Some((usage.input_tokens + usage.output_tokens) as usize)
+                }
+                _ => None,
+            })
+            .sum(),
+        cache_read_token_count: events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TokenUsage { usage, .. } => {
+                    Some(usage.input_cache_read_tokens as usize)
+                }
+                _ => None,
+            })
+            .sum(),
+        cache_write_token_count: events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TokenUsage { usage, .. } => {
+                    Some(usage.input_cache_write_tokens as usize)
                 }
                 _ => None,
             })

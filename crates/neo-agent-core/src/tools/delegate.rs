@@ -1,6 +1,9 @@
 use futures::{StreamExt, stream};
 use serde_json::json;
 
+use super::multi_agent_format::{
+    SummaryScope, agent_details, context_mode_label, delegate_result_content, swarm_details,
+};
 use super::{
     Tool, ToolContext, ToolError, ToolEventCallback, ToolFuture, ToolResult, parse_input, schema,
 };
@@ -49,9 +52,10 @@ impl Tool for DelegateTool {
 
     fn description(&self) -> &'static str {
         "Delegate work to a subagent. Default mode is foreground, so the main agent waits for the result. \
-         To continue an existing completed/failed/cancelled/timed_out agent, pass resume=\"agent_...\" and a new task. \
+         Use mode=\"background\" only when the main agent should continue in parallel. \
+         To continue an existing completed/failed/cancelled/timed_out agent, pass resume=\"agent_xxx\" and a new task; this starts a new run on the same agent. \
          When resume is set, role must be omitted because the resumed agent keeps its original role/profile/name/history. \
-         Use mode=\"background\" only when the main agent should continue in parallel."
+         context controls parent context passed to the child: inherit passes selected parent context, summary passes a compact parent summary, and none passes only the task plus role/profile prompt."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -127,19 +131,26 @@ impl Tool for DelegateTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\ntask: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
+                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\nrun_index: {}\ncontext_mode: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
                     snapshot.id.as_str(),
                     snapshot.display_name.as_str(),
-                    request.task,
+                    snapshot.run_count,
+                    context_mode_label(request.context),
                 ))
-                .with_details(json!({
-                    "kind": "delegate",
-                    "mode": "background",
-                    "agent_id": snapshot.id.as_str(),
-                    "actual_role": snapshot.role,
-                    "agent": snapshot,
-                    "task_id": task_id,
-                })));
+                .with_details({
+                    let mut details = agent_details(
+                        "delegate",
+                        &snapshot,
+                        Some(request.context),
+                        SummaryScope::CurrentRun,
+                        true,
+                        false,
+                        false,
+                    );
+                    details["mode"] = json!("background");
+                    details["task_id"] = json!(task_id);
+                    details
+                }));
             }
 
             // Foreground mode: run synchronously and return the result.
@@ -147,7 +158,6 @@ impl Tool for DelegateTool {
                 turn,
                 agent: snapshot.clone(),
             });
-            let actual_role = snapshot.role;
             let output = ctx
                 .multi_agent
                 .run_started_child_turn(deps, snapshot, request.context, |agent| {
@@ -159,23 +169,19 @@ impl Tool for DelegateTool {
                 turn,
                 agent: completed.clone(),
             });
-            let summary = completed
-                .outcome
-                .as_ref()
-                .map_or("", |outcome| outcome.summary.as_str());
-            Ok(ToolResult::ok(format!(
-                "agent_id: {}\nname: {}\nstatus: completed\nsummary: {}",
-                completed.id.as_str(),
-                completed.display_name.as_str(),
-                summary
-            ))
-            .with_details(json!({
-                "kind": "delegate",
-                "mode": "foreground",
-                "agent_id": completed.id.as_str(),
-                "actual_role": actual_role,
-                "agent": completed,
-            })))
+            Ok(
+                ToolResult::ok(delegate_result_content(&completed, request.context)).with_details(
+                    agent_details(
+                        "delegate",
+                        &completed,
+                        Some(request.context),
+                        SummaryScope::CurrentRun,
+                        true,
+                        true,
+                        false,
+                    ),
+                ),
+            )
         })
     }
 }
@@ -189,9 +195,9 @@ impl Tool for DelegateSwarmTool {
 
     fn description(&self) -> &'static str {
         "Run many related bounded tasks in subagents and return an ordered aggregate result. \
-         Required: description, and either items (with prompt_template containing {{item}}) \
-         or resume_agent_ids, or both. Optional: {{description}} inserts the swarm description. \
-         Only {{item}} and {{description}} placeholders are supported."
+         Default mode is foreground; background returns immediately and exposes the same structured swarm result through WaitDelegate and TaskOutput. \
+         Required: description, and either items with prompt_template containing {{item}}, resume_agent_ids, or both. \
+         Optional {{description}} inserts the swarm description. Only {{item}} and {{description}} placeholders are supported."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -335,7 +341,7 @@ impl Tool for DelegateSwarmTool {
                 swarm: final_snapshot.clone(),
             });
             Ok(ToolResult::ok(format!(
-                "swarm_id: {}\nstatus: {}\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}\nitems: {}\n{}",
+                "swarm_id: {}\nstatus: {}\nsummary_scope: swarm_items\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
                 final_snapshot.swarm_id,
                 final_snapshot.state.as_str(),
                 final_snapshot.aggregate.total,
@@ -345,28 +351,8 @@ impl Tool for DelegateSwarmTool {
                 final_snapshot.aggregate.failed,
                 final_snapshot.aggregate.cancelled,
                 final_snapshot.aggregate.timed_out,
-                total_children,
-                format_swarm_children(&final_snapshot)
             ))
-            .with_details(json!({
-                "kind": "delegate_swarm",
-                "mode": "foreground",
-                "description": request.description,
-                "swarm_id": final_snapshot.swarm_id,
-                "status": final_snapshot.state.as_str(),
-                "aggregate": final_snapshot.aggregate,
-                "items": final_snapshot.children.iter().map(|child| {
-                    json!({
-                        "index": child.item_index,
-                        "item": child.item,
-                        "agent_id": child.agent.id.as_str(),
-                        "status": child.agent.state.as_str(),
-                        "summary": child.agent.outcome.as_ref().map(|o| o.summary.clone()),
-                    })
-                }).collect::<Vec<_>>(),
-                "resume_hint": "Call DelegateSwarm with resume_agent_ids for unfinished children.",
-                "swarm": final_snapshot,
-            })))
+            .with_details(swarm_details(&final_snapshot)))
         })
     }
 }
@@ -678,31 +664,4 @@ fn reject_unknown_placeholders(tool: &str, template: &str) -> Result<(), ToolErr
         rest = &after_start[end + 2..];
     }
     Ok(())
-}
-
-fn format_swarm_children(snapshot: &SwarmSnapshot) -> String {
-    snapshot
-        .children
-        .iter()
-        .map(|child| {
-            let status = child.agent.state.as_str();
-            let summary = child
-                .agent
-                .outcome
-                .as_ref()
-                .map_or("", |outcome| outcome.summary.as_str());
-            format!(
-                "- item_index: {} | item: {} | agent_id: {} | name: {} | status: {} | tools: {} | elapsed_ms: {} | summary: {}",
-                child.item_index,
-                child.item,
-                child.agent.id.as_str(),
-                child.agent.display_name.as_str(),
-                status,
-                child.agent.tool_count,
-                child.agent.elapsed.as_millis(),
-                summary,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }

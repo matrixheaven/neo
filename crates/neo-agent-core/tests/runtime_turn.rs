@@ -217,6 +217,8 @@ async fn runtime_emits_provider_token_usage() {
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: 123,
                 output_tokens: 45,
+                input_cache_read_tokens: 100,
+                input_cache_write_tokens: 7,
             }),
         },
     ]);
@@ -236,6 +238,8 @@ async fn runtime_emits_provider_token_usage() {
         usage: neo_agent_core::AgentTokenUsage {
             input_tokens: 123,
             output_tokens: 45,
+            input_cache_read_tokens: 100,
+            input_cache_write_tokens: 7,
         },
     }));
 }

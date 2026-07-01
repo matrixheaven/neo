@@ -1,7 +1,8 @@
 use std::time::Duration;
 
+use base64::Engine;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
@@ -9,7 +10,7 @@ use crate::multi_agent::{AgentLifecycleState, SwarmSnapshot};
 
 fn terminal_delegate_error(agent_id: &str, state: AgentLifecycleState) -> ToolResult {
     ToolResult::error(format!(
-        "agent already {}; terminal delegate state is immutable. To continue it, call Delegate with resume=\"{}\".",
+        "agent already {}; terminal agents cannot receive live messages or be interrupted. To continue this agent, call Delegate with resume=\"{}\".",
         state.as_str(),
         agent_id
     ))
@@ -25,7 +26,7 @@ fn terminal_delegate_error(agent_id: &str, state: AgentLifecycleState) -> ToolRe
 // ListDelegates
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DelegateListKind {
     Agent,
@@ -34,12 +35,25 @@ enum DelegateListKind {
     All,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum DelegateListOrder {
     #[default]
     Newest,
     Oldest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum DelegateListInclude {
+    Meta,
+    Task,
+    Summary,
+    Activity,
+}
+
+fn default_delegate_list_include() -> Vec<DelegateListInclude> {
+    vec![DelegateListInclude::Meta]
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -68,6 +82,11 @@ struct ListDelegatesInput {
     #[serde(default)]
     #[schemars(description = "Row ordering: newest (default) or oldest.")]
     order: DelegateListOrder,
+    #[serde(default = "default_delegate_list_include")]
+    #[schemars(
+        description = "Fields to include in each row. Defaults to [\"meta\"]. Add task, summary, or activity only when needed."
+    )]
+    include: Vec<DelegateListInclude>,
 }
 
 struct DelegateListRow {
@@ -81,16 +100,96 @@ fn default_delegate_list_limit() -> usize {
     20
 }
 
-fn parse_list_cursor(tool: &str, cursor: Option<&str>) -> Result<usize, ToolError> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DelegateListCursor {
+    offset: usize,
+    query: DelegateListCursorQuery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DelegateListCursorQuery {
+    include_completed: bool,
+    kind: String,
+    state: Option<String>,
+    order: String,
+    include: Vec<String>,
+}
+
+impl DelegateListCursorQuery {
+    fn from_input(input: &ListDelegatesInput, include_completed: bool) -> Self {
+        Self {
+            include_completed,
+            kind: match input.kind {
+                DelegateListKind::Agent => "agent",
+                DelegateListKind::Swarm => "swarm",
+                DelegateListKind::All => "all",
+            }
+            .to_owned(),
+            state: input.state.map(|state| state.as_str().to_owned()),
+            order: match input.order {
+                DelegateListOrder::Newest => "newest",
+                DelegateListOrder::Oldest => "oldest",
+            }
+            .to_owned(),
+            include: input.include.iter().map(include_label).collect(),
+        }
+    }
+}
+
+fn include_label(include: &DelegateListInclude) -> String {
+    match include {
+        DelegateListInclude::Meta => "meta",
+        DelegateListInclude::Task => "task",
+        DelegateListInclude::Summary => "summary",
+        DelegateListInclude::Activity => "activity",
+    }
+    .to_owned()
+}
+
+fn parse_list_cursor(
+    tool: &str,
+    cursor: Option<&str>,
+    expected_query: &DelegateListCursorQuery,
+) -> Result<usize, ToolError> {
     let Some(cursor) = cursor else {
         return Ok(0);
     };
-    cursor
-        .parse::<usize>()
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
         .map_err(|_| ToolError::InvalidInput {
             tool: tool.to_owned(),
             message: "cursor must be a ListDelegates next_cursor value".to_owned(),
-        })
+        })?;
+    let decoded: DelegateListCursor =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "cursor must be a ListDelegates next_cursor value".to_owned(),
+        })?;
+    if decoded.query != *expected_query {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message:
+                "cursor was created for a different ListDelegates query; restart pagination without cursor"
+                    .to_owned(),
+        });
+    }
+    Ok(decoded.offset)
+}
+
+fn encode_list_cursor(
+    tool: &str,
+    offset: usize,
+    query: &DelegateListCursorQuery,
+) -> Result<String, ToolError> {
+    let cursor = DelegateListCursor {
+        offset,
+        query: query.clone(),
+    };
+    let bytes = serde_json::to_vec(&cursor).map_err(|err| ToolError::InvalidInput {
+        tool: tool.to_owned(),
+        message: format!("failed to encode ListDelegates cursor: {err}"),
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 pub struct ListDelegatesTool;
@@ -102,8 +201,10 @@ impl Tool for ListDelegatesTool {
 
     fn description(&self) -> &'static str {
         "List delegate agents and/or swarms with their current status. \
-         Supports filtering by kind (agent, swarm, all), state, and ordering. \
-         Defaults to newest-first, active-only, all kinds."
+         Defaults to newest-first, active-only, all kinds, and meta-only rows. \
+         Pass include_completed=true to see completed, failed, cancelled, or timed_out history. \
+         Use include=[\"task\"], include=[\"summary\"], or include=[\"activity\"] only when that extra context is needed. \
+         Pagination cursors are valid only with the same query parameters that produced them."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -115,8 +216,13 @@ impl Tool for ListDelegatesTool {
             let input: ListDelegatesInput = parse_input(self.name(), input)?;
             let include_completed =
                 input.include_completed || input.state.is_some_and(|s| s.is_terminal());
-            let offset = parse_list_cursor(self.name(), input.cursor.as_deref())?;
+            let cursor_query = DelegateListCursorQuery::from_input(&input, include_completed);
+            let offset = parse_list_cursor(self.name(), input.cursor.as_deref(), &cursor_query)?;
             let limit = input.limit.max(1);
+            let include = input.include.iter().map(include_label).collect::<Vec<_>>();
+            let include_task = input.include.contains(&DelegateListInclude::Task);
+            let include_summary = input.include.contains(&DelegateListInclude::Summary);
+            let include_activity = input.include.contains(&DelegateListInclude::Activity);
 
             let show_agents = matches!(input.kind, DelegateListKind::Agent | DelegateListKind::All);
             let show_swarms = matches!(input.kind, DelegateListKind::Swarm | DelegateListKind::All);
@@ -131,16 +237,23 @@ impl Tool for ListDelegatesTool {
                     {
                         continue;
                     }
-                    let mut detail = format!(
-                        "\n- agent_id: {} ({}) state: {} task: {}",
+                    let detail = format!(
+                        "\n- agent_id: {} ({}) state: {} title: {}",
                         agent.id.as_str(),
                         agent.display_name.as_str(),
                         agent.state.as_str(),
-                        agent.task,
+                        agent.task_title,
                     );
-                    if let Some(outcome) = &agent.outcome {
-                        detail.push_str(&format!(" | summary: {}", outcome.summary));
-                    }
+                    let mut row = super::multi_agent_format::agent_details(
+                        "agent",
+                        agent,
+                        None,
+                        super::multi_agent_format::SummaryScope::None,
+                        include_task,
+                        include_summary,
+                        include_activity,
+                    );
+                    row["kind"] = json!("agent");
                     all_rows.push(DelegateListRow {
                         created_index: ctx
                             .multi_agent
@@ -148,13 +261,7 @@ impl Tool for ListDelegatesTool {
                             .unwrap_or_default(),
                         id: agent.id.as_str().to_owned(),
                         detail,
-                        json: json!({
-                            "kind": "agent",
-                            "id": agent.id.as_str(),
-                            "status": agent.state.as_str(),
-                            "display_name": agent.display_name.as_str(),
-                            "task": agent.task,
-                        }),
+                        json: row,
                     });
                 }
             }
@@ -220,15 +327,26 @@ impl Tool for ListDelegatesTool {
 
             let total = all_rows.len();
             let page_end = offset.saturating_add(limit).min(total);
-            let next_cursor = (page_end < total).then(|| page_end.to_string());
+            let next_cursor = if page_end < total {
+                Some(encode_list_cursor(self.name(), page_end, &cursor_query)?)
+            } else {
+                None
+            };
             let page_rows = all_rows
                 .into_iter()
                 .skip(offset)
                 .take(limit)
                 .collect::<Vec<_>>();
 
+            let empty_next_steps = [
+                "No active delegates found.",
+                "Pass include_completed=true to list completed, failed, cancelled, or timed_out delegates.",
+            ];
             let mut content = if page_rows.is_empty() {
-                "No delegates found.\n".to_owned()
+                format!(
+                    "No delegates found.\nnext_step: {}\nnext_step: {}\n",
+                    empty_next_steps[0], empty_next_steps[1]
+                )
             } else {
                 format!("total: {total}\n")
             };
@@ -240,14 +358,32 @@ impl Tool for ListDelegatesTool {
                 content.push_str(&row.detail);
             }
 
-            Ok(ToolResult::ok(content).with_details(json!({
+            let mut details = json!({
                 "kind": "delegate_list",
                 "count": page_rows.len(),
                 "total": total,
                 "next_cursor": next_cursor,
+                "cursor_query": cursor_query,
                 "include_completed": include_completed,
+                "include": include,
+                "order": match input.order {
+                    DelegateListOrder::Newest => "newest",
+                    DelegateListOrder::Oldest => "oldest",
+                },
+                "query": {
+                    "kind": match input.kind {
+                        DelegateListKind::Agent => "agent",
+                        DelegateListKind::Swarm => "swarm",
+                        DelegateListKind::All => "all",
+                    },
+                    "state": input.state.map(|state| state.as_str()),
+                },
                 "delegates": rows,
-            })))
+            });
+            if page_rows.is_empty() {
+                details["next_steps"] = json!(empty_next_steps);
+            }
+            Ok(ToolResult::ok(content).with_details(details))
         })
     }
 }
@@ -275,8 +411,9 @@ impl Tool for WaitDelegateTool {
 
     fn description(&self) -> &'static str {
         "Wait for a delegate agent or swarm to reach a terminal state (completed, failed, \
-         cancelled, timed_out). Returns the agent's final status or the swarm's aggregate \
-         and per-child results."
+         cancelled, timed_out). A wait timeout returns outcome=\"wait_timed_out\" while preserving \
+         the target's current status; this differs from a case where the delegate itself reached timed_out. \
+         For swarms, terminal results use the same structured shape as DelegateSwarm and TaskOutput."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -327,15 +464,23 @@ impl Tool for WaitDelegateTool {
                         return Ok(format_swarm_result(&swarm));
                     }
                     if std::time::Instant::now() >= deadline {
-                        return Ok(ToolResult::ok(format!(
-                            "id: {}\nstatus: timed_out\nnext_step: The swarm is still running. Increase the timeout or use ListDelegates to check status.",
-                            input.id,
-                        ))
-                        .with_details(json!({
+                        let mut details = json!({
                             "kind": "delegate_wait",
+                            "id": input.id,
                             "task_id": input.id,
-                            "outcome": "timed_out",
-                        })));
+                            "status": "running",
+                            "outcome": "wait_timed_out",
+                        });
+                        if let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.id) {
+                            details["status"] = json!(swarm.state.as_str());
+                            details["aggregate"] = json!(swarm.aggregate);
+                        }
+                        return Ok(ToolResult::ok(format!(
+                            "id: {}\nstatus: {}\noutcome: wait_timed_out\nnext_step: The swarm is still running. Increase timeout_ms or use ListDelegates to check status.",
+                            input.id,
+                            details["status"].as_str().unwrap_or("running"),
+                        ))
+                        .with_details(details));
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -384,13 +529,19 @@ impl Tool for WaitDelegateTool {
 
                 if std::time::Instant::now() >= deadline {
                     return Ok(ToolResult::ok(format!(
-                        "id: {}\nstatus: timed_out\nnext_step: The delegate is still running. Increase the timeout or use ListDelegates to check status.",
+                        "id: {}\nstatus: running\noutcome: wait_timed_out\nnext_step: The delegate is still running. Increase timeout_ms, call ListDelegates, or wait for automatic completion.",
                         input.id,
                     ))
                     .with_details(json!({
                         "kind": "delegate_wait",
+                        "id": input.id,
                         "task_id": input.id,
-                        "outcome": "timed_out",
+                        "status": "running",
+                        "outcome": "wait_timed_out",
+                        "next_steps": [
+                            "The delegate is still running.",
+                            "Increase timeout_ms, call ListDelegates, or wait for automatic completion."
+                        ],
                     })));
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -521,10 +672,10 @@ impl Tool for MessageDelegateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Send a live follow-up message to a currently running delegate or broadcast \
-         to running children of a swarm. MessageDelegate does not queue offline messages \
-         for idle or terminal agents. If the target is completed, failed, cancelled, \
-         timed_out, or not running, call Delegate with resume=\"agent_...\" instead."
+        "Send a live follow-up message to a currently running delegate agent or broadcast \
+         to running children of a swarm. The id may be an agent or swarm ID. \
+         MessageDelegate does not queue offline messages for idle or terminal agents. \
+         If the target is completed, failed, cancelled, timed_out, or not running, call Delegate with resume=\"agent_xxx\" instead."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -604,19 +755,6 @@ fn format_swarm_result(swarm: &SwarmSnapshot) -> ToolResult {
         swarm.aggregate.cancelled,
         swarm.aggregate.timed_out,
     );
-    let items: Vec<serde_json::Value> = swarm
-        .children
-        .iter()
-        .map(|child| {
-            json!({
-                "index": child.item_index,
-                "item": child.item,
-                "agent_id": child.agent.id.as_str(),
-                "status": child.agent.state.as_str(),
-                "summary": child.agent.outcome.as_ref().map(|outcome| outcome.summary.clone()),
-            })
-        })
-        .collect();
     for child in &swarm.children {
         content.push_str(&format!(
             "\n- index: {} agent_id: {} status: {}",
@@ -625,12 +763,5 @@ fn format_swarm_result(swarm: &SwarmSnapshot) -> ToolResult {
             child.agent.state.as_str(),
         ));
     }
-    ToolResult::ok(content).with_details(json!({
-        "kind": "swarm",
-        "swarm_id": swarm.swarm_id,
-        "status": swarm.state.as_str(),
-        "aggregate": swarm.aggregate,
-        "items": items,
-        "resume_hint": "Call DelegateSwarm with resume_agent_ids for unfinished children.",
-    }))
+    ToolResult::ok(content).with_details(super::multi_agent_format::swarm_details(swarm))
 }

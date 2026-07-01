@@ -157,6 +157,9 @@ impl NeoChromeState {
             AgentEvent::QueueDrained { kind, count } => {
                 self.pending_input.drain(kind, count);
             }
+            AgentEvent::TokenUsage { usage, .. } => {
+                self.add_main_agent_token_usage(usage);
+            }
             AgentEvent::CompactionStarted { .. }
             | AgentEvent::CompactionProgress { .. }
             | AgentEvent::CompactionApplied { .. }
@@ -164,7 +167,6 @@ impl NeoChromeState {
             | AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::MessageFinished { .. }
-            | AgentEvent::TokenUsage { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
             | AgentEvent::TerminalSessionFinished { .. }

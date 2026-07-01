@@ -9,7 +9,7 @@ use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::widgets::TodoDisplayItem;
 
 use super::approval::ApprovalRequestModal;
-use super::context::ContextWindow;
+use super::context::{ContextWindow, MainAgentTokenUsage};
 use super::overlay::{Overlay, OverlayId};
 use super::pending_input::PendingInputState;
 use super::prompt::PromptState;
@@ -21,6 +21,7 @@ pub struct NeoChromeState {
     pub(super) model_label: String,
     pub(super) workspace_root: PathBuf,
     pub(super) context_window: Option<ContextWindow>,
+    pub(super) main_agent_token_usage: MainAgentTokenUsage,
     pub(super) activity_frame: usize,
     pub(super) prompt: PromptState,
     pub(super) copy_buffer: Option<String>,
@@ -71,6 +72,7 @@ impl NeoChromeState {
             model_label: model_label.into(),
             workspace_root: workspace_root.into(),
             context_window: None,
+            main_agent_token_usage: MainAgentTokenUsage::default(),
             activity_frame: 0,
             prompt: PromptState::default(),
             copy_buffer: None,
@@ -131,6 +133,27 @@ impl NeoChromeState {
     #[must_use]
     pub fn context_window_label(&self) -> Option<String> {
         self.context_window.map(ContextWindow::label)
+    }
+
+    pub fn add_main_agent_token_usage(&mut self, usage: neo_agent_core::AgentTokenUsage) {
+        self.main_agent_token_usage.add(usage);
+    }
+
+    #[must_use]
+    pub const fn main_agent_token_usage(&self) -> MainAgentTokenUsage {
+        self.main_agent_token_usage
+    }
+
+    #[must_use]
+    pub fn footer_context_usage_label(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(context) = self.context_window_label() {
+            parts.push(context);
+        }
+        if let Some(usage) = self.main_agent_token_usage.label() {
+            parts.push(usage);
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     #[must_use]

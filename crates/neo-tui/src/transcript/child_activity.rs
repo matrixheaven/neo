@@ -52,6 +52,22 @@ pub fn format_token_count(tokens: usize) -> String {
 }
 
 #[must_use]
+pub fn format_cache_token_usage(snapshot: &AgentSnapshot) -> Option<String> {
+    let read = snapshot.cache_read_token_count;
+    let write = snapshot.cache_write_token_count;
+    match (read, write) {
+        (0, 0) => None,
+        (read, 0) => Some(format!("cache {} read", format_token_count(read))),
+        (0, write) => Some(format!("cache {} write", format_token_count(write))),
+        (read, write) => Some(format!(
+            "cache {} read / {} write",
+            format_token_count(read),
+            format_token_count(write)
+        )),
+    }
+}
+
+#[must_use]
 pub fn can_detach(snapshot: &AgentSnapshot) -> bool {
     snapshot.state == AgentLifecycleState::Running
         && snapshot.mode == AgentRunMode::Foreground

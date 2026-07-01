@@ -6,9 +6,9 @@ use neo_agent_core::multi_agent::{
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed, format_elapsed,
-    format_token_count, one_line, render_child_body, render_child_final, render_child_thinking,
-    render_child_tool_row, role_label,
+    MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed,
+    format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
+    render_child_final, render_child_thinking, render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,11 +146,11 @@ impl SwarmCardComponent {
                     Span::raw("] "),
                     Span::styled(
                         format!(
-                            " {} · {} tools · {} · {} tok · {}",
+                            " {} · {} tools · {} · {} · {}",
                             state_label(child.agent.state),
                             child.agent.tool_count,
                             format_elapsed(elapsed.as_secs()),
-                            format_token_count(child.agent.token_count),
+                            child_token_stats(&child.agent),
                             child_activity_summary(&child.agent, &child.item),
                         ),
                         primary,
@@ -225,11 +225,11 @@ impl SwarmCardComponent {
                         Span::styled(format!("[{}]", role_label(child.agent.role)), muted),
                         Span::styled(
                             format!(
-                                "  {} · {} · {} tools · {} tok",
+                                "  {} · {} · {} tools · {}",
                                 state_label(child.agent.state),
                                 format_elapsed(elapsed.as_secs()),
                                 child.agent.tool_count,
-                                format_token_count(child.agent.token_count),
+                                child_token_stats(&child.agent),
                             ),
                             primary,
                         ),
@@ -364,6 +364,14 @@ fn compact_progress_meter(progress: f32, width: usize) -> String {
     let width = width.max(1);
     let filled = ((progress.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
     format!("{}{}", "■".repeat(filled), "·".repeat(width - filled))
+}
+
+fn child_token_stats(agent: &AgentSnapshot) -> String {
+    let mut parts = vec![format!("{} tok", format_token_count(agent.token_count))];
+    if let Some(cache) = format_cache_token_usage(agent) {
+        parts.push(cache);
+    }
+    parts.join(" · ")
 }
 
 fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str) -> String {

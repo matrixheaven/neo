@@ -369,6 +369,82 @@ fn app_shell_updates_context_usage_from_agent_event() {
 }
 
 #[test]
+fn app_shell_footer_shows_main_agent_token_usage_and_cache() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+        turn: 1,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 40_800,
+            output_tokens: 1_234,
+            input_cache_read_tokens: 37_200,
+            input_cache_write_tokens: 1_100,
+        },
+    });
+
+    let footer = render_app(140, &app)
+        .into_iter()
+        .find(|line| line.contains("ctx "))
+        .expect("footer contains context usage");
+
+    assert!(footer.contains("ctx 12k/200k"));
+    assert!(footer.contains("↑40.8k"));
+    assert!(footer.contains("↓1.2k"));
+    assert!(footer.contains("cache 37.2k read / 1.1k write"));
+}
+
+#[test]
+fn app_shell_footer_omits_cache_segment_when_main_agent_cache_is_zero() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+        turn: 1,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 40_800,
+            output_tokens: 1_234,
+            input_cache_read_tokens: 0,
+            input_cache_write_tokens: 0,
+        },
+    });
+
+    let footer = render_app(140, &app)
+        .into_iter()
+        .find(|line| line.contains("ctx "))
+        .expect("footer contains context usage");
+
+    assert!(footer.contains("↑40.8k"));
+    assert!(footer.contains("↓1.2k"));
+    assert!(!footer.contains("cache"));
+}
+
+#[test]
+fn app_shell_footer_keeps_context_usage_within_narrow_width() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(190_000)));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+        turn: 1,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 400_800,
+            output_tokens: 10_234,
+            input_cache_read_tokens: 370_200,
+            input_cache_write_tokens: 101_100,
+        },
+    });
+
+    let lines = render_app(40, &app);
+
+    assert!(
+        lines
+            .iter()
+            .all(|line| neo_tui::primitive::visible_width(line) <= 38),
+        "footer should not exceed frame content width: {lines:?}"
+    );
+}
+
+#[test]
 fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.push_overlay(Overlay::new(

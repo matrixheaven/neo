@@ -114,6 +114,47 @@ fn agent_snapshot_records_timestamps_detach_origin_and_terminal_reason() {
 }
 
 #[test]
+fn agent_snapshot_records_run_metadata_and_resume_origin() {
+    let runtime = MultiAgentRuntime::new();
+    let first = runtime.start_foreground_delegate_for_test("inspect mvcc");
+
+    assert_eq!(first.run_count, 1);
+    assert_eq!(first.live_messages_received, 0);
+    assert_eq!(first.previous_status, None);
+    assert_eq!(first.resumed_from, None);
+
+    let completed = runtime.complete_delegate_for_test(&first.id, "mvcc summary");
+    assert_eq!(completed.state, AgentLifecycleState::Completed);
+
+    let request = neo_agent_core::multi_agent::DelegateRequest {
+        task: "continue with wraparound".to_owned(),
+        resume: Some(first.id.as_str().to_owned()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: neo_agent_core::multi_agent::DelegateContext::Inherit,
+    };
+    let resumed = runtime
+        .start_resume_delegate(first.id.as_str(), &request)
+        .expect("completed agent can be resumed");
+
+    assert_eq!(resumed.run_count, 2);
+    assert_eq!(resumed.live_messages_received, 0);
+    assert_eq!(
+        resumed.previous_status,
+        Some(AgentLifecycleState::Completed)
+    );
+    assert_eq!(
+        resumed
+            .resumed_from
+            .as_ref()
+            .map(neo_agent_core::multi_agent::AgentId::as_str),
+        Some(first.id.as_str())
+    );
+    assert_eq!(resumed.state, AgentLifecycleState::Running);
+}
+
+#[test]
 fn background_terminal_reason_records_lost_without_claiming_completion() {
     let runtime = MultiAgentRuntime::new();
     let snapshot = runtime.start_foreground_delegate_for_test("background work");
@@ -325,6 +366,8 @@ async fn delegate_emits_foreground_events() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 11,
                     output_tokens: 7,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 }),
             },
         ],
@@ -407,6 +450,8 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 13,
                     output_tokens: 5,
+                    input_cache_read_tokens: 9,
+                    input_cache_write_tokens: 2,
                 }),
             },
         ],
@@ -476,6 +521,8 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
     assert_eq!(finished_agent.0, 1);
     assert_eq!(finished_agent.1.tool_count, 0);
     assert_eq!(finished_agent.1.token_count, 18);
+    assert_eq!(finished_agent.1.cache_read_token_count, 9);
+    assert_eq!(finished_agent.1.cache_write_token_count, 2);
     assert_eq!(
         finished_agent.1.latest_text.as_deref(),
         Some("queue is safe")
@@ -539,6 +586,8 @@ async fn delegate_streams_child_activity_updates_before_finish() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 20,
                     output_tokens: 5,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 }),
             },
         ],
@@ -1398,6 +1447,16 @@ async fn delegate_resume_reuses_agent_identity_and_role() {
             .and_then(serde_json::Value::as_str),
         Some("explorer")
     );
+    assert_eq!(details["run_index"], 2);
+    assert_eq!(details["run_count"], 2);
+    assert_eq!(details["resumed_from"], agent_id.as_str());
+    assert_eq!(details["previous_status"], "completed");
+    assert_eq!(details["summary_scope"], "current_run");
+    assert!(
+        second.content.contains("previous_status: completed"),
+        "{}",
+        second.content
+    );
     assert!(
         second.content.contains("status: completed"),
         "{}",
@@ -1405,19 +1464,303 @@ async fn delegate_resume_reuses_agent_identity_and_role() {
     );
 }
 
+#[tokio::test]
+async fn delegate_result_details_include_canonical_run_fields() {
+    let (registry, ctx) = registry_with_multi_agent();
+
+    let result = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "inspect result contract",
+                "title": "Result contract",
+                "context": "summary",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+
+    let details = result.details.as_ref().expect("delegate details");
+    assert_eq!(details["kind"], "delegate");
+    assert_eq!(details["mode"], "foreground");
+    assert_eq!(details["status"], "completed");
+    assert_eq!(details["title"], "Result contract");
+    assert_eq!(details["context_mode"], "summary");
+    assert_eq!(details["summary_scope"], "current_run");
+    assert_eq!(details["run_index"], 1);
+    assert_eq!(details["run_count"], 1);
+    assert!(details["created_at_ms"].as_u64().is_some(), "{details}");
+    assert!(details["started_at_ms"].as_u64().is_some(), "{details}");
+    assert!(details["terminal_at_ms"].as_u64().is_some(), "{details}");
+    assert!(details["elapsed_ms"].as_u64().is_some(), "{details}");
+    assert!(details["tool_count"].as_u64().is_some(), "{details}");
+    assert!(details["token_count"].as_u64().is_some(), "{details}");
+    assert!(
+        details.get("agent").is_none(),
+        "old nested agent field should be gone: {details}"
+    );
+}
+
+#[tokio::test]
+async fn message_delegate_terminal_agent_error_explains_resume_without_immutable_confusion() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let first = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "finish then reject live message",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+    let agent_id = first
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("agent id")
+        .to_owned();
+
+    let result = registry
+        .run(
+            "MessageDelegate",
+            &ctx,
+            serde_json::json!({
+                "id": agent_id,
+                "message": "add one more note"
+            }),
+        )
+        .await
+        .expect("message tool should return an error result");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("cannot receive live messages"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Delegate with resume"),
+        "{}",
+        result.content
+    );
+    assert!(
+        !result
+            .content
+            .contains("terminal delegate state is immutable"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn list_delegates_defaults_to_meta_only_rows_with_title() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let _ = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "long prompt body that should not appear in default list",
+                "title": "Short title",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+
+    let result = registry
+        .run(
+            "ListDelegates",
+            &ctx,
+            serde_json::json!({
+                "include_completed": true,
+                "kind": "agent"
+            }),
+        )
+        .await
+        .expect("list should succeed");
+
+    let details = result.details.as_ref().expect("list details");
+    assert_eq!(details["include"], serde_json::json!(["meta"]));
+    let row = details["delegates"][0].as_object().expect("first row");
+    assert_eq!(row["title"], "Short title");
+    assert!(row.get("task").is_none(), "{row:#?}");
+    assert!(row.get("summary").is_none(), "{row:#?}");
+    assert!(
+        !result.content.contains("long prompt body"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn list_delegates_rejects_cursor_reused_with_different_query() {
+    let (registry, ctx) = registry_with_multi_agent();
+    for index in 0..4 {
+        let _ = registry
+            .run(
+                "Delegate",
+                &ctx,
+                serde_json::json!({
+                    "task": format!("task {index}"),
+                    "mode": "foreground"
+                }),
+            )
+            .await
+            .expect("delegate should complete");
+    }
+
+    let first_page = registry
+        .run(
+            "ListDelegates",
+            &ctx,
+            serde_json::json!({
+                "include_completed": true,
+                "state": "completed",
+                "order": "oldest",
+                "limit": 2
+            }),
+        )
+        .await
+        .expect("first page should succeed");
+    let cursor = first_page.details.as_ref().unwrap()["next_cursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_owned();
+
+    let mismatched = registry
+        .run(
+            "ListDelegates",
+            &ctx,
+            serde_json::json!({
+                "include_completed": true,
+                "order": "oldest",
+                "limit": 2,
+                "cursor": cursor
+            }),
+        )
+        .await;
+
+    let err = mismatched.expect_err("mismatched cursor should be rejected");
+    assert!(
+        err.to_string().contains("different ListDelegates query"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let foreground = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "shape check",
+                "items": ["a", "b"],
+                "prompt_template": "Inspect {{item}}",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("foreground swarm should complete");
+    let swarm_id = foreground.details.as_ref().unwrap()["swarm_id"]
+        .as_str()
+        .expect("swarm id")
+        .to_owned();
+
+    let waited = registry
+        .run("WaitDelegate", &ctx, serde_json::json!({ "id": swarm_id }))
+        .await
+        .expect("wait should read completed swarm");
+    let output = registry
+        .run(
+            "TaskOutput",
+            &ctx,
+            serde_json::json!({ "task_id": swarm_id }),
+        )
+        .await
+        .expect("task output should read completed swarm");
+
+    let foreground_details = foreground.details.as_ref().unwrap();
+    let waited_details = waited.details.as_ref().unwrap();
+    let output_details = output.details.as_ref().unwrap();
+
+    for details in [foreground_details, waited_details, output_details] {
+        assert_eq!(details["kind"], "delegate_swarm");
+        assert_eq!(details["summary_scope"], "swarm_items");
+        assert!(
+            details["aggregate"]["total"].as_u64().is_some(),
+            "{details}"
+        );
+        assert!(details["items"][0]["name"].as_str().is_some(), "{details}");
+        assert!(
+            details["items"][0]["elapsed_ms"].as_u64().is_some(),
+            "{details}"
+        );
+        assert!(
+            details["items"][0]["tool_count"].as_u64().is_some(),
+            "{details}"
+        );
+        assert!(
+            details["items"][0]["token_count"].as_u64().is_some(),
+            "{details}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wait_delegate_timeout_preserves_running_status_with_wait_timed_out_outcome() {
+    let runtime = MultiAgentRuntime::new();
+    let running = runtime.start_foreground_delegate_for_test("still running");
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path())
+        .unwrap()
+        .with_multi_agent(runtime);
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry
+        .run(
+            "WaitDelegate",
+            &ctx,
+            serde_json::json!({
+                "id": running.id.as_str(),
+                "timeout_ms": 1
+            }),
+        )
+        .await
+        .expect("wait should return timeout result");
+
+    let details = result.details.as_ref().expect("wait details");
+    assert_eq!(details["kind"], "delegate_wait");
+    assert_eq!(details["outcome"], "wait_timed_out");
+    assert_eq!(details["status"], "running");
+    assert_eq!(details["id"], running.id.as_str());
+}
+
 #[test]
-fn delegate_and_message_descriptions_explain_resume_and_live_followup() {
+fn multi_agent_tool_descriptions_explain_contract_without_docs() {
     let registry = ToolRegistry::with_builtin_tools_and_todos(Arc::new(Mutex::new(Vec::new())));
     let specs = registry.specs();
-    let delegate = specs
-        .iter()
-        .find(|spec| spec.name == "Delegate")
-        .expect("Delegate spec registered");
-    let message = specs
-        .iter()
-        .find(|spec| spec.name == "MessageDelegate")
-        .expect("MessageDelegate spec registered");
 
+    let spec = |name: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("{name} spec registered"))
+    };
+
+    let delegate = spec("Delegate");
+    assert!(
+        delegate.description.contains("Default mode is foreground"),
+        "{}",
+        delegate.description
+    );
     assert!(
         delegate.description.contains("resume"),
         "{}",
@@ -1429,7 +1772,24 @@ fn delegate_and_message_descriptions_explain_resume_and_live_followup() {
         delegate.description
     );
     assert!(
-        message.description.contains("running"),
+        delegate.description.contains("context"),
+        "{}",
+        delegate.description
+    );
+
+    let message = spec("MessageDelegate");
+    assert!(
+        message.description.contains("live"),
+        "{}",
+        message.description
+    );
+    assert!(
+        message.description.contains("agent or swarm"),
+        "{}",
+        message.description
+    );
+    assert!(
+        message.description.contains("running children"),
         "{}",
         message.description
     );
@@ -1437,6 +1797,58 @@ fn delegate_and_message_descriptions_explain_resume_and_live_followup() {
         message.description.contains("Delegate with resume"),
         "{}",
         message.description
+    );
+
+    let list = spec("ListDelegates");
+    assert!(
+        list.description.contains("active-only"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.description.contains("meta-only"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.description.contains("include_completed=true"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.description.contains("same query"),
+        "{}",
+        list.description
+    );
+
+    let wait = spec("WaitDelegate");
+    assert!(
+        wait.description.contains("wait_timed_out"),
+        "{}",
+        wait.description
+    );
+    assert!(
+        wait.description
+            .contains("delegate itself reached timed_out"),
+        "{}",
+        wait.description
+    );
+
+    let swarm = spec("DelegateSwarm");
+    assert!(
+        swarm.description.contains("foreground"),
+        "{}",
+        swarm.description
+    );
+    assert!(
+        swarm.description.contains("WaitDelegate"),
+        "{}",
+        swarm.description
+    );
+    assert!(
+        swarm.description.contains("TaskOutput"),
+        "{}",
+        swarm.description
     );
 }
 

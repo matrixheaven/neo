@@ -28,8 +28,14 @@ fn running_delegate() -> AgentSnapshot {
         terminal_at_ms: None,
         detached_from_foreground: false,
         terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
         latest_text: Some("Let me start by reading the current file.".to_owned()),
         activity: vec![
@@ -86,8 +92,14 @@ fn option_b_delegate(
         terminal_at_ms: state.is_terminal().then_some(31_000),
         detached_from_foreground: false,
         terminal_reason: terminal_reason_for_state(state),
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),
         latest_text: None,
         activity: Vec::new(),
@@ -1307,6 +1319,42 @@ fn swarm_card_renders_progress_percent() {
 }
 
 #[test]
+fn swarm_card_renders_child_cache_usage_when_reported() {
+    use neo_agent_core::multi_agent::{AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot};
+
+    let child = AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        token_count: 40_800,
+        cache_read_token_count: 37_200,
+        cache_write_token_count: 1_100,
+        ..running_delegate()
+    };
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "cached child".to_owned(),
+        agent: child,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
+    let snapshot = SwarmSnapshot {
+        swarm_id: "swarm-cache".to_owned(),
+        description: "Cache test".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: 1,
+        aggregate,
+        children,
+    };
+    let mut card = SwarmCardComponent::new(snapshot);
+
+    let rows = plain(card.render(140));
+    let text = rows.join("\n");
+
+    assert!(text.contains("40.8k tok"), "{text}");
+    assert!(text.contains("cache 37.2k read / 1.1k write"), "{text}");
+}
+
+#[test]
 fn swarm_card_renders_suspended_rate_limit() {
     use neo_agent_core::multi_agent::{AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot};
 
@@ -1383,8 +1431,14 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         terminal_at_ms: state.is_terminal().then_some(2),
                         detached_from_foreground: false,
                         terminal_reason: terminal_reason_for_state(state),
+                        run_count: 1,
+                        live_messages_received: 0,
+                        previous_status: None,
+                        resumed_from: None,
                         tool_count: 0,
                         token_count: 0,
+                        cache_read_token_count: 0,
+                        cache_write_token_count: 0,
                         elapsed: Duration::from_secs(0),
                         latest_text: None,
                         activity: Vec::new(),

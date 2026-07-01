@@ -429,6 +429,8 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 4,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 })
             },
         ]
@@ -499,6 +501,8 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 4,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 }),
             },
         ]
@@ -1469,14 +1473,21 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
         json!({
             "type": "message_delta",
             "delta": { "stop_reason": "tool_use" },
-            "usage": { "input_tokens": 11, "output_tokens": 3 }
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "cache_read_input_tokens": 8,
+                "cache_creation_input_tokens": 2
+            }
         }),
         json!({ "type": "message_stop" }),
     ])]);
     let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.session_id = Some("session-anthropic".to_owned());
 
     let events = client
-        .stream_chat(request(ApiKind::AnthropicMessages))
+        .stream_chat(request)
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1513,6 +1524,8 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 11,
                     output_tokens: 3,
+                    input_cache_read_tokens: 8,
+                    input_cache_write_tokens: 2,
                 })
             },
         ]
@@ -1523,6 +1536,10 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     assert_eq!(sent.path, "/messages");
     assert_eq!(sent.headers.get("x-api-key").unwrap(), "test-key");
     assert_eq!(sent.headers.get("anthropic-version").unwrap(), "2023-06-01");
+    assert_eq!(
+        sent.body["metadata"],
+        json!({ "user_id": "session-anthropic" })
+    );
     assert_eq!(sent.body["model"], "model-test");
     assert_eq!(sent.body["stream"], true);
     assert_eq!(sent.body["max_tokens"], 64);
@@ -1959,6 +1976,8 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 4,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 })
             },
         ]

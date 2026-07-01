@@ -334,6 +334,10 @@ pub struct ChatRequest {
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub input_cache_read_tokens: u32,
+    #[serde(default)]
+    pub input_cache_write_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

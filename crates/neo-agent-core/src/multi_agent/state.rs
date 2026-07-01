@@ -119,8 +119,16 @@ pub struct AgentSnapshot {
     pub terminal_at_ms: Option<u64>,
     pub detached_from_foreground: bool,
     pub terminal_reason: Option<AgentTerminalReason>,
+    pub run_count: usize,
+    pub live_messages_received: usize,
+    pub previous_status: Option<AgentLifecycleState>,
+    pub resumed_from: Option<AgentId>,
     pub tool_count: usize,
     pub token_count: usize,
+    #[serde(default)]
+    pub cache_read_token_count: usize,
+    #[serde(default)]
+    pub cache_write_token_count: usize,
     pub elapsed: Duration,
     pub latest_text: Option<String>,
     #[serde(default)]

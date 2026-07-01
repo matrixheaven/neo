@@ -5,9 +5,9 @@ use neo_agent_core::multi_agent::{AgentLifecycleState, AgentRunMode, AgentSnapsh
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed, format_elapsed,
-    format_token_count, render_child_body, render_child_final, render_child_thinking,
-    render_child_tool_row, role_label,
+    MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
+    format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
+    render_child_final, render_child_thinking, render_child_tool_row, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +253,9 @@ fn format_stats(agent: &AgentSnapshot, now_ms: Option<u64>) -> String {
     }
     if agent.token_count > 0 {
         parts.push(format!("{} tok", format_token_count(agent.token_count)));
+    }
+    if let Some(cache) = format_cache_token_usage(agent) {
+        parts.push(cache);
     }
     if parts.is_empty() {
         String::new()

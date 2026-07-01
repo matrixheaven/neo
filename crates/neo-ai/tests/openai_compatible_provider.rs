@@ -194,7 +194,11 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
                 },
                 "finish_reason": "tool_calls"
             }],
-            "usage": { "prompt_tokens": 7, "completion_tokens": 5 }
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 4 }
+            }
         }),
     ])]);
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
@@ -292,6 +296,8 @@ fn expected_tool_events() -> Vec<AiStreamEvent> {
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: 7,
                 output_tokens: 5,
+                input_cache_read_tokens: 4,
+                input_cache_write_tokens: 0,
             }),
         },
     ]

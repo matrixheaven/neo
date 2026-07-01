@@ -16,6 +16,10 @@ pub enum ShellCommandOrigin {
 pub struct AgentTokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub input_cache_read_tokens: u32,
+    #[serde(default)]
+    pub input_cache_write_tokens: u32,
 }
 
 impl From<neo_ai::TokenUsage> for AgentTokenUsage {
@@ -23,6 +27,8 @@ impl From<neo_ai::TokenUsage> for AgentTokenUsage {
         Self {
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
+            input_cache_read_tokens: value.input_cache_read_tokens,
+            input_cache_write_tokens: value.input_cache_write_tokens,
         }
     }
 }

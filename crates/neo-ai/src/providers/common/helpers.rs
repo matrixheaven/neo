@@ -18,10 +18,58 @@ pub(crate) fn token_usage_from(
     input_key: &str,
     output_key: &str,
 ) -> Option<TokenUsage> {
+    let input_cache_read_tokens = token_count_from_any(
+        value,
+        &[
+            "cache_read_input_tokens",
+            "input_cache_read",
+            "input_cache_read_tokens",
+            "cache_read_tokens",
+        ],
+        &[
+            ("input_tokens_details", "cached_tokens"),
+            ("input_tokens_details", "cache_read_tokens"),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("prompt_tokens_details", "cache_read_tokens"),
+        ],
+    );
+    let input_cache_write_tokens = token_count_from_any(
+        value,
+        &[
+            "cache_creation_input_tokens",
+            "input_cache_creation",
+            "input_cache_write_tokens",
+            "cache_write_tokens",
+        ],
+        &[
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+        ],
+    );
     Some(TokenUsage {
         input_tokens: u32::try_from(value.get(input_key)?.as_u64()?).ok()?,
         output_tokens: u32::try_from(value.get(output_key)?.as_u64()?).ok()?,
+        input_cache_read_tokens,
+        input_cache_write_tokens,
     })
+}
+
+fn token_count_from_any(value: &Value, direct_keys: &[&str], nested_keys: &[(&str, &str)]) -> u32 {
+    direct_keys
+        .iter()
+        .find_map(|key| token_count(value.get(*key)))
+        .or_else(|| {
+            nested_keys.iter().find_map(|(parent, key)| {
+                value
+                    .get(*parent)
+                    .and_then(|details| token_count(details.get(*key)))
+            })
+        })
+        .unwrap_or(0)
+}
+
+fn token_count(value: Option<&Value>) -> Option<u32> {
+    u32::try_from(value?.as_u64()?).ok()
 }
 
 /// Reject image content parts in non-user messages.

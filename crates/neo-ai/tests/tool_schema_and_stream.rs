@@ -116,6 +116,8 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 2,
                     output_tokens: 3,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
                 })
             },
         ]

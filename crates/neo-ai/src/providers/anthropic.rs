@@ -143,8 +143,11 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     } else if let Some(temperature) = request.options.temperature {
         body["temperature"] = json!(rounded_f64(temperature));
     }
-    if !request.options.metadata.is_empty()
-        && let Some(user_id) = request.options.metadata.get("user_id")
+    if let Some(user_id) = request
+        .options
+        .metadata
+        .get("user_id")
+        .or(request.options.session_id.as_deref())
     {
         body["metadata"] = json!({ "user_id": user_id });
     }

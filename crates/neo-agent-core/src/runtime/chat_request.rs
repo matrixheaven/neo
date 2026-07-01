@@ -12,9 +12,6 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt).to_chat_message());
     }
-    if let Some(tool_schema_catalog) = tool_schema_catalog_message(&config.tools) {
-        messages.push(tool_schema_catalog.to_chat_message());
-    }
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
@@ -71,6 +68,7 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
             max_tokens: config.max_tokens,
             reasoning_effort: config.reasoning_effort,
             replay_reasoning: config.replay_reasoning,
+            session_id: prompt_cache_key(config),
             ..RequestOptions::default()
         },
     }
@@ -93,14 +91,14 @@ fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     )))
 }
 
-fn tool_schema_catalog_message(tools: &[neo_ai::ToolSpec]) -> Option<AgentMessage> {
-    if tools.is_empty() {
-        return None;
-    }
-    let catalog = serde_json::to_string(tools).expect("tool specs should serialize");
-    Some(AgentMessage::system_text(format!(
-        "<available_tools_schema>\n{catalog}\n</available_tools_schema>\n\nUse these exact tool names and JSON schemas when calling tools. Do not invent alternate parameters, aliases, or simplified payloads."
-    )))
+fn prompt_cache_key(config: &AgentConfig) -> Option<String> {
+    config
+        .session_directory
+        .as_ref()?
+        .file_name()?
+        .to_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn without_reasoning_content(message: ChatMessage) -> ChatMessage {
@@ -228,40 +226,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_request_injects_complete_tool_schema_catalog_into_system_context() {
+    async fn chat_request_sends_tools_without_duplicate_system_schema_catalog() {
         let tools = ToolRegistry::with_builtin_tools().specs();
         let config = AgentConfig::for_model(tool_model())
             .with_system_prompt("Base system")
-            .with_tools(tools);
+            .with_tools(tools.clone());
         let context = AgentContext::new();
 
         let request = chat_request(&config, &context).await;
         let system_text = system_texts(&request);
 
         assert!(
-            system_text.contains("<available_tools_schema>"),
+            !system_text.contains("<available_tools_schema>"),
             "{system_text}"
         );
-        assert!(
-            system_text.contains("\"name\":\"Delegate\""),
-            "{system_text}"
-        );
-        assert!(
-            system_text.contains("\"name\":\"DelegateSwarm\""),
-            "{system_text}"
-        );
-        assert!(system_text.contains("\"prompt_template\""), "{system_text}");
-        assert!(system_text.contains("\"max_concurrency\""), "{system_text}");
-        assert!(
-            system_text.contains("\"name\":\"TodoList\""),
-            "{system_text}"
-        );
-        assert!(system_text.contains("\"todos\""), "{system_text}");
-        assert!(
-            system_text.contains("\"name\":\"TaskList\""),
-            "{system_text}"
-        );
-        assert!(system_text.contains("\"active_only\""), "{system_text}");
+        assert_eq!(request.tools, tools);
     }
 
     #[tokio::test]
@@ -277,5 +256,19 @@ mod tests {
             "{system_text}"
         );
         assert!(request.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_request_uses_session_directory_name_as_prompt_cache_key() {
+        let config = AgentConfig::for_model(tool_model())
+            .with_session_directory("/tmp/neo/session_00000000-0000-4000-8000-000000000123");
+        let context = AgentContext::new();
+
+        let request = chat_request(&config, &context).await;
+
+        assert_eq!(
+            request.options.session_id.as_deref(),
+            Some("session_00000000-0000-4000-8000-000000000123")
+        );
     }
 }

@@ -21,7 +21,7 @@ pub use approval::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ApprovalRequestModal, ApprovalResult,
 };
 pub use command_palette::{CommandPaletteState, CommandSpec};
-pub use context::ContextWindow;
+pub use context::{ContextWindow, MainAgentTokenUsage};
 pub use image_cache::InlineImageRenderCache;
 pub use overlay::{Overlay, OverlayId, OverlayKind};
 pub use pending_input::PendingInputState;

@@ -1127,6 +1127,7 @@ impl Tool for TaskOutputTool {
          - By default this tool is non-blocking and returns a current status/output snapshot.\n\
          - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
          - This tool returns structured task metadata and an output preview.\n\
+         - For delegate agent IDs and swarm IDs, this tool returns the canonical multi-agent result shape used by Delegate, DelegateSwarm, and WaitDelegate.\n\
          - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
          - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
          Return fields:\n\
@@ -1171,26 +1172,8 @@ impl Tool for TaskOutputTool {
                         child.agent.state.as_str(),
                     ));
                 }
-                let items: Vec<serde_json::Value> = swarm
-                    .children
-                    .iter()
-                    .map(|child| {
-                        serde_json::json!({
-                            "index": child.item_index,
-                            "item": child.item,
-                            "agent_id": child.agent.id.as_str(),
-                            "status": child.agent.state.as_str(),
-                            "summary": child.agent.outcome.as_ref().map(|o| o.summary.clone()),
-                        })
-                    })
-                    .collect();
-                return Ok(ToolResult::ok(content).with_details(serde_json::json!({
-                    "kind": "swarm",
-                    "swarm_id": swarm.swarm_id,
-                    "status": swarm.state.as_str(),
-                    "aggregate": swarm.aggregate,
-                    "items": items,
-                })));
+                return Ok(ToolResult::ok(content)
+                    .with_details(super::multi_agent_format::swarm_details(&swarm)));
             }
 
             ctx.background_tasks
