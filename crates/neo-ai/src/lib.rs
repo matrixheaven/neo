@@ -9,6 +9,7 @@ pub mod providers;
 pub mod reasoning;
 pub mod registry;
 pub mod stream;
+pub mod tool_assembly;
 pub mod tool_schema;
 pub mod types;
 

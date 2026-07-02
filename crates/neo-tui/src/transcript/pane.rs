@@ -284,7 +284,8 @@ impl TranscriptPane {
                         turn: 0,
                         id: tool_call.id.clone(),
                         name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.clone(),
+                        arguments: serde_json::from_str(&tool_call.raw_arguments)
+                            .unwrap_or_default(),
                     });
                 }
             }

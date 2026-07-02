@@ -439,7 +439,7 @@ impl TranscriptPane {
     }
 
     fn finish_tool_call(&mut self, turn: u32, tool_call: AgentToolCall) {
-        let arguments = tool_call.arguments.to_string();
+        let arguments = tool_call.raw_arguments.clone();
         self.streaming_tool_args
             .insert(tool_call.id.clone(), arguments.clone());
         self.remember_tool_call(turn, &tool_call.id, &tool_call.name);

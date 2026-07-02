@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
@@ -7,6 +5,7 @@ use crate::providers::common::error::{ProviderError, parse_retry_after};
 use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
+use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
     StopReason, TokenUsage, ToolSpec,
@@ -178,7 +177,7 @@ fn tool_call_body(tool_call: &crate::ToolCall) -> Value {
         "type": "function",
         "function": {
             "name": tool_call.name,
-            "arguments": tool_call.arguments.to_string(),
+            "arguments": tool_call.raw_arguments,
         },
     })
 }
@@ -411,8 +410,7 @@ fn sse_payloads(body: &str) -> impl Iterator<Item = String> + '_ {
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,
-    tool_args: BTreeMap<String, String>,
-    tool_index_ids: BTreeMap<u64, String>,
+    tool_calls: StreamingToolCallAssembler,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     saw_finish_reason: bool,
@@ -424,8 +422,7 @@ impl Default for ParseState {
         Self {
             events: Vec::new(),
             started: false,
-            tool_args: BTreeMap::new(),
-            tool_index_ids: BTreeMap::new(),
+            tool_calls: StreamingToolCallAssembler::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             saw_finish_reason: false,
@@ -502,35 +499,47 @@ impl ParseState {
     }
 
     fn ingest_tool_call(&mut self, tool_call: &Value) {
-        let index = tool_call
-            .get("index")
-            .and_then(Value::as_u64)
-            .unwrap_or(self.tool_index_ids.len() as u64);
-        let existing_id = self.tool_index_ids.get(&index).cloned();
-        let id = tool_call
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or(existing_id)
-            .unwrap_or_else(|| format!("tool-{index}"));
-        self.tool_index_ids.insert(index, id.clone());
-
         let function = tool_call.get("function").unwrap_or(&Value::Null);
-        if let Some(name) = function.get("name").and_then(Value::as_str) {
-            self.events.push(AiStreamEvent::ToolCallStart {
-                id: id.clone(),
-                name: name.to_owned(),
-            });
-        }
-        if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
-            let arguments = self.tool_args.entry(id.clone()).or_default();
-            if let Some(delta) = merge_tool_argument_fragment(arguments, fragment) {
-                self.events.push(AiStreamEvent::ToolCallArgsDelta {
-                    id,
-                    json_fragment: delta,
+        let chunk = ToolCallChunk {
+            index: tool_call.get("index").and_then(Value::as_u64),
+            id: tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            name: function
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            arguments_fragment: function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        match self.tool_calls.ingest(chunk) {
+            Ok(events) => self.push_tool_events(events),
+            Err(err) => {
+                self.last_stop_reason = StopReason::Error;
+                self.saw_finish_reason = true;
+                self.events.push(AiStreamEvent::Error {
+                    message: err.to_string(),
                 });
             }
         }
+    }
+
+    fn push_tool_events(&mut self, events: Vec<ToolCallAssemblyEvent>) {
+        self.events
+            .extend(events.into_iter().map(|event| match event {
+                ToolCallAssemblyEvent::Start { id, name } => {
+                    AiStreamEvent::ToolCallStart { id, name }
+                }
+                ToolCallAssemblyEvent::ArgsDelta { id, json_fragment } => {
+                    AiStreamEvent::ToolCallArgsDelta { id, json_fragment }
+                }
+                ToolCallAssemblyEvent::End { id, raw_arguments } => {
+                    AiStreamEvent::ToolCallEnd { id, raw_arguments }
+                }
+            }));
     }
 
     fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {
@@ -539,14 +548,11 @@ impl ParseState {
         }
         self.finished = true;
 
-        for (id, arguments) in &self.tool_args {
-            let parsed = serde_json::from_str(arguments)
-                .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
-            self.events.push(AiStreamEvent::ToolCallEnd {
-                id: id.clone(),
-                arguments: parsed,
-            });
-        }
+        let tool_events = self
+            .tool_calls
+            .finish_all()
+            .map_err(|err| ProviderError::Stream(err.to_string()))?;
+        self.push_tool_events(tool_events);
 
         if self.started {
             self.events.push(AiStreamEvent::MessageEnd {
@@ -557,27 +563,6 @@ impl ParseState {
 
         Ok(self.drain_events())
     }
-}
-
-fn merge_tool_argument_fragment(arguments: &mut String, fragment: &str) -> Option<String> {
-    if fragment.is_empty() {
-        return None;
-    }
-    if arguments.is_empty() {
-        arguments.push_str(fragment);
-        return Some(fragment.to_owned());
-    }
-    if fragment.starts_with(arguments.as_str()) {
-        let delta = fragment[arguments.len()..].to_owned();
-        arguments.clear();
-        arguments.push_str(fragment);
-        return (!delta.is_empty()).then_some(delta);
-    }
-    if arguments.starts_with(fragment) {
-        return None;
-    }
-    arguments.push_str(fragment);
-    Some(fragment.to_owned())
 }
 
 fn stop_reason(reason: &str) -> StopReason {
@@ -603,7 +588,7 @@ mod tests {
             tool_calls: vec![ToolCall {
                 id: "call_1".to_owned(),
                 name: "lookup".to_owned(),
-                arguments: json!({"query": "neo"}),
+                raw_arguments: r#"{"query":"neo"}"#.to_owned(),
             }],
         };
 

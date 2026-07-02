@@ -17,6 +17,7 @@ use super::permission::{
 };
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
 use super::skill_dispatch::execute_invoke_skill;
+use super::tool_arguments::prepare_tool_arguments;
 use crate::skills::SkillStore;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
@@ -65,6 +66,33 @@ pub(super) fn continues_after_terminating_batch(
     })
 }
 
+/// Parse raw arguments for every tool call up front, returning a vec of
+/// `(tool_call, parsed_arguments_or_error_result)`. Invalid arguments produce
+/// a `ToolResult` error that short-circuits execution for that call.
+fn prepare_tool_calls_for_execution<'a>(
+    tool_calls: &'a [AgentToolCall],
+    tool_specs: &[neo_ai::ToolSpec],
+) -> Vec<(
+    &'a AgentToolCall,
+    Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+)> {
+    tool_calls
+        .iter()
+        .map(|tool_call| {
+            let prepared = prepare_tool_arguments(tool_call, tool_specs);
+            if let Ok(ref parsed) = prepared {
+                if let Some(warning) = &parsed.warning {
+                    eprintln!(
+                        "[warn] tool call '{}' arguments repaired: {}",
+                        parsed.name, warning
+                    );
+                }
+            }
+            (tool_call, prepared)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_calls(
     config: &AgentConfig,
@@ -77,6 +105,9 @@ pub(super) async fn execute_tool_calls(
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
+    let tool_specs = registry.specs();
+    let prepared = prepare_tool_calls_for_execution(tool_calls, &tool_specs);
+
     if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
         return execute_tool_calls_sequential(
             config,
@@ -84,7 +115,7 @@ pub(super) async fn execute_tool_calls(
             Arc::clone(&registry),
             skills,
             turn,
-            tool_calls,
+            &prepared,
             emitter,
             cancel_token,
             process_supervisor,
@@ -92,9 +123,17 @@ pub(super) async fn execute_tool_calls(
         .await;
     }
 
-    if tool_calls.iter().any(|call| {
-        let prep = permission_preparation_for_mode(config, call);
-        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::BlockingDialog
+    if prepared.iter().any(|(tool_call, parsed)| {
+        let prep = match parsed {
+            Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
+            Err(_) => return false, // invalid args bypass scheduling — handled inline
+        };
+        scheduling_class_for_preparation(
+            config,
+            tool_call,
+            &prep,
+            parsed_prepared_arguments(parsed),
+        ) == ToolSchedulingClass::BlockingDialog
     }) {
         return execute_tool_calls_sequential(
             config,
@@ -102,7 +141,7 @@ pub(super) async fn execute_tool_calls(
             Arc::clone(&registry),
             skills,
             turn,
-            tool_calls,
+            &prepared,
             emitter,
             cancel_token,
             process_supervisor,
@@ -110,9 +149,17 @@ pub(super) async fn execute_tool_calls(
         .await;
     }
 
-    if tool_calls.iter().any(|call| {
-        let prep = permission_preparation_for_mode(config, call);
-        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::Exclusive
+    if prepared.iter().any(|(tool_call, parsed)| {
+        let prep = match parsed {
+            Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
+            Err(_) => return false,
+        };
+        scheduling_class_for_preparation(
+            config,
+            tool_call,
+            &prep,
+            parsed_prepared_arguments(parsed),
+        ) == ToolSchedulingClass::Exclusive
     }) {
         return execute_tool_calls_sequential(
             config,
@@ -120,7 +167,7 @@ pub(super) async fn execute_tool_calls(
             Arc::clone(&registry),
             skills,
             turn,
-            tool_calls,
+            &prepared,
             emitter,
             cancel_token,
             process_supervisor,
@@ -134,7 +181,7 @@ pub(super) async fn execute_tool_calls(
         registry,
         skills,
         turn,
-        tool_calls,
+        &prepared,
         emitter,
         cancel_token,
         process_supervisor,
@@ -142,15 +189,28 @@ pub(super) async fn execute_tool_calls(
     .await
 }
 
+/// Helper to extract the parsed arguments reference for scheduling decisions.
+fn parsed_prepared_arguments(
+    parsed: &Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+) -> &serde_json::Value {
+    match parsed {
+        Ok(prepared) => &prepared.arguments,
+        // Invalid args never reach scheduling (returned false above); this
+        // fallback is never used but must be valid.
+        Err(_) => &serde_json::Value::Null,
+    }
+}
+
 fn scheduling_class_for_preparation(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
     preparation: &PermissionPreparation,
+    arguments: &serde_json::Value,
 ) -> ToolSchedulingClass {
     if matches!(preparation, PermissionPreparation::Ask { .. }) {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(tool_call) {
+    if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(arguments) {
         return ToolSchedulingClass::BlockingDialog;
     }
     if tool_call.name == "ExitPlanMode"
@@ -171,9 +231,8 @@ fn scheduling_class_for_preparation(
     ToolSchedulingClass::ParallelSafe
 }
 
-pub(super) fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
-    tool_call
-        .arguments
+pub(super) fn ask_user_runs_in_background(arguments: &serde_json::Value) -> bool {
+    arguments
         .get("background")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
@@ -186,7 +245,10 @@ async fn execute_tool_calls_sequential(
     registry: Arc<ToolRegistry>,
     skills: Option<&SkillStore>,
     turn: u32,
-    tool_calls: &[AgentToolCall],
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
@@ -200,12 +262,27 @@ async fn execute_tool_calls_sequential(
         process_supervisor.clone(),
     )?;
     let mut results = Vec::new();
-    for tool_call in tool_calls {
+    for (tool_call, parsed) in prepared {
+        // Invalid arguments: emit a finished error without starting execution.
+        let prepared_call = match parsed {
+            Ok(prepared) => prepared,
+            Err(error_result) => {
+                let result = error_result.clone();
+                emitter.emit(AgentEvent::ToolExecutionFinished {
+                    turn,
+                    id: tool_call.id.clone(),
+                    name: tool_call.name.clone(),
+                    result: result.clone(),
+                });
+                results.push(((*tool_call).clone(), result));
+                continue;
+            }
+        };
         emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
+            arguments: prepared_call.arguments.clone(),
         });
         let mut result =
             if let Some(blocked) = before_tool_result(config, tool_call, cancel_token).await {
@@ -218,6 +295,7 @@ async fn execute_tool_calls_sequential(
                     &tool_context,
                     turn,
                     tool_call,
+                    &prepared_call.arguments,
                     emitter,
                     cancel_token,
                 )
@@ -227,14 +305,21 @@ async fn execute_tool_calls_sequential(
             result = after_tool_result(config, tool_call, result, cancel_token).await;
         }
         emit_shell_finished(turn, tool_call, &result, emitter);
-        emit_terminal_events(turn, tool_call, &result, &tool_context, emitter);
+        emit_terminal_events(
+            turn,
+            &prepared_call.arguments,
+            tool_call,
+            &result,
+            &tool_context,
+            emitter,
+        );
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
             result: result.clone(),
         });
-        results.push((tool_call.clone(), result));
+        results.push(((*tool_call).clone(), result));
         if cancel_token.is_cancelled() {
             break;
         }
@@ -249,7 +334,10 @@ async fn execute_tool_calls_parallel(
     registry: Arc<ToolRegistry>,
     skills: Option<&SkillStore>,
     turn: u32,
-    tool_calls: &[AgentToolCall],
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
@@ -262,57 +350,97 @@ async fn execute_tool_calls_parallel(
         cancel_token,
         process_supervisor.clone(),
     )?;
-    let mut completed = Vec::with_capacity(tool_calls.len());
+    let mut completed = Vec::with_capacity(prepared.len());
     let mut running = FuturesUnordered::new();
 
-    for (index, tool_call) in tool_calls.iter().cloned().enumerate() {
+    for (index, (tool_call, parsed)) in prepared.iter().cloned().enumerate() {
         if cancel_token.is_cancelled() {
             break;
         }
-        emitter.emit(AgentEvent::ToolExecutionStarted {
-            turn,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
-        });
-        if let Some(mut result) = before_tool_result(config, &tool_call, cancel_token).await {
-            if !cancel_token.is_cancelled() {
-                result = after_tool_result(config, &tool_call, result, cancel_token).await;
-            }
-            emit_shell_finished(turn, &tool_call, &result, emitter);
-            emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
-            emitter.emit(AgentEvent::ToolExecutionFinished {
-                turn,
-                id: tool_call.id.clone(),
-                name: tool_call.name.clone(),
-                result: result.clone(),
-            });
-            completed.push((index, tool_call, result));
-            continue;
-        }
 
-        let prepared = prepare_tool_call(config, &tool_call, turn, emitter, cancel_token).await;
-        if let PreparedToolCallResult::Skip(result) = prepared.result {
-            if !cancel_token.is_cancelled() {
-                let result = after_tool_result(config, &tool_call, result, cancel_token).await;
-                emit_shell_finished(turn, &tool_call, &result, emitter);
-                emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
+        // Invalid arguments: emit a finished error without starting execution.
+        let prepared_call = match parsed {
+            Ok(prepared) => prepared,
+            Err(error_result) => {
+                let result = error_result;
                 emitter.emit(AgentEvent::ToolExecutionFinished {
                     turn,
                     id: tool_call.id.clone(),
                     name: tool_call.name.clone(),
                     result: result.clone(),
                 });
-                completed.push((index, tool_call, result));
+                completed.push((index, (*tool_call).clone(), result));
+                continue;
+            }
+        };
+
+        emitter.emit(AgentEvent::ToolExecutionStarted {
+            turn,
+            id: tool_call.id.clone(),
+            name: tool_call.name.clone(),
+            arguments: prepared_call.arguments.clone(),
+        });
+        if let Some(mut result) = before_tool_result(config, tool_call, cancel_token).await {
+            if !cancel_token.is_cancelled() {
+                result = after_tool_result(config, tool_call, result, cancel_token).await;
+            }
+            emit_shell_finished(turn, tool_call, &result, emitter);
+            emit_terminal_events(
+                turn,
+                &prepared_call.arguments,
+                tool_call,
+                &result,
+                &tool_context,
+                emitter,
+            );
+            emitter.emit(AgentEvent::ToolExecutionFinished {
+                turn,
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+                result: result.clone(),
+            });
+            completed.push((index, (*tool_call).clone(), result));
+            continue;
+        }
+
+        let permission_prep = prepare_tool_call(
+            config,
+            tool_call,
+            &prepared_call.arguments,
+            turn,
+            emitter,
+            cancel_token,
+        )
+        .await;
+        if let PreparedToolCallResult::Skip(result) = permission_prep.result {
+            if !cancel_token.is_cancelled() {
+                let result = after_tool_result(config, tool_call, result, cancel_token).await;
+                emit_shell_finished(turn, tool_call, &result, emitter);
+                emit_terminal_events(
+                    turn,
+                    &prepared_call.arguments,
+                    tool_call,
+                    &result,
+                    &tool_context,
+                    emitter,
+                );
+                emitter.emit(AgentEvent::ToolExecutionFinished {
+                    turn,
+                    id: tool_call.id.clone(),
+                    name: tool_call.name.clone(),
+                    result: result.clone(),
+                });
+                completed.push((index, (*tool_call).clone(), result));
             }
             continue;
         }
 
         let config = config.clone();
         let registry = Arc::clone(&registry);
-        let tool_context = tool_context.clone().with_access(prepared.access);
+        let tool_context = tool_context.clone().with_access(permission_prep.access);
         let cancel_token = cancel_token.clone();
         let sink = emitter.sink();
+        let arguments = prepared_call.arguments.clone();
         running.push(async move {
             let tool_context = tool_context
                 .with_tool_update(make_tool_update_callback(
@@ -325,22 +453,35 @@ async fn execute_tool_calls_parallel(
             let mut result = run_tool_with_cancel(
                 skills,
                 registry.as_ref(),
-                &tool_call,
+                tool_call,
+                &arguments,
                 &tool_context,
                 &cancel_token,
             )
             .await;
             if !cancel_token.is_cancelled() {
-                result = after_tool_result(&config, &tool_call, result, &cancel_token).await;
+                result = after_tool_result(&config, tool_call, result, &cancel_token).await;
             }
-            Ok::<_, AgentRuntimeError>((index, tool_call, result))
+            Ok::<_, AgentRuntimeError>((index, (*tool_call).clone(), result))
         });
     }
 
     while let Some(outcome) = running.next().await {
         let (index, tool_call, result) = outcome?;
+        // Re-derive parsed arguments for shell/terminal event emission.
+        let arguments = match &prepared[index].1 {
+            Ok(p) => p.arguments.clone(),
+            Err(_) => serde_json::Value::Null,
+        };
         emit_shell_finished(turn, &tool_call, &result, emitter);
-        emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
+        emit_terminal_events(
+            turn,
+            &arguments,
+            &tool_call,
+            &result,
+            &tool_context,
+            emitter,
+        );
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
@@ -402,10 +543,12 @@ async fn prepare_and_run_tool(
     tool_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) -> Result<ToolResult, AgentRuntimeError> {
-    let prepared = prepare_tool_call(config, tool_call, turn, emitter, cancel_token).await;
+    let prepared =
+        prepare_tool_call(config, tool_call, arguments, turn, emitter, cancel_token).await;
     match prepared.result {
         PreparedToolCallResult::Skip(result) => Ok(result),
         PreparedToolCallResult::Run => {
@@ -421,15 +564,21 @@ async fn prepare_and_run_tool(
                 ))
                 .with_tool_event(make_tool_event_callback(sink));
             if tool_call.name == "Bash" {
-                emit_shell_started(turn, tool_call, &context, emitter);
+                emit_shell_started(turn, arguments, tool_call, &context, emitter);
             }
-            let result =
-                run_tool_with_cancel(skills, registry, tool_call, &context, cancel_token).await;
+            let result = run_tool_with_cancel(
+                skills,
+                registry,
+                tool_call,
+                arguments,
+                &context,
+                cancel_token,
+            )
+            .await;
             if tool_call.name == "Skill" && !result.is_error {
                 emitter.emit(AgentEvent::SkillActivated {
                     turn,
-                    name: tool_call
-                        .arguments
+                    name: arguments
                         .get("skill")
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown")
@@ -445,18 +594,19 @@ async fn run_tool_with_cancel(
     skills: Option<&SkillStore>,
     registry: &ToolRegistry,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
 ) -> ToolResult {
     if tool_call.name == "Skill" {
-        return execute_invoke_skill(skills, tool_call);
+        return execute_invoke_skill(skills, arguments);
     }
     if tool_call.name == "Bash" {
-        return run_model_bash_with_cancel(tool_call, tool_context, cancel_token).await;
+        return run_model_bash_with_cancel(arguments, tool_context, cancel_token).await;
     }
     tokio::select! {
         biased;
-        result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
+        result = registry.run(&tool_call.name, tool_context, arguments.clone()) => {
             result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
         }
         () = cancel_token.cancelled() => cancelled_tool_result(),
@@ -468,13 +618,13 @@ pub(super) fn cancelled_tool_result() -> ToolResult {
 }
 
 async fn run_model_bash_with_cancel(
-    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
 ) -> ToolResult {
     tokio::select! {
         biased;
-        result = execute_model_bash_for_runtime(tool_context, tool_call.arguments.clone()) => {
+        result = execute_model_bash_for_runtime(tool_context, arguments.clone()) => {
             result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
         }
         () = cancel_token.cancelled() => cancelled_tool_result(),

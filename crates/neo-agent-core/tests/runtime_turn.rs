@@ -451,7 +451,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
-            arguments: json!({ "path": "README.md" }),
+            raw_arguments: json!({ "path": "README.md" }).to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: neo_ai::StopReason::ToolUse,
@@ -482,7 +482,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         tool_call: AgentToolCall {
             id: "tool_1".to_owned(),
             name: "Read".to_owned(),
-            arguments: json!({ "path": "README.md" }),
+            raw_arguments: json!({ "path": "README.md" }).to_string(),
         },
     }));
     assert_eq!(
@@ -492,7 +492,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
             vec![AgentToolCall {
                 id: "tool_1".to_owned(),
                 name: "Read".to_owned(),
-                arguments: json!({ "path": "README.md" }),
+                raw_arguments: json!({ "path": "README.md" }).to_string(),
             }],
             StopReason::ToolUse,
         )
@@ -1231,12 +1231,12 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
             AgentToolCall {
                 id: "tool_1".to_owned(),
                 name: "Read".to_owned(),
-                arguments: json!({ "path": "a.rs" }),
+                raw_arguments: json!({ "path": "a.rs" }).to_string(),
             },
             AgentToolCall {
                 id: "tool_2".to_owned(),
                 name: "List".to_owned(),
-                arguments: json!({ "path": "src" }),
+                raw_arguments: json!({ "path": "src" }).to_string(),
             },
         ],
         StopReason::ToolUse,
@@ -1390,7 +1390,7 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "neo" }),
+                raw_arguments: json!({ "text": "neo" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -1432,7 +1432,7 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
         tool_call: AgentToolCall {
             id: "tool_1".to_owned(),
             name: "echo".to_owned(),
-            arguments: json!({ "text": "neo" }),
+            raw_arguments: json!({ "text": "neo" }).to_string(),
         },
     }));
     assert_eq!(
@@ -1491,9 +1491,10 @@ async fn runtime_emits_todo_update_only_for_writes() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_write".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "todos": [{ "title": "Read code", "status": "in_progress" }]
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -1510,7 +1511,7 @@ async fn runtime_emits_todo_update_only_for_writes() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_read".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -1580,7 +1581,7 @@ async fn runtime_emits_empty_todo_update_for_clear() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_clear".to_owned(),
-                arguments: json!({ "todos": [] }),
+                raw_arguments: json!({ "todos": [] }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -1694,7 +1695,7 @@ async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "bad": true }),
+                raw_arguments: json!({ "bad": true }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -1782,7 +1783,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2009,7 +2010,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "fast" }),
+                raw_arguments: json!({ "text": "fast" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -2017,7 +2018,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2104,7 +2105,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "first" }),
+                raw_arguments: json!({ "text": "first" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -2112,7 +2113,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2345,24 +2346,18 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
             .with_tool_execution_mode(ToolExecutionMode::Sequential)
             .with_permission_mode(PermissionMode::Yolo)
             .with_before_tool_call(|call| {
-                if call
-                    .arguments
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("blocked")
-                {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.raw_arguments).unwrap_or_default();
+                if args.get("text").and_then(serde_json::Value::as_str) == Some("blocked") {
                     Some(ToolResult::error("blocked by policy").terminate())
                 } else {
                     None
                 }
             })
             .with_after_tool_call(|call, mut result| {
-                if call
-                    .arguments
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("stop")
-                {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.raw_arguments).unwrap_or_default();
+                if args.get("text").and_then(serde_json::Value::as_str) == Some("stop") {
                     result = result.terminate();
                 }
                 result
@@ -2431,7 +2426,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "needs approval" }),
+                raw_arguments: json!({ "text": "needs approval" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2526,7 +2521,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "approved" }),
+                raw_arguments: json!({ "text": "approved" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2616,7 +2611,7 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "first" }),
+                raw_arguments: json!({ "text": "first" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2633,7 +2628,7 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "second" }),
+                raw_arguments: json!({ "text": "second" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2729,7 +2724,7 @@ async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() 
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "first" }),
+                raw_arguments: json!({ "text": "first" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2746,7 +2741,7 @@ async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() 
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "second" }),
+                raw_arguments: json!({ "text": "second" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2839,7 +2834,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "denied" }),
+                raw_arguments: json!({ "text": "denied" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2923,7 +2918,7 @@ fn echo_tool_harness(text: &str) -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": text }),
+                raw_arguments: json!({ "text": text }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3321,7 +3316,7 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "path": "approved.txt", "content": "ok" }),
+                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -3329,7 +3324,7 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "pattern": "*" }),
+                raw_arguments: json!({ "pattern": "*" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3354,7 +3349,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "path": "approved.txt", "content": "ok" }),
+                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3435,7 +3430,7 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "printf shell-ok" }),
+                raw_arguments: json!({ "command": "printf shell-ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3507,10 +3502,11 @@ async fn runtime_emits_shell_finished_when_model_bash_times_out() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
-            arguments: json!({
+            raw_arguments: json!({
                 "command": "printf before-timeout; sleep 5",
                 "timeout": 0
-            }),
+            })
+            .to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: neo_ai::StopReason::ToolUse,
@@ -3582,11 +3578,12 @@ async fn runtime_marks_model_background_bash_as_backgrounded_shell_event() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
-            arguments: json!({
+            raw_arguments: json!({
                 "command": "sleep 5",
                 "run_in_background": true,
                 "description": "sleep in background"
-            }),
+            })
+            .to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: neo_ai::StopReason::ToolUse,
@@ -3653,10 +3650,11 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "command": "printf keep; printf '%s%s%s%s' runtime -bash -leak -tail",
                     "max_output_bytes": 4
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3908,7 +3906,7 @@ fn blocking_then_terminating_tool_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "blocked" }),
+                raw_arguments: json!({ "text": "blocked" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -3916,7 +3914,7 @@ fn blocking_then_terminating_tool_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "stop" }),
+                raw_arguments: json!({ "text": "stop" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -3951,7 +3949,7 @@ async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "slow", "delay_ms": 40 }),
+                raw_arguments: json!({ "text": "slow", "delay_ms": 40 }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -3959,7 +3957,7 @@ async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "fast", "delay_ms": 0 }),
+                raw_arguments: json!({ "text": "fast", "delay_ms": 0 }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4040,7 +4038,7 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "questions": [{
                         "question": "Continue?",
                         "options": [
@@ -4048,7 +4046,8 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
                             { "label": "No" }
                         ]
                     }]
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -4056,7 +4055,7 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "should wait" }),
+                raw_arguments: json!({ "text": "should wait" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4121,7 +4120,7 @@ async fn ask_mode_ask_user_question_dispatches_without_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "questions": [{
                         "question": "Which language?",
                         "options": [
@@ -4129,7 +4128,8 @@ async fn ask_mode_ask_user_question_dispatches_without_approval() {
                             { "label": "TypeScript" }
                         ]
                     }]
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4203,7 +4203,7 @@ Review the current change carefully.
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({"skill": "review"}),
+                raw_arguments: json!({"skill": "review"}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4265,7 +4265,7 @@ async fn enter_plan_mode_continues_model_loop_after_mode_switch() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4377,12 +4377,13 @@ async fn runtime_auto_mode_denies_ask_user_question() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "questions": [{
                         "question": "Continue?",
                         "options": [{ "label": "Yes" }, { "label": "No" }]
                     }]
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4444,7 +4445,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "path": "file.txt" }),
+                raw_arguments: json!({ "path": "file.txt" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -4452,7 +4453,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "needs approval" }),
+                raw_arguments: json!({ "text": "needs approval" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4517,7 +4518,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "text": "first" }),
+                raw_arguments: json!({ "text": "first" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -4525,7 +4526,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "text": "second" }),
+                raw_arguments: json!({ "text": "second" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4605,7 +4606,7 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready to execute" }),
+                raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4688,7 +4689,7 @@ async fn exit_plan_mode_continues_loop_after_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready to execute" }),
+                raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4781,13 +4782,14 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "plan_summary": "Two approaches available",
                     "options": [
                         {"label": "Option A", "description": "fast"},
                         {"label": "Option B", "description": "safe"}
                     ]
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4888,11 +4890,12 @@ async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "objective": "Ship goal mode",
                     "completion_criterion": "Goal tests pass",
                     "phases": ["Draft", "Implement", "Audit"],
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4970,7 +4973,7 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready to execute" }),
+                raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5043,11 +5046,12 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "objective": "Ship goal mode",
                     "completion_criterion": "Goal tests pass",
                     "phases": ["Draft", "Implement", "Audit"],
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5133,7 +5137,7 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready to execute" }),
+                raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5213,7 +5217,7 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "path": "other.txt", "content": "x" }),
+                raw_arguments: json!({ "path": "other.txt", "content": "x" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5282,10 +5286,11 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "path": plan_path,
                     "content": "# Plan\n\nUse Write, not Bash."
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5356,11 +5361,12 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "path": plan_path,
                     "old": "Draft.",
                     "new": "Finalized."
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5429,7 +5435,7 @@ async fn ask_mode_asks_for_bash() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "mkdir test_dir" }),
+                raw_arguments: json!({ "command": "mkdir test_dir" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5498,7 +5504,7 @@ async fn auto_mode_approves_bash_without_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "printf auto-ok" }),
+                raw_arguments: json!({ "command": "printf auto-ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5557,7 +5563,7 @@ async fn yolo_mode_approves_write_without_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "path": "yolo.txt", "content": "yolo" }),
+                raw_arguments: json!({ "path": "yolo.txt", "content": "yolo" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5615,7 +5621,7 @@ async fn auto_exit_plan_mode_does_not_request_review() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready" }),
+                raw_arguments: json!({ "plan_summary": "Ready" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -5667,7 +5673,7 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "plan_summary": "Ready" }),
+                raw_arguments: json!({ "plan_summary": "Ready" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6062,7 +6068,7 @@ fn bash_tool_turn(
         },
         AiStreamEvent::ToolCallEnd {
             id: tool_id.to_owned(),
-            arguments,
+            raw_arguments: arguments.to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: neo_ai::StopReason::ToolUse,
@@ -6177,7 +6183,7 @@ fn terminal_tool_turn(
         },
         AiStreamEvent::ToolCallEnd {
             id: tool_id.to_owned(),
-            arguments,
+            raw_arguments: arguments.to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: neo_ai::StopReason::ToolUse,
@@ -6775,7 +6781,7 @@ async fn layer1_bash_session_approval_exact_command_only() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "git status" }),
+                raw_arguments: json!({ "command": "git status" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6792,7 +6798,7 @@ async fn layer1_bash_session_approval_exact_command_only() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "command": "python script.py" }),
+                raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6851,7 +6857,7 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "python script.py" }),
+                raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6907,7 +6913,7 @@ async fn allow_for_prefix_persists_prefix_rule() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "python script.py" }),
+                raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6961,7 +6967,7 @@ async fn layer3_safe_command_auto_approved() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "cat README.md" }),
+                raw_arguments: json!({ "command": "cat README.md" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7016,7 +7022,7 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "rm -rf /tmp/x" }),
+                raw_arguments: json!({ "command": "rm -rf /tmp/x" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7057,5 +7063,99 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
     assert!(
         !has_scope,
         "dangerous commands must not offer a reusable session scope"
+    );
+}
+
+#[tokio::test]
+async fn runtime_invalid_tool_arguments_return_model_visible_error() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: r#"{"text":"neo"#.to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "retrying".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(EchoTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Yolo),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call echo"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    // 1. No ToolExecutionStarted — execution never begins for invalid args.
+    assert!(
+        !events.iter().any(
+            |event| matches!(event, AgentEvent::ToolExecutionStarted { name, .. } if name == "echo")
+        ),
+        "invalid tool arguments must not start execution"
+    );
+
+    // 2. A ToolExecutionFinished with an error result is emitted.
+    let error_event = events.iter().find(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { name, result, .. }
+                if name == "echo" && result.is_error
+        )
+    });
+    let error_event = error_event.expect("expected a ToolExecutionFinished error event");
+    if let AgentEvent::ToolExecutionFinished { result, .. } = error_event {
+        assert!(
+            result.content.contains("Tool arguments were invalid JSON"),
+            "error content should mention invalid JSON, got: {}",
+            result.content
+        );
+    }
+
+    // 3. The model gets a second turn (error is fed back).
+    assert_eq!(harness.requests().len(), 2);
+
+    // 4. The second request's messages end with a ToolResult containing the error.
+    let requests = harness.requests();
+    let last_message = requests[1].messages.last();
+    assert!(
+        matches!(
+            last_message,
+            Some(neo_ai::ChatMessage::ToolResult { content, is_error, .. })
+                if *is_error
+                    && content.iter().any(|part| matches!(part,
+                        neo_ai::ContentPart::Text { text } if text.contains("invalid JSON")
+                    ))
+        ),
+        "second request should end with an error ToolResult"
     );
 }

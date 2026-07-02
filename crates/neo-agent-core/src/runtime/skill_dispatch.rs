@@ -1,7 +1,7 @@
 use neo_ai::ToolSpec;
 
+use crate::ToolResult;
 use crate::skills::SkillStore;
-use crate::{AgentToolCall, ToolResult};
 
 pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
     ToolSpec {
@@ -26,12 +26,12 @@ pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
 
 pub(super) fn execute_invoke_skill(
     skills: Option<&SkillStore>,
-    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> ToolResult {
     let Some(skills) = skills else {
         return ToolResult::error("skill system is not enabled");
     };
-    let request = match skill_tool_request(&tool_call.arguments) {
+    let request = match skill_tool_request(arguments) {
         Ok(request) => request,
         Err(message) => return ToolResult::error(message),
     };
@@ -129,12 +129,8 @@ arguments:
         .expect("skill file");
     }
 
-    fn skill_tool_call(arguments: serde_json::Value) -> AgentToolCall {
-        AgentToolCall {
-            id: "tool-1".to_owned(),
-            name: "Skill".to_owned(),
-            arguments,
-        }
+    fn skill_arguments(arguments: serde_json::Value) -> serde_json::Value {
+        arguments
     }
 
     fn skill_store(root: &std::path::Path) -> SkillStore {
@@ -149,7 +145,7 @@ arguments:
 
         let result = execute_invoke_skill(
             Some(&store),
-            &skill_tool_call(json!({
+            &skill_arguments(json!({
                 "skill": "review",
                 "arguments": {
                     "target": "src/lib.rs",
@@ -167,24 +163,24 @@ arguments:
         write_skill(temp.path(), "manual-flow", "flow", "Manual only.");
         let store = skill_store(temp.path());
 
-        let no_store = execute_invoke_skill(None, &skill_tool_call(json!({"skill": "review"})));
+        let no_store = execute_invoke_skill(None, &skill_arguments(json!({"skill": "review"})));
         assert_eq!(no_store.content, "skill system is not enabled");
         assert!(no_store.is_error);
 
         let missing_name =
-            execute_invoke_skill(Some(&store), &skill_tool_call(json!({"arguments": {}})));
+            execute_invoke_skill(Some(&store), &skill_arguments(json!({"arguments": {}})));
         assert_eq!(
             missing_name.content,
             "Skill requires a `skill` string argument"
         );
 
         let missing_skill =
-            execute_invoke_skill(Some(&store), &skill_tool_call(json!({"skill": "review"})));
+            execute_invoke_skill(Some(&store), &skill_arguments(json!({"skill": "review"})));
         assert_eq!(missing_skill.content, "skill `review` is not available");
 
         let flow = execute_invoke_skill(
             Some(&store),
-            &skill_tool_call(json!({"skill": "manual-flow"})),
+            &skill_arguments(json!({"skill": "manual-flow"})),
         );
         assert_eq!(
             flow.content,
@@ -201,14 +197,14 @@ arguments:
 
         let first = execute_invoke_skill(
             Some(&store),
-            &skill_tool_call(json!({
+            &skill_arguments(json!({
                 "skill": "review",
                 "arguments": {"target": "src/lib.rs"}
             })),
         );
         let second = execute_invoke_skill(
             Some(&store),
-            &skill_tool_call(json!({
+            &skill_arguments(json!({
                 "skill": "summarize",
                 "arguments": {"target": "src/main.rs"}
             })),

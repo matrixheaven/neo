@@ -85,8 +85,8 @@ impl ModelTurnState {
                     json_fragment,
                 });
             }
-            AiStreamEvent::ToolCallEnd { id, arguments } => {
-                self.finish_tool_call(turn, id, arguments, emitter);
+            AiStreamEvent::ToolCallEnd { id, raw_arguments } => {
+                self.finish_tool_call(turn, id, raw_arguments, emitter);
             }
             AiStreamEvent::MessageEnd { stop_reason, usage } => {
                 if let Some(usage) = usage {
@@ -171,13 +171,13 @@ impl ModelTurnState {
         &mut self,
         turn: u32,
         id: String,
-        arguments: serde_json::Value,
+        raw_arguments: String,
         emitter: &mut EventEmitter,
     ) {
         let tool_call = AgentToolCall {
             name: self.tool_names.remove(&id).unwrap_or_default(),
             id,
-            arguments,
+            raw_arguments,
         };
         emitter.emit(AgentEvent::ToolCallFinished {
             turn,

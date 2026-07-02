@@ -340,7 +340,7 @@ async fn jsonl_session_replay_context_drops_incomplete_trailing_tool_turn() {
                 [AgentToolCall {
                     id: "call-1".to_owned(),
                     name: "Read".to_owned(),
-                    arguments: json!({ "path": "README.md" }),
+                    raw_arguments: json!({ "path": "README.md" }).to_string(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -378,7 +378,7 @@ async fn jsonl_session_replay_context_keeps_complete_trailing_tool_turn() {
         [AgentToolCall {
             id: "call-1".to_owned(),
             name: "Read".to_owned(),
-            arguments: json!({ "path": "README.md" }),
+            raw_arguments: json!({ "path": "README.md" }).to_string(),
         }],
         StopReason::ToolUse,
     );

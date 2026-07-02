@@ -241,7 +241,7 @@ pub enum ContentPart {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: serde_json::Value,
+    pub raw_arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -377,7 +377,7 @@ pub enum AiStreamEvent {
     },
     ToolCallEnd {
         id: String,
-        arguments: serde_json::Value,
+        raw_arguments: String,
     },
     MessageEnd {
         stop_reason: StopReason,

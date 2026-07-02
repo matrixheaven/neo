@@ -14,6 +14,7 @@ mod queue;
 mod skill_dispatch;
 mod stream_aggregator;
 mod tokens;
+mod tool_arguments;
 mod tool_dispatch;
 mod turn_loop;
 

@@ -307,11 +307,18 @@ fn assistant_content(
         }
     }
     for tool_call in tool_calls {
+        let input =
+            serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments).map_err(|err| {
+                ProviderError::Stream(format!(
+                    "invalid raw tool arguments for Anthropic replay tool call '{}': {err}",
+                    tool_call.id
+                ))
+            })?;
         parts.push(json!({
             "type": "tool_use",
             "id": tool_call.id,
             "name": tool_call.name,
-            "input": tool_call.arguments,
+            "input": input,
         }));
     }
     Ok(Value::Array(parts))
@@ -669,11 +676,9 @@ impl ParseState {
         }
 
         for (id, arguments) in &self.tool_args {
-            let parsed = serde_json::from_str(arguments)
-                .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
             self.events.push(AiStreamEvent::ToolCallEnd {
                 id: id.clone(),
-                arguments: parsed,
+                raw_arguments: arguments.clone(),
             });
         }
 
@@ -705,5 +710,29 @@ fn stop_reason(reason: &str) -> StopReason {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolCall;
+
+    #[test]
+    fn assistant_replay_rejects_invalid_raw_tool_arguments() {
+        let err = assistant_content(
+            &[],
+            &[ToolCall {
+                id: "call-1".to_owned(),
+                name: "read".to_owned(),
+                raw_arguments: r#"{"path":"Cargo"#.to_owned(),
+            }],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::Stream(message) if message.contains("invalid raw tool arguments"))
+        );
     }
 }

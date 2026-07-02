@@ -364,7 +364,7 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
                     lines.push(format!("  - {}: {}", call.id, call.name));
                     lines.push(format!(
                         "    arguments:\n{}",
-                        indent_block(&call.arguments.to_string(), 6)
+                        indent_block(&call.raw_arguments, 6)
                     ));
                 }
             }
@@ -796,7 +796,7 @@ mod tests {
         AgentToolCall {
             id: id.to_owned(),
             name: "bash".to_owned(),
-            arguments: serde_json::json!({"command": "ls"}),
+            raw_arguments: serde_json::json!({"command": "ls"}).to_string(),
         }
     }
 

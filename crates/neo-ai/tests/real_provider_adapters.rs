@@ -190,7 +190,7 @@ fn tool_result_request(api: ApiKind, is_error: bool) -> ChatRequest {
                 tool_calls: vec![ToolCall {
                     id: "call-1".to_owned(),
                     name: "read_file".to_owned(),
-                    arguments: json!({ "path": "Cargo.toml" }),
+                    raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
                 }],
             },
             ChatMessage::ToolResult {
@@ -235,12 +235,12 @@ fn multi_tool_result_request(api: ApiKind) -> ChatRequest {
                     ToolCall {
                         id: "call-1".to_owned(),
                         name: "read_file".to_owned(),
-                        arguments: json!({ "path": "Cargo.toml" }),
+                        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
                     },
                     ToolCall {
                         id: "call-2".to_owned(),
                         name: "list_files".to_owned(),
-                        arguments: json!({ "path": "crates" }),
+                        raw_arguments: r#"{"path":"crates"}"#.to_owned(),
                     },
                 ],
             },
@@ -422,7 +422,7 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "call-1".to_owned(),
-                arguments: json!({ "path": "Cargo.toml" })
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -448,6 +448,44 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_responses_output_item_done_overrides_argument_preview() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-1" } }),
+        json!({
+            "type": "response.output_item.added",
+            "item": { "id": "item-1", "type": "function_call", "call_id": "call-1", "name": "read_file" }
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-1",
+            "delta": "{\"path\":\"Car"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "item": { "id": "item-1", "type": "function_call", "call_id": "call-1", "name": "read_file", "arguments": "{\"path\":\"Cargo.toml\"}" }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "usage": { "input_tokens": 1, "output_tokens": 1 } }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
 }
 
 #[tokio::test]
@@ -494,7 +532,7 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
             },
             AiStreamEvent::ToolCallEnd {
                 id: "call-1".to_owned(),
-                arguments: json!({ "path": "Cargo.toml" })
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -1517,7 +1555,7 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "toolu-1".to_owned(),
-                arguments: json!({ "path": "Cargo.toml" })
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -1969,7 +2007,7 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
             },
             AiStreamEvent::ToolCallEnd {
                 id: "read_file".to_owned(),
-                arguments: json!({ "path": "Cargo.toml" })
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,

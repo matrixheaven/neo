@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::providers::common::error::{ProviderError, parse_retry_after};
 use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
+use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
@@ -182,7 +183,7 @@ fn message_body(
                     "type": "function_call",
                     "call_id": tool_call.id,
                     "name": tool_call.name,
-                    "arguments": tool_call.arguments,
+                    "arguments": tool_call.raw_arguments,
                 })
             }));
             Ok(output)
@@ -409,8 +410,11 @@ impl IncrementalSse {
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,
-    tool_args: BTreeMap<String, String>,
+    tool_calls: StreamingToolCallAssembler,
     item_call_ids: BTreeMap<String, String>,
+    item_names: BTreeMap<String, String>,
+    item_indexes: BTreeMap<String, u64>,
+    next_tool_index: u64,
     thinking_parts: BTreeMap<String, ThinkingPart>,
     thinking_order: VecDeque<String>,
     active_thinking_id: Option<String>,
@@ -435,8 +439,11 @@ impl Default for ParseState {
         Self {
             events: Vec::new(),
             started: false,
-            tool_args: BTreeMap::new(),
+            tool_calls: StreamingToolCallAssembler::new(),
             item_call_ids: BTreeMap::new(),
+            item_names: BTreeMap::new(),
+            item_indexes: BTreeMap::new(),
+            next_tool_index: 0,
             thinking_parts: BTreeMap::new(),
             thinking_order: VecDeque::new(),
             active_thinking_id: None,
@@ -509,6 +516,31 @@ impl ParseState {
         self.started = true;
     }
 
+    fn tool_index_for_item(&mut self, item_id: &str) -> u64 {
+        if let Some(index) = self.item_indexes.get(item_id) {
+            return *index;
+        }
+        let index = self.next_tool_index;
+        self.next_tool_index += 1;
+        self.item_indexes.insert(item_id.to_owned(), index);
+        index
+    }
+
+    fn push_tool_events(&mut self, events: Vec<ToolCallAssemblyEvent>) {
+        self.events
+            .extend(events.into_iter().map(|event| match event {
+                ToolCallAssemblyEvent::Start { id, name } => {
+                    AiStreamEvent::ToolCallStart { id, name }
+                }
+                ToolCallAssemblyEvent::ArgsDelta { id, json_fragment } => {
+                    AiStreamEvent::ToolCallArgsDelta { id, json_fragment }
+                }
+                ToolCallAssemblyEvent::End { id, raw_arguments } => {
+                    AiStreamEvent::ToolCallEnd { id, raw_arguments }
+                }
+            }));
+    }
+
     fn ingest_item_added(&mut self, value: &Value) {
         let item = value.get("item").unwrap_or(&Value::Null);
         if item.get("type").and_then(Value::as_str) != Some("function_call") {
@@ -526,12 +558,22 @@ impl ParseState {
             .and_then(Value::as_str)
             .unwrap_or(&item_id)
             .to_owned();
-        self.item_call_ids.insert(item_id, call_id.clone());
+        self.item_call_ids.insert(item_id.clone(), call_id.clone());
+        let index = self.tool_index_for_item(&item_id);
         if let Some(name) = item.get("name").and_then(Value::as_str) {
-            self.events.push(AiStreamEvent::ToolCallStart {
-                id: call_id,
-                name: name.to_owned(),
+            self.item_names.insert(item_id, name.to_owned());
+            let events = self.tool_calls.ingest(ToolCallChunk {
+                index: Some(index),
+                id: Some(call_id),
+                name: Some(name.to_owned()),
+                arguments_fragment: None,
             });
+            match events {
+                Ok(events) => self.push_tool_events(events),
+                Err(err) => self.events.push(AiStreamEvent::Error {
+                    message: err.to_string(),
+                }),
+            }
         }
     }
 
@@ -603,6 +645,46 @@ impl ParseState {
 
     fn ingest_output_item_done(&mut self, value: &Value) {
         let item = value.get("item").unwrap_or(&Value::Null);
+
+        // Handle function_call items as authoritative final tool-call data.
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            let item_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("function-call");
+            let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .or_else(|| self.item_call_ids.get(item_id).map(String::as_str))
+                .unwrap_or(item_id)
+                .to_owned();
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| self.item_names.get(item_id).map(String::as_str))
+                .unwrap_or("function_call")
+                .to_owned();
+            let index = self.tool_index_for_item(item_id);
+            let raw_arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let events = self.tool_calls.finish_with_final_arguments(
+                Some(index),
+                call_id,
+                name,
+                raw_arguments,
+            );
+            match events {
+                Ok(events) => self.push_tool_events(events),
+                Err(err) => self.events.push(AiStreamEvent::Error {
+                    message: err.to_string(),
+                }),
+            }
+            return;
+        }
+
         if item.get("type").and_then(Value::as_str) != Some("reasoning") {
             return;
         }
@@ -648,15 +730,22 @@ impl ParseState {
             .get(item_id)
             .cloned()
             .unwrap_or_else(|| item_id.to_owned());
-        if let Some(fragment) = value.get("delta").and_then(Value::as_str) {
-            self.tool_args
-                .entry(id.clone())
-                .or_default()
-                .push_str(fragment);
-            self.events.push(AiStreamEvent::ToolCallArgsDelta {
-                id,
-                json_fragment: fragment.to_owned(),
-            });
+        let index = self.tool_index_for_item(item_id);
+        let fragment = value
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let events = self.tool_calls.ingest(ToolCallChunk {
+            index: Some(index),
+            id: Some(id),
+            name: self.item_names.get(item_id).cloned(),
+            arguments_fragment: fragment,
+        });
+        match events {
+            Ok(events) => self.push_tool_events(events),
+            Err(err) => self.events.push(AiStreamEvent::Error {
+                message: err.to_string(),
+            }),
         }
     }
 
@@ -665,7 +754,7 @@ impl ParseState {
         self.usage = response
             .get("usage")
             .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"));
-        self.last_stop_reason = if self.tool_args.is_empty() {
+        self.last_stop_reason = if self.item_call_ids.is_empty() {
             StopReason::EndTurn
         } else {
             StopReason::ToolUse
@@ -683,14 +772,11 @@ impl ParseState {
         }
         self.flush_thinking_ready();
 
-        for (id, arguments) in &self.tool_args {
-            let parsed = serde_json::from_str(arguments)
-                .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
-            self.events.push(AiStreamEvent::ToolCallEnd {
-                id: id.clone(),
-                arguments: parsed,
-            });
-        }
+        let tool_events = self
+            .tool_calls
+            .finish_all()
+            .map_err(|err| ProviderError::Stream(err.to_string()))?;
+        self.push_tool_events(tool_events);
 
         if self.started {
             self.events.push(AiStreamEvent::MessageEnd {

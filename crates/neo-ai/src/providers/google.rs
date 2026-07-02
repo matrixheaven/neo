@@ -180,19 +180,28 @@ fn content_body(
         } => {
             let tool_calls = tool_calls.clone();
             Some(
-                content_parts(content, replay_reasoning).map(move |mut parts| {
+                content_parts(content, replay_reasoning).and_then(move |mut parts| {
                     for tool_call in &tool_calls {
+                        let args = serde_json::from_str::<serde_json::Value>(
+                            &tool_call.raw_arguments,
+                        )
+                        .map_err(|err| {
+                            ProviderError::Stream(format!(
+                                "invalid raw tool arguments for Google replay tool call '{}': {err}",
+                                tool_call.id
+                            ))
+                        })?;
                         parts.push(json!({
                             "functionCall": {
                                 "name": tool_call.name,
-                                "args": tool_call.arguments,
+                                "args": args,
                             },
                         }));
                     }
-                    json!({
+                    Ok(json!({
                         "role": "model",
                         "parts": parts,
-                    })
+                    }))
                 }),
             )
         }
@@ -561,7 +570,7 @@ impl ParseState {
         for (id, arguments) in &self.tool_args {
             self.events.push(AiStreamEvent::ToolCallEnd {
                 id: id.clone(),
-                arguments: arguments.clone(),
+                raw_arguments: arguments.to_string(),
             });
         }
 
@@ -581,5 +590,32 @@ fn stop_reason(reason: &str) -> StopReason {
         "MAX_TOKENS" => StopReason::MaxTokens,
         "SAFETY" | "RECITATION" | "SPII" | "MALFORMED_FUNCTION_CALL" => StopReason::Error,
         _ => StopReason::EndTurn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolCall;
+
+    #[test]
+    fn assistant_replay_rejects_invalid_raw_tool_arguments() {
+        let result = content_body(
+            &ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "read".to_owned(),
+                    raw_arguments: r#"{"path":"Cargo"#.to_owned(),
+                }],
+            },
+            false,
+        )
+        .expect("assistant message should produce content");
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProviderError::Stream(message) if message.contains("invalid raw tool arguments"))
+        );
     }
 }

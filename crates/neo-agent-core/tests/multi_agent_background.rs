@@ -141,7 +141,7 @@ async fn delegate_background_registers_task() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
-            arguments: json!({ "task": "bg task", "mode": "background" }),
+            raw_arguments: json!({ "task": "bg task", "mode": "background" }).to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: StopReason::ToolUse,
@@ -665,7 +665,7 @@ async fn message_delegate_delivers_to_running_background_delegate_as_live_steer(
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_block".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,

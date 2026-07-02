@@ -52,7 +52,7 @@ mod tests {
         let call = AgentToolCall {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
-            arguments: serde_json::json!({}),
+            raw_arguments: "{}".to_owned(),
         };
         let result = deny_sidecar_tool_call(&call).expect("hook should return a result");
         assert!(result.is_error);
@@ -92,7 +92,7 @@ mod tests {
                 tool_calls: vec![AgentToolCall {
                     id: "t1".to_owned(),
                     name: "bash".to_owned(),
-                    arguments: serde_json::json!({"command": "echo hi"}),
+                    raw_arguments: serde_json::json!({"command": "echo hi"}).to_string(),
                 }],
                 stop_reason: StopReason::ToolUse,
             },

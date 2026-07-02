@@ -17,7 +17,6 @@ use crate::{
     AgentEvent, AgentToolCall, PermissionApprovalDecision, PermissionMode, PermissionOperation,
     PlanModeGuard, ToolAccess, ToolResult, check_plan_mode_guard, is_active_plan_file_path,
 };
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalRequest {
     pub turn: u32,
@@ -49,11 +48,12 @@ pub(super) enum PermissionPreparation {
 pub(super) async fn prepare_tool_call(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     turn: u32,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> PreparedToolCall {
-    let preparation = permission_preparation_for_mode(config, tool_call);
+    let preparation = permission_preparation_for_mode(config, tool_call, arguments);
 
     match preparation {
         PermissionPreparation::Run(access) => PreparedToolCall {
@@ -74,6 +74,7 @@ pub(super) async fn prepare_tool_call(
                 config,
                 turn,
                 tool_call,
+                arguments,
                 operation,
                 subject,
                 session_scope,
@@ -99,6 +100,7 @@ pub(super) async fn prepare_tool_call(
 pub(super) fn permission_preparation_for_mode(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> PermissionPreparation {
     // Read live permission state once. The TUI may switch this mid-turn via
     // `/ask`, `/auto`, `/yolo`, or `/permissions`; every branch below must use
@@ -106,20 +108,21 @@ pub(super) fn permission_preparation_for_mode(
     let mode = current_permission_mode(config);
 
     // 1. Plan-mode hard guard.
-    if let Some(prep) = check_plan_guard(config, tool_call) {
+    if let Some(prep) = check_plan_guard(config, tool_call, arguments) {
         return prep;
     }
 
     // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
-    if let Some(prep) = check_mode_early_returns(tool_call, mode) {
+    if let Some(prep) = check_mode_early_returns(tool_call, arguments, mode) {
         return prep;
     }
 
     // 6. Derive the reusable scope + prefix rule for the ask fallback.
-    let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call);
+    let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call, arguments);
 
     // 7-8. Cached approvals (persistent prefix rules + session approvals).
-    if let Some(prep) = check_cached_approvals(config, tool_call, session_scope.as_ref()) {
+    if let Some(prep) = check_cached_approvals(config, tool_call, arguments, session_scope.as_ref())
+    {
         return prep;
     }
 
@@ -129,17 +132,17 @@ pub(super) fn permission_preparation_for_mode(
     }
 
     // 10. Plan-mode helper approvals (e.g. writing the active plan file).
-    if let Some(prep) = check_plan_file_write(config, tool_call) {
+    if let Some(prep) = check_plan_file_write(config, tool_call, arguments) {
         return prep;
     }
 
     // 11-13. Yolo mode, safe commands, and default-approved tools.
-    if let Some(prep) = check_safe_or_prompt(config, tool_call, mode) {
+    if let Some(prep) = check_safe_or_prompt(config, tool_call, arguments, mode) {
         return prep;
     }
 
     // 14. Ask fallback prompt.
-    let (operation, subject) = permission_operation_for_tool(tool_call)
+    let (operation, subject) = permission_operation_for_tool(tool_call, arguments)
         .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
     PermissionPreparation::Ask {
         operation,
@@ -154,6 +157,7 @@ pub(super) fn permission_preparation_for_mode(
 fn check_plan_guard(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> Option<PermissionPreparation> {
     let plan_mode = config.plan_mode.read().ok()?;
     if plan_mode.is_active() {
@@ -161,7 +165,7 @@ fn check_plan_guard(
             &plan_mode,
             config.workspace_root.as_deref(),
             &tool_call.name,
-            &tool_call.arguments,
+            arguments,
         ) {
             PlanModeGuard::Allow => {}
             PlanModeGuard::Deny { message } => {
@@ -177,6 +181,7 @@ fn check_plan_guard(
 /// auto-approve.
 fn check_mode_early_returns(
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     // 2. Auto mode hard deny for AskUserQuestion.
@@ -187,7 +192,7 @@ fn check_mode_early_returns(
     }
 
     // 3. Background AskUserQuestion does not need an approval dialog in any mode.
-    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(tool_call) {
+    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(arguments) {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
 
@@ -210,10 +215,11 @@ fn check_mode_early_returns(
 fn check_cached_approvals(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     session_scope: Option<&SessionApprovalScope>,
 ) -> Option<PermissionPreparation> {
     // Layer 2 — persistent prefix rules (loaded from disk).
-    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call)
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call, arguments)
         && config
             .prefix_approval_rules
             .lock()
@@ -276,12 +282,13 @@ fn check_transition_tools(
 fn check_plan_file_write(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> Option<PermissionPreparation> {
     if !matches!(tool_call.name.as_str(), "Write" | "Edit") {
         return None;
     }
     let plan_mode = config.plan_mode.read().ok()?;
-    if let Some(path) = tool_call.arguments.get("path").and_then(|v| v.as_str())
+    if let Some(path) = arguments.get("path").and_then(|v| v.as_str())
         && plan_mode.is_active()
         && is_active_plan_file_path(&plan_mode, config.workspace_root.as_deref(), path)
     {
@@ -295,6 +302,7 @@ fn check_plan_file_write(
 fn check_safe_or_prompt(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     // 11. Yolo mode approves all remaining tools.
@@ -304,9 +312,9 @@ fn check_safe_or_prompt(
 
     // 12. Read-only safe commands skip the prompt in ask mode. Dangerous
     //     commands bypass this and force a prompt.
-    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call) {
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call, arguments) {
         if command_might_be_dangerous(&argv) {
-            let (operation, subject) = permission_operation_for_tool(tool_call)
+            let (operation, subject) = permission_operation_for_tool(tool_call, arguments)
                 .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
             return Some(PermissionPreparation::Ask {
                 operation,
@@ -384,6 +392,7 @@ async fn resolve_approval(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     operation: PermissionOperation,
     subject: String,
     session_scope: Option<SessionApprovalScope>,
@@ -391,13 +400,13 @@ async fn resolve_approval(
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> Option<ToolResult> {
-    let mut arguments = tool_call.arguments.clone();
+    let mut approval_arguments = arguments.clone();
     // For plan transitions, inject the plan file content so the TUI can
     // render it inside the approval dialog.
     if operation == PermissionOperation::PlanTransition
         && let Ok(plan_mode) = config.plan_mode.read()
         && let Ok(Some(plan_data)) = plan_mode.data()
-        && let Some(obj) = arguments.as_object_mut()
+        && let Some(obj) = approval_arguments.as_object_mut()
     {
         obj.insert(
             "plan_content".to_string(),
@@ -413,7 +422,7 @@ async fn resolve_approval(
         id: tool_call.id.clone(),
         operation,
         subject: subject.clone(),
-        arguments,
+        arguments: approval_arguments,
         session_scope: session_scope.clone(),
         prefix_rule: prefix_rule.clone(),
     };
@@ -509,41 +518,30 @@ fn permission_error(
 
 fn permission_operation_for_tool(
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> Option<(PermissionOperation, String)> {
     match tool_call.name.as_str() {
         "Read" | "List" | "Grep" | "Find" | "Glob" => Some((
             PermissionOperation::FileRead,
-            path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
+            path_subject(arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),
         "Write" | "Edit" => Some((
             PermissionOperation::FileWrite,
-            path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
+            path_subject(arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),
         "Bash" | "Terminal" | "TaskStop" => Some((
             PermissionOperation::Shell,
-            tool_call
-                .arguments
+            arguments
                 .get("command")
                 .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    tool_call
-                        .arguments
-                        .get("task_id")
-                        .and_then(serde_json::Value::as_str)
-                })
-                .or_else(|| {
-                    tool_call
-                        .arguments
-                        .get("handle")
-                        .and_then(serde_json::Value::as_str)
-                })
+                .or_else(|| arguments.get("task_id").and_then(serde_json::Value::as_str))
+                .or_else(|| arguments.get("handle").and_then(serde_json::Value::as_str))
                 .unwrap_or(tool_call.name.as_str())
                 .to_owned(),
         )),
         "AskUserQuestion" => Some((
             PermissionOperation::UserQuestion,
-            tool_call
-                .arguments
+            arguments
                 .get("questions")
                 .and_then(|q| q.as_array())
                 .and_then(|arr| arr.first())
@@ -707,20 +705,22 @@ fn is_compound_or_opaque_command(command: &str) -> bool {
 
 /// Tokenize a Bash command for prefix-check / safety classification. Returns
 /// `None` when there is no `command` arg or it cannot be tokenized.
-fn shell_argv(config: &AgentConfig, tool_call: &AgentToolCall) -> Option<Vec<String>> {
+fn shell_argv(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+) -> Option<Vec<String>> {
     if tool_call.name != "Bash" {
         return None;
     }
-    let background = tool_call
-        .arguments
+    let background = arguments
         .get("run_in_background")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if background {
         return None;
     }
-    let raw = tool_call
-        .arguments
+    let raw = arguments
         .get("command")
         .and_then(serde_json::Value::as_str)?;
     let _ = config.workspace_root.as_deref()?;
@@ -731,8 +731,9 @@ fn shell_argv(config: &AgentConfig, tool_call: &AgentToolCall) -> Option<Vec<Str
 fn shell_argv_for_prefix_check(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> Option<Vec<String>> {
-    shell_argv(config, tool_call)
+    shell_argv(config, tool_call, arguments)
 }
 
 /// Derive `(session_scope, prefix_rule)` for a tool call. Returns `(None, None)`
@@ -741,27 +742,22 @@ fn shell_argv_for_prefix_check(
 fn approval_scope_for_tool_call(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
 ) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
     // Review transitions and dangerous commands never offer scope/prefix.
     if matches!(tool_call.name.as_str(), "ExitPlanMode" | "ExitGoalMode") {
         return (None, None);
     }
     match tool_call.name.as_str() {
-        "Bash" => bash_approval_scope(config, &tool_call.arguments),
+        "Bash" => bash_approval_scope(config, arguments),
         "Write" => {
-            let (scope, _) = file_write_approval_scope(
-                config,
-                &tool_call.arguments,
-                FileWriteApprovalOperation::Write,
-            );
+            let (scope, _) =
+                file_write_approval_scope(config, arguments, FileWriteApprovalOperation::Write);
             (scope, None)
         }
         "Edit" => {
-            let (scope, _) = file_write_approval_scope(
-                config,
-                &tool_call.arguments,
-                FileWriteApprovalOperation::Edit,
-            );
+            let (scope, _) =
+                file_write_approval_scope(config, arguments, FileWriteApprovalOperation::Edit);
             (scope, None)
         }
         _ => tool_approval_scope(config, &tool_call.name),

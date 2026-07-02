@@ -4,17 +4,17 @@ pub fn collect_tool_arguments(
     events: &[AiStreamEvent],
     tool_call_id: &str,
 ) -> Result<serde_json::Value, AiError> {
-    let mut out = String::new();
+    let mut preview = String::new();
     let mut saw_delta = false;
 
     for event in events {
         match event {
             AiStreamEvent::ToolCallArgsDelta { id, json_fragment } if id == tool_call_id => {
                 saw_delta = true;
-                out.push_str(json_fragment);
+                preview.push_str(json_fragment);
             }
-            AiStreamEvent::ToolCallEnd { id, arguments } if id == tool_call_id => {
-                return Ok(arguments.clone());
+            AiStreamEvent::ToolCallEnd { id, raw_arguments } if id == tool_call_id => {
+                return parse_tool_arguments(raw_arguments);
             }
             _ => {}
         }
@@ -26,7 +26,11 @@ pub fn collect_tool_arguments(
         });
     }
 
-    serde_json::from_str(&out).map_err(|err| AiError::Stream {
+    parse_tool_arguments(&preview)
+}
+
+fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, AiError> {
+    serde_json::from_str(raw).map_err(|err| AiError::Stream {
         message: format!("invalid tool arguments: {err}"),
     })
 }

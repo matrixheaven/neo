@@ -26,7 +26,7 @@ fn collect_tool_arguments_prefers_final_tool_call_end_arguments() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "call-1".to_owned(),
-            arguments: json!({ "path": "final" }),
+            raw_arguments: r#"{"path":"final"}"#.to_owned(),
         },
     ];
 
@@ -109,7 +109,7 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "call-1".to_owned(),
-                arguments: json!({ "path": "Cargo.toml" })
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -142,13 +142,13 @@ fn openai_chat_sse_normalizer_accepts_cumulative_tool_argument_snapshots() {
 
     assert!(events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::ToolCallEnd { id, arguments }
+        AiStreamEvent::ToolCallEnd { id, raw_arguments }
             if id == "call-1"
-                && arguments
-                    == &json!({
+                && serde_json::from_str::<serde_json::Value>(raw_arguments).ok()
+                    == Some(json!({
                         "questions": [{ "question": "3 × 7 = ?" }],
                         "background": false
-                    })
+                    }))
     )));
 }
 
@@ -180,7 +180,7 @@ fn chat_message_stream_event_and_tool_spec_serialize_stably() {
         tool_calls: vec![ToolCall {
             id: "call-1".to_owned(),
             name: "read_file".to_owned(),
-            arguments: json!({ "path": "Cargo.toml" }),
+            raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
         }],
     };
     let event = AiStreamEvent::MessageEnd {

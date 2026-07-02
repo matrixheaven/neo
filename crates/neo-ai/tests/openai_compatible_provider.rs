@@ -289,7 +289,7 @@ fn expected_tool_events() -> Vec<AiStreamEvent> {
         },
         AiStreamEvent::ToolCallEnd {
             id: "call-1".to_owned(),
-            arguments: json!({ "path": "Cargo.toml" }),
+            raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: StopReason::ToolUse,
@@ -374,4 +374,241 @@ async fn openai_compatible_client_reports_non_retryable_http_failures() {
 
     assert!(err.to_string().contains("authentication error"));
     assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn openai_compatible_half_json_arguments_emit_raw_tool_call_end() {
+    let raw = r#"{"command":"uname -a","description": "#;
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-half-json",
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": raw
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions {
+            retries: Some(0),
+            ..RequestOptions::default()
+        }))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: raw.to_owned(),
+    }));
+}
+
+#[tokio::test]
+async fn openai_compatible_stable_index_survives_tool_id_mutation() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-id-mutation",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "functions.read:0",
+                        "function": { "name": "read_file", "arguments": "{\"path\":" }
+                    }]
+                }
+            }]
+        }),
+        json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "chatcmpl-tool-b",
+                        "function": { "arguments": "\"Cargo.toml\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AiStreamEvent::ToolCallStart { .. }))
+            .count(),
+        1
+    );
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "functions.read:0".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
+}
+
+#[tokio::test]
+async fn openai_compatible_buffers_arguments_until_tool_name_arrives() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-args-first",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": { "arguments": "{\"path\":\"Cargo" }
+                    }]
+                }
+            }]
+        }),
+        json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "read_file", "arguments": ".toml\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let start_pos = events
+        .iter()
+        .position(|event| matches!(event, AiStreamEvent::ToolCallStart { .. }))
+        .expect("missing start");
+    let delta_pos = events
+        .iter()
+        .position(|event| matches!(event, AiStreamEvent::ToolCallArgsDelta { .. }))
+        .expect("missing delta");
+    assert!(start_pos < delta_pos);
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
+}
+
+#[tokio::test]
+async fn openai_compatible_interleaves_two_indexed_tool_calls() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-interleave",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [
+                        { "index": 0, "id": "call-a", "function": { "name": "read_file", "arguments": "{\"path\":" } },
+                        { "index": 1, "id": "call-b", "function": { "name": "read_file", "arguments": "{\"path\":" } }
+                    ]
+                }
+            }]
+        }),
+        json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [
+                        { "index": 1, "function": { "arguments": "\"B.md\"}" } },
+                        { "index": 0, "function": { "arguments": "\"A.md\"}" } }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-a".to_owned(),
+        raw_arguments: r#"{"path":"A.md"}"#.to_owned(),
+    }));
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-b".to_owned(),
+        raw_arguments: r#"{"path":"B.md"}"#.to_owned(),
+    }));
+}
+
+#[tokio::test]
+async fn openai_compatible_ignores_empty_tool_argument_deltas() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-empty-delta",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": { "name": "read_file", "arguments": "" }
+                    }]
+                }
+            }]
+        }),
+        json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "{\"path\":\"Cargo.toml\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AiStreamEvent::ToolCallArgsDelta { json_fragment, .. } if json_fragment.is_empty()))
+            .count(),
+        0
+    );
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
 }

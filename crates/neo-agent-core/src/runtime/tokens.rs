@@ -25,7 +25,7 @@ pub(crate) fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
             let content_chars = estimate_chat_content_chars(content);
             let tool_chars = tool_calls
                 .iter()
-                .map(|call| call.name.len() + call.arguments.to_string().len())
+                .map(|call| call.name.len() + call.raw_arguments.len())
                 .sum::<usize>();
             content_chars + tool_chars
         }
@@ -46,7 +46,7 @@ pub(crate) fn estimate_message_tokens(message: &AgentMessage) -> usize {
             let content_chars = estimate_content_chars(content);
             let tool_chars = tool_calls
                 .iter()
-                .map(|call| call.name.len() + call.arguments.to_string().len())
+                .map(|call| call.name.len() + call.raw_arguments.len())
                 .sum::<usize>();
             content_chars + tool_chars
         }

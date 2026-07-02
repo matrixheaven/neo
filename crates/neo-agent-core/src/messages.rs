@@ -78,7 +78,7 @@ pub enum ImageRef {
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: serde_json::Value,
+    pub raw_arguments: String,
 }
 
 impl From<ToolCall> for AgentToolCall {
@@ -86,7 +86,7 @@ impl From<ToolCall> for AgentToolCall {
         Self {
             id: value.id,
             name: value.name,
-            arguments: value.arguments,
+            raw_arguments: value.raw_arguments,
         }
     }
 }
@@ -96,7 +96,7 @@ impl From<AgentToolCall> for ToolCall {
         Self {
             id: value.id,
             name: value.name,
-            arguments: value.arguments,
+            raw_arguments: value.raw_arguments,
         }
     }
 }
@@ -395,7 +395,7 @@ mod tests {
                 vec![AgentToolCall {
                     id: "tc1".to_owned(),
                     name: "Bash".to_owned(),
-                    arguments: serde_json::Value::Null,
+                    raw_arguments: "null".to_owned(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -416,7 +416,7 @@ mod tests {
                 vec![AgentToolCall {
                     id: "tc1".to_owned(),
                     name: "Bash".to_owned(),
-                    arguments: serde_json::Value::Null,
+                    raw_arguments: "null".to_owned(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -437,12 +437,12 @@ mod tests {
                     AgentToolCall {
                         id: "tc1".to_owned(),
                         name: "Bash".to_owned(),
-                        arguments: serde_json::Value::Null,
+                        raw_arguments: "null".to_owned(),
                     },
                     AgentToolCall {
                         id: "tc2".to_owned(),
                         name: "Bash".to_owned(),
-                        arguments: serde_json::Value::Null,
+                        raw_arguments: "null".to_owned(),
                     },
                 ],
                 StopReason::ToolUse,
@@ -476,7 +476,7 @@ mod tests {
                 vec![AgentToolCall {
                     id: "tc1".to_owned(),
                     name: "Bash".to_owned(),
-                    arguments: serde_json::Value::Null,
+                    raw_arguments: "null".to_owned(),
                 }],
                 StopReason::ToolUse,
             ),

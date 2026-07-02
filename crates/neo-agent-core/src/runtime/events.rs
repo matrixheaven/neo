@@ -230,6 +230,7 @@ pub(super) fn emit_context_window_update(
 
 pub(super) fn emit_shell_started(
     turn: u32,
+    arguments: &serde_json::Value,
     tool_call: &AgentToolCall,
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
@@ -237,11 +238,7 @@ pub(super) fn emit_shell_started(
     if tool_call.name != "Bash" {
         return;
     }
-    if let Some(command) = tool_call
-        .arguments
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-    {
+    if let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) {
         emitter.emit(AgentEvent::ShellCommandStarted {
             turn,
             id: tool_call.id.clone(),
@@ -323,6 +320,7 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
 
 pub(super) fn emit_terminal_events(
     turn: u32,
+    arguments: &serde_json::Value,
     tool_call: &AgentToolCall,
     result: &ToolResult,
     tool_context: &ToolContext,
@@ -341,11 +339,7 @@ pub(super) fn emit_terminal_events(
     else {
         return;
     };
-    match tool_call
-        .arguments
-        .get("mode")
-        .and_then(serde_json::Value::as_str)
-    {
+    match arguments.get("mode").and_then(serde_json::Value::as_str) {
         Some("start") => {
             let command = details
                 .get("command")

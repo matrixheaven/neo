@@ -347,7 +347,7 @@ async fn delegate_emits_foreground_events() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "task": "test task" }),
+                raw_arguments: json!({ "task": "test task" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -428,11 +428,12 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_delegate".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "task": "inspect queue",
                     "role": "reviewer",
                     "context": "inherit"
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -552,7 +553,7 @@ async fn delegate_streams_child_activity_updates_before_finish() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_delegate".to_owned(),
-                arguments: json!({ "task": "inspect lib" }),
+                raw_arguments: json!({ "task": "inspect lib" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -569,7 +570,8 @@ async fn delegate_streams_child_activity_updates_before_finish() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "read_1".to_owned(),
-                arguments: json!({ "file_path": "crates/neo-agent-core/src/lib.rs" }),
+                raw_arguments: json!({ "file_path": "crates/neo-agent-core/src/lib.rs" })
+                    .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -670,7 +672,7 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_delegate".to_owned(),
-                arguments: json!({ "task": "try recursive delegation" }),
+                raw_arguments: json!({ "task": "try recursive delegation" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -760,7 +762,7 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_delegate".to_owned(),
-                arguments: json!({ "task": "try hidden task output" }),
+                raw_arguments: json!({ "task": "try hidden task output" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -777,7 +779,7 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "hidden_tool".to_owned(),
-                arguments: json!({}),
+                raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -1018,12 +1020,12 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_swarm".to_owned(),
-            arguments: json!({
+            raw_arguments: json!({
                 "description": "inspect modules",
                 "items": ["api", "tui", "runtime"],
                 "prompt_template": "Check {{item}}",
                 "max_concurrency": 2
-            }),
+            }).to_string(),
         },
         AiStreamEvent::MessageEnd {
             stop_reason: StopReason::ToolUse,
@@ -1178,12 +1180,13 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_swarm".to_owned(),
-                arguments: json!({
+                raw_arguments: json!({
                     "description": "canonical title",
                     "items": ["alpha", "beta"],
                     "prompt_template": "Review {{item}} for {{description}}",
                     "max_concurrency": 2
-                }),
+                })
+                .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
