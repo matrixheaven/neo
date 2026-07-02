@@ -97,6 +97,12 @@ fn is_complete_sequence(data: &str) -> SequenceStatus {
 
     let after_esc = &data[ESC.len()..];
 
+    // Meta + escape sequence (for example Alt+Up in terminals that encode it
+    // as ESC followed by the normal arrow sequence).
+    if after_esc.starts_with(ESC) {
+        return is_complete_sequence(after_esc);
+    }
+
     // CSI sequences: ESC [
     if after_esc.starts_with('[') {
         // Old-style mouse: ESC[M + 3 bytes = 6 total
@@ -856,6 +862,10 @@ fn legacy_sequence_key_id(data: &str) -> Option<&'static str> {
         "\x1bf" => Some("alt+right"),
         "\x1bp" => Some("alt+up"),
         "\x1bn" => Some("alt+down"),
+        "\x1b\x1b[A" | "\x1b\x1bOA" => Some("alt+up"),
+        "\x1b\x1b[B" | "\x1b\x1bOB" => Some("alt+down"),
+        "\x1b\x1b[D" | "\x1b\x1bOD" => Some("alt+left"),
+        "\x1b\x1b[C" | "\x1b\x1bOC" => Some("alt+right"),
         _ => None,
     }
 }
@@ -1425,7 +1435,10 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
 
         "up" => {
             if modifier == MOD_ALT {
-                return data == "\x1bp" || matches_kitty_sequence(data, CP_UP, MOD_ALT);
+                return data == "\x1bp"
+                    || data == "\x1b\x1b[A"
+                    || data == "\x1b\x1bOA"
+                    || matches_kitty_sequence(data, CP_UP, MOD_ALT);
             }
             if modifier == 0 {
                 return matches_legacy_sequence(data, legacy_key_sequences("up"))
@@ -1437,7 +1450,10 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
 
         "down" => {
             if modifier == MOD_ALT {
-                return data == "\x1bn" || matches_kitty_sequence(data, CP_DOWN, MOD_ALT);
+                return data == "\x1bn"
+                    || data == "\x1b\x1b[B"
+                    || data == "\x1b\x1bOB"
+                    || matches_kitty_sequence(data, CP_DOWN, MOD_ALT);
             }
             if modifier == 0 {
                 return matches_legacy_sequence(data, legacy_key_sequences("down"))
@@ -1452,6 +1468,8 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
                 return data == "\x1b[1;3D"
                     || (!is_kitty_protocol_active() && data == "\x1bB")
                     || data == "\x1bb"
+                    || data == "\x1b\x1b[D"
+                    || data == "\x1b\x1bOD"
                     || matches_kitty_sequence(data, CP_LEFT, MOD_ALT);
             }
             if modifier == MOD_CTRL {
@@ -1472,6 +1490,8 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
                 return data == "\x1b[1;3C"
                     || (!is_kitty_protocol_active() && data == "\x1bF")
                     || data == "\x1bf"
+                    || data == "\x1b\x1b[C"
+                    || data == "\x1b\x1bOC"
                     || matches_kitty_sequence(data, CP_RIGHT, MOD_ALT);
             }
             if modifier == MOD_CTRL {
@@ -1718,6 +1738,15 @@ mod tests {
         let events = parser.feed_bytes(b"\x1b[A");
         assert_eq!(events, vec![RawEvent::Key("\x1b[A".to_owned())]);
         assert_eq!(parse_key("\x1b[A"), Some("up".to_owned()));
+    }
+
+    #[test]
+    fn meta_arrow_up_sequence() {
+        let mut parser = RawInputParser::new();
+        let events = parser.feed_bytes(b"\x1b\x1b[A");
+        assert_eq!(events, vec![RawEvent::Key("\x1b\x1b[A".to_owned())]);
+        assert_eq!(parse_key("\x1b\x1b[A"), Some("alt+up".to_owned()));
+        assert!(matches_key("\x1b\x1b[A", "alt+up"));
     }
 
     #[test]

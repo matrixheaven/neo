@@ -297,6 +297,7 @@ pub(crate) struct InteractiveController {
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
     session_messages: Vec<AgentMessage>,
+    local_user_message_acks: VecDeque<String>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
     shell_driver: ShellDriver,
@@ -661,6 +662,7 @@ impl InteractiveController {
             local_config: None,
             active_model: None,
             session_messages: Vec::new(),
+            local_user_message_acks: VecDeque::new(),
             current_thinking: false,
             active_turn: None,
             shell_driver,
@@ -1383,7 +1385,7 @@ impl InteractiveController {
         }
 
         for message in steered_messages {
-            self.tui.transcript_mut().push_user_message(message);
+            self.push_local_user_message(message);
         }
         Ok(())
     }
@@ -1425,6 +1427,7 @@ impl InteractiveController {
         {
             self.session_messages.push(message.clone());
         }
+        self.render_appended_user_message_if_needed(&event);
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"
             && let Some(details) = &result.details
@@ -1441,6 +1444,37 @@ impl InteractiveController {
         if should_refresh_git_status {
             self.refresh_git_status_now();
         }
+    }
+
+    fn push_local_user_message(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.tui.transcript_mut().push_user_message(text.clone());
+        self.local_user_message_acks.push_back(text);
+    }
+
+    fn render_appended_user_message_if_needed(&mut self, event: &AgentEvent) {
+        let AgentEvent::MessageAppended {
+            message: AgentMessage::User { content },
+        } = event
+        else {
+            return;
+        };
+        let text = content_to_display_text(content);
+        if text.trim().is_empty() {
+            return;
+        }
+        if self
+            .local_user_message_acks
+            .front()
+            .is_some_and(|pending| pending == &text)
+        {
+            self.local_user_message_acks.pop_front();
+            return;
+        }
+        self.tui.transcript_mut().push_user_message(text);
     }
 
     fn sync_inline_approval_selection(&mut self) {

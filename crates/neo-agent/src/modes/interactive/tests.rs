@@ -7372,6 +7372,56 @@ async fn active_turn_enter_updates_pending_preview_immediately() {
 }
 
 #[tokio::test]
+async fn queued_follow_up_message_appended_renders_user_transcript_entry() {
+    let mut controller = running_turn_controller().await;
+
+    controller.type_text("queued transcript content");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("enter while busy enqueues");
+
+    controller.apply_turn_event(AgentEvent::QueueDrained {
+        kind: neo_agent_core::QueueKind::FollowUp,
+        count: 1,
+    });
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("queued transcript content"),
+    });
+
+    assert!(
+        transcript_entries(&controller).iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "queued transcript content")
+        ),
+        "queued follow-up should be rendered as a user prompt when it is appended"
+    );
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
+async fn locally_rendered_prompt_message_appended_does_not_duplicate_transcript_entry() {
+    let mut controller = running_turn_controller().await;
+
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("long running"),
+    });
+
+    let matching_entries = transcript_entries(&controller)
+        .iter()
+        .filter(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "long running"),
+        )
+        .count();
+    assert_eq!(
+        matching_entries, 1,
+        "runtime ack for a locally rendered prompt should not duplicate it"
+    );
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
 async fn active_turn_ctrl_s_steers_running_turn() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),

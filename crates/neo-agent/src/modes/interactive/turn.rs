@@ -26,9 +26,7 @@ impl InteractiveController {
             return;
         }
         if show_user_message {
-            self.tui
-                .transcript_mut()
-                .push_user_message(super::content_to_display_text(&prompt));
+            self.push_local_user_message(super::content_to_display_text(&prompt));
         }
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
