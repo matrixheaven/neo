@@ -72,12 +72,12 @@ mod snapshot;
 use snapshot::render_transcript_snapshot;
 
 mod prompt_completion;
-use prompt_completion::{longest_common_completion_prefix, prompt_completions};
+use prompt_completion::{
+    longest_common_completion_prefix, prompt_completions, session_completion_items,
+};
 
 #[cfg(test)]
-use prompt_completion::{
-    CompletionCatalog, CompletionSource, completion_source_candidates, session_completion_items,
-};
+use prompt_completion::{CompletionCatalog, CompletionSource, completion_source_candidates};
 
 mod mode_state;
 

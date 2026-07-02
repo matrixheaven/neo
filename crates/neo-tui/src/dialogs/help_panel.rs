@@ -226,11 +226,16 @@ fn command_line(command: &HelpPanelCommand, theme: &TuiTheme) -> String {
     match command
         .description
         .as_deref()
+        .map(sanitize_description)
         .filter(|description| !description.is_empty())
     {
-        Some(description) => format!("  {} {}", label, paint(description, theme.text_muted)),
+        Some(description) => format!("  {} {}", label, paint(&description, theme.text_muted)),
         None => format!("  {label}"),
     }
+}
+
+fn sanitize_description(description: &str) -> String {
+    description.replace(['\r', '\n'], " ").trim().to_owned()
 }
 
 fn shortcut_line(key: &str, description: &str, theme: &TuiTheme) -> String {
@@ -384,6 +389,35 @@ mod tests {
             widths.iter().all(|width| width == expected_width),
             "expected every help panel line to be {expected_width} cols, got {widths:?}\n{}",
             strip_ansi(&rendered.join("\n"))
+        );
+    }
+
+    #[test]
+    fn help_panel_sanitizes_multiline_command_descriptions() {
+        let state = HelpPanelState::new(HelpPanelOptions {
+            commands: vec![HelpPanelCommand::new(
+                "/skill:multi",
+                Some("First line\nSecond line\rThird line"),
+            )],
+            theme: theme(),
+        });
+
+        let rendered = state
+            .render_lines(80)
+            .into_iter()
+            .map(|line| strip_ansi(&line))
+            .collect::<Vec<_>>();
+        let joined = rendered.join("\n");
+
+        assert!(
+            joined.contains("First line Second line Third line"),
+            "{joined}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| !line.contains('\n') && !line.contains('\r')),
+            "{joined}"
         );
     }
 
