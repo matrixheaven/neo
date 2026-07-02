@@ -1,4 +1,5 @@
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
+use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{truncate_width, visible_width, wrap_width};
 use neo_tui::shell::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
 use neo_tui::transcript::{TranscriptEntry, TranscriptStore, TranscriptViewport};
@@ -700,15 +701,12 @@ fn select_list_filters_wraps_and_reports_visible_window() {
     list.move_down();
     assert_eq!(list.selected_item().expect("selected").value, "close");
 
-    let lines = list.render_lines(18);
+    let theme = TuiTheme::default();
+    let lines = list.render_lines(18, &theme);
     assert_eq!(lines.len(), 3);
-    assert!(lines[0].contains("> Close"));
+    assert!(strip_ansi_escapes(&lines[0]).contains("> Close"));
     assert!(lines[2].contains("(1/3)"));
-    assert!(
-        lines
-            .iter()
-            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 18)
-    );
+    assert!(lines.iter().all(|line| visible_width(line) <= 18));
 }
 
 #[test]

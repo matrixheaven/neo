@@ -1,4 +1,5 @@
 use super::select_list::{SelectItem, SelectListState};
+use crate::primitive::theme::TuiTheme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -71,8 +72,8 @@ impl CommandPaletteState {
     }
 
     #[must_use]
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
-        self.list.render_lines(width)
+    pub fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
+        self.list.render_lines(width, theme)
     }
 }
 

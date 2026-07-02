@@ -173,10 +173,10 @@ impl OverlayKind {
     #[must_use]
     fn picker_lines(&self, width: usize, theme: &TuiTheme) -> Option<Vec<String>> {
         match self {
-            Self::CommandPalette(palette) => Some(palette.render_lines(width)),
+            Self::CommandPalette(palette) => Some(palette.render_lines(width, theme)),
             Self::SessionPicker(_) => self.session_picker_lines(width, theme),
-            Self::ModelPicker(picker) => Some(picker.render_lines(width)),
-            Self::PromptCompletion(completions) => Some(completions.render_lines(width)),
+            Self::ModelPicker(picker) => Some(picker.render_lines(width, theme)),
+            Self::PromptCompletion(completions) => Some(completions.render_lines(width, theme)),
             _ => None,
         }
     }

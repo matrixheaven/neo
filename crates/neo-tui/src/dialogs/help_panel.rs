@@ -4,10 +4,10 @@ use std::cmp::Ordering;
 
 use crate::input::InputEvent;
 use crate::input::KeybindingAction;
-use crate::primitive::theme::TuiTheme;
-use crate::primitive::visible_width;
 use crate::primitive::Color;
 use crate::primitive::InputResult;
+use crate::primitive::theme::TuiTheme;
+use crate::primitive::visible_width;
 
 use super::choice_picker::dialog_rgb;
 

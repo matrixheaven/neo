@@ -1,5 +1,6 @@
 //! Extracted: TUI snapshot/frame rendering helpers for tests and rendering.
 
+use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::shell::{NeoChromeState, OverlayKind};
 use neo_tui::transcript::TranscriptPane;
 
@@ -54,7 +55,8 @@ fn render_overlay_content_snapshot(app: &NeoChromeState, content_width: usize) -
             picker.render_lines(content_width, &theme)
         }
         Some(OverlayKind::ModelPicker(picker)) => {
-            render_picker_snapshot("Models", picker, content_width)
+            let theme = app.theme();
+            render_picker_snapshot("Models", picker, content_width, &theme)
         }
         Some(OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
         Some(OverlayKind::PromptCompletion(_)) => vec![],
@@ -79,8 +81,9 @@ pub(super) fn render_picker_snapshot(
     title: &str,
     picker: &neo_tui::shell::PickerState,
     width: usize,
+    theme: &TuiTheme,
 ) -> Vec<String> {
     let mut lines = vec![title.to_owned()];
-    lines.extend(picker.render_lines(width));
+    lines.extend(picker.render_lines(width, theme));
     lines
 }

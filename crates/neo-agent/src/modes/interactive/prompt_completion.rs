@@ -48,8 +48,8 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
                 .and_then(|component| component.as_os_str().to_str())
                 .filter(|provider| !provider.is_empty())?;
             let value = format!("/{}", command.template.name);
-            let description = (!command.template.description.is_empty())
-                .then_some(command.template.description);
+            let description =
+                (!command.template.description.is_empty()).then_some(command.template.description);
             Some(PickerItem::new(value.clone(), value, description))
         })
         .collect::<Vec<_>>();

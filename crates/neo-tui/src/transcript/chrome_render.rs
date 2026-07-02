@@ -241,11 +241,11 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
         return None;
     };
     let inner_width = width.saturating_sub(2).max(1);
-    let raw_lines = state.render_lines(inner_width);
+    let theme = app.theme();
+    let raw_lines = state.render_lines(inner_width, &theme);
     if raw_lines.is_empty() {
         return None;
     }
-    let theme = app.theme();
     let border_style = Style::default().fg(theme.brand);
     let mut lines = Vec::with_capacity(raw_lines.len() + 1);
     for raw in raw_lines {
