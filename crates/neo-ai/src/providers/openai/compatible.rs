@@ -178,8 +178,18 @@ fn assistant_message_body(
     let text = content_text(content, "assistant")?;
     let mut body = json!({
         "role": "assistant",
-        "content": text,
     });
+    // When the assistant message carries tool calls and no visible text,
+    // omit `content` entirely (set it to null). Sending `"content": ""`
+    // confuses some OpenAI-compatible models (e.g. MiMo) into echoing the
+    // tool calls back as XML text in subsequent turns — they interpret the
+    // empty string as "the assistant produced text that should be paired
+    // with the tool calls" rather than "the assistant only called tools".
+    if !tool_calls.is_empty() && text.is_empty() {
+        body["content"] = Value::Null;
+    } else {
+        body["content"] = json!(text);
+    }
     if !tool_calls.is_empty() {
         body["tool_calls"] = json!(tool_calls.iter().map(tool_call_body).collect::<Vec<_>>());
     }
