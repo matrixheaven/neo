@@ -361,7 +361,11 @@ fn progress_bar_text(progress: f32, state: AgentLifecycleState) -> String {
     };
     // WIDTH is a small constant; the f32 cast is lossless in practice. Truncation
     // and sign loss are intentional because progress is clamped below before use.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let filled = (progress * WIDTH as f32).floor() as usize;
     format!(
         "{}{}",

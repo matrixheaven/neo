@@ -22,10 +22,7 @@ pub(super) async fn maybe_compact(
     cancel_token: &CancellationToken,
 ) {
     const MIN_REDUCTION_TOKENS: usize = 1024;
-    let max_rounds = config
-        .compaction
-        .as_ref()
-        .map_or(5, |s| s.max_rounds);
+    let max_rounds = config.compaction.as_ref().map_or(5, |s| s.max_rounds);
 
     for round in 0..max_rounds {
         let Some(trigger) = evaluate_compaction_need(config, emitter) else {

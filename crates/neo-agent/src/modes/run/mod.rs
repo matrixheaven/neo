@@ -306,12 +306,10 @@ async fn prepare_new_streaming_turn(
     let (user_message, initial_events) =
         append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt_text);
-    let session_directory = session_path
-        .parent()
-        .map_or_else(
-            || workspace_sessions_dir(config).join(&session_id),
-            Path::to_path_buf,
-        );
+    let session_directory = session_path.parent().map_or_else(
+        || workspace_sessions_dir(config).join(&session_id),
+        Path::to_path_buf,
+    );
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
         session_id,
@@ -336,12 +334,10 @@ async fn prepare_existing_streaming_turn(
         .collect::<Vec<_>>()
         .join(" ");
     let session_path = sessions::session_path(session_id, config)?;
-    let session_directory = session_path
-        .parent()
-        .map_or_else(
-            || workspace_sessions_dir(config).join(session_id),
-            Path::to_path_buf,
-        );
+    let session_directory = session_path.parent().map_or_else(
+        || workspace_sessions_dir(config).join(session_id),
+        Path::to_path_buf,
+    );
     let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;

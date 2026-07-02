@@ -337,11 +337,10 @@ impl Tool for ListDelegatesTool {
                     message: "limit must be >= 1".to_owned(),
                 });
             }
-            let include_completed =
-                input.include_completed
-                    || input
-                        .state
-                        .is_some_and(crate::multi_agent::AgentLifecycleState::is_terminal);
+            let include_completed = input.include_completed
+                || input
+                    .state
+                    .is_some_and(crate::multi_agent::AgentLifecycleState::is_terminal);
             let cursor_query = DelegateListCursorQuery::from_input(&input, include_completed);
             let offset = parse_list_cursor(self.name(), input.cursor.as_deref(), &cursor_query)?;
             let limit = input.limit;
