@@ -93,7 +93,7 @@ mod tests {
         let mut paste_store = HashMap::new();
         paste_store.insert(1, "pasted content".into());
         let parts = expand_prompt_markers(
-            "before [paste 1 chars] after",
+            "before [paste #1 chars] after",
             &paste_store,
             &ImageAttachmentStore::new(),
         );

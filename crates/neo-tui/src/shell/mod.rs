@@ -369,32 +369,32 @@ mod tests {
 
     #[test]
     fn backspace_selects_marker_first_then_deletes() {
-        let mut prompt = PromptState::new("hello [paste +5 lines]");
+        let mut prompt = PromptState::new("hello [paste #1 +5 lines]");
         prompt.cursor = prompt.char_len();
         // First backspace selects marker, text unchanged.
         assert!(prompt.apply_edit(PromptEdit::Backspace).is_none());
-        assert!(prompt.text.contains("[paste +5 lines]"));
+        assert!(prompt.text.contains("[paste #1 +5 lines]"));
         assert!(prompt.selected_marker().is_some());
         // Second backspace deletes marker.
         assert!(prompt.apply_edit(PromptEdit::Backspace).is_some());
-        assert!(!prompt.text.contains("[paste +5 lines]"));
+        assert!(!prompt.text.contains("[paste #1 +5 lines]"));
         assert_eq!(prompt.text, "hello ");
     }
 
     #[test]
     fn delete_selects_marker_first_then_deletes() {
-        let mut prompt = PromptState::new("[paste +5 lines] world");
+        let mut prompt = PromptState::new("[paste #1 +5 lines] world");
         prompt.cursor = 0;
         assert!(prompt.apply_edit(PromptEdit::Delete).is_none());
-        assert!(prompt.text.contains("[paste +5 lines]"));
+        assert!(prompt.text.contains("[paste #1 +5 lines]"));
         assert!(prompt.apply_edit(PromptEdit::Delete).is_some());
-        assert!(!prompt.text.contains("[paste +5 lines]"));
+        assert!(!prompt.text.contains("[paste #1 +5 lines]"));
         assert_eq!(prompt.text, " world");
     }
 
     #[test]
     fn cursor_movement_clears_marker_selection() {
-        let mut prompt = PromptState::new("hello [paste +5 lines]");
+        let mut prompt = PromptState::new("hello [paste #1 +5 lines]");
         prompt.cursor = prompt.char_len();
         prompt.apply_edit(PromptEdit::Backspace);
         assert!(prompt.selected_marker().is_some());

@@ -3,11 +3,11 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Matches `[paste +N lines]`, `[paste N chars]`, or `[image #N (WxH)]`.
+/// Matches `[paste #ID +N lines]`, `[paste #ID chars]`, or `[image #N (WxH)]`.
 pub fn marker_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[(?:(paste)\s+(?:\+(\d+)\s+lines|(\d+)\s+chars)|(image)\s+#(\d+)\s+\((\d+)x(\d+)\))\]")
+        Regex::new(r"\[(?:(paste)\s+#(\d+)\s+(?:\+(\d+)\s+lines|chars)|(image)\s+#(\d+)\s+\((\d+)x(\d+)\))\]")
             .expect("marker regex is valid")
     })
 }
@@ -34,10 +34,8 @@ impl Marker {
     #[must_use]
     pub fn as_placeholder(&self) -> String {
         match self {
-            Self::Paste { lines: Some(n), .. } => format!("[paste +{n} lines]"),
-            // The id is hidden in rendering for chars markers; callers keep the
-            // original text in the paste store keyed by id.
-            Self::Paste { id, lines: None } => format!("[paste {id} chars]"),
+            Self::Paste { id, lines: Some(n), .. } => format!("[paste #{id} +{n} lines]"),
+            Self::Paste { id, lines: None, .. } => format!("[paste #{id} chars]"),
             Self::Image { id, width, height } => {
                 format!("[image #{id} ({width}x{height})]")
             }
@@ -51,18 +49,19 @@ pub fn parse_markers(text: &str) -> Vec<(usize, Marker)> {
     let mut out = Vec::new();
     for cap in marker_regex().captures_iter(text) {
         let m = cap.get(0).expect("regex match has group 0");
-        if let Some(lines) = cap.get(2).and_then(|m| m.as_str().parse().ok()) {
-            out.push((
-                m.start(),
-                Marker::Paste {
-                    id: out.len() + 1,
-                    lines: Some(lines),
-                },
-            ));
-        } else if cap.get(3).is_some() {
-            let id = out.len() + 1;
-            out.push((m.start(), Marker::Paste { id, lines: None }));
+        if cap.get(1).is_some() {
+            // Paste marker: [paste #ID +N lines] or [paste #ID chars]
+            let id = cap
+                .get(2)
+                .and_then(|c| c.as_str().parse().ok())
+                .unwrap_or_else(|| out.len() + 1);
+            if let Some(lines) = cap.get(3).and_then(|c| c.as_str().parse().ok()) {
+                out.push((m.start(), Marker::Paste { id, lines: Some(lines) }));
+            } else {
+                out.push((m.start(), Marker::Paste { id, lines: None }));
+            }
         } else if cap.get(4).is_some() {
+            // Image marker: [image #ID (WxH)]
             let id = cap[5].parse().unwrap_or(0);
             let width = cap[6].parse().unwrap_or(0);
             let height = cap[7].parse().unwrap_or(0);
@@ -168,15 +167,15 @@ mod tests {
 
     #[test]
     fn parses_paste_lines_marker() {
-        let text = "hello [paste +15 lines] world";
+        let text = "hello [paste #1 +15 lines] world";
         let markers = parse_markers(text);
         assert_eq!(markers.len(), 1);
         assert!(
             matches!(
                 markers[0].1,
                 Marker::Paste {
+                    id: 1,
                     lines: Some(15),
-                    ..
                 }
             ),
             "expected paste lines marker"
@@ -185,11 +184,17 @@ mod tests {
 
     #[test]
     fn parses_paste_chars_marker() {
-        let text = "hello [paste 1234 chars] world";
+        let text = "hello [paste #3 chars] world";
         let markers = parse_markers(text);
         assert_eq!(markers.len(), 1);
         assert!(
-            matches!(markers[0].1, Marker::Paste { lines: None, .. }),
+            matches!(
+                markers[0].1,
+                Marker::Paste {
+                    id: 3,
+                    lines: None
+                }
+            ),
             "expected paste chars marker"
         );
     }
@@ -214,7 +219,7 @@ mod tests {
 
     #[test]
     fn parses_multiple_markers() {
-        let text = "[paste +1 lines][image #1 (10x20)][paste 5 chars]";
+        let text = "[paste #1 +1 lines][image #1 (10x20)][paste #2 chars]";
         let markers = parse_markers(text);
         assert_eq!(markers.len(), 3);
     }

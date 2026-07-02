@@ -372,12 +372,11 @@ impl InteractiveController {
             let id = self.next_paste_id;
             self.next_paste_id += 1;
             self.paste_store.insert(id, cleaned);
-            let marker = if line_count > 10 {
-                format!("[paste +{line_count} lines]")
-            } else {
-                format!("[paste {id} chars]")
+            let marker = neo_tui::paste::Marker::Paste {
+                id,
+                lines: if line_count > 10 { Some(line_count) } else { None },
             };
-            self.apply_prompt_edit(PromptEdit::Insert(&marker));
+            self.apply_prompt_edit(PromptEdit::Insert(&marker.as_placeholder()));
         } else {
             self.apply_prompt_edit(PromptEdit::Insert(&cleaned));
         }
@@ -390,11 +389,11 @@ impl InteractiveController {
         for cap in neo_tui::paste::marker_regex().captures_iter(&text) {
             let m = cap.get(0).expect("regex match has group 0");
             if m.start() <= cursor_byte && m.end() >= cursor_byte {
+                // Group 2 = paste id, group 5 = image id (new regex layout).
                 let id = cap
                     .get(2)
-                    .or_else(|| cap.get(3))
                     .or_else(|| cap.get(5))
-                    .and_then(|m| m.as_str().parse::<usize>().ok());
+                    .and_then(|c| c.as_str().parse::<usize>().ok());
                 if let Some((id, original)) = id.and_then(|id| {
                     self.paste_store
                         .get(&id)
