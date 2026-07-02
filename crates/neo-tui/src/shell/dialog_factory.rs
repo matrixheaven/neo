@@ -220,6 +220,17 @@ impl NeoChromeState {
         self.push_overlay(Overlay::new("trust", OverlayKind::TrustDialog(state)))
     }
 
+    pub fn open_help_panel(
+        &mut self,
+        commands: Vec<crate::dialogs::HelpPanelCommand>,
+    ) -> OverlayId {
+        let state = crate::dialogs::HelpPanelState::new(crate::dialogs::HelpPanelOptions {
+            commands,
+            theme: self.theme,
+        });
+        self.push_overlay(Overlay::new("help", OverlayKind::HelpPanel(state)))
+    }
+
     pub fn push_task_browser_overlay(&mut self, state: TaskBrowserState) -> OverlayId {
         if let Some(overlay) = self
             .overlays
@@ -287,6 +298,7 @@ impl NeoChromeState {
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::TrustDialog(_)
+                | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
         )
     }

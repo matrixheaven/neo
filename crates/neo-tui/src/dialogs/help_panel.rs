@@ -36,7 +36,7 @@ pub struct HelpPanelOptions {
     pub theme: TuiTheme,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpPanelState {
     commands: Vec<HelpPanelCommand>,
     theme: TuiTheme,

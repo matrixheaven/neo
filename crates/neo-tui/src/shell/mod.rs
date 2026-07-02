@@ -340,6 +340,7 @@ impl NeoChromeState {
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::Approval(_)
                 | OverlayKind::TrustDialog(_)
+                | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
         )
     }
@@ -428,5 +429,38 @@ mod tests {
         // The dialog reserves 16 rows so the larger http/sse form fits; the
         // actual rendered lines may be fewer (e.g. 11 for stdio).
         assert_eq!(chrome.focused_overlay_height(), 16);
+    }
+
+    #[test]
+    fn help_panel_overlay_opens_as_rich_dialog_and_blocks_prompt() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        let id = chrome.open_help_panel(vec![
+            crate::dialogs::HelpPanelCommand::new("/help", Some("Show help information")),
+            crate::dialogs::HelpPanelCommand::new("/skill:refactor", Some("Refactor safely")),
+        ]);
+
+        assert_eq!(chrome.focused_overlay_id(), Some(id));
+        assert!(chrome.focused_overlay_is_rich_dialog());
+        assert!(chrome.focused_overlay_blocks_prompt());
+        assert_eq!(chrome.focused_overlay_height(), 16);
+
+        let visible = chrome
+            .focused_overlay_lines(80)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            visible.contains("help · Esc / Enter / q close"),
+            "{visible}"
+        );
+        assert!(visible.contains("/help"), "{visible}");
+        assert!(visible.contains("/skill:refactor"), "{visible}");
+
+        assert_eq!(
+            chrome.handle_focused_dialog_input(crate::input::InputEvent::Insert('q')),
+            crate::primitive::InputResult::Cancelled
+        );
+        assert!(chrome.focused_overlay().is_none());
     }
 }

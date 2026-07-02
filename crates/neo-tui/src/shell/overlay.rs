@@ -7,9 +7,9 @@ use crate::primitive::theme::TuiTheme;
 
 use crate::dialogs::QuestionStateMachine;
 use crate::dialogs::{
-    ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, McpAddFormState,
-    McpManagerState, ModelSelectorState, ProviderManagerState, TabbedModelSelectorState,
-    TextInputState, TrustDialogState,
+    ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, HelpPanelState,
+    McpAddFormState, McpManagerState, ModelSelectorState, ProviderManagerState,
+    TabbedModelSelectorState, TextInputState, TrustDialogState,
 };
 use crate::input::KeybindingAction;
 use crate::tasks_browser::{TaskBrowserRenderer, TaskBrowserState};
@@ -141,6 +141,7 @@ pub enum OverlayKind {
     TextInput(TextInputState),
     CustomRegistryImport(CustomRegistryImportState),
     TrustDialog(TrustDialogState),
+    HelpPanel(HelpPanelState),
     TaskBrowser(TaskBrowserState),
 }
 
@@ -187,6 +188,7 @@ impl OverlayKind {
             Self::TabbedModelSelector(state) => Some(state.render_lines(width)),
             Self::ProviderManager(state) => Some(state.render_lines(width)),
             Self::McpManager(state) => Some(state.render_lines(width)),
+            Self::HelpPanel(state) => Some(state.render_lines(width)),
             _ => self.input_dialog_lines(width),
         }
     }
@@ -248,7 +250,8 @@ impl OverlayKind {
             | Self::McpManager(_)
             | Self::McpAddForm(_)
             | Self::ChoicePicker(_)
-            | Self::TrustDialog(_) => Some(16),
+            | Self::TrustDialog(_)
+            | Self::HelpPanel(_) => Some(16),
             Self::TaskBrowser(_) => Some(0),
             _ => None,
         }

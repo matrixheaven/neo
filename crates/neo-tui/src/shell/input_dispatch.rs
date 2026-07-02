@@ -42,6 +42,13 @@ impl NeoChromeState {
                 result
             }
             OverlayKind::TrustDialog(state) => state.handle_input(&input),
+            OverlayKind::HelpPanel(state) => {
+                let result = state.handle_input(&input);
+                if matches!(result, InputResult::Submitted | InputResult::Cancelled) {
+                    close_overlay = true;
+                }
+                result
+            }
             _ => InputResult::Ignored,
         };
         if close_overlay {
