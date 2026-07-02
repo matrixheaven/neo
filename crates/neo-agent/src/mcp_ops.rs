@@ -714,8 +714,7 @@ pub async fn authenticate_mcp_server_oauth(
         .persist_client_and_discovery(&identity, &client_config, discovery_metadata)
         .context("failed to persist OAuth client metadata to Neo MCP credential store")?;
     service
-        .persist_rmcp_credentials(&identity, credentials)
-        .await
+        .persist_rmcp_credentials(&identity, &credentials)
         .context("failed to persist OAuth credentials to Neo MCP credential store")?;
 
     Ok(())

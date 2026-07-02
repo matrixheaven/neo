@@ -1617,6 +1617,7 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children() {
     let mut pane = TranscriptPane::new(160, 30);
     let first = AgentSnapshot {

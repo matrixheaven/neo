@@ -19,14 +19,10 @@ impl InteractiveController {
         &mut self,
         prompt: Vec<Content>,
         model_override: Option<super::SelectedModel>,
-        show_user_message: bool,
     ) {
         if self.active_turn.is_some() {
             self.push_status("A turn is already running");
             return;
-        }
-        if show_user_message {
-            self.push_local_user_message(super::content_to_display_text(&prompt));
         }
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -106,7 +106,7 @@ fn is_vision_mime(mime: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::*;
+    use super::{ClipboardError, ClipboardImage, detect_image_mime, is_vision_mime};
     use std::process::Command;
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
@@ -157,7 +157,7 @@ mod macos {
         }
     }
 
-    /// Read raw bytes for a given NSPasteboard type via JXA.
+    /// Read raw bytes for a given `NSPasteboard` type via JXA.
     fn read_pasteboard_type(pasteboard_type: &str) -> Option<Vec<u8>> {
         let suffix = if pasteboard_type.contains("PNG") {
             "png"

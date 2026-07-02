@@ -596,6 +596,7 @@ impl PromptState {
         Some(replacement.to_owned())
     }
 
+    #[must_use]
     pub fn byte_index(&self, char_index: usize) -> usize {
         if char_index == 0 {
             return 0;

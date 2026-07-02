@@ -1,4 +1,11 @@
-use super::*;
+use std::fmt::Write as _;
+
+use anyhow::Result;
+
+use super::{
+    Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind, PromptEdit,
+    frame_content_width, longest_common_completion_prefix, prompt_completions, size,
+};
 
 pub(super) fn content_to_display_text(content: &[Content]) -> String {
     let mut image_idx = 0;
@@ -9,7 +16,7 @@ pub(super) fn content_to_display_text(content: &[Content]) -> String {
             Content::Image { mime_type, data } => {
                 image_idx += 1;
                 let (w, h) = image_dimensions_from_data(mime_type, data);
-                out.push_str(&format!("[image #{image_idx} ({w}x{h})]"));
+                let _ = write!(out, "[image #{image_idx} ({w}x{h})]");
             }
             Content::Thinking { .. } => {}
         }
@@ -222,7 +229,7 @@ impl InteractiveController {
                 height,
                 Some(image.bytes),
             );
-            let placeholder = format!("[image #{} ({}x{})]", id, width, height);
+            let placeholder = format!("[image #{id} ({width}x{height})]");
             self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
             return;
         }
@@ -233,7 +240,7 @@ impl InteractiveController {
             self.next_paste_id += 1;
             self.paste_store.insert(id, cleaned);
             let marker = if line_count > 10 {
-                format!("[paste +{} lines]", line_count)
+                format!("[paste +{line_count} lines]")
             } else {
                 format!("[paste {id} chars]")
             };
@@ -273,10 +280,12 @@ impl InteractiveController {
         false
     }
 
+    #[allow(clippy::unused_async)] // sync API kept for symmetry with submit_shell_command; no awaits inside.
     pub(super) async fn handle_paste_image(&mut self) -> Result<()> {
         if !self.model_supports_images() {
             // Model doesn't support images — fall through to text paste.
-            return self.fallback_text_paste();
+            self.fallback_text_paste();
+            return Ok(());
         }
 
         if self.expand_marker_at_cursor() {
@@ -288,7 +297,8 @@ impl InteractiveController {
             Err(crate::clipboard::ClipboardError::NoImage) => {
                 // No image in clipboard — fall through to text paste (like
                 // kimi-code: Ctrl+V pastes text when no image is available).
-                return self.fallback_text_paste();
+                self.fallback_text_paste();
+                return Ok(());
             }
             Err(err) => {
                 self.push_status(format!("读取剪贴板图片失败: {err}"));
@@ -312,27 +322,25 @@ impl InteractiveController {
             height,
             Some(image.bytes),
         );
-        let placeholder = format!("[image #{} ({}x{})]", id, width, height);
+        let placeholder = format!("[image #{id} ({width}x{height})]");
         self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
         Ok(())
     }
 
-    pub(super) fn fallback_text_paste(&mut self) -> Result<()> {
+    pub(super) fn fallback_text_paste(&mut self) {
         let text = crate::clipboard::read_text_clipboard();
         if let Some(text) = text
             && !text.is_empty()
         {
             self.handle_paste_text(&text);
         }
-        Ok(())
     }
 
     pub(super) fn model_supports_images(&self) -> bool {
         self.active_model
             .as_ref()
             .and_then(|m| self.model_capabilities.get(&m.alias))
-            .map(|c| c.images)
-            .unwrap_or(false)
+            .is_some_and(|c| c.images)
     }
 
     pub(super) fn apply_prompt_edit(&mut self, edit: PromptEdit<'_>) {

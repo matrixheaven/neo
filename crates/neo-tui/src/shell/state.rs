@@ -15,6 +15,10 @@ use super::pending_input::PendingInputState;
 use super::prompt::PromptState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Many independent toggle fields are stored on this central chrome state.
+// Splitting them into smaller enums or sub-states would require a larger
+// refactor and currently offers no benefit; flagging this lint as accepted.
+#[allow(clippy::struct_excessive_bools)]
 pub struct NeoChromeState {
     pub(super) title: String,
     pub(super) session_label: String,

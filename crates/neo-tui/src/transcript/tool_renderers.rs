@@ -55,9 +55,9 @@ pub fn tool_header_spans(
     spans
 }
 
-/// Build a custom header for the ExitPlanMode tool card.
+/// Build a custom header for the `ExitPlanMode` tool card.
 ///
-/// Replaces the generic "Used ExitPlanMode" with "Current plan",
+/// Replaces the generic "Used `ExitPlanMode`" with "Current plan",
 /// optionally appending "· Approved: <label>" (on success with a chosen
 /// approach) or "· Rejected" (on failure).
 #[must_use]
@@ -543,8 +543,7 @@ fn make_workspace_relative(path: &str, workspace_dir: Option<&Path>) -> String {
     };
     canonical_path
         .strip_prefix(&canonical_workspace)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_owned())
+        .map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned())
 }
 
 fn truncate_arg_value(is_path: bool, value: &str) -> String {

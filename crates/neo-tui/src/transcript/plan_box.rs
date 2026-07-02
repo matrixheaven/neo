@@ -69,7 +69,11 @@ impl PlanBoxComponent {
         let mut lines = vec![Self::titled_border(&indent, &title, horz_len, border_style)];
 
         // Content lines — render as markdown if the file is .md, plain text otherwise
-        let is_markdown = self.path.as_ref().is_some_and(|p| p.ends_with(".md"));
+        let is_markdown = self
+            .path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).extension())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
         if is_markdown && !self.content.trim().is_empty() {
             let md_lines = render_markdown(&self.content, content_width, theme, "", "");
             for md_line in md_lines {
@@ -227,7 +231,7 @@ mod tests {
         let lines = comp.render(60, &TuiTheme::default());
         assert!(lines.len() >= 4, "should have border + content lines");
         // The content should contain "Title" somewhere
-        let all_text = lines.iter().map(|l| l.to_ansi()).collect::<String>();
+        let all_text = lines.iter().map(Line::to_ansi).collect::<String>();
         assert!(
             all_text.contains("Title"),
             "markdown content should be rendered"

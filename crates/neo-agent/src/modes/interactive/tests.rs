@@ -2172,9 +2172,9 @@ async fn slash_help_opens_help_panel_overlay() {
         .await
         .expect("scroll help panel");
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageDown))
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageUp))
         .await
-        .expect("scroll help panel again");
+        .expect("scroll help panel back up");
 
     let snapshot = controller.render_snapshot();
     assert!(
@@ -7603,6 +7603,7 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prompt() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
@@ -7643,9 +7644,68 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
-        .expect("ctrl+s steers queue and current prompt");
+        .expect("first ctrl+s promotes oldest queued follow-up");
 
     let steer_handle = captured_steer.lock().expect("steer lock").clone();
+    assert_eq!(steer_handle.pending(), 1);
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued two"],
+        "one Ctrl+S should promote only the oldest queued follow-up"
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one"]
+    );
+    assert_eq!(
+        controller.chrome().prompt().text,
+        "current steer",
+        "composer text should wait until queued follow-ups have been promoted"
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("second ctrl+s promotes second queued follow-up");
+    assert_eq!(steer_handle.pending(), 2);
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one", "queued two"]
+    );
+    assert_eq!(controller.chrome().prompt().text, "current steer");
+
+    controller.apply_turn_event(AgentEvent::FollowUpQueued {
+        message: AgentMessage::user_text("queued D"),
+    });
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("third ctrl+s promotes newly queued follow-up before composer");
     assert_eq!(steer_handle.pending(), 3);
     assert!(
         controller
@@ -7662,13 +7722,35 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued one", "queued two", "current steer"]
+        vec!["queued one", "queued two", "queued D"]
     );
+    assert_eq!(controller.chrome().prompt().text, "current steer");
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("fourth ctrl+s steers current composer text");
+    assert_eq!(steer_handle.pending(), 4);
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one", "queued two", "queued D", "current steer"]
+    );
+    assert_eq!(controller.chrome().prompt().text, "");
+
     let steered_user_messages = transcript_entries(&controller)
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::UserMessage(text)
-                if matches!(text.as_str(), "queued one" | "queued two" | "current steer") =>
+                if matches!(
+                    text.as_str(),
+                    "queued one" | "queued two" | "queued D" | "current steer"
+                ) =>
             {
                 Some(text.as_str())
             }
@@ -7681,7 +7763,7 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         "promoted steers should not render in the transcript before MessageAppended"
     );
 
-    for text in ["queued one", "queued two", "current steer"] {
+    for text in ["queued one", "queued two", "queued D", "current steer"] {
         controller.apply_turn_event(AgentEvent::MessageAppended {
             message: AgentMessage::user_text(text),
         });
@@ -7690,7 +7772,10 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::UserMessage(text)
-                if matches!(text.as_str(), "queued one" | "queued two" | "current steer") =>
+                if matches!(
+                    text.as_str(),
+                    "queued one" | "queued two" | "queued D" | "current steer"
+                ) =>
             {
                 Some(text.as_str())
             }
@@ -7699,13 +7784,14 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         .collect::<Vec<_>>();
     assert_eq!(
         steered_user_messages,
-        vec!["queued one", "queued two", "current steer"],
+        vec!["queued one", "queued two", "queued D", "current steer"],
         "promoted steers should render in runtime append order"
     );
 }
 
 #[tokio::test]
-async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
+#[allow(clippy::too_many_lines)] // Large scenario test asserts on full steer/follow-up ordering; splitting hurts readability.
+async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -7749,8 +7835,8 @@ async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
     let steer_handle = captured_steer.lock().expect("steer lock").clone();
     assert_eq!(
         steer_handle.pending(),
-        2,
-        "queued follow-ups are sent as steer inputs"
+        1,
+        "one Ctrl+S should enqueue one promotion request"
     );
     assert_eq!(
         controller
@@ -7760,8 +7846,8 @@ async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        Vec::<&str>::new(),
-        "promoted follow-ups should leave the visible follow-up queue immediately"
+        vec!["queued two"],
+        "only the oldest follow-up should leave the visible follow-up queue"
     );
     assert_eq!(
         controller
@@ -7771,8 +7857,8 @@ async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued one", "queued two"],
-        "promoted follow-ups should appear as pending steers immediately"
+        vec!["queued one"],
+        "promoted follow-up should appear as a pending steer immediately"
     );
 
     controller.apply_turn_event(AgentEvent::QueueDrained {
@@ -7787,12 +7873,47 @@ async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        Vec::<&str>::new(),
-        "runtime follow-up drain ack must not affect the already-promoted visible queue"
+        vec!["queued two"],
+        "runtime follow-up drain ack must not affect the next visible queued follow-up"
     );
     controller.apply_turn_event(AgentEvent::SteeringQueued {
         message: AgentMessage::user_text("queued one"),
     });
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one"],
+        "runtime steer ack must not duplicate the promoted preview"
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("second empty ctrl+s promotes next queued follow-up");
+    assert_eq!(steer_handle.pending(), 2);
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one", "queued two"]
+    );
+
     controller.apply_turn_event(AgentEvent::QueueDrained {
         kind: neo_agent_core::QueueKind::FollowUp,
         count: 1,
@@ -7837,27 +7958,6 @@ async fn empty_ctrl_s_with_no_queue_reports_noop_status() {
     assert!(
         transcript_has_status(&controller, "No queued follow-up to steer"),
         "empty Ctrl+S with no queue should be visible feedback"
-    );
-
-    controller.cancel_active_turn().await.expect("cancel turn");
-}
-
-#[tokio::test]
-async fn local_user_message_ack_matches_out_of_order_runtime_append() {
-    let mut controller = running_turn_controller().await;
-
-    controller.push_local_user_message("second");
-    controller.apply_turn_event(AgentEvent::MessageAppended {
-        message: AgentMessage::user_text("second"),
-    });
-
-    let matching_entries = transcript_entries(&controller)
-        .iter()
-        .filter(|entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "second"))
-        .count();
-    assert_eq!(
-        matching_entries, 1,
-        "runtime ack should consume the matching local user message even when it is not first"
     );
 
     controller.cancel_active_turn().await.expect("cancel turn");
@@ -8701,8 +8801,12 @@ async fn task_browser_periodic_refresh_updates_open_browser() {
         .background_tasks
         .start_question("question-2".to_owned(), "Pick another".to_owned())
         .await;
-    controller.last_task_browser_refresh =
-        Some(Instant::now() - TASK_BROWSER_REFRESH_INTERVAL - Duration::from_millis(1));
+    controller.last_task_browser_refresh = Some(
+        Instant::now()
+            .checked_sub(TASK_BROWSER_REFRESH_INTERVAL)
+            .and_then(|instant| instant.checked_sub(Duration::from_millis(1)))
+            .expect("now is far enough in the past"),
+    );
     controller.maybe_refresh_task_browser().await;
 
     let browser = controller

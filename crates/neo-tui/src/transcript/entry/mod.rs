@@ -51,10 +51,10 @@ pub struct ApprovalPromptData {
     /// `None` omits the option.
     #[serde(default)]
     pub prefix_option_label: Option<String>,
-    /// Plan file content to render inside the approval dialog (PlanTransition only).
+    /// Plan file content to render inside the approval dialog (`PlanTransition` only).
     #[serde(default)]
     pub plan_content: Option<String>,
-    /// Plan file path for the box title (PlanTransition only).
+    /// Plan file path for the box title (`PlanTransition` only).
     #[serde(default)]
     pub plan_path: Option<String>,
 }

@@ -84,6 +84,7 @@ impl InteractiveController {
         self.start_shell_command(command).await
     }
 
+    #[allow(clippy::unused_async)] // sync API kept for future awaiter hookups; signature stays async.
     pub(super) async fn start_shell_command(&mut self, command: String) -> Result<()> {
         let id = self.next_shell_id();
         let cancel_token = CancellationToken::new();
@@ -299,7 +300,7 @@ impl InteractiveController {
                 &self.image_attachment_store,
             );
             self.append_prompt_history(&content_to_display_text(&content));
-            self.start_turn_with_prompt(content, model_override, true);
+            self.start_turn_with_prompt(content, model_override);
         }
         Ok(())
     }

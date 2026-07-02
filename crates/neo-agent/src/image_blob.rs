@@ -54,8 +54,8 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             if i + 9 >= bytes.len() {
                 break;
             }
-            let height = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
-            let width = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+            let height = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
             return Some((width, height));
         }
         i += 2 + segment_len;
@@ -70,8 +70,8 @@ fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if &bytes[0..3] != b"GIF" {
         return None;
     }
-    let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
-    let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+    let width = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+    let height = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
     Some((width, height))
 }
 
@@ -84,8 +84,8 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
     if &bytes[12..16] == b"VP8 " {
         // Simple lossy VP8: bytes 26-29 hold width/height.
-        let width = u16::from_le_bytes([bytes[26], bytes[27]]) as u32 & 0x3FFF;
-        let height = u16::from_le_bytes([bytes[28], bytes[29]]) as u32 & 0x3FFF;
+        let width = u32::from(u16::from_le_bytes([bytes[26], bytes[27]])) & 0x3FFF;
+        let height = u32::from(u16::from_le_bytes([bytes[28], bytes[29]])) & 0x3FFF;
         return Some((width, height));
     }
     if &bytes[12..16] == b"VP8L" {

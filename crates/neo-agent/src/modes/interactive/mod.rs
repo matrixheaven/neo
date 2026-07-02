@@ -1286,7 +1286,7 @@ impl InteractiveController {
         // expansion) to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
         self.append_prompt_history(&content_to_display_text(&content));
-        self.start_turn_with_prompt(content, model_override, true);
+        self.start_turn_with_prompt(content, model_override);
         self.drain_active_turn().await?;
         self.start_pending_background_question_followups().await
     }

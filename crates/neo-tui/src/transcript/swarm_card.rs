@@ -59,6 +59,7 @@ impl SwarmCardComponent {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
@@ -358,6 +359,9 @@ fn progress_bar_text(progress: f32, state: AgentLifecycleState) -> String {
     } else {
         progress.clamp(0.0, 0.95)
     };
+    // WIDTH is a small constant; the f32 cast is lossless in practice. Truncation
+    // and sign loss are intentional because progress is clamped below before use.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     let filled = (progress * WIDTH as f32).floor() as usize;
     format!(
         "{}{}",
@@ -368,6 +372,14 @@ fn progress_bar_text(progress: f32, state: AgentLifecycleState) -> String {
 
 fn compact_progress_meter(progress: f32, width: usize) -> String {
     let width = width.max(1);
+    // width is small (<= a few hundred) and progress is clamped to [0, 1],
+    // so the f32 round-trip cannot overflow the usize and the result stays
+    // within width; all three casts are intentional and safe here.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let filled = ((progress.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
     format!("{}{}", "■".repeat(filled), "·".repeat(width - filled))
 }
@@ -452,6 +464,13 @@ fn format_tool_summary(verb: &str, name: &str, summary: Option<&str>) -> String 
 
 fn progress_meter(progress: f32, theme: &TuiTheme) -> Span {
     let width = 30usize;
+    // width is a small fixed constant; progress is clamped to [0, 1] before the
+    // round-trip so the f32->usize cast cannot overflow and stays within width.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let filled = ((progress.clamp(0.0, 1.0) * width as f32).round() as usize).min(width);
     let text = format!(
         "{}{}",
@@ -465,7 +484,11 @@ fn aggregate_progress(child_progress: &[f32]) -> f32 {
     if child_progress.is_empty() {
         return 1.0;
     }
-    child_progress.iter().sum::<f32>() / child_progress.len() as f32
+    // child_progress.len() is a small bounded count; precision loss in the
+    // usize -> f32 cast does not affect the resulting progress ratio.
+    #[allow(clippy::cast_precision_loss)]
+    let len = child_progress.len() as f32;
+    child_progress.iter().sum::<f32>() / len
 }
 
 fn child_tool_ids(agent: &AgentSnapshot) -> impl Iterator<Item = &str> {
@@ -536,11 +559,10 @@ fn agent_status_color(state: AgentLifecycleState, theme: &TuiTheme) -> Color {
 
 fn marker(state: AgentLifecycleState) -> &'static str {
     match state {
-        AgentLifecycleState::Queued => "◌",
+        AgentLifecycleState::Queued | AgentLifecycleState::Cancelled => "◌",
         AgentLifecycleState::Running => "●",
         AgentLifecycleState::Completed => "✓",
         AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "✗",
-        AgentLifecycleState::Cancelled => "◌",
     }
 }
 

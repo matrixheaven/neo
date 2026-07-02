@@ -64,9 +64,7 @@ fn is_interactive_tui_mode(cli: &Cli) -> bool {
     }
     match &cli.command {
         // `neo` with no subcommand, or `neo --resume`
-        None => true,
-        // `neo resume`
-        Some(cli::Command::Resume { .. }) => true,
+        None | Some(cli::Command::Resume { .. }) => true,
         Some(_) => false,
     }
 }

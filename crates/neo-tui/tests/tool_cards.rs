@@ -876,7 +876,7 @@ fn write_streaming_uses_preview_format() {
     };
     let mut comp = ToolCallComponent::new(state);
     let lines = comp.render_with_theme(80, &TuiTheme::default());
-    let body_text = lines.iter().map(|l| l.to_ansi()).collect::<String>();
+    let body_text = lines.iter().map(Line::to_ansi).collect::<String>();
     // Should NOT contain the old progress line
     assert!(
         !body_text.contains("Preparing changes"),

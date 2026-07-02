@@ -171,7 +171,7 @@ pub async fn run_prompt_in_session(
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
-    let content = vec![Content::text(&prompt_text)];
+    let user_content = vec![Content::text(&prompt_text)];
     let session_path = sessions::session_path(session_id, config)?;
     let context = JsonlSessionReader::replay_context(&session_path)
         .await
@@ -180,7 +180,7 @@ pub async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(content, &mut writer).await?;
+    let (user_message, events) = append_user_event(user_content, &mut writer).await?;
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -308,8 +308,10 @@ async fn prepare_new_streaming_turn(
     record_session_activity(config, &session_id, &prompt_text);
     let session_directory = session_path
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace_sessions_dir(config).join(&session_id));
+        .map_or_else(
+            || workspace_sessions_dir(config).join(&session_id),
+            Path::to_path_buf,
+        );
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
         session_id,
@@ -336,8 +338,10 @@ async fn prepare_existing_streaming_turn(
     let session_path = sessions::session_path(session_id, config)?;
     let session_directory = session_path
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace_sessions_dir(config).join(session_id));
+        .map_or_else(
+            || workspace_sessions_dir(config).join(session_id),
+            Path::to_path_buf,
+        );
     let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
@@ -619,6 +623,7 @@ struct PreparedStreamingTurn {
 #[derive(Debug, PartialEq, Eq)]
 struct StreamingEventEffect {
     persist: bool,
+    forward: bool,
     assistant_text: Option<String>,
 }
 
@@ -715,8 +720,10 @@ async fn append_streaming_event(
     if effect.persist {
         writer.append_event(event).await?;
     }
-    let _ = event_tx.send(Ok(event.clone()));
-    events.push(event.clone());
+    if effect.forward {
+        let _ = event_tx.send(Ok(event.clone()));
+        events.push(event.clone());
+    }
     Ok(())
 }
 
@@ -724,11 +731,13 @@ fn streaming_event_effect(event: &AgentEvent, user_message: &AgentMessage) -> St
     if is_duplicate_user_message_event(event, user_message) {
         return StreamingEventEffect {
             persist: false,
+            forward: false,
             assistant_text: None,
         };
     }
     StreamingEventEffect {
         persist: true,
+        forward: true,
         assistant_text: assistant_text_from_event(event),
     }
 }
@@ -1306,7 +1315,46 @@ mod tests {
         let effect = super::streaming_event_effect(&event, &user_message);
 
         assert!(!effect.persist);
+        assert!(!effect.forward);
         assert_eq!(effect.assistant_text.as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn append_streaming_event_suppresses_duplicate_user_message_externally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session writer");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let user_message = AgentMessage::user_text("hello");
+        let event = AgentEvent::MessageAppended {
+            message: user_message.clone(),
+        };
+        let mut assistant_text = String::new();
+        let mut events = Vec::new();
+
+        super::append_streaming_event(
+            &event,
+            &user_message,
+            &mut writer,
+            &mut assistant_text,
+            &event_tx,
+            &mut events,
+        )
+        .await
+        .expect("append streaming event");
+        writer.flush().await.expect("flush writer");
+
+        assert!(event_rx.try_recv().is_err());
+        assert!(events.is_empty());
+        assert!(assistant_text.is_empty());
+        assert!(
+            JsonlSessionReader::replay_messages(&session_path)
+                .await
+                .expect("replay messages")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1323,6 +1371,7 @@ mod tests {
         let effect = super::streaming_event_effect(&event, &user_message);
 
         assert!(effect.persist);
+        assert!(effect.forward);
         assert_eq!(effect.assistant_text.as_deref(), Some("answer"));
     }
 
@@ -1334,6 +1383,7 @@ mod tests {
         let effect = super::streaming_event_effect(&event, &user_message);
 
         assert!(effect.persist);
+        assert!(effect.forward);
         assert_eq!(effect.assistant_text.as_deref(), None);
     }
 

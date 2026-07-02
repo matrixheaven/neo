@@ -115,6 +115,7 @@ impl TranscriptPane {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::ToolCallStarted { turn, id, name } => {
@@ -231,7 +232,7 @@ impl TranscriptPane {
                             stdout,
                             stderr,
                             *truncated,
-                            outcome.clone(),
+                            outcome,
                         );
                     }
                     ShellCommandOrigin::UserShellMode => {
@@ -267,9 +268,9 @@ impl TranscriptPane {
                 use crate::transcript::entry::StatusSeverity;
 
                 let severity = match code.as_deref() {
-                    Some("provider.rate_limit")
-                    | Some("provider.server_error")
-                    | Some("provider.network_error") => StatusSeverity::Warning,
+                    Some(
+                        "provider.rate_limit" | "provider.server_error" | "provider.network_error",
+                    ) => StatusSeverity::Warning,
                     _ => StatusSeverity::Error,
                 };
 
@@ -561,9 +562,9 @@ impl TranscriptPane {
         stdout: &str,
         stderr: &str,
         truncated: bool,
-        outcome: ShellCommandOutcome,
+        outcome: &ShellCommandOutcome,
     ) {
-        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated, &outcome);
+        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated, outcome);
         self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
         if let Some(tool) = self.transcript.tool_mut(&id) {
             let is_error = exit_code != Some(0)

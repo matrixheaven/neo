@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Style, paint, truncate_width, visible_width};
 
@@ -121,18 +123,18 @@ impl<'a> TaskBrowserRenderer<'a> {
             .count();
         let mut header = format!(" TASK BROWSER  filter={}", self.state.filter().label());
         if running > 0 {
-            header.push_str(&format!("  {running} running"));
+            let _ = write!(header, "  {running} running");
         }
         if waiting > 0 {
-            header.push_str(&format!("  {waiting} waiting"));
+            let _ = write!(header, "  {waiting} waiting");
         }
         if completed > 0 {
-            header.push_str(&format!("  {completed} completed"));
+            let _ = write!(header, "  {completed} completed");
         }
         if interrupted > 0 {
-            header.push_str(&format!("  {interrupted} interrupted"));
+            let _ = write!(header, "  {interrupted} interrupted");
         }
-        header.push_str(&format!("  {} total", visible.len()));
+        let _ = write!(header, "  {} total", visible.len());
         truncate_width(&header, width, "...", false)
     }
 
@@ -176,7 +178,7 @@ impl<'a> TaskBrowserRenderer<'a> {
                 body.push(self.task_row(item, width.saturating_sub(4)));
             }
         }
-        pane(&title, width, height, body, self.theme.overlay_border)
+        pane(&title, width, height, &body, self.theme.overlay_border)
     }
 
     fn detail_pane(&self, width: usize, height: usize) -> Vec<String> {
@@ -184,7 +186,7 @@ impl<'a> TaskBrowserRenderer<'a> {
             || vec!["Select a task from the list.".to_owned()],
             |item| item.detail_lines.clone(),
         );
-        pane(" Detail ", width, height, body, self.theme.overlay_border)
+        pane(" Detail ", width, height, &body, self.theme.overlay_border)
     }
 
     fn preview_pane(&self, width: usize, height: usize) -> Vec<String> {
@@ -206,7 +208,7 @@ impl<'a> TaskBrowserRenderer<'a> {
             " Preview Output ",
             width,
             height,
-            body,
+            &body,
             self.theme.overlay_border,
         )
     }
@@ -228,7 +230,7 @@ impl<'a> TaskBrowserRenderer<'a> {
     }
 }
 
-fn pane(title: &str, width: usize, height: usize, body: Vec<String>, color: Color) -> Vec<String> {
+fn pane(title: &str, width: usize, height: usize, body: &[String], color: Color) -> Vec<String> {
     if width < 2 || height == 0 {
         return Vec::new();
     }
@@ -285,10 +287,12 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
             visible_width(&current) + 1 + visible_width(word)
         };
         if next_width > width && !current.is_empty() {
-            lines.push(current);
-            current = word.to_owned();
+            // Flush the in-progress line and start a new one with `word`,
+            // reusing the existing capacity to avoid an extra allocation.
+            lines.push(std::mem::take(&mut current));
+            word.clone_into(&mut current);
         } else if current.is_empty() {
-            current = word.to_owned();
+            word.clone_into(&mut current);
         } else {
             current.push(' ');
             current.push_str(word);

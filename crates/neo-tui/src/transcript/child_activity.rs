@@ -56,7 +56,11 @@ pub fn format_elapsed(seconds: u64) -> String {
 #[must_use]
 pub fn format_token_count(tokens: usize) -> String {
     if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
+        // usize -> f64 is lossy for values above 2^53; token counts well under
+        // that bound are safely represented and the precision loss is acceptable.
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = tokens as f64 / 1_000.0;
+        format!("{scaled:.1}k")
     } else {
         tokens.to_string()
     }

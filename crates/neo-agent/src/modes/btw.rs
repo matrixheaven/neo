@@ -68,10 +68,10 @@ impl BtwRunner {
         model: ModelSpec,
         client: Arc<dyn ModelClient>,
         config: AppConfig,
-        inherited_messages: Vec<AgentMessage>,
+        inherited_messages: &[AgentMessage],
     ) -> Self {
         let mut context = AgentContext::new();
-        for message in sidecar_projected_messages(&inherited_messages) {
+        for message in sidecar_projected_messages(inherited_messages) {
             context.append_message(message);
         }
 
@@ -373,7 +373,7 @@ mod tests {
                 usage: None,
             },
         ]);
-        let runner = BtwRunner::new(fake_model(), Arc::new(fake), config, Vec::new());
+        let runner = BtwRunner::new(fake_model(), Arc::new(fake), config, &[]);
 
         let mut rx = runner.run("hi".to_owned()).await.expect("run");
 
@@ -419,7 +419,7 @@ mod tests {
                 AgentStopReason::EndTurn,
             ),
         ];
-        let runner = BtwRunner::new(fake_model(), Arc::new(fake.clone()), config, inherited);
+        let runner = BtwRunner::new(fake_model(), Arc::new(fake.clone()), config, &inherited);
 
         let mut rx = runner.run("third".to_owned()).await.expect("run");
         while rx.recv().await.is_some() {}
@@ -460,7 +460,7 @@ mod tests {
                 usage: None,
             },
         ]);
-        let runner = BtwRunner::new(fake_model(), Arc::new(fake.clone()), config, Vec::new());
+        let runner = BtwRunner::new(fake_model(), Arc::new(fake.clone()), config, &[]);
 
         let mut first = runner
             .run("first side question".to_owned())
@@ -500,7 +500,7 @@ mod tests {
         // Fake model never emits anything, so cancellation is the only way the
         // stream will end.
         let fake = FakeModelClient::new(vec![]);
-        let runner = BtwRunner::new(fake_model(), Arc::new(fake), config, Vec::new());
+        let runner = BtwRunner::new(fake_model(), Arc::new(fake), config, &[]);
 
         let mut rx = runner.run("wait".to_owned()).await.expect("run");
         runner.cancel();

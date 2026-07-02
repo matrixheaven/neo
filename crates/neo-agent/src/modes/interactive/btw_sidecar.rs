@@ -86,7 +86,7 @@ impl InteractiveController {
             model,
             client,
             config,
-            inherited_messages,
+            &inherited_messages,
         ))
     }
 

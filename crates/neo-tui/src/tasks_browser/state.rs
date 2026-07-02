@@ -160,16 +160,16 @@ impl TaskBrowserState {
             }
             TaskBrowserAction::SelectPageUp => {
                 if self.focus == TaskBrowserFocus::Output {
-                    self.move_output_scroll(-(PAGE_SIZE as isize));
+                    self.move_output_scroll(-PAGE_SIZE.cast_signed());
                 } else {
-                    self.move_selection(-(PAGE_SIZE as isize));
+                    self.move_selection(-PAGE_SIZE.cast_signed());
                 }
             }
             TaskBrowserAction::SelectPageDown => {
                 if self.focus == TaskBrowserFocus::Output {
-                    self.move_output_scroll(PAGE_SIZE as isize);
+                    self.move_output_scroll(PAGE_SIZE.cast_signed());
                 } else {
-                    self.move_selection(PAGE_SIZE as isize);
+                    self.move_selection(PAGE_SIZE.cast_signed());
                 }
             }
             TaskBrowserAction::ToggleFilter => {

@@ -137,7 +137,7 @@ fn app_shell_renders_context_window_and_working_status() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("ctx ") && line.contains("/")),
+            .any(|line| line.contains("ctx ") && line.contains('/')),
         "should show context window info"
     );
     assert!(lines.iter().any(|line| line.contains("working")));

@@ -564,8 +564,7 @@ mod tests {
                     .detected
                     .iter()
                     .any(|(_, kind)| *kind == TrustInputKind::ContextFile),
-                "failed to detect {} as a context file",
-                casing,
+                "failed to detect {casing} as a context file",
             );
         }
     }

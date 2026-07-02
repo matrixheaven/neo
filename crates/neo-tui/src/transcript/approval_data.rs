@@ -11,6 +11,7 @@ struct ApprovalPromptSummary {
     plan_path: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn approval_prompt(
     operation: PermissionOperation,
     subject: &str,

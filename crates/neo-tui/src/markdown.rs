@@ -654,10 +654,11 @@ fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     let mut h = syntect::easy::HighlightLines::new(syntax, syntax_theme);
     let mut out = Vec::new();
     for line in syntect::util::LinesWithEndings::from(code.trim_end_matches('\n')) {
+        let line = line.trim_end_matches(['\r', '\n']);
         match h.highlight_line(line, ss) {
             Ok(ranges) => out.push(syntect_to_ansi(&ranges, theme)),
             Err(_) => out.push(crate::primitive::paint(
-                line.trim_end_matches('\n'),
+                line,
                 Style::default().fg(theme.text_primary),
             )),
         }
@@ -1087,6 +1088,43 @@ mod code_block_tests {
                     line.visible_width()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn json_code_block_keeps_right_border_aligned_after_highlighting() {
+        let text = r#"```json
+{
+  "kind": "swarm",
+  "swarm_id": "swarm_xxx",
+  "status": "completed",
+  "aggregate": { "total": 2, "completed": 2, ... },
+  "items": [
+    {"index": 0, "agent_id": "agent_xxx", "status": "completed"},
+    {"index": 1, "agent_id": "agent_yyy", "status": "completed"}
+  ]
+}
+```"#;
+        let lines = render_markdown(text, 100, &TuiTheme::default(), "", "");
+        let plain_lines = lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(&line.to_ansi()))
+            .collect::<Vec<_>>();
+        let expected_width = crate::primitive::visible_width(&plain_lines[0]);
+
+        for (index, raw_line) in lines.iter().map(Line::to_ansi).enumerate() {
+            assert!(
+                !raw_line.contains(['\n', '\r']),
+                "rendered code block row {index} must not contain embedded line breaks: {raw_line:?}"
+            );
+        }
+
+        for line in &plain_lines {
+            assert_eq!(
+                crate::primitive::visible_width(line),
+                expected_width,
+                "code block line should stay inside the same border columns: {line:?}"
+            );
         }
     }
 

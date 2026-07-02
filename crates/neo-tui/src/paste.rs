@@ -23,6 +23,7 @@ pub enum Marker {
 
 impl Marker {
     /// Return the attachment id.
+    #[must_use]
     pub fn id(&self) -> usize {
         match self {
             Self::Paste { id, .. } | Self::Image { id, .. } => *id,
@@ -30,6 +31,7 @@ impl Marker {
     }
 
     /// Render the marker as it appears in the composer.
+    #[must_use]
     pub fn as_placeholder(&self) -> String {
         match self {
             Self::Paste { lines: Some(n), .. } => format!("[paste +{n} lines]"),
@@ -44,6 +46,7 @@ impl Marker {
 }
 
 /// Parse markers in source order, returning the byte start position and marker.
+#[must_use]
 pub fn parse_markers(text: &str) -> Vec<(usize, Marker)> {
     let mut out = Vec::new();
     for cap in marker_regex().captures_iter(text) {
@@ -92,6 +95,7 @@ pub struct ImageAttachmentStore {
 
 impl ImageAttachmentStore {
     /// Create an empty store.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             next_id: 1,
@@ -129,11 +133,13 @@ impl ImageAttachmentStore {
     }
 
     /// Look up an attachment by id.
+    #[must_use]
     pub fn get(&self, id: usize) -> Option<&ImageAttachment> {
         self.by_id.get(&id)
     }
 
     /// Get pending (unsaved) bytes for an attachment.
+    #[must_use]
     pub fn pending_bytes(&self, id: usize) -> Option<&Vec<u8>> {
         self.pending_bytes.get(&id)
     }
@@ -144,6 +150,7 @@ impl ImageAttachmentStore {
     }
 
     /// Find an attachment by SHA-256.
+    #[must_use]
     pub fn find_by_sha256(&self, sha256: &str) -> Option<&ImageAttachment> {
         self.by_id.values().find(|a| a.sha256 == sha256)
     }

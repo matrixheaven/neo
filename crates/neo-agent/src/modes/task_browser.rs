@@ -111,8 +111,9 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
                         .agent
                         .outcome
                         .as_ref()
-                        .map(|outcome| outcome.summary.as_str())
-                        .unwrap_or(child.agent.task_title.as_str());
+                        .map_or(child.agent.task_title.as_str(), |outcome| {
+                            outcome.summary.as_str()
+                        });
                     lines.push(format!(
                         "  {} {} {} {}",
                         child.item_index,
@@ -386,7 +387,7 @@ mod tests {
     fn task_browser_adapter_maps_delegate_snapshot() {
         use neo_agent_core::multi_agent::{
             AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-            AgentSnapshot,
+            AgentSnapshot, DelegateContext,
         };
         let name = AgentDisplayName::new("Gibbs");
         let agent = AgentSnapshot {
@@ -395,6 +396,7 @@ mod tests {
             path: AgentPath::root_child(&name),
             role: AgentRole::Coder,
             mode: AgentRunMode::Background,
+            context: DelegateContext::Inherit,
             state: AgentLifecycleState::Running,
             task: "fix the border".to_owned(),
             task_title: "fix the border".to_owned(),
@@ -440,7 +442,7 @@ mod tests {
     fn task_browser_adapter_maps_swarm_snapshot() {
         use neo_agent_core::multi_agent::{
             AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-            AgentSnapshot, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+            AgentSnapshot, DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
         };
         let name = AgentDisplayName::new("Zeno");
         let agent = AgentSnapshot {
@@ -449,6 +451,7 @@ mod tests {
             path: AgentPath::root_child(&name),
             role: AgentRole::Coder,
             mode: AgentRunMode::Background,
+            context: DelegateContext::Inherit,
             state: AgentLifecycleState::Running,
             task: "item 0".to_owned(),
             task_title: "item 0".to_owned(),
@@ -505,10 +508,12 @@ mod tests {
         assert!(item.detail_lines.iter().any(|l| l.contains("children:")));
     }
 
+    #[allow(clippy::too_many_lines)] // Shared test fixture assembles many children inline; clearer than splitting into helpers.
     fn delegate_swarm_snapshot_with_completed_children() -> BackgroundTaskSnapshot {
         use neo_agent_core::multi_agent::{
             AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-            AgentSnapshot, AgentTerminalOutcome, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+            AgentSnapshot, AgentTerminalOutcome, DelegateContext, SwarmAggregate,
+            SwarmChildSnapshot, SwarmSnapshot,
         };
         let name_a = AgentDisplayName::new("Alpha");
         let name_b = AgentDisplayName::new("Beta");
@@ -518,6 +523,7 @@ mod tests {
             path: AgentPath::swarm_child("swarm_comp", &name_a),
             role: AgentRole::Coder,
             mode: AgentRunMode::Background,
+            context: DelegateContext::Inherit,
             state: AgentLifecycleState::Completed,
             task: "child A prompt".to_owned(),
             task_title: "Child A".to_owned(),
@@ -551,6 +557,7 @@ mod tests {
             path: AgentPath::swarm_child("swarm_comp", &name_b),
             role: AgentRole::Coder,
             mode: AgentRunMode::Background,
+            context: DelegateContext::Inherit,
             state: AgentLifecycleState::Completed,
             task: "child B prompt".to_owned(),
             task_title: "Child B".to_owned(),

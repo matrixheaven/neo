@@ -382,10 +382,11 @@ mod tests {
 
     #[test]
     fn capturing_writer_collects_lines_into_ring_buffer() {
+        use std::io::Write;
+
         let (capture, _rx) = make_capture(10);
         let writer = CapturingWriter::new(capture.clone());
         let mut sink = writer.make_writer();
-        use std::io::Write;
         writeln!(sink, "hello world").unwrap();
         writeln!(sink, "second line").unwrap();
         sink.flush().unwrap();
@@ -396,10 +397,11 @@ mod tests {
 
     #[test]
     fn capturing_writer_skips_empty_lines() {
+        use std::io::Write;
+
         let (capture, _rx) = make_capture(10);
         let writer = CapturingWriter::new(capture.clone());
         let mut sink = writer.make_writer();
-        use std::io::Write;
         writeln!(sink).unwrap();
         writeln!(sink, "   ").unwrap();
         writeln!(sink, "real content").unwrap();

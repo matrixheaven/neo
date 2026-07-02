@@ -53,7 +53,16 @@ impl NeoChromeState {
             | AgentEvent::ToolExecutionUpdate { .. }
             | AgentEvent::ToolExecutionFinished { .. }
             | AgentEvent::ShellCommandStarted { .. }
-            | AgentEvent::ShellCommandFinished { .. } => {
+            | AgentEvent::ShellCommandFinished { .. }
+            | AgentEvent::DelegateStarted { .. }
+            | AgentEvent::DelegateUpdated { .. }
+            | AgentEvent::DelegateFinished { .. }
+            | AgentEvent::DelegateSwarmStarted { .. }
+            | AgentEvent::DelegateSwarmUpdated { .. }
+            | AgentEvent::DelegateSwarmFinished { .. }
+            | AgentEvent::WorkflowStarted { .. }
+            | AgentEvent::WorkflowUpdated { .. }
+            | AgentEvent::WorkflowFinished { .. } => {
                 self.mode = ChromeMode::Streaming;
             }
             AgentEvent::ApprovalRequested {
@@ -221,17 +230,6 @@ impl NeoChromeState {
                     })
                     .collect();
                 self.push_question_overlay(id, display);
-            }
-            AgentEvent::DelegateStarted { .. }
-            | AgentEvent::DelegateUpdated { .. }
-            | AgentEvent::DelegateFinished { .. }
-            | AgentEvent::DelegateSwarmStarted { .. }
-            | AgentEvent::DelegateSwarmUpdated { .. }
-            | AgentEvent::DelegateSwarmFinished { .. }
-            | AgentEvent::WorkflowStarted { .. }
-            | AgentEvent::WorkflowUpdated { .. }
-            | AgentEvent::WorkflowFinished { .. } => {
-                self.mode = ChromeMode::Streaming;
             }
         }
     }

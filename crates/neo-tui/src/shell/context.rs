@@ -98,7 +98,11 @@ fn format_cache_usage(read: u64, write: u64) -> Option<String> {
 #[must_use]
 fn format_usage_token_count(tokens: u64) -> String {
     if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
+        // u64 -> f64 is lossy for values above 2^53, but token counts well under
+        // that bound are safely represented; precision loss is acceptable here.
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = tokens as f64 / 1_000.0;
+        format!("{scaled:.1}k")
     } else {
         tokens.to_string()
     }

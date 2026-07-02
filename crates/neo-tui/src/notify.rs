@@ -18,9 +18,9 @@ pub enum NotificationMode {
 /// What kind of event triggered the notification.
 #[derive(Debug, Clone, Copy)]
 pub enum EventKind {
-    /// A model run finished (EndTurn, ToolUse, or MaxTokens).
+    /// A model run finished (`EndTurn`, `ToolUse`, or `MaxTokens`).
     Completion,
-    /// The agent is requesting user input (AskUserQuestion).
+    /// The agent is requesting user input (`AskUserQuestion`).
     Question,
 }
 

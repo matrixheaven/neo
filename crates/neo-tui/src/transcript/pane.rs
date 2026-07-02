@@ -427,7 +427,7 @@ impl TranscriptPane {
                     id,
                     mime_type.to_owned(),
                     None,
-                    Some(format!("[image blob {}]", sha256)),
+                    Some(format!("[image blob {sha256}]")),
                     ImageSource::Base64,
                     format!("blob:{sha256}"),
                     None,
@@ -709,9 +709,10 @@ impl TranscriptPane {
         let ids = self
             .tool_call_metadata
             .iter()
-            .filter_map(|(id, (tool_turn, tool_name))| {
-                (*tool_turn == turn && tool_name == kind.tool_name()).then(|| id.clone())
+            .filter(|&(_id, (tool_turn, tool_name))| {
+                *tool_turn == turn && tool_name == kind.tool_name()
             })
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for id in ids {
             if self.should_suppress_delegate_tool_run(turn, kind, &id) {

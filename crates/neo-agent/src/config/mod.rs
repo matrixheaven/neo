@@ -76,7 +76,7 @@ pub struct AppConfig {
     pub runtime: RuntimeConfig,
     /// Shared background task registry for the interactive session.
     ///
-    /// Model-initiated Bash background jobs, background AskUser questions, and
+    /// Model-initiated Bash background jobs, background `AskUser` questions, and
     /// user shell-mode Ctrl+B detach all need to land in the same task list so
     /// `TaskList`/`TaskOutput` can observe them on later turns.
     #[serde(skip)]

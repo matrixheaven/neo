@@ -95,7 +95,7 @@ pub enum McpTransport {
 impl McpTransport {
     /// Returns the string representation used in config files.
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Stdio => "stdio",
             Self::Http => "http",
