@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use neo_agent_core::session::{
+    SessionState, SessionStateStore, main_agent_wire_path, validate_session_id,
+};
 
 use super::{
     AppConfig, ContextWindow, InputResult, InteractiveController, KeybindingsManager,
@@ -283,19 +286,51 @@ pub(super) async fn create_interactive_session_path(config: &AppConfig) -> Resul
                         session_dir.display()
                     )
                 })?;
-            return Ok(session_dir.join("transcript.jsonl"));
+            return initialize_session_dir(&session_dir).await;
         }
     }
 }
 
-pub(super) fn session_id_from_transcript_path(path: &Path) -> Result<String> {
-    let session_dir = path
+async fn initialize_session_dir(session_dir: &Path) -> Result<PathBuf> {
+    let wire_path = main_agent_wire_path(session_dir);
+    if let Some(parent) = wire_path.parent() {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!("failed to create main agent directory {}", parent.display())
+        })?;
+    }
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .with_context(|| format!("failed to write session state {}", session_dir.display()))?;
+    Ok(wire_path)
+}
+
+pub(super) fn session_id_from_wire_path(path: &Path) -> Result<String> {
+    if path.file_name().and_then(std::ffi::OsStr::to_str) != Some("wire.jsonl") {
+        anyhow::bail!("invalid wire path {}", path.display());
+    }
+    let main_dir = path
         .parent()
-        .with_context(|| format!("invalid session path {}", path.display()))?;
+        .with_context(|| format!("invalid wire path {}", path.display()))?;
+    if main_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("main") {
+        anyhow::bail!("invalid wire path {}", path.display());
+    }
+    let agents_dir = main_dir
+        .parent()
+        .with_context(|| format!("invalid wire path {}", path.display()))?;
+    if agents_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("agents") {
+        anyhow::bail!("invalid wire path {}", path.display());
+    }
+    let session_dir = agents_dir
+        .parent()
+        .with_context(|| format!("invalid wire path {}", path.display()))?;
     let id = session_dir
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
+    validate_session_id(id).map_err(|_| anyhow::anyhow!("invalid session id {id:?}"))?;
     Ok(id.to_owned())
 }
 

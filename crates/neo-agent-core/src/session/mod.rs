@@ -544,7 +544,7 @@ impl SessionMetadataStore {
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(session_id).join("transcript.jsonl")
+        main_agent_wire_path(&self.session_dir(session_id))
     }
 
     fn session_dir(&self, session_id: &str) -> PathBuf {
@@ -600,7 +600,7 @@ impl SessionMetadataStore {
                 if !name.starts_with(SESSION_ID_PREFIX) {
                     continue;
                 }
-                if !path.join("transcript.jsonl").is_file() {
+                if !main_agent_wire_path(&path).is_file() {
                     continue;
                 }
                 if validate_session_id(name).is_ok() {

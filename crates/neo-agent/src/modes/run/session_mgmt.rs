@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use futures::StreamExt;
-use neo_agent_core::session::SessionMetadataStore;
+use neo_agent_core::session::{
+    SessionMetadataStore, SessionState, SessionStateStore, main_agent_wire_path,
+};
 use neo_ai::{ChatMessage, ContentPart, RequestOptions};
 use uuid::Uuid;
 
@@ -33,36 +35,73 @@ pub(super) async fn create_session_path(config: &AppConfig) -> anyhow::Result<Pa
                         session_dir.display()
                     )
                 })?;
-            return Ok(session_dir.join("transcript.jsonl"));
+            return initialize_session_dir(&session_dir).await;
         }
     }
 }
 
+async fn initialize_session_dir(session_dir: &Path) -> anyhow::Result<PathBuf> {
+    let wire_path = main_agent_wire_path(session_dir);
+    if let Some(parent) = wire_path.parent() {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!("failed to create main agent directory {}", parent.display())
+        })?;
+    }
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .with_context(|| format!("failed to write session state {}", session_dir.display()))?;
+    Ok(wire_path)
+}
+
 pub(super) fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
+    let session_dir = session_root_from_wire_path(path)?;
+    let dir_name = session_dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
+
+    Ok(dir_name.to_owned())
+}
+
+pub(super) fn session_root_from_wire_path(path: &Path) -> anyhow::Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .with_context(|| format!("invalid session path {}", path.display()))?;
 
-    if file_name != "transcript.jsonl" {
-        anyhow::bail!("invalid session path {}", path.display());
+    if file_name != "wire.jsonl" {
+        anyhow::bail!("invalid session wire path {}", path.display());
     }
 
-    let session_dir = path.parent().with_context(|| {
+    let main_dir = path
+        .parent()
+        .with_context(|| format!("session wire has no parent directory {}", path.display()))?;
+    if main_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("main") {
+        anyhow::bail!("invalid main agent wire path {}", path.display());
+    }
+    let agents_dir = main_dir
+        .parent()
+        .with_context(|| format!("main agent directory has no parent {}", main_dir.display()))?;
+    if agents_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("agents") {
+        anyhow::bail!("invalid agents directory {}", agents_dir.display());
+    }
+    let session_dir = agents_dir.parent().with_context(|| {
         format!(
-            "session transcript has no parent directory {}",
-            path.display()
+            "agents directory has no session parent {}",
+            agents_dir.display()
         )
     })?;
     let dir_name = session_dir
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
-    if dir_name.starts_with("session_") {
-        return Ok(dir_name.to_owned());
-    }
 
-    anyhow::bail!("invalid session path {}", path.display())
+    neo_agent_core::session::validate_session_id(dir_name)
+        .map_err(|_| anyhow::anyhow!("invalid session id {dir_name:?}"))?;
+    Ok(session_dir.to_path_buf())
 }
 
 pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
@@ -84,8 +123,8 @@ pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
         if !name.starts_with("session_") {
             continue;
         }
-        let transcript = path.join("transcript.jsonl");
-        if !transcript.exists() {
+        let transcript = main_agent_wire_path(&path);
+        if !transcript.is_file() {
             continue;
         }
         let Ok(session_id) = session_id_from_path(&transcript) else {

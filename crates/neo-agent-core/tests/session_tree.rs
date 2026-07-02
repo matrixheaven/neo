@@ -8,8 +8,29 @@ const SESSION_C: &str = "session_00000000-0000-4000-8000-000000000103";
 
 fn write_session_transcript(dir: &std::path::Path, session_id: &str) {
     let session_dir = dir.join(session_id);
-    std::fs::create_dir_all(&session_dir).expect("create session dir");
-    std::fs::write(session_dir.join("transcript.jsonl"), "{}\n").expect("write transcript");
+    let wire_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    std::fs::create_dir_all(wire_path.parent().expect("wire parent")).expect("create session dir");
+    std::fs::write(wire_path, "{}\n").expect("write transcript");
+}
+
+#[test]
+fn session_metadata_lists_sessions_with_main_agent_wire() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path();
+    let session_id = "session_00000000-0000-0000-0000-000000000001";
+    let session_dir = sessions_dir.join(session_id);
+    let wire_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    std::fs::create_dir_all(wire_path.parent().expect("wire parent")).expect("mkdir");
+    std::fs::write(
+        wire_path,
+        "{\"kind\":\"neo.session.metadata\",\"format\":\"neo.session.jsonl\",\"schema_version\":1,\"created_at\":\"0\"}\n",
+    )
+    .expect("write wire");
+
+    let store = neo_agent_core::session::SessionMetadataStore::new(sessions_dir);
+    let sessions = store.list().expect("list");
+
+    assert!(sessions.iter().any(|session| session.id == session_id));
 }
 
 #[test]

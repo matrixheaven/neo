@@ -19,7 +19,7 @@ pub(crate) use models_cli::list_configured_models;
 // Re-export session helpers used within this module.
 use session_mgmt::{
     create_session_path, latest_session_id, record_initial_session_title, record_session_activity,
-    session_id_from_path,
+    session_id_from_path, session_root_from_wire_path,
 };
 
 use std::{
@@ -109,7 +109,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     record_session_activity(config, &session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
-        session_path.parent().map(Path::to_path_buf),
+        Some(session_root_from_wire_path(&session_path)?),
         None,
         None,
         None,
@@ -306,10 +306,7 @@ async fn prepare_new_streaming_turn(
     let (user_message, initial_events) =
         append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt_text);
-    let session_directory = session_path.parent().map_or_else(
-        || workspace_sessions_dir(config).join(&session_id),
-        Path::to_path_buf,
-    );
+    let session_directory = session_root_from_wire_path(&session_path)?;
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
         session_id,
@@ -778,7 +775,9 @@ mod tests {
         agent_config_for_app, model_registry_for_config, select_config_model,
         tool_registry_for_config,
     };
-    use super::session_mgmt::create_session_path;
+    use super::session_mgmt::{
+        create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
+    };
     use super::{PromptApprovalRequest, run_prompt_with_runtime};
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
@@ -970,7 +969,11 @@ mod tests {
         let path = create_session_path(&config)
             .await
             .expect("session path is created");
-        let session_dir = path.parent().expect("session directory");
+        let session_dir = path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .expect("session directory");
         let session_id = session_dir
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
@@ -979,7 +982,113 @@ mod tests {
         assert!(session_id.starts_with("session_"));
         assert_eq!(session_id.len(), "session_".len() + 36);
         assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
-        assert!(path.ends_with("transcript.jsonl"));
+        assert!(
+            path.ends_with(
+                std::path::Path::new("agents")
+                    .join("main")
+                    .join("wire.jsonl")
+            )
+        );
+        assert!(session_dir.join("state.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn session_root_from_wire_path_returns_session_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+
+        let wire_path = create_session_path(&config)
+            .await
+            .expect("session path is created");
+        let session_root =
+            session_root_from_wire_path(&wire_path).expect("session root from wire path");
+
+        assert_eq!(
+            neo_agent_core::session::main_agent_wire_path(&session_root),
+            wire_path
+        );
+        assert_eq!(
+            session_root.file_name().and_then(std::ffi::OsStr::to_str),
+            session_id_from_path(&wire_path).ok().as_deref()
+        );
+    }
+
+    #[test]
+    fn latest_session_id_ignores_main_wire_directories() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        let bucket_dir = crate::config::workspace_sessions_dir(&config);
+        let valid_id = "session_00000000-0000-4000-8000-000000000001";
+        let directory_wire_id = "session_00000000-0000-4000-8000-000000000999";
+        let valid_wire = neo_agent_core::session::main_agent_wire_path(&bucket_dir.join(valid_id));
+        std::fs::create_dir_all(valid_wire.parent().expect("valid wire parent"))
+            .expect("create valid wire parent");
+        std::fs::write(valid_wire, "{}\n").expect("write valid wire");
+        std::fs::create_dir_all(neo_agent_core::session::main_agent_wire_path(
+            &bucket_dir.join(directory_wire_id),
+        ))
+        .expect("create directory wire");
+
+        assert_eq!(
+            latest_session_id(&config).expect("latest session"),
+            valid_id
+        );
     }
 
     #[test]

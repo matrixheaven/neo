@@ -129,7 +129,7 @@ mod controller_factory;
 pub use controller_factory::controller_for_config;
 use controller_factory::{
     create_interactive_session_path, current_unix_timestamp, dialog_result_may_close,
-    parse_timestamp, same_work_dir, session_id_from_transcript_path, startup_notices,
+    parse_timestamp, same_work_dir, session_id_from_wire_path, startup_notices,
 };
 #[cfg(test)]
 use controller_factory::{empty_session_forker, empty_session_loader};

@@ -249,7 +249,7 @@ impl InteractiveController {
             return crate::modes::sessions::session_path(session_id, config);
         }
         let session_path = create_interactive_session_path(config).await?;
-        let session_id = session_id_from_transcript_path(&session_path)?;
+        let session_id = session_id_from_wire_path(&session_path)?;
         self.set_active_session_id(session_id.clone());
         let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
             .await
