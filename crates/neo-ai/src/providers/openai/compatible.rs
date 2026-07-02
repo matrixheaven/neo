@@ -769,8 +769,13 @@ fn safe_text_len(buffer: &str) -> usize {
     const MARKER: &str = "<tool_call>";
     let max_check = buffer.len().min(MARKER.len());
     for i in (1..=max_check).rev() {
-        if MARKER.starts_with(&buffer[buffer.len() - i..]) {
-            return buffer.len() - i;
+        let start = buffer.len() - i;
+        // Must land on a UTF-8 char boundary.
+        if !buffer.is_char_boundary(start) {
+            continue;
+        }
+        if MARKER.starts_with(&buffer[start..]) {
+            return start;
         }
     }
     buffer.len()
