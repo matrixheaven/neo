@@ -418,13 +418,16 @@ async fn openai_streams_reasoning_content_as_thinking_events() {
 }
 
 #[tokio::test]
-async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
+async fn openai_xml_tool_call_in_content_is_parsed_as_structured() {
+    // MiMo sometimes emits tool calls as XML in the content field instead of
+    // (or alongside) structured tool_calls. The parser must extract these
+    // into proper ToolCallStart/End events and strip the XML from text.
     let server = MockServer::start(vec![sse_response(&[
         json!({
             "id": "chatcmpl-xml-tool",
             "choices": [{
                 "delta": {
-                    "content": "<tool_call><function=Bash></function></tool_call>"
+                    "content": "<tool_call>\n<function=Bash>\n<parameter=command>echo hello</parameter>\n<parameter=description>Test</parameter>\n</function>\n</tool_call>"
                 }
             }]
         }),
@@ -443,24 +446,30 @@ async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
+    // XML tool call is parsed into structured events.
     assert!(events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::TextDelta { text }
-            if text.contains("<tool_call><function=Bash>")
+        AiStreamEvent::ToolCallStart { name, .. } if name == "Bash"
     )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AiStreamEvent::ToolCallEnd { raw_arguments, .. }
+            if raw_arguments.contains("echo hello")
+    )));
+    // The raw XML must NOT leak into text output.
     assert!(!events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::ToolCallStart { .. } | AiStreamEvent::ToolCallEnd { .. }
+        AiStreamEvent::TextDelta { text } if text.contains("<tool_call>")
     )));
-    assert!(events.iter().any(|event| matches!(
+    // No error — tool call was recovered from XML.
+    assert!(!events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::Error { message }
-            if message == "Provider reported tool calls but emitted no structured tool calls"
+        AiStreamEvent::Error { .. }
     )));
     assert!(matches!(
         events.last(),
         Some(AiStreamEvent::MessageEnd {
-            stop_reason: StopReason::Error,
+            stop_reason: StopReason::ToolUse,
             ..
         })
     ));
