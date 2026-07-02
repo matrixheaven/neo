@@ -1,6 +1,7 @@
 pub mod api_key_input;
 pub mod choice_picker;
 pub mod custom_registry_import;
+pub mod help_panel;
 pub mod mcp_add_form;
 pub mod mcp_manager;
 pub mod model_selector;
@@ -16,6 +17,7 @@ pub use custom_registry_import::{
     CustomRegistryImportOptions, CustomRegistryImportResult, CustomRegistryImportState,
     CustomRegistrySource,
 };
+pub use help_panel::{HelpPanelCommand, HelpPanelOptions, HelpPanelState};
 pub use mcp_add_form::{McpAddFormData, McpAddFormOptions, McpAddFormResult, McpAddFormState};
 pub use mcp_manager::{
     McpManagerAction, McpManagerOptions, McpManagerState, McpServerRow, McpToolStatus,
