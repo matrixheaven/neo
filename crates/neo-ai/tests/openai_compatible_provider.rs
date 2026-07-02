@@ -609,6 +609,70 @@ fn assert_typed_request(sent: &RecordedRequest) {
 }
 
 #[tokio::test]
+async fn openai_compatible_client_normalizes_tool_schema_before_sending() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-1",
+        "choices": [{
+            "delta": { "content": "ok" },
+            "finish_reason": "stop"
+        }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let mut request = request(RequestOptions::default());
+    request.tools = vec![ToolSpec::new(
+        "Terminal",
+        "Operate a PTY.",
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "TerminalMode": {
+                    "oneOf": [
+                        { "const": "start", "type": "string" },
+                        { "const": "read", "type": "string" }
+                    ]
+                }
+            },
+            "title": "TerminalInput",
+            "type": "object",
+            "properties": {
+                "mode": { "$ref": "#/$defs/TerminalMode" },
+                "timeout": {
+                    "format": "uint64",
+                    "type": ["integer", "null"]
+                }
+            },
+            "required": ["mode"]
+        }),
+    )];
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(
+        sent.body["tools"][0]["function"]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["start", "read"]
+                },
+                "timeout": {
+                    "type": "integer"
+                }
+            },
+            "required": ["mode"]
+        })
+    );
+}
+
+#[tokio::test]
 async fn openai_compatible_client_retries_retryable_http_responses() {
     let server = MockServer::start(vec![
         status_response(500),

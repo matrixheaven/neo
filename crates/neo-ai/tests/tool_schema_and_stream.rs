@@ -18,6 +18,69 @@ fn tool_spec_helpers_build_single_string_schema() {
 }
 
 #[test]
+fn normalize_tool_schema_removes_provider_hostile_metadata() {
+    let schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+            "TerminalMode": {
+                "oneOf": [
+                    { "const": "start", "description": "Launch a new PTY session.", "type": "string" },
+                    { "const": "read", "description": "Read buffered output.", "type": "string" }
+                ]
+            }
+        },
+        "title": "TerminalInput",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "mode": {
+                "$ref": "#/$defs/TerminalMode",
+                "description": "The operation to perform."
+            },
+            "command": {
+                "description": "The shell command to launch.",
+                "type": ["string", "null"],
+                "default": null
+            },
+            "timeout": {
+                "description": "Optional timeout in seconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": ["integer", "null"]
+            }
+        },
+        "required": ["mode"]
+    });
+
+    let normalized = neo_ai::tool_schema::normalize_tool_schema(&schema);
+
+    assert_eq!(
+        normalized,
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "description": "The operation to perform.",
+                    "type": "string",
+                    "enum": ["start", "read"]
+                },
+                "command": {
+                    "description": "The shell command to launch.",
+                    "type": "string"
+                },
+                "timeout": {
+                    "description": "Optional timeout in seconds.",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": ["mode"]
+        })
+    );
+}
+
+#[test]
 fn collect_tool_arguments_prefers_final_tool_call_end_arguments() {
     let events = vec![
         AiStreamEvent::ToolCallArgsDelta {

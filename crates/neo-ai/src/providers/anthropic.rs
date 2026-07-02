@@ -362,7 +362,7 @@ fn tool_body(tool: &ToolSpec) -> Value {
     json!({
         "name": tool.name,
         "description": tool.description,
-        "input_schema": tool.input_schema,
+        "input_schema": crate::tool_schema::normalize_tool_schema(&tool.input_schema),
     })
 }
 
