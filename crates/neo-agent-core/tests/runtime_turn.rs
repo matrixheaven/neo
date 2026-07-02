@@ -6683,6 +6683,72 @@ async fn runtime_reclassifies_promoted_follow_up_as_steer_without_running_follow
     assert_eq!(steer_input.pending(), 0);
 }
 
+#[tokio::test]
+async fn runtime_dequeues_follow_up_for_edit_without_running_it() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    steer_input.push(neo_agent_core::ActiveTurnInput::DequeueFollowUpForEdit);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::OneAtATime, QueueMode::All),
+        harness.client(),
+    )
+    .with_steer_input(steer_input.clone());
+    let mut context = AgentContext::new();
+    context.queue_follow_up_message(AgentMessage::user_text("queued follow"));
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("dequeued follow-up run should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::QueueDrained { kind, count: 1 }
+            if *kind == neo_agent_core::QueueKind::FollowUp
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SteeringQueued { message }
+            if message == &AgentMessage::user_text("queued follow")
+    )));
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "dequeued follow-up should not run as an automatic follow-up turn"
+    );
+    assert_eq!(context.pending_follow_up_len(), 0);
+    assert_eq!(steer_input.pending(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // NEO-30 Layer 1/2/3: approval key scoping, prefix rules, safety classification
 // ---------------------------------------------------------------------------

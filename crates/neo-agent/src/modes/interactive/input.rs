@@ -454,7 +454,7 @@ impl InteractiveController {
             KeybindingAction::PromptSteer => {
                 return self.handle_prompt_steer().await.map(|()| Some(false));
             }
-            KeybindingAction::EditLastQueuedMessage => {
+            KeybindingAction::EditNextQueuedMessage => {
                 if let Some(text) = self
                     .tui
                     .chrome_mut()
@@ -463,14 +463,8 @@ impl InteractiveController {
                 {
                     self.tui.chrome_mut().enter_shell_mode();
                     self.tui.chrome_mut().prompt_mut().set_text(text);
-                } else if let Some(text) = self
-                    .tui
-                    .chrome_mut()
-                    .pending_input_mut()
-                    .pop_most_recent_follow_up_for_edit()
-                {
-                    self.tui.chrome_mut().exit_shell_mode();
-                    self.tui.chrome_mut().prompt_mut().set_text(text);
+                } else {
+                    self.dequeue_follow_up_into_prompt_for_edit();
                 }
             }
             KeybindingAction::AppClear => return self.handle_app_clear_action().await.map(Some),
@@ -660,14 +654,8 @@ impl InteractiveController {
                     {
                         self.tui.chrome_mut().enter_shell_mode();
                         self.tui.chrome_mut().prompt_mut().set_text(text);
-                    } else if let Some(text) = self
-                        .tui
-                        .chrome_mut()
-                        .pending_input_mut()
-                        .pop_most_recent_follow_up_for_edit()
-                    {
-                        self.tui.chrome_mut().exit_shell_mode();
-                        self.tui.chrome_mut().prompt_mut().set_text(text);
+                    } else {
+                        self.dequeue_follow_up_into_prompt_for_edit();
                     }
                 }
             }
@@ -679,6 +667,37 @@ impl InteractiveController {
         self.clear_pending_exit_confirmation();
         self.sync_inline_prompt_completion();
         true
+    }
+
+    fn dequeue_follow_up_into_prompt_for_edit(&mut self) {
+        let has_active_turn = self.active_turn.is_some();
+        let text = {
+            let pending_input = self.tui.chrome_mut().pending_input_mut();
+            if has_active_turn {
+                pending_input.dequeue_oldest_follow_up_for_edit_optimistic()
+            } else {
+                pending_input.dequeue_oldest_follow_up_for_edit()
+            }
+        };
+        let Some(text) = text else {
+            return;
+        };
+        if let Some(turn) = &self.active_turn {
+            turn.steer_input
+                .push(neo_agent_core::ActiveTurnInput::DequeueFollowUpForEdit);
+        }
+        self.tui.chrome_mut().exit_shell_mode();
+        let prompt = self.tui.chrome_mut().prompt_mut();
+        if prompt.text.is_empty() {
+            prompt.set_text(text);
+            return;
+        }
+        let mut next = prompt.text.clone();
+        if !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&text);
+        prompt.set_text(next);
     }
 
     pub(super) fn handle_transcript_keybinding_action(&mut self, action: KeybindingAction) -> bool {

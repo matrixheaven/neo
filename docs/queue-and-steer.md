@@ -11,7 +11,7 @@ communicate with the agent **while it is working**: the **message queue**
 | ----------------------- | ----------- | ----------------------------------------------------------- |
 | Queue a follow-up       | `Enter`     | While busy: queues the message; it is submitted next. |
 | Steer the turn          | `Ctrl+S`    | Injects the message at the next natural break point.       |
-| Edit last queued input  | `Alt+↑`     | Pulls the most recent queued follow-up back into composer. |
+| Edit next queued input  | `Alt+↑`     | Dequeues the next queued follow-up back into composer. |
 | (Idle) submit           | `Ctrl+S`    | When idle, Ctrl+S behaves like a normal submit.            |
 
 ## Pending Input Preview
@@ -24,7 +24,7 @@ and avoids cluttering the conversation history.
 ```text
 ──────────────────────────────────────────────────
    ❯ queued or steered message here
-   Alt+↑ edit last queued message · Ctrl+S steer next
+   Alt+↑ edit next queued message · Ctrl+S steer next
 ```
 
 ## Message Queue (follow-ups)
@@ -40,7 +40,7 @@ shown in the Pending Input Preview panel.
   follow-up turn.
 - Slash commands cannot be queued — they must wait for the turn to finish.
 - Press `Alt+↑` (or `↑` when the composer is empty and history is empty) to
-  pull the most recent queued follow-up back into the composer for editing.
+  dequeue the next queued follow-up back into the composer for editing.
 
 ## Message Steer
 

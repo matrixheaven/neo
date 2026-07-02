@@ -768,7 +768,7 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::TranscriptSelectionExtendPageDown
         | KeybindingAction::TranscriptCopySelection
         | KeybindingAction::PromptSteer
-        | KeybindingAction::EditLastQueuedMessage
+        | KeybindingAction::EditNextQueuedMessage
         | KeybindingAction::PasteImage => return None,
     };
     Some(KeyEvent::new(code, KeyModifiers::NONE))

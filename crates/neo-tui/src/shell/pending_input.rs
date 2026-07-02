@@ -90,10 +90,18 @@ impl PendingInputState {
         }
     }
 
-    /// Pop the most recent queued follow-up back into the composer for editing
-    /// (LIFO). Returns the text if any was available.
-    pub fn pop_most_recent_follow_up_for_edit(&mut self) -> Option<String> {
-        self.queued_follow_ups.pop_back()
+    /// Dequeue the oldest visible follow-up back into the composer for editing,
+    /// without expecting a later runtime drain acknowledgement.
+    pub fn dequeue_oldest_follow_up_for_edit(&mut self) -> Option<String> {
+        self.queued_follow_ups.pop_front()
+    }
+
+    /// Dequeue the oldest visible follow-up back into the composer for editing,
+    /// mirroring a runtime drain that will be acknowledged by queue events later.
+    pub fn dequeue_oldest_follow_up_for_edit_optimistic(&mut self) -> Option<String> {
+        let text = self.dequeue_oldest_follow_up_for_edit()?;
+        self.optimistic_follow_up_drains += 1;
+        Some(text)
     }
 
     pub fn drain_next_follow_up(&mut self) -> Option<String> {
@@ -219,6 +227,30 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["one"]
+        );
+    }
+
+    #[test]
+    fn optimistic_edit_dequeues_oldest_follow_up_without_ack_removing_next() {
+        let mut state = PendingInputState::new();
+        state.queue_follow_up("one");
+        state.queue_follow_up("two");
+
+        assert_eq!(
+            state
+                .dequeue_oldest_follow_up_for_edit_optimistic()
+                .as_deref(),
+            Some("one")
+        );
+        state.drain(neo_agent_core::QueueKind::FollowUp, 1);
+
+        assert_eq!(
+            state
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["two"]
         );
     }
 }

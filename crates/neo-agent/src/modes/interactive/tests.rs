@@ -7947,6 +7947,92 @@ async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication
 }
 
 #[tokio::test]
+async fn alt_up_dequeues_oldest_follow_up_into_multiline_composer() {
+    let captured_steer = Arc::new(std::sync::Mutex::new(
+        neo_agent_core::SteerInputHandle::new(),
+    ));
+    let observed_steer = Arc::clone(&captured_steer);
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        let observed_steer = Arc::clone(&observed_steer);
+        *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+        Box::pin(async move {
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+
+    controller.type_text("first prompt");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("first prompt starts turn");
+    for text in ["AAAA", "BBBB", "CCCC"] {
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text(text),
+        });
+    }
+
+    let steer_handle = captured_steer.lock().expect("steer lock").clone();
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("alt+up").expect("valid key")))
+        .await
+        .expect("first alt+up dequeues oldest queued follow-up");
+    assert_eq!(steer_handle.pending(), 1);
+    assert_eq!(controller.chrome().prompt().text, "AAAA");
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["BBBB", "CCCC"]
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("alt+up").expect("valid key")))
+        .await
+        .expect("second alt+up appends next queued follow-up");
+    assert_eq!(steer_handle.pending(), 2);
+    assert_eq!(controller.chrome().prompt().text, "AAAA\nBBBB");
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["CCCC"]
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("alt+up").expect("valid key")))
+        .await
+        .expect("third alt+up appends final queued follow-up");
+    assert_eq!(steer_handle.pending(), 3);
+    assert_eq!(controller.chrome().prompt().text, "AAAA\nBBBB\nCCCC");
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn empty_ctrl_s_with_no_queue_reports_noop_status() {
     let mut controller = running_turn_controller().await;
 

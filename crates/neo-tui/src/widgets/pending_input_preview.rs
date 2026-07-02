@@ -59,11 +59,16 @@ impl<'a> PendingInputPreview<'a> {
             Style::default().fg(self.theme.pending_input_header),
         )];
         if !self.pending_steers.is_empty() {
-            lines.extend(self.render_messages(self.pending_steers, true, width));
+            lines.extend(self.render_messages(self.pending_steers, true, true, width));
         }
 
         if !self.queued_follow_ups.is_empty() {
-            lines.extend(self.render_messages(self.queued_follow_ups, false, width));
+            lines.extend(self.render_messages(
+                self.queued_follow_ups,
+                false,
+                self.pending_steers.is_empty(),
+                width,
+            ));
         }
 
         if !self.queued_shell_commands.is_empty() {
@@ -111,6 +116,7 @@ impl<'a> PendingInputPreview<'a> {
         &self,
         messages: &VecDeque<String>,
         is_steer: bool,
+        select_first: bool,
         width: usize,
     ) -> Vec<String> {
         let mut lines = Vec::new();
@@ -118,30 +124,56 @@ impl<'a> PendingInputPreview<'a> {
         let prefix_width = visible_width(prefix);
         let body_width = width.saturating_sub(prefix_width).max(1);
         let continuation = " ".repeat(prefix_width);
-        let text_style = Style::default().fg(self.theme.pending_input_text).italic();
+        let text_style = Style::default().fg(self.theme.brand).italic();
         let prefix_style = if is_steer {
             Style::default().fg(self.theme.pending_input_steer_prefix)
         } else {
-            text_style
+            Style::default().fg(self.theme.brand).italic()
         };
 
-        for message in messages {
+        for (message_index, message) in messages.iter().enumerate() {
+            let is_selected = select_first && message_index == 0;
             let wrapped = wrap_width(message, body_width);
             for (i, line) in wrapped.iter().enumerate().take(PREVIEW_LINE_LIMIT) {
                 if i == 0 {
-                    let colored_prefix = paint(prefix.trim_end(), prefix_style);
-                    let colored_body = paint(line, text_style);
-                    lines.push(format!("{colored_prefix} {colored_body}"));
+                    let prompt_line = format!("{} {line}", prefix.trim_end());
+                    if is_selected {
+                        lines.push(self.render_selected_prompt_line(&prompt_line, width));
+                    } else {
+                        let colored_prefix = paint(prefix.trim_end(), prefix_style);
+                        let colored_body = paint(line, text_style);
+                        lines.push(format!("{colored_prefix} {colored_body}"));
+                    }
+                } else if is_selected {
+                    lines.push(
+                        self.render_selected_prompt_line(&format!("{continuation}{line}"), width),
+                    );
                 } else {
                     lines.push(paint(&format!("{continuation}{line}"), text_style));
                 }
             }
             if wrapped.len() > PREVIEW_LINE_LIMIT {
-                lines.push(paint(&format!("{continuation}…"), text_style));
+                let ellipsis_line = format!("{continuation}…");
+                if is_selected {
+                    lines.push(self.render_selected_prompt_line(&ellipsis_line, width));
+                } else {
+                    lines.push(paint(&ellipsis_line, text_style));
+                }
             }
         }
 
         lines
+    }
+
+    fn render_selected_prompt_line(&self, line: &str, width: usize) -> String {
+        let padding = width.saturating_sub(visible_width(line));
+        let selected = format!("{line}{}", " ".repeat(padding));
+        paint(
+            &selected,
+            Style::default()
+                .fg(self.theme.selected_fg)
+                .bg(self.theme.selected_bg),
+        )
     }
 
     fn render_hint(&self, width: usize) -> String {
@@ -154,7 +186,7 @@ impl<'a> PendingInputPreview<'a> {
             && !self.queued_follow_ups.is_empty()
             && self.queued_shell_commands.is_empty()
         {
-            "Alt+↑ edit last queued message · Ctrl+S steer next"
+            "Alt+↑ edit next queued message · Ctrl+S steer next"
         } else if !self.queued_shell_commands.is_empty()
             && self.pending_steers.is_empty()
             && self.queued_follow_ups.is_empty()
@@ -206,7 +238,7 @@ mod tests {
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
         assert_eq!(plain[0], "─".repeat(60));
-        assert_eq!(plain[1], "   ❯ Please continue.");
+        assert_eq!(plain[1].trim_end(), "   ❯ Please continue.");
         assert_eq!(plain[2], "   after next tool call");
     }
 
@@ -222,8 +254,42 @@ mod tests {
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
         assert_eq!(plain[0], "─".repeat(40));
-        assert_eq!(plain[1], "   ❯ Hello?");
-        assert!(plain[2].contains("Alt+↑ edit last queued message"));
+        assert_eq!(plain[1].trim_end(), "   ❯ Hello?");
+        assert!(plain[2].contains("Alt+↑ edit next queued message"));
+    }
+
+    #[test]
+    fn queued_follow_up_prompts_use_brand_and_highlight_next_message() {
+        let steers: VecDeque<String> = VecDeque::new();
+        let follow_ups: VecDeque<String> =
+            VecDeque::from(["first queued".to_owned(), "second queued".to_owned()]);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
+
+        let lines = panel.render(60);
+
+        assert!(
+            lines[1].contains("\x1b[48;2;198;120;221m"),
+            "the next queued prompt should render with selected background: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("❯ first queued"),
+            "the selected highlight should include the prompt marker and text: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("\x1b[38;2;198;120;221m"),
+            "non-selected queued prompts should use the brand foreground color: {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[2].matches("\x1b[38;2;198;120;221m").count() >= 2
+                && lines[2].contains("❯")
+                && lines[2].contains("second queued"),
+            "the prompt marker and body should both be purple: {:?}",
+            lines[2]
+        );
     }
 
     #[test]
@@ -239,7 +305,7 @@ mod tests {
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
         assert_eq!(plain[0], "─".repeat(60));
-        assert!(plain.contains(&"   ❯ Steer one".to_owned()));
+        assert!(plain.iter().any(|line| line.trim_end() == "   ❯ Steer one"));
         assert!(plain.contains(&"   ❯ Follow one".to_owned()));
         assert!(plain.contains(&"   ❯ Follow two".to_owned()));
         assert_eq!(

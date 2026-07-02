@@ -176,7 +176,7 @@ impl HelpPanelState {
                 "Steer or queue while a turn is running",
                 &self.theme,
             ),
-            shortcut_line("Alt+Up", "Edit the last queued message", &self.theme),
+            shortcut_line("Alt+Up", "Edit the next queued message", &self.theme),
             shortcut_line("Esc", "Close dialog or cancel selection", &self.theme),
             String::new(),
             paint("Slash Commands", self.theme.brand),

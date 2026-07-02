@@ -169,7 +169,7 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::queued_message(content, is_steer));
     }
 
-    /// Pop the most recent queued follow-up entry from the transcript. Used
+    /// Pop the oldest queued follow-up entry from the transcript. Used
     /// when the user presses Ctrl+S with an empty composer to promote the
     /// oldest queued follow-up to a steer. Returns the text if found.
     pub fn pop_pending_follow_up(&mut self) -> Option<String> {

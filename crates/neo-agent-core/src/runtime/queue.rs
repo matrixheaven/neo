@@ -20,6 +20,9 @@ pub enum ActiveTurnInput {
     SteerNow(AgentMessage),
     /// Queue as a follow-up turn after the current turn completes (FIFO).
     FollowUp(AgentMessage),
+    /// Remove the oldest queued follow-up after the UI pulled it back into the
+    /// composer for editing.
+    DequeueFollowUpForEdit,
     /// Reclassify the oldest queued follow-up as steering input.
     PromoteFollowUpToSteer,
 }
@@ -111,6 +114,15 @@ pub(super) fn drain_live_steer_input(handle: &SteerInputHandle, emitter: &mut Ev
             }
             ActiveTurnInput::FollowUp(message) => {
                 emitter.emit(AgentEvent::FollowUpQueued { message });
+            }
+            ActiveTurnInput::DequeueFollowUpForEdit => {
+                if emitter.context.follow_up_queue.is_empty() {
+                    continue;
+                }
+                emitter.emit(AgentEvent::QueueDrained {
+                    kind: QueueKind::FollowUp,
+                    count: 1,
+                });
             }
             ActiveTurnInput::PromoteFollowUpToSteer => {
                 let Some(message) = emitter.context.follow_up_queue.first().cloned() else {
