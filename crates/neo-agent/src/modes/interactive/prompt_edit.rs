@@ -433,7 +433,7 @@ impl InteractiveController {
                 return Ok(());
             }
             Err(err) => {
-                self.push_status(format!("读取剪贴板图片失败: {err}"));
+                self.push_status(format!("Failed to read clipboard image: {err}"));
                 return Ok(());
             }
         };

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "neo", version, about = "Rust-native 本地 AI 编程代理")]
+#[command(name = "neo", version, about = "Rust-native local AI coding agent")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     #[arg(
@@ -42,37 +42,37 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 在标准输入/文件上运行一次代理任务
+    /// Run a single agent task on stdin/file input
     Run {
         #[arg(long, value_enum)]
         output: Option<RunOutput>,
         prompt: Vec<String>,
     },
-    /// 恢复指定会话并进入交互模式
+    /// Resume a specific session and enter interactive mode
     Resume { session_id: Option<String> },
-    /// 会话管理
+    /// Session management
     Sessions {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// 模型提供商管理
+    /// Model provider management
     Provider {
         #[command(subcommand)]
         command: ProviderCommand,
     },
-    /// 模型管理
+    /// Model management
     Models {
         #[command(subcommand)]
         command: ModelCommand,
     },
-    /// MCP 服务器管理
+    /// MCP server management
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
     },
-    /// JSONL RPC 服务端模式
+    /// JSONL RPC server mode
     Rpc,
-    /// 工作区信任管理
+    /// Workspace trust management
     Trust {
         #[command(subcommand)]
         command: TrustCommand,
@@ -81,63 +81,63 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum TrustCommand {
-    /// 显示当前工作区的信任状态
+    /// Show trust status for the current workspace
     Status,
-    /// 信任当前工作区
+    /// Trust the current workspace
     Approve,
-    /// 拒绝信任当前工作区
+    /// Deny trust for the current workspace
     Deny,
-    /// 清除当前工作区的信任决定
+    /// Clear the trust decision for the current workspace
     Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunOutput {
-    /// 原始事件流
+    /// Raw event stream
     Events,
-    /// JSON 输出
+    /// JSON output
     Json,
-    /// 纯文本输出
+    /// Plain text output
     Text,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
-    /// 列出当前工作区会话
+    /// List sessions in the current workspace
     List,
-    /// 查看会话详情
+    /// Show session details
     Show { session_id: String },
-    /// 重命名会话
+    /// Rename a session
     Rename { session_id: String, name: String },
-    /// 分叉会话
+    /// Fork a session
     Fork {
         session_id: String,
-        /// 新会话名称
+        /// Name for the forked session
         #[arg(long)]
         name: Option<String>,
     },
-    /// 压缩会话历史
+    /// Compact session history
     Compact {
         session_id: String,
-        /// 保留最近多少条消息
+        /// Number of recent messages to keep
         #[arg(long, default_value_t = 20)]
         keep_recent: usize,
     },
-    /// 导出会话为 HTML
+    /// Export a session as HTML
     ExportHtml { session_id: String },
-    /// 导出会话为 JSON
+    /// Export a session as JSON
     ExportJson { session_id: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
-    /// 列出可用模型
+    /// List available models
     List {
-        /// 以 JSON 格式输出
+        /// Output in JSON format
         #[arg(long)]
         json: bool,
     },
-    /// 添加模型别名
+    /// Add a model alias
     Add {
         alias: String,
         #[arg(long)]
@@ -151,21 +151,21 @@ pub enum ModelCommand {
         #[arg(long)]
         display_name: Option<String>,
     },
-    /// 删除模型别名
+    /// Remove a model alias
     Remove { alias: String },
-    /// 设置默认模型
+    /// Set the default model
     Set { alias: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
-    /// 列出已配置或可用的提供商
+    /// List configured or available providers
     List {
-        /// 以 JSON 格式输出
+        /// Output in JSON format
         #[arg(long)]
         json: bool,
     },
-    /// 添加自定义提供商
+    /// Add a custom provider
     Add {
         provider_id: String,
         #[arg(long, value_name = "TYPE")]
@@ -177,9 +177,9 @@ pub enum ProviderCommand {
         #[arg(long, value_name = "ENV_VAR")]
         api_key_env: Option<String>,
     },
-    /// 删除自定义提供商
+    /// Remove a custom provider
     Remove { provider_id: String },
-    /// models.dev 目录管理
+    /// models.dev catalog management
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
@@ -188,23 +188,23 @@ pub enum ProviderCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum CatalogCommand {
-    /// 列出 models.dev 上的提供商
+    /// List providers on models.dev
     List {
-        /// 只看指定提供商的模型
+        /// Show models for a specific provider only
         provider_id: Option<String>,
-        /// 按关键字过滤
+        /// Filter by keyword
         #[arg(long)]
         filter: Option<String>,
-        /// 以 JSON 格式输出
+        /// Output in JSON format
         #[arg(long)]
         json: bool,
     },
-    /// 从 models.dev 导入提供商及其模型
+    /// Import a provider and its models from models.dev
     Add {
         provider_id: String,
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
-        /// 导入后设为默认的模型 ID
+        /// Model ID to set as default after import
         #[arg(long, value_name = "MODEL_ID")]
         default_model: Option<String>,
     },
@@ -213,90 +213,90 @@ pub enum CatalogCommand {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum McpCommand {
-    /// 列出所有已配置的 MCP 及其工具名
+    /// List all configured MCP servers and their tool names
     List,
-    /// 添加并测试一个 MCP
+    /// Add and test an MCP server
     Add {
-        /// MCP 名称
+        /// MCP server name
         mcp_name: String,
-        /// MCP 类型：studio、remote-http、remote-sse
+        /// MCP type: studio, remote-http, remote-sse
         #[arg(short = 't', long = "type", value_name = "TYPE")]
         r#type: String,
-        /// studio 类型的完整 shell 命令（全局 -c 已被占用，因此用 -C）
+        /// Full shell command for studio type (global -c is taken, so -C)
         #[arg(short = 'C', long = "command", value_name = "CMD")]
         command: Option<String>,
-        /// remote-http / remote-sse 的服务地址
+        /// Service URL for remote-http / remote-sse
         #[arg(short = 'u', long = "url", value_name = "URL")]
         url: Option<String>,
-        /// 环境变量，格式 KEY=VALUE，可多次指定
+        /// Environment variables in KEY=VALUE format, may be specified multiple times
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
-        /// remote 类型的 HTTP 请求头，格式 KEY=VALUE（-h 已被 help 占用，因此用 -H）
+        /// HTTP headers for remote types in KEY=VALUE format (-h is taken by help, so -H)
         #[arg(short = 'H', long = "header", value_name = "KEY=VALUE")]
         headers: Vec<String>,
-        /// studio 类型子进程的工作目录
+        /// Working directory for studio subprocess
         #[arg(long = "cwd", value_name = "DIR")]
         cwd: Option<std::path::PathBuf>,
-        /// 工具白名单，逗号分隔
+        /// Tool allowlist, comma-separated
         #[arg(
             long = "enabled-tools",
             value_name = "TOOL1,TOOL2",
             value_delimiter = ','
         )]
         enabled_tools: Vec<String>,
-        /// 工具黑名单，逗号分隔
+        /// Tool denylist, comma-separated
         #[arg(
             long = "disabled-tools",
             value_name = "TOOL1,TOOL2",
             value_delimiter = ','
         )]
         disabled_tools: Vec<String>,
-        /// 连接测试超时（毫秒）
+        /// Connection test timeout in milliseconds
         #[arg(long = "startup-timeout-ms", value_name = "MS")]
         startup_timeout_ms: Option<u64>,
-        /// 单次工具调用超时（毫秒）
+        /// Per-tool-call timeout in milliseconds
         #[arg(long = "tool-timeout-ms", value_name = "MS")]
         tool_timeout_ms: Option<u64>,
-        /// 添加后默认启用；显式传 --enable 保持启用（默认行为）
+        /// Enable after adding (default behavior)
         #[arg(long = "enable", default_value_t = true)]
         enable: bool,
-        /// 添加后默认启用；加此 flag 则禁用
+        /// Disable after adding
         #[arg(long = "disable", default_value_t = false)]
         disable: bool,
     },
-    /// 删除一个 MCP
+    /// Remove an MCP server
     Del {
-        /// MCP 名称
+        /// MCP server name
         mcp_name: String,
     },
-    /// 禁用一个 MCP
+    /// Disable an MCP server
     Disable {
-        /// MCP 名称
+        /// MCP server name
         mcp_name: String,
     },
-    /// 启用一个 MCP
+    /// Enable an MCP server
     Enable {
-        /// MCP 名称
+        /// MCP server name
         mcp_name: String,
     },
-    /// 显示每个 MCP 的连接状态、工具数和最近的错误
+    /// Show connection status, tool count, and recent errors for each MCP server
     Status,
-    /// 列出已连接 MCP 暴露的资源
+    /// List resources exposed by connected MCP servers
     Resources {
-        /// 仅列出指定 MCP 服务器的资源
+        /// Only list resources for the specified MCP server
         #[arg(short, long, value_name = "SERVER")]
         server_id: Option<String>,
     },
-    /// 读取已连接 MCP 暴露的资源内容
+    /// Read the content of a resource exposed by a connected MCP server
     ReadResource {
-        /// MCP 服务器名称
+        /// MCP server name
         server_id: String,
-        /// 资源 URI
+        /// Resource URI
         uri: String,
     },
-    /// 为 MCP 服务器启动 OAuth 授权流程
+    /// Start the OAuth authorization flow for an MCP server
     Auth {
-        /// MCP 服务器名称
+        /// MCP server name
         server_id: String,
     },
 }
