@@ -178,18 +178,8 @@ fn assistant_message_body(
     let text = content_text(content, "assistant")?;
     let mut body = json!({
         "role": "assistant",
+        "content": text,
     });
-    // When the assistant message carries tool calls and no visible text,
-    // omit `content` entirely (set it to null). Sending `"content": ""`
-    // confuses some OpenAI-compatible models (e.g. MiMo) into echoing the
-    // tool calls back as XML text in subsequent turns — they interpret the
-    // empty string as "the assistant produced text that should be paired
-    // with the tool calls" rather than "the assistant only called tools".
-    if !tool_calls.is_empty() && text.is_empty() {
-        body["content"] = Value::Null;
-    } else {
-        body["content"] = json!(text);
-    }
     if !tool_calls.is_empty() {
         body["tool_calls"] = json!(tool_calls.iter().map(tool_call_body).collect::<Vec<_>>());
     }
@@ -487,14 +477,6 @@ struct ParseState {
     provider_reported_tool_calls: bool,
     completed_tool_calls: usize,
     finished: bool,
-    /// Accumulated text content, buffered so embedded `<tool_call>` XML
-    /// blocks can be extracted and converted to structured tool calls.
-    text_buffer: String,
-    /// Monotonic index for XML-parsed tool calls. Starts high to avoid
-    /// colliding with provider-assigned indices (typically 0–9).
-    next_xml_tool_index: u64,
-    /// Count of tool calls parsed from `<tool_call>` XML in content text.
-    xml_tool_calls_parsed: usize,
 }
 
 impl Default for ParseState {
@@ -510,9 +492,6 @@ impl Default for ParseState {
             provider_reported_tool_calls: false,
             completed_tool_calls: 0,
             finished: false,
-            text_buffer: String::new(),
-            next_xml_tool_index: 1000,
-            xml_tool_calls_parsed: 0,
         }
     }
 }
@@ -564,62 +543,6 @@ impl ParseState {
         self.saw_finish_reason
     }
 
-    /// Scan the text buffer for `<tool_call>` XML blocks. Complete blocks are
-    /// parsed into structured tool calls. Text outside blocks is emitted as
-    /// `TextDelta`. A trailing partial `<tool_call>` prefix is held back.
-    fn flush_text_buffer(&mut self) {
-        const OPEN_TAG: &str = "<tool_call>";
-        loop {
-            match self.text_buffer.find(OPEN_TAG) {
-                None => {
-                    let safe = safe_text_len(&self.text_buffer);
-                    if safe > 0 {
-                        let text: String = self.text_buffer.drain(..safe).collect();
-                        self.events.push(AiStreamEvent::TextDelta { text });
-                    }
-                    break;
-                }
-                Some(start) => {
-                    if start > 0 {
-                        let before: String = self.text_buffer.drain(..start).collect();
-                        self.events.push(AiStreamEvent::TextDelta { text: before });
-                    }
-                    match self.text_buffer.find("</tool_call>") {
-                        Some(end_rel) => {
-                            let block_end = end_rel + "</tool_call>".len();
-                            let block: String = self.text_buffer.drain(..block_end).collect();
-                            self.parse_xml_tool_call(&block);
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-    }
-
-    /// Parse one `<tool_call>…</tool_call>` block and feed it into the
-    /// streaming tool-call assembler.
-    fn parse_xml_tool_call(&mut self, block: &str) {
-        let Some(name) = extract_xml_function_name(block) else {
-            return;
-        };
-        let args = extract_xml_parameters(block);
-        let raw_arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_owned());
-        let id = format!("xml-tool-{}", self.next_xml_tool_index);
-        let index = self.next_xml_tool_index;
-        self.next_xml_tool_index += 1;
-        let chunk = ToolCallChunk {
-            index: Some(index),
-            id: Some(id),
-            name: Some(name),
-            arguments_fragment: Some(raw_arguments),
-        };
-        if let Ok(events) = self.tool_calls.ingest(chunk) {
-            self.push_tool_events(events);
-            self.xml_tool_calls_parsed += 1;
-        }
-    }
-
     fn ensure_started(&mut self, value: &Value) {
         if self.started {
             return;
@@ -651,8 +574,9 @@ impl ParseState {
         if let Some(text) = delta.get("content").and_then(Value::as_str)
             && !text.is_empty()
         {
-            self.text_buffer.push_str(text);
-            self.flush_text_buffer();
+            self.events.push(AiStreamEvent::TextDelta {
+                text: text.to_owned(),
+            });
         }
 
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
@@ -715,12 +639,6 @@ impl ParseState {
         }
         self.finished = true;
 
-        // Flush remaining buffered text (including incomplete XML fragments).
-        if !self.text_buffer.is_empty() {
-            let text = std::mem::take(&mut self.text_buffer);
-            self.events.push(AiStreamEvent::TextDelta { text });
-        }
-
         let tool_events = self
             .tool_calls
             .finish_all()
@@ -736,8 +654,6 @@ impl ParseState {
             } else {
                 self.last_stop_reason = StopReason::ToolUse;
             }
-        } else if self.xml_tool_calls_parsed > 0 {
-            self.last_stop_reason = StopReason::ToolUse;
         }
         if self.reasoning_started {
             self.events.push(AiStreamEvent::ThinkingEnd {
@@ -761,58 +677,6 @@ fn reasoning_delta(delta: &Value) -> Option<&str> {
     KNOWN_REASONING_KEYS
         .iter()
         .find_map(|key| delta.get(*key).and_then(Value::as_str))
-}
-
-/// Length of text safe to emit as `TextDelta` — everything except a trailing
-/// partial prefix of `"<tool_call>"`.
-fn safe_text_len(buffer: &str) -> usize {
-    const MARKER: &str = "<tool_call>";
-    let max_check = buffer.len().min(MARKER.len());
-    for i in (1..=max_check).rev() {
-        let start = buffer.len() - i;
-        // Must land on a UTF-8 char boundary.
-        if !buffer.is_char_boundary(start) {
-            continue;
-        }
-        if MARKER.starts_with(&buffer[start..]) {
-            return start;
-        }
-    }
-    buffer.len()
-}
-
-/// Extract the function name from `<function=NAME>` inside a tool-call block.
-fn extract_xml_function_name(block: &str) -> Option<String> {
-    let open = block.find("<function=")?;
-    let after_eq = &block[open + "<function=".len()..];
-    let end = after_eq.find('>')?;
-    let name = after_eq[..end].trim();
-    (!name.is_empty()).then(|| name.to_owned())
-}
-
-/// Extract `<parameter=KEY>VALUE</parameter>` pairs from a tool-call block.
-fn extract_xml_parameters(block: &str) -> serde_json::Map<String, Value> {
-    let mut params = serde_json::Map::new();
-    let mut search_from = 0_usize;
-    while let Some(open) = block[search_from..].find("<parameter=") {
-        let abs_open = search_from + open;
-        let after_eq = &block[abs_open + "<parameter=".len()..];
-        let Some(key_end) = after_eq.find('>') else {
-            break;
-        };
-        let key = after_eq[..key_end].trim().to_owned();
-        let value_start = abs_open + "<parameter=".len() + key_end + 1;
-        let remaining = &block[value_start..];
-        let Some(value_end) = remaining.find("</parameter>") else {
-            break;
-        };
-        let raw_value = &remaining[..value_end];
-        let value = serde_json::from_str::<Value>(raw_value)
-            .unwrap_or_else(|_| Value::String(raw_value.to_owned()));
-        params.insert(key, value);
-        search_from = value_start + value_end + "</parameter>".len();
-    }
-    params
 }
 
 #[cfg(test)]

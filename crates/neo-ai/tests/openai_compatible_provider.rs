@@ -10,8 +10,7 @@ use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
-    RequestOptions, StopReason, ToolCall, ToolSpec,
-    providers::openai::compatible::OpenAiCompatibleClient,
+    RequestOptions, StopReason, ToolSpec, providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
 
@@ -418,16 +417,13 @@ async fn openai_streams_reasoning_content_as_thinking_events() {
 }
 
 #[tokio::test]
-async fn openai_xml_tool_call_in_content_is_parsed_as_structured() {
-    // MiMo sometimes emits tool calls as XML in the content field instead of
-    // (or alongside) structured tool_calls. The parser must extract these
-    // into proper ToolCallStart/End events and strip the XML from text.
+async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
     let server = MockServer::start(vec![sse_response(&[
         json!({
             "id": "chatcmpl-xml-tool",
             "choices": [{
                 "delta": {
-                    "content": "<tool_call>\n<function=Bash>\n<parameter=command>echo hello</parameter>\n<parameter=description>Test</parameter>\n</function>\n</tool_call>"
+                    "content": "<tool_call><function=Bash></function></tool_call>"
                 }
             }]
         }),
@@ -446,30 +442,24 @@ async fn openai_xml_tool_call_in_content_is_parsed_as_structured() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    // XML tool call is parsed into structured events.
     assert!(events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::ToolCallStart { name, .. } if name == "Bash"
+        AiStreamEvent::TextDelta { text }
+            if text.contains("<tool_call><function=Bash>")
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AiStreamEvent::ToolCallStart { .. } | AiStreamEvent::ToolCallEnd { .. }
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        AiStreamEvent::ToolCallEnd { raw_arguments, .. }
-            if raw_arguments.contains("echo hello")
-    )));
-    // The raw XML must NOT leak into text output.
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::TextDelta { text } if text.contains("<tool_call>")
-    )));
-    // No error — tool call was recovered from XML.
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::Error { .. }
+        AiStreamEvent::Error { message }
+            if message == "Provider reported tool calls but emitted no structured tool calls"
     )));
     assert!(matches!(
         events.last(),
         Some(AiStreamEvent::MessageEnd {
-            stop_reason: StopReason::ToolUse,
+            stop_reason: StopReason::Error,
             ..
         })
     ));
@@ -903,82 +893,4 @@ async fn openai_compatible_ignores_empty_tool_argument_deltas() {
         id: "call-1".to_owned(),
         raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
     }));
-}
-
-#[tokio::test]
-async fn openai_assistant_with_tool_calls_and_empty_text_omits_content() {
-    // When an assistant message has tool_calls but no visible text content,
-    // `content` must be null (not empty string). Sending `"content": ""`
-    // confuses some OpenAI-compatible models (e.g. MiMo) into echoing tool
-    // calls back as XML text in subsequent turns.
-    let server = MockServer::start(vec![sse_response(&[json!({
-        "id": "chatcmpl-null-content",
-        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
-    })])]);
-    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
-    let mut request = request(RequestOptions::default());
-    request.messages = vec![ChatMessage::Assistant {
-        content: vec![],
-        tool_calls: vec![ToolCall {
-            id: "call-1".to_owned(),
-            name: "read_file".to_owned(),
-            raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
-        }],
-    }];
-
-    client
-        .stream_chat(request)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    let sent = server.requests().pop().unwrap();
-    assert_eq!(sent.body["messages"][0]["role"], "assistant");
-    assert!(
-        sent.body["messages"][0]["content"].is_null(),
-        "content must be null for assistant with tool_calls and no text: {}",
-        sent.body["messages"][0]
-    );
-    assert_eq!(
-        sent.body["messages"][0]["tool_calls"][0]["function"]["name"],
-        "read_file"
-    );
-}
-
-#[tokio::test]
-async fn openai_assistant_with_tool_calls_and_text_keeps_content() {
-    // When an assistant message has both text and tool_calls, content is kept.
-    let server = MockServer::start(vec![sse_response(&[json!({
-        "id": "chatcmpl-with-text",
-        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
-    })])]);
-    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
-    let mut request = request(RequestOptions::default());
-    request.messages = vec![ChatMessage::Assistant {
-        content: vec![ContentPart::Text {
-            text: "Let me read that.".to_owned(),
-        }],
-        tool_calls: vec![ToolCall {
-            id: "call-1".to_owned(),
-            name: "read_file".to_owned(),
-            raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
-        }],
-    }];
-
-    client
-        .stream_chat(request)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    let sent = server.requests().pop().unwrap();
-    assert_eq!(sent.body["messages"][0]["content"], "Let me read that.");
-    assert_eq!(
-        sent.body["messages"][0]["tool_calls"][0]["function"]["name"],
-        "read_file"
-    );
 }
