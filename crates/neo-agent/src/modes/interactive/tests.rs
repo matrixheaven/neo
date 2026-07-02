@@ -4,8 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use neo_agent_core::ToolResult;
-use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionMode, StopReason};
+use neo_agent_core::{
+    AgentEvent, AgentMessage, Content, PermissionMode, StopReason, ToolResult,
+    skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
+};
 use neo_tui::{
     input::KeybindingAction,
     shell::{ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
@@ -29,6 +31,29 @@ fn test_workspace_root() -> PathBuf {
     let dir = std::env::temp_dir().join("neo-test-workspace");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+fn skill_store_with_refactor_skill() -> SkillStore {
+    SkillStore::load(
+        &[],
+        &[],
+        vec![LoadedSkill {
+            name: "refactor".to_owned(),
+            root: PathBuf::from("builtin/refactor"),
+            manifest: SkillManifest {
+                name: "refactor".to_owned(),
+                description: "Refactor with project conventions".to_owned(),
+                skill_type: SkillType::Prompt,
+                when_to_use: None,
+                disable_model_invocation: false,
+                arguments: Vec::new(),
+                slash_commands: Vec::new(),
+            },
+            body: "Refactor safely.".to_owned(),
+            source: SkillSource::Builtin,
+        }],
+    )
+    .expect("skill store")
 }
 
 fn pending_approval_response(
@@ -1933,6 +1958,33 @@ fn slash_completion_descriptions_hide_internal_metadata() {
 }
 
 #[test]
+fn slash_completions_include_dynamic_skill_commands_without_metadata() {
+    let skill_store = skill_store_with_refactor_skill();
+    let completions = prompt_completions(
+        &test_workspace_root(),
+        "/skill:",
+        &[],
+        Some(&skill_store),
+        true,
+    )
+    .expect("skill completions resolve");
+    let skill = completions
+        .iter()
+        .find(|item| item.value == "/skill:refactor")
+        .expect("missing dynamic skill command");
+
+    assert_eq!(skill.label, "/skill:refactor");
+    assert_eq!(
+        skill.description.as_deref(),
+        Some("Refactor with project conventions")
+    );
+    let description = skill.description.as_deref().unwrap_or_default();
+    assert!(!description.contains("provider:"), "{description}");
+    assert!(!description.contains("trust:"), "{description}");
+    assert!(!description.contains("source:"), "{description}");
+}
+
+#[test]
 fn slash_completions_include_help_command() {
     let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
         .expect("completions resolve");
@@ -2131,6 +2183,38 @@ async fn slash_help_opens_help_panel_overlay() {
     );
     assert!(snapshot.contains("/help"), "{snapshot}");
     assert!(snapshot.contains("/ask"), "{snapshot}");
+}
+
+#[tokio::test]
+async fn slash_help_panel_includes_dynamic_skill_commands() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.skill_store = Some(skill_store_with_refactor_skill());
+
+    controller.type_text("/help");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("slash help command runs locally");
+
+    for _ in 0..8 {
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageDown))
+            .await
+            .expect("scroll help panel");
+    }
+
+    let snapshot = controller.render_snapshot();
+    assert!(snapshot.contains("/skill:refactor"), "{snapshot}");
+    assert!(
+        snapshot.contains("Refactor with project conventions"),
+        "{snapshot}"
+    );
 }
 
 #[test]
