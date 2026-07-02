@@ -62,7 +62,7 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             },
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
-                used_tokens: 3,
+                used_tokens: 4,
             },
             AgentEvent::TurnStarted { turn: 1 },
             AgentEvent::MessageStarted {
@@ -91,7 +91,7 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             },
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
-                used_tokens: 5,
+                used_tokens: 9,
             },
             AgentEvent::TurnFinished {
                 turn: 1,
@@ -200,6 +200,60 @@ async fn runtime_context_window_estimate_includes_effective_request_messages() {
             } if *used_tokens > 20
         )),
         "context estimate should include system/workspace request messages, not only the user buffer"
+    );
+}
+
+#[tokio::test]
+async fn runtime_context_window_estimate_includes_tool_schemas() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let tool = ToolSpec {
+        name: "LargeSchemaTool".to_owned(),
+        description: "tool description that must count toward context".repeat(8),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "string",
+                    "description": "schema description that must count toward context".repeat(16),
+                },
+            },
+            "required": ["payload"],
+            "additionalProperties": false,
+        }),
+    };
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_tools(vec![tool]),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("x"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let used_tokens = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextWindowUpdated { used_tokens, .. } => Some(*used_tokens),
+            _ => None,
+        })
+        .expect("context window update");
+
+    assert!(
+        used_tokens > 100,
+        "context estimate should include tool name, description, and input schema; got {used_tokens}"
     );
 }
 
@@ -329,7 +383,7 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
             .expect("context tokens should be ok"),
         AgentEvent::ContextWindowUpdated {
             turn: 1,
-            used_tokens: 2,
+            used_tokens: 3,
         }
     );
     assert_eq!(
@@ -1156,7 +1210,7 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
 
     // Verify the lifecycle starts at 0%, goes through the visible phases, and
     // finishes smoothly at 100% instead of jumping from ~80% to done.
-    assert_eq!(lifecycle.first(), Some(&"start:Threshold:24:3".to_owned()));
+    assert_eq!(lifecycle.first(), Some(&"start:Threshold:29:3".to_owned()));
     assert!(lifecycle.contains(&"progress:Estimating:0".to_owned()));
     assert!(lifecycle.contains(&"progress:SelectingBoundary:15".to_owned()));
     assert!(lifecycle.contains(&"progress:Summarizing:15".to_owned()));
@@ -1171,7 +1225,7 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
         Some(&"progress:Applying:100".to_owned()),
         "last progress should reach 100%: {lifecycle:?}"
     );
-    assert!(lifecycle.contains(&"applied:2:24".to_owned()));
+    assert!(lifecycle.contains(&"applied:2:29".to_owned()));
 
     // Percentages must be non-decreasing across CompactionProgress events.
     let percents: Vec<u8> = lifecycle
@@ -1311,7 +1365,7 @@ async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
             },
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
-                used_tokens: 5,
+                used_tokens: 6,
             },
             AgentEvent::RunFinished {
                 turn: 1,

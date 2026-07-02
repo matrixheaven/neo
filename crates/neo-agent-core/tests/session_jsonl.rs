@@ -584,7 +584,7 @@ async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
     .expect("compact session");
 
     assert_eq!(result.compacted_message_count, 1);
-    assert_eq!(result.summary.tokens_before, 9);
+    assert_eq!(result.summary.tokens_before, 13);
 }
 
 #[tokio::test]

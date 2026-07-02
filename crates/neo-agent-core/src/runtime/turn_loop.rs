@@ -20,7 +20,7 @@ use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
 use super::stream_aggregator::run_model_turn;
-use super::tokens::{estimate_chat_messages_tokens, estimate_messages_tokens};
+use super::tokens::{estimate_chat_request_tokens, estimate_messages_tokens};
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
@@ -146,11 +146,7 @@ pub(super) async fn run_agent_turn(
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context).await;
-        emit_context_window_update(
-            emitter,
-            turn,
-            estimate_chat_messages_tokens(&request.messages),
-        );
+        emit_context_window_update(emitter, turn, estimate_chat_request_tokens(&request));
         validate_model_capabilities(&request)?;
         let assistant =
             run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
@@ -327,11 +323,7 @@ pub(super) async fn emit_effective_context_window(
     turn: u32,
 ) {
     let request = chat_request_for_context_estimate(config, &emitter.context).await;
-    emit_context_window_update(
-        emitter,
-        turn,
-        estimate_chat_messages_tokens(&request.messages),
-    );
+    emit_context_window_update(emitter, turn, estimate_chat_request_tokens(&request));
 }
 
 fn terminal_pre_model_stop(
