@@ -1310,25 +1310,29 @@ impl InteractiveController {
             &self.paste_store,
             &self.image_attachment_store,
         );
+        let display_text = content_to_display_text(&content);
         let message = AgentMessage::User { content };
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             self.tui
                 .chrome_mut()
                 .pending_input_mut()
-                .queue_follow_up(prompt);
+                .queue_follow_up(display_text);
             return;
         };
+        self.tui
+            .chrome_mut()
+            .pending_input_mut()
+            .queue_follow_up_optimistic(display_text);
         turn.steer_input
             .push(neo_agent_core::ActiveTurnInput::FollowUp(message));
     }
 
     /// Handle the `PromptSteer` keybinding (Ctrl+S by default).
     ///
-    /// 1. If the composer has text, steer the running turn with it (inject at
-    ///    the next natural break point).
-    /// 2. If the composer is empty and a turn is active, re-classify the oldest
-    ///    queued follow-up as a steer (FIFO pull).
+    /// 1. Re-classify queued follow-ups as steers (FIFO pull).
+    /// 2. If the composer has text, steer the running turn with it (inject at
+    ///    the next natural break point) after the promoted follow-ups.
     /// 3. If no turn is active, fall back to a normal submit so Ctrl+S is never
     ///    a dead key when idle.
     async fn handle_prompt_steer(&mut self) -> Result<()> {
@@ -1336,39 +1340,50 @@ impl InteractiveController {
             return Ok(());
         }
         let text = self.tui.chrome().prompt().text.trim().to_owned();
-        if !text.is_empty() {
-            if self.active_turn.is_some() {
-                let content = crate::prompt::parts::expand_prompt_markers(
-                    &text,
-                    &self.paste_store,
-                    &self.image_attachment_store,
-                );
-                let message = AgentMessage::User { content };
-                if let Some(turn) = &self.active_turn {
-                    turn.steer_input
-                        .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
-                }
-                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        let Some(turn) = &self.active_turn else {
+            if text.is_empty() {
+                self.push_status("No active turn to steer");
                 return Ok(());
             }
             // Idle: behave like a normal submit.
             return self.submit_current_prompt().await;
-        }
-        let Some(turn) = &self.active_turn else {
-            self.push_status("No active turn to steer");
-            return Ok(());
         };
-        if self
+        let steer_input = turn.steer_input.clone();
+        let mut steered_messages = Vec::new();
+        while let Some(message) = self
             .tui
-            .chrome()
-            .pending_input()
-            .queued_follow_ups()
-            .is_empty()
+            .chrome_mut()
+            .pending_input_mut()
+            .promote_oldest_follow_up_to_steer_optimistic()
         {
+            steer_input.push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
+            steered_messages.push(message);
+        }
+
+        if !text.is_empty() {
+            let content = crate::prompt::parts::expand_prompt_markers(
+                &text,
+                &self.paste_store,
+                &self.image_attachment_store,
+            );
+            let display_text = content_to_display_text(&content);
+            let message = AgentMessage::User { content };
+            steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(message));
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .queue_steer_optimistic(display_text.clone());
+            steered_messages.push(display_text);
+            self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        }
+
+        if steered_messages.is_empty() {
             self.push_status("No queued follow-up to steer");
-        } else {
-            turn.steer_input
-                .push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
+            return Ok(());
+        }
+
+        for message in steered_messages {
+            self.tui.transcript_mut().push_user_message(message);
         }
         Ok(())
     }

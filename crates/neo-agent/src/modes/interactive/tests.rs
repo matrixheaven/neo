@@ -7295,7 +7295,7 @@ async fn active_turn_enter_enqueues_follow_up_instead_of_rejecting() {
 }
 
 #[tokio::test]
-async fn active_turn_enter_waits_for_runtime_event_before_pending_preview() {
+async fn active_turn_enter_updates_pending_preview_immediately() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -7331,13 +7331,16 @@ async fn active_turn_enter_waits_for_runtime_event_before_pending_preview() {
         .await
         .expect("enter while busy enqueues");
 
-    assert!(
+    assert_eq!(
         controller
             .chrome()
             .pending_input()
             .queued_follow_ups()
-            .is_empty(),
-        "local submit path must not duplicate the runtime FollowUpQueued event"
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued follow up"],
+        "queued follow-up should appear above the composer immediately"
     );
 
     controller.apply_turn_event(AgentEvent::FollowUpQueued {
@@ -7351,7 +7354,8 @@ async fn active_turn_enter_waits_for_runtime_event_before_pending_preview() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued follow up"]
+        vec!["queued follow up"],
+        "runtime queue ack must not duplicate the local preview"
     );
     controller.apply_turn_event(AgentEvent::QueueDrained {
         kind: neo_agent_core::QueueKind::FollowUp,
@@ -7417,7 +7421,7 @@ async fn active_turn_ctrl_s_steers_running_turn() {
 }
 
 #[tokio::test]
-async fn active_turn_ctrl_s_waits_for_runtime_event_before_pending_preview() {
+async fn active_turn_ctrl_s_updates_transcript_and_pending_preview_immediately() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -7454,12 +7458,21 @@ async fn active_turn_ctrl_s_waits_for_runtime_event_before_pending_preview() {
         .expect("ctrl+s steers");
 
     assert!(
+        transcript_entries(&controller).iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "steer this")
+        ),
+        "Ctrl+S should show the steered user prompt in the transcript immediately"
+    );
+    assert_eq!(
         controller
             .chrome()
             .pending_input()
             .pending_steers()
-            .is_empty(),
-        "local Ctrl+S path must not duplicate the runtime SteeringQueued event"
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["steer this"],
+        "steer should appear above the composer immediately"
     );
     controller.apply_turn_event(AgentEvent::SteeringQueued {
         message: AgentMessage::user_text("steer this"),
@@ -7472,12 +7485,92 @@ async fn active_turn_ctrl_s_waits_for_runtime_event_before_pending_preview() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["steer this"]
+        vec!["steer this"],
+        "runtime steer ack must not duplicate the local preview"
     );
 }
 
 #[tokio::test]
-async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication() {
+async fn active_turn_ctrl_s_steers_queued_follow_ups_before_current_prompt() {
+    let captured_steer = Arc::new(std::sync::Mutex::new(
+        neo_agent_core::SteerInputHandle::new(),
+    ));
+    let observed_steer = Arc::clone(&captured_steer);
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        let observed_steer = Arc::clone(&observed_steer);
+        *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+        Box::pin(async move {
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+
+    controller.type_text("first prompt");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("first prompt starts turn");
+    controller.apply_turn_event(AgentEvent::FollowUpQueued {
+        message: AgentMessage::user_text("queued one"),
+    });
+    controller.apply_turn_event(AgentEvent::FollowUpQueued {
+        message: AgentMessage::user_text("queued two"),
+    });
+
+    controller.type_text("current steer");
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("ctrl+s steers queue and current prompt");
+
+    let steer_handle = captured_steer.lock().expect("steer lock").clone();
+    assert_eq!(steer_handle.pending(), 3);
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one", "queued two", "current steer"]
+    );
+    let steered_user_messages = transcript_entries(&controller)
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::UserMessage(text)
+                if matches!(text.as_str(), "queued one" | "queued two" | "current steer") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steered_user_messages,
+        vec!["queued one", "queued two", "current steer"]
+    );
+}
+
+#[tokio::test]
+async fn empty_ctrl_s_promotes_all_follow_ups_fifo_without_local_duplication() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -7521,8 +7614,8 @@ async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication()
     let steer_handle = captured_steer.lock().expect("steer lock").clone();
     assert_eq!(
         steer_handle.pending(),
-        1,
-        "promoted follow-up is sent as steer"
+        2,
+        "queued follow-ups are sent as steer inputs"
     );
     assert_eq!(
         controller
@@ -7532,16 +7625,19 @@ async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued one", "queued two"],
-        "local promotion intent must wait for runtime drain before changing follow-up preview"
+        Vec::<&str>::new(),
+        "promoted follow-ups should leave the visible follow-up queue immediately"
     );
-    assert!(
+    assert_eq!(
         controller
             .chrome()
             .pending_input()
             .pending_steers()
-            .is_empty(),
-        "local promotion must wait for the runtime SteeringQueued event before showing steer preview"
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued one", "queued two"],
+        "promoted follow-ups should appear as pending steers immediately"
     );
 
     controller.apply_turn_event(AgentEvent::QueueDrained {
@@ -7556,11 +7652,18 @@ async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued two"],
-        "runtime follow-up drain removes the promoted FIFO item"
+        Vec::<&str>::new(),
+        "runtime follow-up drain ack must not affect the already-promoted visible queue"
     );
     controller.apply_turn_event(AgentEvent::SteeringQueued {
         message: AgentMessage::user_text("queued one"),
+    });
+    controller.apply_turn_event(AgentEvent::QueueDrained {
+        kind: neo_agent_core::QueueKind::FollowUp,
+        count: 1,
+    });
+    controller.apply_turn_event(AgentEvent::SteeringQueued {
+        message: AgentMessage::user_text("queued two"),
     });
     assert_eq!(
         controller
@@ -7570,11 +7673,12 @@ async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["queued one"]
+        vec!["queued one", "queued two"],
+        "runtime steer acks must not duplicate the promoted previews"
     );
     controller.apply_turn_event(AgentEvent::QueueDrained {
         kind: neo_agent_core::QueueKind::Steering,
-        count: 1,
+        count: 2,
     });
     assert!(
         controller
