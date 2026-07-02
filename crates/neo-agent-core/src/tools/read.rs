@@ -267,7 +267,7 @@ impl ReadRenderResult {
 
         if self.line_ending_style == LineEndingStyle::Mixed {
             parts.push(
-                "Mixed or lone carriage-return line endings are shown as \\r. Use exact \\r\\n or \\r escapes in Edit.old_string for those lines.".to_owned(),
+                "Mixed or lone carriage-return line endings are shown as \\r. Use exact \\r\\n or \\r escapes in Edit.old for those lines.".to_owned(),
             );
         }
 

@@ -14,10 +14,6 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
-    /// Kept for API compatibility; the actual startup timeout is owned by
-    /// `connect_one` in `mcp_manager.rs` so that serve + `list_tools` share a
-    /// single deadline.
-    pub startup_timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
 }
 
@@ -70,9 +66,6 @@ pub async fn build_stdio_client(
 
     let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
 
-    // Note: no internal startup timeout here. The caller (`connect_one` in
-    // `mcp_manager.rs`) wraps the entire serve + discover_tools sequence in a
-    // single timeout so the deadline is not double-counted.
     let service = ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?;
 
     let client: Arc<dyn McpClient> =
@@ -103,7 +96,6 @@ mod tests {
             args: vec![],
             env: BTreeMap::new(),
             cwd: None,
-            startup_timeout_ms: None,
             tool_timeout_ms: None,
         };
         // We can't inspect the Stdio setting directly on tokio::process::Command,

@@ -34,8 +34,12 @@ impl Marker {
     #[must_use]
     pub fn as_placeholder(&self) -> String {
         match self {
-            Self::Paste { id, lines: Some(n), .. } => format!("[paste #{id} +{n} lines]"),
-            Self::Paste { id, lines: None, .. } => format!("[paste #{id} chars]"),
+            Self::Paste {
+                id, lines: Some(n), ..
+            } => format!("[paste #{id} +{n} lines]"),
+            Self::Paste {
+                id, lines: None, ..
+            } => format!("[paste #{id} chars]"),
             Self::Image { id, width, height } => {
                 format!("[image #{id} ({width}x{height})]")
             }
@@ -56,7 +60,13 @@ pub fn parse_markers(text: &str) -> Vec<(usize, Marker)> {
                 .and_then(|c| c.as_str().parse().ok())
                 .unwrap_or_else(|| out.len() + 1);
             if let Some(lines) = cap.get(3).and_then(|c| c.as_str().parse().ok()) {
-                out.push((m.start(), Marker::Paste { id, lines: Some(lines) }));
+                out.push((
+                    m.start(),
+                    Marker::Paste {
+                        id,
+                        lines: Some(lines),
+                    },
+                ));
             } else {
                 out.push((m.start(), Marker::Paste { id, lines: None }));
             }
@@ -188,13 +198,7 @@ mod tests {
         let markers = parse_markers(text);
         assert_eq!(markers.len(), 1);
         assert!(
-            matches!(
-                markers[0].1,
-                Marker::Paste {
-                    id: 3,
-                    lines: None
-                }
-            ),
+            matches!(markers[0].1, Marker::Paste { id: 3, lines: None }),
             "expected paste chars marker"
         );
     }

@@ -56,6 +56,7 @@ async fn read_allows_absolute_paths_outside_workspace() {
     assert!(result.content.contains("external content"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn read_allows_symlink_to_external_file() {
     let workspace = tempfile::tempdir().expect("workspace");

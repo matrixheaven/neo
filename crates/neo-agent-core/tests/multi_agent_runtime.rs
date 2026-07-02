@@ -570,8 +570,7 @@ async fn delegate_streams_child_activity_updates_before_finish() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "read_1".to_owned(),
-                raw_arguments: json!({ "file_path": "crates/neo-agent-core/src/lib.rs" })
-                    .to_string(),
+                raw_arguments: json!({ "path": "crates/neo-agent-core/src/lib.rs" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -841,7 +840,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
     );
     let started_at = std::time::Instant::now();
 
-    for (id, file_path) in [("read_ok", "ok.rs"), ("read_fail", "missing.rs")] {
+    for (id, path) in [("read_ok", "ok.rs"), ("read_fail", "missing.rs")] {
         let _ = runtime.apply_child_event(
             &agent.id,
             started_at,
@@ -849,7 +848,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
                 turn: 1,
                 id: id.to_owned(),
                 name: "Read".to_owned(),
-                arguments: json!({ "file_path": file_path }),
+                arguments: json!({ "path": path }),
             },
         );
     }

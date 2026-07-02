@@ -309,8 +309,8 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
         arguments: Some(
             serde_json::json!({
                 "path": "src/lib.rs",
-                "old_string": "old",
-                "new_string": "new"
+                "old": "old",
+                "new": "new"
             })
             .to_string(),
         ),
@@ -835,7 +835,7 @@ fn edit_streaming_preview_shows_progress() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "edit-1".to_owned(),
-        json_fragment: r#"{"path":"src/foo.rs","old_string":"foo","new_string":"bar"}"#.to_owned(),
+        json_fragment: r#"{"path":"src/foo.rs","old":"foo","new":"bar"}"#.to_owned(),
     });
 
     let frame = runtime
@@ -857,6 +857,14 @@ fn edit_streaming_preview_shows_progress() {
         frame.iter().any(|line| line.contains("tok")),
         "streaming preview should show token count: {frame:?}"
     );
+}
+
+#[test]
+fn key_argument_ignores_legacy_file_path_alias() {
+    let argument =
+        neo_tui::transcript::tool_renderers::key_argument(Some(r#"{"file_path":"src/legacy.rs"}"#));
+
+    assert!(argument.is_empty());
 }
 
 #[test]

@@ -443,28 +443,25 @@ struct EditArguments {
     new: String,
 }
 
-const PATH_KEYS: &[&str] = &["path", "file_path"];
-const OLD_KEYS: &[&str] = &["old_string", "old"];
-const NEW_KEYS: &[&str] = &["new_string", "new"];
-
 fn parse_write_arguments(arguments: Option<&str>) -> Option<(String, String)> {
     let value = serde_json::from_str::<serde_json::Value>(arguments?).ok()?;
-    let path = string_field(&value, PATH_KEYS)?;
-    let content = string_field(&value, &["content"])?;
+    let path = string_field(&value, "path")?;
+    let content = string_field(&value, "content")?;
     Some((path, content))
 }
 
 fn parse_edit_arguments(arguments: &str) -> Option<EditArguments> {
     let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
-    let path = string_field(&value, PATH_KEYS)?;
-    let old = string_field(&value, OLD_KEYS)?;
-    let new = string_field(&value, NEW_KEYS)?;
+    let path = string_field(&value, "path")?;
+    let old = string_field(&value, "old")?;
+    let new = string_field(&value, "new")?;
     Some(EditArguments { path, old, new })
 }
 
-fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
         .map(std::borrow::ToOwned::to_owned)
 }
 
@@ -472,17 +469,9 @@ fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
 fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
     let arguments = arguments.map(str::trim).filter(|value| !value.is_empty())?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
-        for key in [
-            "path",
-            "file_path",
-            "command",
-            "pattern",
-            "query",
-            "url",
-            "description",
-        ] {
+        for key in ["path", "command", "pattern", "query", "url", "description"] {
             if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                let is_path = PATH_KEYS.contains(&key);
+                let is_path = key == "path";
                 return Some((one_line(text), is_path));
             }
         }
@@ -616,9 +605,7 @@ pub fn render_streaming_preview(
     let args = state.arguments.as_deref().unwrap_or("");
 
     if state.name == "Write" {
-        let path = extract_partial_string_field(args, "file_path")
-            .or_else(|| extract_partial_string_field(args, "path"))
-            .unwrap_or_default();
+        let path = extract_partial_string_field(args, "path").unwrap_or_default();
         let content = extract_partial_string_field(args, "content").unwrap_or_default();
         if content.is_empty() {
             return vec![Line::styled(
@@ -632,9 +619,7 @@ pub fn render_streaming_preview(
     }
 
     if state.name == "Edit" {
-        let path = extract_partial_string_field(args, "file_path")
-            .or_else(|| extract_partial_string_field(args, "path"))
-            .unwrap_or_default();
+        let path = extract_partial_string_field(args, "path").unwrap_or_default();
         let tokens = estimate_tokens(args);
         return vec![Line::styled(
             format!("  Editing {path}... ~{} tok", format_token_count(tokens)),

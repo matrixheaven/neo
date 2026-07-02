@@ -374,7 +374,11 @@ impl InteractiveController {
             self.paste_store.insert(id, cleaned);
             let marker = neo_tui::paste::Marker::Paste {
                 id,
-                lines: if line_count > 10 { Some(line_count) } else { None },
+                lines: if line_count > 10 {
+                    Some(line_count)
+                } else {
+                    None
+                },
             };
             self.apply_prompt_edit(PromptEdit::Insert(&marker.as_placeholder()));
         } else {

@@ -901,7 +901,6 @@ async fn build_client_for_config(
                     args: args.clone(),
                     env: env.clone(),
                     cwd: cwd.clone(),
-                    startup_timeout_ms: config.startup_timeout_ms,
                     tool_timeout_ms: config.tool_timeout_ms,
                 },
                 supervisor,

@@ -1661,7 +1661,6 @@ fn last_tool_summary(activity: &[AgentActivityEntry], id: &str) -> Option<String
 
 fn summarize_tool_arguments(arguments: &serde_json::Value) -> Option<String> {
     for key in [
-        "file_path",
         "path",
         "pattern",
         "query",

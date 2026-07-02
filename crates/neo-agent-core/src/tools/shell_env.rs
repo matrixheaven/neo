@@ -40,7 +40,7 @@ impl std::fmt::Display for ShellEnvError {
             write!(
                 f,
                 "Git Bash was not found on this Windows host. Install Git for Windows from \
-                 https://gitforwindows.org/ or set KIMI_SHELL_PATH to a bash.exe. Checked: {}.",
+                 https://gitforwindows.org/ or set NEO_SHELL_PATH to a bash.exe. Checked: {}.",
                 self.checked.join(", ")
             )
         } else {
@@ -144,7 +144,7 @@ fn detect_windows(probes: &EnvProbes) -> Result<ShellEnv, ShellEnvError> {
     let mut checked: Vec<String> = Vec::new();
 
     // 1. Explicit override.
-    if let Some(override_path) = (probes.env_get)("KIMI_SHELL_PATH")
+    if let Some(override_path) = (probes.env_get)("NEO_SHELL_PATH")
         && !override_path.trim().is_empty()
     {
         let path = PathBuf::from(&override_path);
@@ -503,16 +503,26 @@ mod tests {
     }
 
     #[test]
-    fn windows_kimi_shell_path_override_wins() {
+    fn windows_neo_shell_path_override_wins() {
         let env = MockEnv::new()
             .file(r"C:\custom\bash.exe")
-            .env("KIMI_SHELL_PATH", r"C:\custom\bash.exe");
+            .env("NEO_SHELL_PATH", r"C:\custom\bash.exe");
         let env_detected = detect_with(&env.probes()).unwrap();
         assert_eq!(
             env_detected.shell_path,
             PathBuf::from(r"C:\custom\bash.exe")
         );
         assert!(env_detected.is_windows);
+    }
+
+    #[test]
+    fn windows_kimi_shell_path_is_not_an_override() {
+        let env = MockEnv::new()
+            .file(r"C:\custom\bash.exe")
+            .env("KIMI_SHELL_PATH", r"C:\custom\bash.exe");
+        let err = detect_with(&env.probes()).unwrap_err();
+        assert!(err.is_windows);
+        assert!(!err.checked.iter().any(|path| path == r"C:\custom\bash.exe"));
     }
 
     #[test]

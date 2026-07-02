@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotificationCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
 /// Notification mode, serialized as lowercase string in config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -61,25 +67,50 @@ fn ring_bell() {
 }
 
 /// Spawn a fire-and-forget desktop notification.
-///
-/// macOS: `osascript -e 'display notification ...'`
-/// Linux: `notify-send`
 /// Errors are silently ignored — notification is best-effort.
 fn spawn_desktop_notification(title: &str, body: &str, subtitle: Option<&str>) {
-    let cmd = if cfg!(target_os = "macos") {
-        let sub = subtitle.unwrap_or("");
-        format!(
-            "osascript -e 'display notification \"{body}\" with title \"{title}\" subtitle \"{sub}\"'"
-        )
-    } else {
-        format!("notify-send \"{title}\" \"{body}\"")
+    let Some(command) = desktop_notification_command(title, body, subtitle) else {
+        return;
     };
-    let _ = Command::new("sh")
-        .args(["-c", &cmd])
+    let _ = Command::new(command.program)
+        .args(command.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+fn desktop_notification_command(
+    title: &str,
+    body: &str,
+    subtitle: Option<&str>,
+) -> Option<NotificationCommand> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut script = format!("display notification {body:?} with title {title:?}");
+        if let Some(subtitle) = subtitle.filter(|value| !value.is_empty()) {
+            script.push_str(&format!(" subtitle {subtitle:?}"));
+        }
+        return Some(NotificationCommand {
+            program: "osascript",
+            args: vec!["-e".to_owned(), script],
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = subtitle;
+        return Some(NotificationCommand {
+            program: "notify-send",
+            args: vec![title.to_owned(), body.to_owned()],
+        });
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let _ = (title, body, subtitle);
+        None
+    }
 }
 
 #[cfg(test)]
@@ -117,5 +148,34 @@ mod tests {
         // This just verifies the function doesn't panic
         notify_event(NotificationMode::None, EventKind::Completion);
         notify_event(NotificationMode::None, EventKind::Question);
+    }
+
+    #[test]
+    fn desktop_notification_command_uses_platform_binary_without_shell() {
+        let command = desktop_notification_command("Neo", "Task completed", Some("Done"));
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            assert!(command.is_none());
+            return;
+        }
+
+        let command = command.expect("notification command on supported platform");
+
+        assert_ne!(command.program, "sh");
+        assert!(!command.args.iter().any(|arg| arg == "-c"));
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(command.program, "osascript");
+            assert_eq!(command.args[0], "-e");
+            assert!(command.args[1].contains("display notification"));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(command.program, "notify-send");
+            assert_eq!(command.args, vec!["Neo", "Task completed"]);
+        }
     }
 }
