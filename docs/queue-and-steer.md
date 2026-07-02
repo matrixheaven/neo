@@ -9,7 +9,7 @@ communicate with the agent **while it is working**: the **message queue**
 
 | Action                  | Key         | Behavior                                                    |
 | ----------------------- | ----------- | ----------------------------------------------------------- |
-| Queue a follow-up       | `Enter`     | While busy: queues the message; it starts a new turn next. |
+| Queue a follow-up       | `Enter`     | While busy: queues the message; it is submitted next. |
 | Steer the turn          | `Ctrl+S`    | Injects the message at the next natural break point.       |
 | Edit last queued input  | `Alt+↑`     | Pulls the most recent queued follow-up back into composer. |
 | (Idle) submit           | `Ctrl+S`    | When idle, Ctrl+S behaves like a normal submit.            |
@@ -22,13 +22,9 @@ This keeps "what I already said" separate from "what is waiting to be sent"
 and avoids cluttering the conversation history.
 
 ```text
-• Messages to be submitted after next tool call
-  ↳ steer message here
-
-• Queued follow-up inputs
-  ↳ queued message one
-  ↳ queued message two
-    Alt+↑ edit last queued message
+──────────────────────────────────────────────────
+   ❯ queued or steered message here
+   Alt+↑ edit last queued message · Ctrl+S steer next
 ```
 
 ## Message Queue (follow-ups)
@@ -37,8 +33,11 @@ When the agent is mid-turn and you type a message and press `Enter`, the
 message is **not** rejected. Instead it is appended to the follow-up queue and
 shown in the Pending Input Preview panel.
 
-- Follow-ups are processed **FIFO** after the current turn's workflow drains.
-- Each queued follow-up starts a fresh model turn, preserving context.
+- Follow-ups preserve **FIFO** order after the current turn's workflow drains.
+- By default, Neo uses `follow_up_queue_mode = "All"`, so all currently queued
+  follow-ups are submitted together in FIFO order. Set
+  `follow_up_queue_mode = "OneAtATime"` to process one queued follow-up per
+  follow-up turn.
 - Slash commands cannot be queued — they must wait for the turn to finish.
 - Press `Alt+↑` (or `↑` when the composer is empty and history is empty) to
   pull the most recent queued follow-up back into the composer for editing.
@@ -52,10 +51,10 @@ next decision, **without** interrupting the current step.
 
 Press `Ctrl+S` to steer:
 
-- If the composer has text → that text is sent as a steer and shown in the
-  Pending Input Preview panel (prefix `↳`, brand color).
-- If the composer is empty and follow-ups are queued → the **oldest** queued
-  follow-up is promoted to a steer (FIFO).
+- If follow-ups are queued → the **oldest** queued follow-up is promoted to a
+  steer (FIFO), one `Ctrl+S` press at a time.
+- If no follow-up is queued and the composer has text → that text is sent as a
+  steer and shown in the Pending Input Preview panel.
 - If no turn is active → Ctrl+S falls back to a normal submit so the key is
   never dead.
 
@@ -104,5 +103,5 @@ You can also rebind the steer action to any other key in your config:
 | ------------- | ---------------------------- | ------------------------------ | -------------------- |
 | When sent      | Starts turn immediately     | Starts turn after current one  | Injected mid-turn    |
 | Interrupts?   | N/A                          | No                             | No                   |
-| UI location   | Transcript (`✨` prefix)     | Pending Input Preview (`↪`)    | Pending Input Preview (`↳` brand) |
+| UI location   | Transcript (`✨` prefix)     | Pending Input Preview panel    | Pending Input Preview panel |
 | Cache impact  | Fresh turn                  | Fresh turn                     | Append-only context  |

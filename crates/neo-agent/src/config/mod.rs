@@ -150,7 +150,7 @@ impl Default for RuntimeConfig {
             reasoning_effort: None,
             replay_reasoning: true,
             steering_queue_mode: QueueMode::All,
-            follow_up_queue_mode: QueueMode::OneAtATime,
+            follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
             compaction: None,
         }
@@ -253,10 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_follow_up_queue_to_one_turn_at_a_time() {
+    fn config_defaults_follow_up_queue_to_all() {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
-        assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::OneAtATime);
+        assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::All);
     }
 
     /// Regression: the model display label must never stitch the provider onto

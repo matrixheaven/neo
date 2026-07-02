@@ -54,36 +54,22 @@ impl<'a> PendingInputPreview<'a> {
             return Vec::new();
         }
 
-        let mut lines = Vec::new();
+        let mut lines = vec![paint(
+            &"─".repeat(width.max(1)),
+            Style::default().fg(self.theme.pending_input_header),
+        )];
         if !self.pending_steers.is_empty() {
-            lines.extend(self.render_section(
-                "Messages to be submitted after next tool call",
-                self.pending_steers,
-                true,
-                width,
-            ));
+            lines.extend(self.render_messages(self.pending_steers, true, width));
         }
 
         if !self.queued_follow_ups.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.extend(self.render_section(
-                "Queued follow-up inputs",
-                self.queued_follow_ups,
-                false,
-                width,
-            ));
-            lines.push(self.render_hint("Alt+↑ edit last queued message", width));
+            lines.extend(self.render_messages(self.queued_follow_ups, false, width));
         }
 
         if !self.queued_shell_commands.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
             lines.extend(self.render_shell_section(width));
-            lines.push(self.render_hint("Alt+↑ edit · will run after current task", width));
         }
+        lines.push(self.render_hint(width));
 
         lines
             .into_iter()
@@ -92,11 +78,8 @@ impl<'a> PendingInputPreview<'a> {
     }
 
     fn render_shell_section(&self, width: usize) -> Vec<String> {
-        let mut lines = vec![paint(
-            "• Queued shell commands",
-            Style::default().fg(self.theme.pending_input_header),
-        )];
-        let prefix = "  ❯ ";
+        let mut lines = Vec::new();
+        let prefix = "   ❯ ";
         let prefix_width = visible_width(prefix);
         let body_width = width.saturating_sub(prefix_width).max(1);
         let continuation = " ".repeat(prefix_width);
@@ -124,20 +107,14 @@ impl<'a> PendingInputPreview<'a> {
         lines
     }
 
-    fn render_section(
+    fn render_messages(
         &self,
-        header: &str,
         messages: &VecDeque<String>,
         is_steer: bool,
         width: usize,
     ) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(paint(
-            &format!("• {header}"),
-            Style::default().fg(self.theme.pending_input_header),
-        ));
-
-        let prefix = "  ↳ ";
+        let prefix = "   ❯ ";
         let prefix_width = visible_width(prefix);
         let body_width = width.saturating_sub(prefix_width).max(1);
         let continuation = " ".repeat(prefix_width);
@@ -167,8 +144,26 @@ impl<'a> PendingInputPreview<'a> {
         lines
     }
 
-    fn render_hint(&self, text: &str, width: usize) -> String {
-        let indent = "    ";
+    fn render_hint(&self, width: usize) -> String {
+        let text = if !self.pending_steers.is_empty()
+            && self.queued_follow_ups.is_empty()
+            && self.queued_shell_commands.is_empty()
+        {
+            "after next tool call"
+        } else if self.pending_steers.is_empty()
+            && !self.queued_follow_ups.is_empty()
+            && self.queued_shell_commands.is_empty()
+        {
+            "Alt+↑ edit last queued message · Ctrl+S steer next"
+        } else if !self.queued_shell_commands.is_empty()
+            && self.pending_steers.is_empty()
+            && self.queued_follow_ups.is_empty()
+        {
+            "Alt+↑ edit · will run after current task"
+        } else {
+            "Ctrl+S steers next queued item first · Alt+↑ edit queue"
+        };
+        let indent = "   ";
         let prefix_width = visible_width(indent);
         let body_width = width.saturating_sub(prefix_width).max(1);
         let truncated = if text.chars().count() > body_width {
@@ -210,8 +205,9 @@ mod tests {
             .iter()
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
-        assert_eq!(plain[0], "• Messages to be submitted after next tool call");
-        assert_eq!(plain[1], "  ↳ Please continue.");
+        assert_eq!(plain[0], "─".repeat(60));
+        assert_eq!(plain[1], "   ❯ Please continue.");
+        assert_eq!(plain[2], "   after next tool call");
     }
 
     #[test]
@@ -225,8 +221,8 @@ mod tests {
             .iter()
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
-        assert_eq!(plain[0], "• Queued follow-up inputs");
-        assert_eq!(plain[1], "  ↳ Hello?");
+        assert_eq!(plain[0], "─".repeat(40));
+        assert_eq!(plain[1], "   ❯ Hello?");
         assert!(plain[2].contains("Alt+↑ edit last queued message"));
     }
 
@@ -242,11 +238,15 @@ mod tests {
             .iter()
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
-        assert!(plain.contains(&"• Messages to be submitted after next tool call".to_owned()));
-        assert!(plain.contains(&"  ↳ Steer one".to_owned()));
-        assert!(plain.contains(&"• Queued follow-up inputs".to_owned()));
-        assert!(plain.contains(&"  ↳ Follow one".to_owned()));
-        assert!(plain.contains(&"  ↳ Follow two".to_owned()));
+        assert_eq!(plain[0], "─".repeat(60));
+        assert!(plain.contains(&"   ❯ Steer one".to_owned()));
+        assert!(plain.contains(&"   ❯ Follow one".to_owned()));
+        assert!(plain.contains(&"   ❯ Follow two".to_owned()));
+        assert_eq!(
+            plain.iter().filter(|line| line.starts_with('•')).count(),
+            0,
+            "pending input should render as one compact floating panel, not separate bullet sections"
+        );
     }
 
     #[test]
@@ -260,8 +260,11 @@ mod tests {
             .iter()
             .map(|l| crate::primitive::strip_ansi(l))
             .collect();
-        // Header + up to 3 wrapped lines + ellipsis row.
-        assert_eq!(plain.len(), 5);
-        assert!(plain.last().unwrap().contains('…'));
+        // Divider + up to 3 wrapped lines + ellipsis row + hint.
+        assert_eq!(plain.len(), 6);
+        assert!(
+            plain.iter().any(|line| line.contains('…')),
+            "long message should include an ellipsis row before the hint"
+        );
     }
 }

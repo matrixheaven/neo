@@ -674,21 +674,19 @@ mod tests {
             .iter()
             .map(|line| crate::primitive::strip_ansi(line))
             .collect::<Vec<_>>();
-        let pending_header = plain
+        let pending_line = plain
             .iter()
-            .position(|line| line.contains("Queued follow-up inputs"))
+            .position(|line| line.contains("queued follow-up"))
             .expect("pending follow-up preview should render");
         let prompt_top = plain
             .iter()
             .position(|line| line.contains('╭'))
             .expect("prompt should render");
 
-        assert!(
-            pending_header > 0,
-            "pending preview needs a spacer above it"
-        );
-        assert_eq!(plain[pending_header - 1], "");
-        assert!(prompt_top > pending_header);
+        assert!(pending_line > 1, "pending preview needs a spacer above it");
+        assert_eq!(plain[pending_line - 2], "");
+        assert_eq!(plain[pending_line - 1], "─".repeat(frame_content_width(80)));
+        assert!(prompt_top > pending_line);
         assert_ne!(
             plain[prompt_top - 1],
             "",
@@ -707,21 +705,19 @@ mod tests {
             .iter()
             .map(|line| crate::primitive::strip_ansi(line))
             .collect::<Vec<_>>();
-        let pending_header = plain
+        let pending_line = plain
             .iter()
-            .position(|line| line.contains("Messages to be submitted after next tool call"))
+            .position(|line| line.contains("steer now"))
             .expect("pending steer preview should render");
         let prompt_top = plain
             .iter()
             .position(|line| line.contains('╭'))
             .expect("prompt should render");
 
-        assert!(
-            pending_header > 0,
-            "pending preview needs a spacer above it"
-        );
-        assert_eq!(plain[pending_header - 1], "");
-        assert!(prompt_top > pending_header);
+        assert!(pending_line > 1, "pending preview needs a spacer above it");
+        assert_eq!(plain[pending_line - 2], "");
+        assert_eq!(plain[pending_line - 1], "─".repeat(frame_content_width(80)));
+        assert!(prompt_top > pending_line);
         assert_ne!(
             plain[prompt_top - 1],
             "",

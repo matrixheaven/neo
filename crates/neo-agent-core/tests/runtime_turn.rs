@@ -1063,6 +1063,7 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -1273,7 +1274,7 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
     // the user prompt — never an orphaned tool result.
     assert!(matches!(
         request.messages.first(),
-        Some(neo_ai::ChatMessage::System { .. }) | Some(neo_ai::ChatMessage::User { .. })
+        Some(neo_ai::ChatMessage::System { .. } | neo_ai::ChatMessage::User { .. })
     ));
 }
 
@@ -6418,7 +6419,7 @@ async fn runtime_drains_live_follow_up_input_as_new_turn() {
 }
 
 #[tokio::test]
-async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_by_default() {
+async fn runtime_drains_multiple_live_follow_ups_all_by_default() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
@@ -6478,8 +6479,8 @@ async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_by_default()
 
     assert_eq!(
         harness.requests().len(),
-        3,
-        "two queued follow-ups should start two fresh model turns, not one combined prompt"
+        2,
+        "default follow-up queue mode should drain all queued follow-ups into the next model turn"
     );
     let drained_counts = events
         .iter()
@@ -6493,8 +6494,8 @@ async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_by_default()
         .collect::<Vec<_>>();
     assert_eq!(
         drained_counts,
-        vec![1, 1],
-        "follow-up queue should drain FIFO one item at a time"
+        vec![2],
+        "default follow-up queue mode should preserve FIFO order while draining all pending items"
     );
     let appended_users = events
         .iter()
@@ -6514,6 +6515,92 @@ async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_by_default()
         })
         .collect::<Vec<_>>();
     assert_eq!(appended_users, vec!["start", "queued one", "queued two"]);
+    assert_eq!(steer_input.pending(), 0);
+}
+
+#[tokio::test]
+async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_when_configured() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "third".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    steer_input.push(neo_agent_core::ActiveTurnInput::FollowUp(
+        AgentMessage::user_text("queued one"),
+    ));
+    steer_input.push(neo_agent_core::ActiveTurnInput::FollowUp(
+        AgentMessage::user_text("queued two"),
+    ));
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::All, QueueMode::OneAtATime),
+        harness.client(),
+    )
+    .with_steer_input(steer_input.clone());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("configured one-at-a-time follow-up run should succeed");
+
+    assert_eq!(
+        harness.requests().len(),
+        3,
+        "configured OneAtATime mode should keep each queued follow-up in its own turn"
+    );
+    let drained_counts = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::QueueDrained {
+                kind: neo_agent_core::QueueKind::FollowUp,
+                count,
+            } => Some(*count),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drained_counts,
+        vec![1, 1],
+        "configured OneAtATime mode should drain follow-ups FIFO one item at a time"
+    );
     assert_eq!(steer_input.pending(), 0);
 }
 

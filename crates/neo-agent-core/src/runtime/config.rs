@@ -158,7 +158,7 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared multi-agent runtime for Delegate and DelegateSwarm tools.
+    /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     #[serde(skip)]
     #[schemars(skip)]
     pub multi_agent: MultiAgentRuntime,
@@ -177,7 +177,7 @@ impl AgentConfig {
             replay_reasoning: true,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,
-            follow_up_queue_mode: QueueMode::OneAtATime,
+            follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
@@ -453,10 +453,15 @@ const OVERFLOW_SAFETY_RATIO: f64 = 0.85;
 #[must_use]
 pub fn effective_max_context_tokens(config: &AgentConfig) -> usize {
     let configured = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let observed = config
         .observed_max_context_tokens
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .map(|v| ((v as f64) * OVERFLOW_SAFETY_RATIO) as usize);
 
     match (configured, observed) {
@@ -471,11 +476,16 @@ pub fn effective_max_context_tokens(config: &AgentConfig) -> usize {
 /// Only updates if the new value (× 0.85) is smaller than the current
 /// observation — never increases the effective max.
 pub fn observe_context_overflow(config: &AgentConfig, estimated_tokens: usize) {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let safe = ((estimated_tokens as f64) * OVERFLOW_SAFETY_RATIO) as usize;
     let mut guard = config
         .observed_max_context_tokens
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match *guard {
         Some(current) if safe < current => *guard = Some(safe),
         None => *guard = Some(safe),
@@ -528,8 +538,8 @@ mod tests {
     use super::*;
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
 
-    /// Test helper — constructs a minimal AgentConfig via for_model.
-    /// AgentConfig has NO Default impl (closure/handler fields).
+    /// Test helper — constructs a minimal `AgentConfig` via `for_model`.
+    /// `AgentConfig` has NO Default impl (closure/handler fields).
     fn test_config() -> AgentConfig {
         let spec = ModelSpec {
             provider: ProviderId("test".to_owned()),

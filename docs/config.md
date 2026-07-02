@@ -176,7 +176,14 @@ Runtime behavior is configured under the `[runtime]` table:
 [runtime]
 temperature = 0.7
 max_tokens = 16384
+follow_up_queue_mode = "All"           # "All" (default) or "OneAtATime"
+steering_queue_mode = "All"            # "All" (default) or "OneAtATime"
 ```
+
+`follow_up_queue_mode = "All"` submits all queued follow-ups together after the
+current turn drains, preserving FIFO order. Use `"OneAtATime"` when each queued
+follow-up should run as its own follow-up turn. `steering_queue_mode` uses the
+same values for messages injected with `Ctrl+S`.
 
 ### Compaction
 

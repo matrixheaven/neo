@@ -297,7 +297,6 @@ pub(crate) struct InteractiveController {
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
     session_messages: Vec<AgentMessage>,
-    local_user_message_acks: VecDeque<String>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
     shell_driver: ShellDriver,
@@ -597,7 +596,7 @@ impl ForkedSessionTranscript {
 /// history and transcript summaries.
 /// Best-effort dimension extraction from image data for display purposes.
 impl InteractiveController {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn new(
         title: impl Into<String>,
         session_label: impl Into<String>,
@@ -662,7 +661,6 @@ impl InteractiveController {
             local_config: None,
             active_model: None,
             session_messages: Vec::new(),
-            local_user_message_acks: VecDeque::new(),
             current_thinking: false,
             active_turn: None,
             shell_driver,
@@ -1332,9 +1330,9 @@ impl InteractiveController {
 
     /// Handle the `PromptSteer` keybinding (Ctrl+S by default).
     ///
-    /// 1. Re-classify queued follow-ups as steers (FIFO pull).
-    /// 2. If the composer has text, steer the running turn with it (inject at
-    ///    the next natural break point) after the promoted follow-ups.
+    /// 1. Re-classify the oldest queued follow-up as a steer (FIFO pull).
+    /// 2. If no follow-up is queued and the composer has text, steer the
+    ///    running turn with it at the next natural break point.
     /// 3. If no turn is active, fall back to a normal submit so Ctrl+S is never
     ///    a dead key when idle.
     async fn handle_prompt_steer(&mut self) -> Result<()> {
@@ -1351,15 +1349,15 @@ impl InteractiveController {
             return self.submit_current_prompt().await;
         };
         let steer_input = turn.steer_input.clone();
-        let mut steered_messages = Vec::new();
-        while let Some(message) = self
+        if self
             .tui
             .chrome_mut()
             .pending_input_mut()
             .promote_oldest_follow_up_to_steer_optimistic()
+            .is_some()
         {
             steer_input.push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
-            steered_messages.push(message);
+            return Ok(());
         }
 
         if !text.is_empty() {
@@ -1374,16 +1372,12 @@ impl InteractiveController {
             self.tui
                 .chrome_mut()
                 .pending_input_mut()
-                .queue_steer_optimistic(display_text.clone());
-            steered_messages.push(display_text);
+                .queue_steer_optimistic(display_text);
             self.tui.chrome_mut().prompt_mut().clear_after_submit();
-        }
-
-        if steered_messages.is_empty() {
-            self.push_status("No queued follow-up to steer");
             return Ok(());
         }
 
+        self.push_status("No queued follow-up to steer");
         Ok(())
     }
 
@@ -1443,15 +1437,6 @@ impl InteractiveController {
         }
     }
 
-    fn push_local_user_message(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        if text.trim().is_empty() {
-            return;
-        }
-        self.tui.transcript_mut().push_user_message(text.clone());
-        self.local_user_message_acks.push_back(text);
-    }
-
     fn render_appended_user_message_if_needed(&mut self, event: &AgentEvent) {
         let AgentEvent::MessageAppended {
             message: AgentMessage::User { content },
@@ -1461,14 +1446,6 @@ impl InteractiveController {
         };
         let text = content_to_display_text(content);
         if text.trim().is_empty() {
-            return;
-        }
-        if let Some(position) = self
-            .local_user_message_acks
-            .iter()
-            .position(|pending| pending == &text)
-        {
-            self.local_user_message_acks.remove(position);
             return;
         }
         self.tui.transcript_mut().push_user_message(text);

@@ -175,9 +175,7 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         reasoning_effort: runtime.reasoning_effort,
         replay_reasoning: runtime.replay_reasoning.unwrap_or(true),
         steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
-        follow_up_queue_mode: runtime
-            .follow_up_queue_mode
-            .unwrap_or(QueueMode::OneAtATime),
+        follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
         tool_execution_mode: runtime
             .tool_execution_mode
             .unwrap_or(ToolExecutionMode::Parallel),

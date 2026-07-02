@@ -7400,7 +7400,7 @@ async fn queued_follow_up_message_appended_renders_user_transcript_entry() {
 }
 
 #[tokio::test]
-async fn locally_rendered_prompt_message_appended_does_not_duplicate_transcript_entry() {
+async fn appended_user_prompt_renders_single_transcript_entry() {
     let mut controller = running_turn_controller().await;
 
     controller.apply_turn_event(AgentEvent::MessageAppended {
@@ -7416,6 +7416,55 @@ async fn locally_rendered_prompt_message_appended_does_not_duplicate_transcript_
     assert_eq!(
         matching_entries, 1,
         "runtime ack for a locally rendered prompt should not duplicate it"
+    );
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
+async fn idle_submit_renders_user_prompt_only_after_runtime_append() {
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        Arc::new(|_request, channels| {
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        }),
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+
+    controller.type_text("wait for runtime append");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit starts turn");
+
+    assert!(
+        !transcript_entries(&controller).iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
+        ),
+        "normal submits should not add a local transcript preview before the runtime append event"
+    );
+
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("wait for runtime append"),
+    });
+
+    let matching_entries = transcript_entries(&controller)
+        .iter()
+        .filter(|entry| {
+            matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
+        })
+        .count();
+    assert_eq!(
+        matching_entries, 1,
+        "runtime append should render the user prompt exactly once"
     );
 
     controller.cancel_active_turn().await.expect("cancel turn");
@@ -7554,7 +7603,7 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
 }
 
 #[tokio::test]
-async fn active_turn_ctrl_s_steers_queued_follow_ups_before_current_prompt() {
+async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prompt() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
