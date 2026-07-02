@@ -119,7 +119,11 @@ pub fn child_activity_view(
                 .flatten()
         });
     let body_text = if snapshot.state.is_terminal() {
-        latest_body.filter(|text| final_text.as_ref() != Some(text))
+        latest_body.filter(|text| {
+            final_text
+                .as_ref()
+                .is_none_or(|final_text| !same_child_final_body(text, final_text))
+        })
     } else {
         latest_body
     };
@@ -246,6 +250,32 @@ pub fn render_child_final(
 #[must_use]
 pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn same_child_final_body(body: &str, final_text: &str) -> bool {
+    comparable_child_text(body) == comparable_child_text(final_text)
+}
+
+fn comparable_child_text(text: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous: Option<char> = None;
+    for ch in one_line(text).chars() {
+        if ch == '#' {
+            normalized.push(' ');
+            normalized.push('#');
+            normalized.push(' ');
+        } else {
+            if let Some(previous) = previous
+                && ((previous.is_ascii_alphabetic() && ch.is_ascii_digit())
+                    || (previous.is_ascii_digit() && ch.is_ascii_alphabetic()))
+            {
+                normalized.push(' ');
+            }
+            normalized.push(ch);
+        }
+        previous = Some(ch);
+    }
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[must_use]

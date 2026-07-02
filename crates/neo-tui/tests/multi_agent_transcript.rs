@@ -882,6 +882,42 @@ fn delegate_card_collapses_streamed_thinking_and_renders_single_final_body_line(
 }
 
 #[test]
+fn delegate_card_suppresses_normalized_duplicate_final_body() {
+    let summary =
+        "All Wave 1 tasks are complete. Here's the summary: ## Wave 1 Implementation Summary";
+    let streamed_body =
+        "All Wave1 tasks are complete. Here's the summary: ##Wave1 Implementation Summary";
+    let snapshot = AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        tool_count: 0,
+        token_count: 234,
+        elapsed: Duration::from_secs(2),
+        activity: vec![AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: streamed_body.to_owned(),
+                thinking: false,
+            },
+        }],
+        outcome: Some(AgentTerminalOutcome {
+            summary: summary.to_owned(),
+            is_error: false,
+        }),
+        ..running_delegate()
+    };
+
+    let plain_rows =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()));
+    let text = plain_rows.join("\n");
+
+    assert!(
+        !plain_rows.iter().any(|row| row.contains("│ All Wave")),
+        "duplicate final body preview must be suppressed: {text}"
+    );
+    assert!(text.contains("└ All Wave 1 tasks are complete"), "{text}");
+    assert_eq!(text.matches("All Wave").count(), 1, "{text}");
+}
+
+#[test]
 fn delegate_card_trims_activity_to_recent_kimi_style_window() {
     let mut snapshot = running_delegate();
     snapshot.activity = (0..8)
