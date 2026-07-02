@@ -99,6 +99,19 @@ fn session_bucket(project_dir: &Path) -> PathBuf {
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
 }
 
+fn write_session_transcript(sessions: &Path, session_id: &str, content: &str) -> PathBuf {
+    let session_dir = sessions.join(session_id);
+    let wire = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    std::fs::create_dir_all(wire.parent().expect("wire parent")).expect("create wire dir");
+    std::fs::write(&wire, content).expect("write main wire");
+    std::fs::write(
+        neo_agent_core::session::session_state_path(&session_dir),
+        "{\"schema_version\":1,\"agents\":{\"main\":{\"kind\":\"main\",\"record_dir\":\"agents/main\"}}}\n",
+    )
+    .expect("write session state");
+    wire
+}
+
 fn run_with_stdin(mut command: Command, stdin: &str) -> String {
     let mut child = command
         .stdin(Stdio::piped())
@@ -128,9 +141,7 @@ fn rpc_get_state_reports_project_runtime_state() {
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "{}\n")
-        .expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
     std::fs::write(
         isolated_home().join("config.toml"),
         r#"
@@ -168,9 +179,7 @@ fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "{}\n")
-        .expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         isolated_home().join("config.toml"),
@@ -201,15 +210,14 @@ fn rpc_get_messages_replays_session_jsonl_messages() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_A).join("transcript.jsonl"),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc history\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi from jsonl\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -244,9 +252,7 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_EMPTY)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_EMPTY).join("transcript.jsonl"), "")
-        .expect("write empty session");
+    write_session_transcript(&sessions, SESSION_EMPTY, "");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -310,9 +316,7 @@ fn rpc_session_methods_reject_invalid_or_missing_ids() {
         if case.create_existing_session {
             let sessions = session_bucket(temp.path());
             std::fs::create_dir_all(&sessions).expect("create sessions");
-            std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-            std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "")
-                .expect("write session");
+            write_session_transcript(&sessions, SESSION_A, "");
         }
         let mut command = neo();
         command.current_dir(temp.path()).arg("rpc");
@@ -351,9 +355,7 @@ fn rpc_get_messages_accepts_in_directory_jsonl_path() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    let session_path = sessions.join(SESSION_A).join("transcript.jsonl");
-    std::fs::write(&session_path, "").expect("write session");
+    let session_path = write_session_transcript(&sessions, SESSION_A, "");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -381,15 +383,8 @@ fn rpc_sessions_list_returns_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "{}\n")
-        .expect("write parent session");
-    std::fs::create_dir_all(sessions.join(SESSION_CHILD)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_CHILD).join("transcript.jsonl"),
-        "{}\n",
-    )
-    .expect("write child session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
+    write_session_transcript(&sessions, SESSION_CHILD, "{}\n");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
         sessions_metadata_json(&[
@@ -449,9 +444,7 @@ fn rpc_sessions_tree_method_is_not_exposed() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "{}\n")
-        .expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -472,21 +465,15 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_A).join("transcript.jsonl"),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello session get\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"session get reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
-    std::fs::create_dir_all(sessions.join(SESSION_CHILD)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_CHILD).join("transcript.jsonl"),
-        "{}\n",
-    )
-    .expect("write child session");
+    );
+    write_session_transcript(&sessions, SESSION_CHILD, "{}\n");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
         sessions_metadata_json(&[
@@ -528,12 +515,12 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     );
     assert!(messages[0]["result"]["parent_id"].is_null());
     assert_eq!(messages[0]["result"]["children"], json!([SESSION_CHILD]));
-    assert!(
+    let returned_session_path = Path::new(
         messages[0]["result"]["path"]
             .as_str()
-            .expect("session path")
-            .ends_with("transcript.jsonl")
+            .expect("session path"),
     );
+    assert!(returned_session_path.ends_with(Path::new("agents").join("main").join("wire.jsonl")));
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
         2
@@ -553,15 +540,14 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_A).join("transcript.jsonl"),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello html export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rendered **bold** local reply <script>alert(1)</script>\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -593,21 +579,15 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_A).join("transcript.jsonl"),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc json export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rpc portable reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
-    std::fs::create_dir_all(sessions.join(SESSION_CHILD)).expect("create session dir");
-    std::fs::write(
-        sessions.join(SESSION_CHILD).join("transcript.jsonl"),
-        "{}\n",
-    )
-    .expect("write child session");
+    );
+    write_session_transcript(&sessions, SESSION_CHILD, "{}\n");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
         sessions_metadata_json(&[
@@ -674,9 +654,7 @@ fn rpc_set_session_name_updates_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::create_dir_all(sessions.join(SESSION_A)).expect("create session dir");
-    std::fs::write(sessions.join(SESSION_A).join("transcript.jsonl"), "{}\n")
-        .expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");

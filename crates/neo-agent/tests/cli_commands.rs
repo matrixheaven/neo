@@ -139,8 +139,14 @@ fn session_bucket(project_dir: &Path) -> PathBuf {
 
 fn write_session_transcript(sessions: &Path, session_id: &str, content: &str) {
     let session_dir = sessions.join(session_id);
-    fs::create_dir_all(&session_dir).expect("create session dir");
-    fs::write(session_dir.join("transcript.jsonl"), content).expect("write transcript");
+    let wire = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    fs::create_dir_all(wire.parent().expect("wire parent")).expect("create wire dir");
+    fs::write(&wire, content).expect("write main wire");
+    fs::write(
+        neo_agent_core::session::session_state_path(&session_dir),
+        "{\"schema_version\":1,\"agents\":{\"main\":{\"kind\":\"main\",\"record_dir\":\"agents/main\"}}}\n",
+    )
+    .expect("write session state");
 }
 
 #[test]
@@ -529,6 +535,38 @@ fn sessions_reject_invalid_session_ids() {
         fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
         assert_session_command_rejects(&temp, case.args, case.expected);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn sessions_reject_existing_symlink_wire_path_outside_bucket() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = session_bucket(temp.path());
+    let outside = TempDir::new().expect("outside tempdir");
+    let outside_wire = outside.path().join("wire.jsonl");
+    fs::write(&outside_wire, "{}\n").expect("write outside wire");
+
+    let session_dir = sessions.join(SESSION_A);
+    let symlink_wire = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    fs::create_dir_all(symlink_wire.parent().expect("wire parent")).expect("create wire dir");
+    std::os::unix::fs::symlink(&outside_wire, &symlink_wire).expect("symlink wire");
+
+    let output = neo()
+        .current_dir(temp.path())
+        .args(["sessions", "show"])
+        .arg(&symlink_wire)
+        .output()
+        .expect("neo command should run");
+
+    assert!(
+        !output.status.success(),
+        "command unexpectedly accepted symlinked wire path outside bucket"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid session id"),
+        "expected invalid session id, got {stderr}"
+    );
 }
 
 #[test]

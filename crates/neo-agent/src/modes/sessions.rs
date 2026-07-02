@@ -231,7 +231,9 @@ fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Res
 pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
     let session_id = resolve_session_id(session_ref, config)?;
     let bucket_dir = workspace_sessions_dir(config);
-    Ok(bucket_dir.join(&session_id).join("transcript.jsonl"))
+    Ok(neo_agent_core::session::main_agent_wire_path(
+        &bucket_dir.join(&session_id),
+    ))
 }
 
 pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -257,25 +259,27 @@ fn session_id_from_jsonl_path(
         env::current_dir()?.join(raw)
     };
 
-    // Try canonicalize for path-containment checks. If the file does not exist,
-    // fall back to the un-canonicalized path for direct bucket paths.
-    let canonical = path.canonicalize();
-    let check_path = canonical.as_deref().unwrap_or(&path);
-
     let bucket_dir = workspace_sessions_dir(config);
-    let in_bucket = if let Ok(bucket_canonical) = bucket_dir.canonicalize() {
-        check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir)
-    } else {
-        path.starts_with(&bucket_dir)
-    };
-    if !in_bucket {
+    if !path_is_inside_session_bucket(&path, &bucket_dir) {
         return Ok(None);
     }
 
-    // New layout: .../session_<uuid>/transcript.jsonl
-    if path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl")
+    if path.file_name().and_then(|n| n.to_str()) == Some("wire.jsonl")
+        && path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some("main")
+        && path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some("agents")
         && let Some(session_id) = path
             .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
     {
@@ -285,6 +289,17 @@ fn session_id_from_jsonl_path(
     }
 
     Ok(None)
+}
+
+fn path_is_inside_session_bucket(path: &Path, bucket_dir: &Path) -> bool {
+    match path.canonicalize() {
+        Ok(canonical_path) => bucket_dir
+            .canonicalize()
+            .map(|canonical_bucket| canonical_path.starts_with(canonical_bucket))
+            .unwrap_or_else(|_| path.starts_with(bucket_dir)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.starts_with(bucket_dir),
+        Err(_) => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

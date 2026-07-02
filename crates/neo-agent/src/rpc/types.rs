@@ -146,7 +146,7 @@ mod tests {
                 parent_id: None,
                 children: vec![SESSION_CHILD.to_owned()],
             },
-            path: format!("/tmp/neo/.neo/sessions/{SESSION_A}/transcript.jsonl"),
+            path: format!("/tmp/neo/.neo/sessions/{SESSION_A}/agents/main/wire.jsonl"),
             messages: vec![json!({
                 "User": {
                     "content": [
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(value["children"], json!([SESSION_CHILD]));
         assert_eq!(
             value["path"],
-            format!("/tmp/neo/.neo/sessions/{SESSION_A}/transcript.jsonl")
+            format!("/tmp/neo/.neo/sessions/{SESSION_A}/agents/main/wire.jsonl")
         );
         assert_eq!(
             value["messages"][0]["User"]["content"][0]["Text"]["text"],

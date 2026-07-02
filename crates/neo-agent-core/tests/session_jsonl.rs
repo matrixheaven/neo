@@ -472,7 +472,11 @@ async fn jsonl_session_replays_queues_and_compaction_summary() {
 #[tokio::test]
 async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_context() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("session.jsonl");
+    let session_dir = dir
+        .path()
+        .join("session_00000000-0000-0000-0000-000000000001");
+    let path = main_agent_wire_path(&session_dir);
+    std::fs::create_dir_all(path.parent().expect("wire parent")).expect("mkdir wire parent");
     let mut writer = JsonlSessionWriter::create(&path)
         .await
         .expect("create session");
@@ -555,7 +559,11 @@ async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_c
 #[tokio::test]
 async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("session.jsonl");
+    let session_dir = dir
+        .path()
+        .join("session_00000000-0000-0000-0000-000000000001");
+    let path = main_agent_wire_path(&session_dir);
+    std::fs::create_dir_all(path.parent().expect("wire parent")).expect("mkdir wire parent");
     let mut writer = JsonlSessionWriter::create(&path)
         .await
         .expect("create session");

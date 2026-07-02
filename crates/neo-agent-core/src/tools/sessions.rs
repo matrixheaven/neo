@@ -134,7 +134,9 @@ async fn find_session_path(neo_home: &Path, session_id: &str) -> Result<PathBuf,
                         tool: "SummarizeSessions".to_owned(),
                         message: "session index entry missing session_dir".to_owned(),
                     })?;
-            return Ok(PathBuf::from(session_dir).join("transcript.jsonl"));
+            return Ok(crate::session::main_agent_wire_path(&PathBuf::from(
+                session_dir,
+            )));
         }
     }
     let available = if available.is_empty() {
@@ -198,7 +200,7 @@ fn recent_session_path(entry: &serde_json::Value, cutoff: u64) -> Option<PathBuf
     let session_dir = entry["session_dir"].as_str()?;
     validate_session_id(session_id)
         .is_ok()
-        .then(|| PathBuf::from(session_dir).join("transcript.jsonl"))
+        .then(|| crate::session::main_agent_wire_path(&PathBuf::from(session_dir)))
 }
 
 fn validate_tool_session_id(session_id: &str) -> Result<(), ToolError> {
@@ -266,9 +268,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_id = "session_550e8400-e29b-41d4-a716-446655440000";
         let session_dir = temp.path().join("wd_test_1234567890ab").join(session_id);
-        fs::create_dir_all(&session_dir).await.expect("mkdir");
+        let session_path = crate::session::main_agent_wire_path(&session_dir);
+        fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("mkdir");
         fs::write(
-            session_dir.join("transcript.jsonl"),
+            session_path,
             json!({
                 "type": "user",
                 "content": {"text": "hello"}
@@ -336,10 +341,16 @@ mod tests {
         let old_id = "session_550e8400-e29b-41d4-a716-446655440002";
         let recent_dir = temp.path().join("wd_recent_1234567890ab").join(recent_id);
         let old_dir = temp.path().join("wd_old_1234567890ab").join(old_id);
-        fs::create_dir_all(&recent_dir).await.expect("mkdir recent");
-        fs::create_dir_all(&old_dir).await.expect("mkdir old");
+        let recent_path = crate::session::main_agent_wire_path(&recent_dir);
+        let old_path = crate::session::main_agent_wire_path(&old_dir);
+        fs::create_dir_all(recent_path.parent().expect("recent wire parent"))
+            .await
+            .expect("mkdir recent");
+        fs::create_dir_all(old_path.parent().expect("old wire parent"))
+            .await
+            .expect("mkdir old");
         fs::write(
-            recent_dir.join("transcript.jsonl"),
+            recent_path,
             json!({
                 "type": "user",
                 "content": {"text": "recent"}
@@ -349,7 +360,7 @@ mod tests {
         .await
         .expect("write recent session");
         fs::write(
-            old_dir.join("transcript.jsonl"),
+            old_path,
             json!({
                 "type": "user",
                 "content": {"text": "old"}

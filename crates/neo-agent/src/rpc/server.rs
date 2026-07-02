@@ -194,9 +194,9 @@ async fn handle_sessions_get(
             );
         }
     };
-    let path = workspace_sessions_dir(config)
-        .join(&session_id)
-        .join("transcript.jsonl");
+    let path = neo_agent_core::session::main_agent_wire_path(
+        &workspace_sessions_dir(config).join(&session_id),
+    );
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -302,9 +302,9 @@ async fn handle_sessions_export_html(
             );
         }
     };
-    let path = workspace_sessions_dir(config)
-        .join(&session_id)
-        .join("transcript.jsonl");
+    let path = neo_agent_core::session::main_agent_wire_path(
+        &workspace_sessions_dir(config).join(&session_id),
+    );
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -436,9 +436,9 @@ fn handle_set_session_name(
             );
         }
     };
-    let path = workspace_sessions_dir(config)
-        .join(&session_id)
-        .join("transcript.jsonl");
+    let path = neo_agent_core::session::main_agent_wire_path(
+        &workspace_sessions_dir(config).join(&session_id),
+    );
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -505,9 +505,9 @@ async fn handle_get_messages(
             );
         }
     };
-    let path = workspace_sessions_dir(config)
-        .join(&session_id)
-        .join("transcript.jsonl");
+    let path = neo_agent_core::session::main_agent_wire_path(
+        &workspace_sessions_dir(config).join(&session_id),
+    );
 
     if !path.exists() {
         return push_rpc_message(
@@ -657,7 +657,8 @@ fn session_count(config: &AppConfig) -> usize {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 return false;
             };
-            name.starts_with("session_") && path.join("transcript.jsonl").is_file()
+            name.starts_with("session_")
+                && neo_agent_core::session::main_agent_wire_path(&path).is_file()
         })
         .count()
 }

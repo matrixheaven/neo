@@ -23,7 +23,7 @@ use session_mgmt::{
 };
 
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{AppConfig, neo_home, workspace_sessions_dir},
+    config::{AppConfig, neo_home},
     modes::sessions,
     resources,
 };
@@ -184,7 +184,7 @@ pub async fn run_prompt_in_session(
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
-        session_path.parent().map(Path::to_path_buf),
+        Some(session_root_from_wire_path(&session_path)?),
         None,
         None,
         None,
@@ -331,10 +331,7 @@ async fn prepare_existing_streaming_turn(
         .collect::<Vec<_>>()
         .join(" ");
     let session_path = sessions::session_path(session_id, config)?;
-    let session_directory = session_path.parent().map_or_else(
-        || workspace_sessions_dir(config).join(session_id),
-        Path::to_path_buf,
-    );
+    let session_directory = session_root_from_wire_path(&session_path)?;
     let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
@@ -1331,10 +1328,10 @@ mod tests {
         let session_dir = temp
             .path()
             .join("session_00000000-0000-4000-8000-000000000501");
-        let session_path = session_dir.join("transcript.jsonl");
-        tokio::fs::create_dir_all(&session_dir)
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
             .await
-            .expect("create session dir");
+            .expect("create wire dir");
         let mut seed = JsonlSessionWriter::create(&session_path)
             .await
             .expect("create session");
@@ -1408,6 +1405,39 @@ mod tests {
             AgentMessage::Assistant { content, .. }
                 if content[0].as_text() == Some("continued answer")
         ));
+    }
+
+    #[tokio::test]
+    async fn prepare_existing_streaming_turn_uses_session_root_for_main_wire_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000502";
+        let session_dir = crate::config::workspace_sessions_dir(&config).join(session_id);
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("create wire dir");
+        let mut seed = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session");
+        seed.append_event(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("hello"),
+        })
+        .await
+        .expect("append user");
+        seed.flush().await.expect("flush seed");
+
+        let prepared = super::prepare_existing_streaming_turn(
+            session_id,
+            &[Content::text("continue")],
+            &config,
+            None,
+            None,
+        )
+        .await
+        .expect("prepare existing streaming turn");
+
+        assert_eq!(prepared.session_directory, session_dir);
     }
 
     #[test]

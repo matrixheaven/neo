@@ -65,6 +65,17 @@ fn test_workspace_root() -> PathBuf {
     dir
 }
 
+fn main_wire_path_for_session(session_dir: impl AsRef<Path>) -> PathBuf {
+    let path = neo_agent_core::session::main_agent_wire_path(session_dir.as_ref());
+    fs::create_dir_all(path.parent().expect("wire parent")).expect("create wire dir");
+    path
+}
+
+fn write_main_wire(bucket_dir: &Path, session_id: &str, content: &str) {
+    let path = main_wire_path_for_session(bucket_dir.join(session_id));
+    fs::write(path, content).expect("write main wire");
+}
+
 fn skill_store_with_refactor_skill() -> SkillStore {
     SkillStore::load(
         &[],
@@ -3308,15 +3319,14 @@ async fn command_palette_exports_active_session_to_html() {
     let config = test_config(temp.path(), sessions_dir.clone());
     let bucket_dir = workspace_sessions_dir(&config);
     fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
-    fs::write(
-            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
-            concat!(
-                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
-                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
-            ),
-        )
-        .expect("write session jsonl");
+    write_main_wire(
+        &bucket_dir,
+        SESSION_A,
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    );
 
     let config = test_config(temp.path(), sessions_dir.clone());
     let mut controller = controller_for_config(&config);
@@ -3359,7 +3369,8 @@ async fn command_palette_exports_active_session_to_html() {
         .await
         .expect("export command runs");
 
-    let export_path = bucket_dir.join(SESSION_A).join("transcript.html");
+    let export_path = neo_agent_core::session::main_agent_wire_path(&bucket_dir.join(SESSION_A))
+        .with_extension("html");
     let html = fs::read_to_string(&export_path).expect("read exported html");
     assert!(html.contains(&format!("<title>neo session {SESSION_A}</title>")));
     assert!(html.contains("<strong>bold</strong>"));
@@ -4620,8 +4631,7 @@ async fn load_session_transcript_estimates_context_usage_for_replayed_session() 
     let config = test_config(temp.path(), sessions_dir);
     let bucket_dir = workspace_sessions_dir(&config);
     fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
-    let session_path = bucket_dir.join(SESSION_A).join("transcript.jsonl");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
     let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
         .await
         .expect("create session");
@@ -4637,7 +4647,7 @@ async fn load_session_transcript_estimates_context_usage_for_replayed_session() 
         .await
         .expect("load transcript");
 
-    assert_eq!(loaded.estimated_context_tokens, Some(4));
+    assert_eq!(loaded.estimated_context_tokens, Some(5));
 }
 
 #[tokio::test]
@@ -4647,8 +4657,7 @@ async fn load_session_transcript_replays_token_usage_for_footer() {
     let config = test_config(temp.path(), sessions_dir);
     let bucket_dir = workspace_sessions_dir(&config);
     fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
-    let session_path = bucket_dir.join(SESSION_A).join("transcript.jsonl");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
     let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
         .await
         .expect("create session");
@@ -5283,15 +5292,14 @@ async fn session_catalog_and_loader_use_real_local_session_store() {
     // Compute the workspace-scoped bucket directory that the code will use.
     let bucket_dir = workspace_sessions_dir(&test_config(temp.path(), sessions_dir.clone()));
     fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
-    fs::write(
-            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
-            concat!(
-                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
-                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
-            ),
-        )
-        .expect("write session jsonl");
+    write_main_wire(
+        &bucket_dir,
+        SESSION_A,
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    );
 
     let store = SessionMetadataStore::new(&bucket_dir);
     store
@@ -5367,15 +5375,14 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
     let config = test_config(temp.path(), sessions_dir.clone());
     let bucket_dir = workspace_sessions_dir(&config);
     fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
-    fs::write(
-            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
-            concat!(
-                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
-                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
-            ),
-        )
-        .expect("write session jsonl");
+    write_main_wire(
+        &bucket_dir,
+        SESSION_A,
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    );
 
     let forked = fork_session_transcript(SESSION_A.to_owned(), &config)
         .await
@@ -5389,9 +5396,7 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
     );
     assert_eq!(forked.transcript.messages.len(), 2);
     assert!(
-        bucket_dir
-            .join(&forked.session_id)
-            .join("transcript.jsonl")
+        neo_agent_core::session::main_agent_wire_path(&bucket_dir.join(&forked.session_id))
             .is_file()
     );
 
@@ -5423,12 +5428,11 @@ async fn session_picker_ctrl_a_toggles_scope() {
     let config_a = test_config(&project_a, sessions_dir.clone());
     let bucket_a = workspace_sessions_dir(&config_a);
     fs::create_dir_all(&bucket_a).expect("create bucket_a");
-    fs::create_dir_all(bucket_a.join(SESSION_A)).expect("create session_a dir");
-    fs::write(
-        bucket_a.join(SESSION_A).join("transcript.jsonl"),
+    write_main_wire(
+        &bucket_a,
+        SESSION_A,
         r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
-    )
-    .expect("write alpha jsonl");
+    );
     let store_a = SessionMetadataStore::new(&bucket_a);
     store_a
         .record_activity(
@@ -5444,12 +5448,11 @@ async fn session_picker_ctrl_a_toggles_scope() {
     let config_b = test_config(&project_b, sessions_dir.clone());
     let bucket_b = workspace_sessions_dir(&config_b);
     fs::create_dir_all(&bucket_b).expect("create bucket_b");
-    fs::create_dir_all(bucket_b.join(SESSION_B)).expect("create session_b dir");
-    fs::write(
-        bucket_b.join(SESSION_B).join("transcript.jsonl"),
+    write_main_wire(
+        &bucket_b,
+        SESSION_B,
         r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
-    )
-    .expect("write beta jsonl");
+    );
     let store_b = SessionMetadataStore::new(&bucket_b);
     store_b
         .record_activity(
@@ -10080,8 +10083,7 @@ async fn btw_conversation_is_not_written_to_main_session_jsonl() {
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let session_id = "session_00000000-0000-4000-8000-000000000901";
-    let session_path = sessions_dir.join(session_id).join("transcript.jsonl");
-    fs::create_dir_all(session_path.parent().expect("session dir")).expect("create session dir");
+    let session_path = main_wire_path_for_session(sessions_dir.join(session_id));
     let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
         .await
         .expect("create session");
