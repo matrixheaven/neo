@@ -12,7 +12,7 @@ default_model = "openai/gpt-4.1"
 # The <id> is arbitrary — you choose the name.
 
 [providers.openai]
-type = "openai-responses"
+type = "openai_response"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
@@ -28,13 +28,13 @@ api_key_env = "GEMINI_API_KEY"
 
 # Custom provider using inline API key
 [providers.openrouter]
-type = "openai-compatible"
+type = "openai"
 base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-v1-xxxxxxxxxxxxxxxx"
 
 # Local LLM (Ollama)
 [providers."local-ollama"]
-type = "openai-compatible"
+type = "openai"
 base_url = "http://localhost:11434/v1"
 api_key = "ollama"   # Ollama doesn't need a real key
 

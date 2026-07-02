@@ -7,7 +7,7 @@ test client.
 ## Core Types
 
 - `ProviderId` identifies a configured provider.
-- `ApiKind` names the protocol family, including OpenAI Responses, Chat Completions, Anthropic Messages, Google Generative AI, OpenAI-compatible APIs, and local providers.
+- `ApiKind` names the protocol family, including OpenAI Responses, OpenAI-compatible Chat Completions, Anthropic Messages, Google Generative AI, and local providers.
 - `ModelCapabilities` tells the runtime whether a model supports streaming, tools, images, reasoning, embeddings, and an optional context limit.
 - `ModelSpec` combines provider, model name, API kind, and capabilities.
 - `RequestOptions` carries temperature, max tokens, reasoning effort, custom
@@ -132,7 +132,7 @@ Built-in provider base URLs and credential environment names can be overridden
 from Neo config with `providers.<provider-id>.base_url` and
 `providers.<provider-id>.api_key_env`. The provider `type` selects the wire
 client. OpenAI supports both Responses and Chat Completions models; OpenRouter
-supports OpenAI-compatible and Chat Completions models. Anthropic, Google, and
+supports OpenAI-compatible Chat Completions models. Anthropic, Google, and
 Amazon Bedrock are restricted to their registered protocol families. Bedrock is
 still credential metadata only until a production adapter/base URL contract
 exists. The resolver does not resolve `ApiKind::Local` or the fake test

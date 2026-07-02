@@ -221,13 +221,11 @@ impl ProviderResolver {
             })?;
 
         match effective_api {
-            ApiKind::OpenAiResponses => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
+            ApiKind::OpenAiResponse => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
             ApiKind::AnthropicMessages => {
                 Ok(Arc::new(AnthropicMessagesClient::new(base_url, api_key)))
             }
-            ApiKind::OpenAiCompatible | ApiKind::OpenAiChatCompletions => {
-                Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key)))
-            }
+            ApiKind::OpenAi => Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key))),
             ApiKind::GoogleGenerativeAi => {
                 Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key)))
             }
@@ -285,25 +283,25 @@ fn builtin_models() -> Vec<ModelSpec> {
         builtin_model(
             "openai",
             "gpt-5.4",
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
         ),
         builtin_model(
             "openai",
             "gpt-5-mini",
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
         ),
         builtin_model(
             "openai",
             "gpt-4.1",
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ModelCapabilities::tool_chat().with_max_context_tokens(1_047_576),
         ),
         builtin_model(
             "openai",
             "gpt-4o-mini",
-            ApiKind::OpenAiChatCompletions,
+            ApiKind::OpenAi,
             ModelCapabilities::tool_chat().with_max_context_tokens(128_000),
         ),
         builtin_model(
@@ -340,8 +338,8 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "openai",
             "OpenAI",
-            ApiKind::OpenAiResponses,
-            &[ApiKind::OpenAiResponses, ApiKind::OpenAiChatCompletions],
+            ApiKind::OpenAiResponse,
+            &[ApiKind::OpenAiResponse, ApiKind::OpenAi],
             Some("https://api.openai.com/v1"),
             &["OPENAI_API_KEY"],
             &[],
@@ -367,8 +365,8 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "openrouter",
             "OpenRouter",
-            ApiKind::OpenAiCompatible,
-            &[ApiKind::OpenAiCompatible, ApiKind::OpenAiChatCompletions],
+            ApiKind::OpenAi,
+            &[ApiKind::OpenAi],
             Some("https://openrouter.ai/api/v1"),
             &["OPENROUTER_API_KEY"],
             &[],
@@ -402,11 +400,10 @@ fn provider(
     ambient_auth_env_vars: &[&[&str]],
 ) -> ProviderSpec {
     let provider_type = match api {
-        ApiKind::OpenAiResponses => Some(ApiType::OpenAiResponses),
+        ApiKind::OpenAiResponse => Some(ApiType::OpenAiResponse),
         ApiKind::AnthropicMessages => Some(ApiType::Anthropic),
         ApiKind::GoogleGenerativeAi => Some(ApiType::Google),
-        ApiKind::OpenAiChatCompletions => Some(ApiType::OpenAiChat),
-        ApiKind::OpenAiCompatible => Some(ApiType::OpenAiCompatible),
+        ApiKind::OpenAi => Some(ApiType::OpenAi),
         ApiKind::Local => None,
     };
     ProviderSpec {

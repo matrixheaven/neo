@@ -840,7 +840,7 @@ mod tests {
         let model = ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "test-model".to_owned(),
-            api: ApiKind::OpenAiResponses,
+            api: ApiKind::OpenAiResponse,
             capabilities: ModelCapabilities::tool_chat(),
         };
 
@@ -923,7 +923,7 @@ mod tests {
         let model = ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "test-model".to_owned(),
-            api: ApiKind::OpenAiResponses,
+            api: ApiKind::OpenAiResponse,
             capabilities: ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
         };
 
@@ -1177,7 +1177,7 @@ mod tests {
         let model = ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "test-model".to_owned(),
-            api: ApiKind::OpenAiResponses,
+            api: ApiKind::OpenAiResponse,
             capabilities: ModelCapabilities::tool_chat(),
         };
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1392,7 +1392,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
-                provider_type: Some(ApiType::OpenAiResponses),
+                provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
         );
@@ -1423,7 +1423,7 @@ mod tests {
             output,
             concat!(
                 "models:\n",
-                "- fast -> openai/gpt-4.1 (openai-responses default) ctx=1000000 [streaming,tools] - GPT 4.1\n",
+                "- fast -> openai/gpt-4.1 (openai_response default) ctx=1000000 [streaming,tools] - GPT 4.1\n",
                 "- local/echo (unknown) ctx=? [streaming]\n",
             )
         );
@@ -1438,7 +1438,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
-                provider_type: Some(ApiType::OpenAiResponses),
+                provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
         );
@@ -1464,7 +1464,7 @@ mod tests {
                     "alias": "fast",
                     "provider": "openai",
                     "model": "gpt-4.1",
-                    "type": "openai-responses",
+                    "type": "openai_response",
                     "capabilities": ["streaming", "tools"],
                     "max_context_tokens": 1_000_000,
                     "display_name": "GPT 4.1",
@@ -1484,7 +1484,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
-                provider_type: Some(ApiType::OpenAiResponses),
+                provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
         );
@@ -1514,7 +1514,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
-                provider_type: Some(ApiType::OpenAiResponses),
+                provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
         );

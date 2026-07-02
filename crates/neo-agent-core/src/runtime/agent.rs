@@ -314,7 +314,7 @@ mod tests {
         let mut config = AgentConfig::for_model(neo_ai::ModelSpec {
             provider: neo_ai::ProviderId("fake".to_owned()),
             model: "fake".to_owned(),
-            api: neo_ai::ApiKind::OpenAiChatCompletions,
+            api: neo_ai::ApiKind::OpenAi,
             capabilities: neo_ai::ModelCapabilities::chat()
                 .with_max_context_tokens(100_000)
                 .with_max_output_tokens(4_096),

@@ -135,7 +135,7 @@ default_provider = "mock"
 default_model = "gpt-4.1"
 
 [providers.mock]
-type = "openai-responses"
+type = "openai_response"
 base_url = "{base_url}"
 api_key_env = "OPENAI_API_KEY"
 
@@ -423,7 +423,7 @@ default_provider = "mock"
 default_model = "reasoning-model"
 
 [providers.mock]
-type = "openai-responses"
+type = "openai_response"
 base_url = "{}"
 api_key_env = "OPENAI_API_KEY"
 
@@ -549,7 +549,7 @@ default_model = "scoped-runtime-model"
 model_scope = ["scoped"]
 
 [providers.mock]
-type = "openai-responses"
+type = "openai_response"
 base_url = "{}"
 api_key_env = "OPENAI_API_KEY"
 
@@ -617,7 +617,7 @@ default_provider = "mock"
 default_model = "gpt-4.1"
 
 [providers.mock]
-type = "openai-responses"
+type = "openai_response"
 base_url = "{base_url}"
 api_key_env = "OPENAI_API_KEY"
 
@@ -658,7 +658,7 @@ default_provider = "mock"
 default_model = "gpt-4.1"
 
 [providers.mock]
-type = "openai-responses"
+type = "openai_response"
 base_url = "{base_url}"
 api_key_env = "OPENAI_API_KEY"
 

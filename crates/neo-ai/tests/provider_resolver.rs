@@ -149,14 +149,10 @@ fn provider_resolver_builds_real_clients_by_model_api() {
     let resolver = registry.resolver_from(env);
 
     resolver
-        .resolve(&model("openai", "gpt-test", ApiKind::OpenAiResponses))
+        .resolve(&model("openai", "gpt-test", ApiKind::OpenAiResponse))
         .expect("openai responses client should resolve");
     resolver
-        .resolve(&model(
-            "openai",
-            "gpt-chat-test",
-            ApiKind::OpenAiChatCompletions,
-        ))
+        .resolve(&model("openai", "gpt-chat-test", ApiKind::OpenAi))
         .expect("openai chat completions client should resolve");
     resolver
         .resolve(&model(
@@ -169,17 +165,13 @@ fn provider_resolver_builds_real_clients_by_model_api() {
         .resolve(&model("google", "gemini-test", ApiKind::GoogleGenerativeAi))
         .expect("google generative ai client should resolve");
     resolver
-        .resolve(&model(
-            "openrouter",
-            "openrouter-test",
-            ApiKind::OpenAiCompatible,
-        ))
+        .resolve(&model("openrouter", "openrouter-test", ApiKind::OpenAi))
         .expect("openrouter compatible client should resolve");
     resolver
         .resolve(&model(
             "openrouter",
             "openrouter-chat-test",
-            ApiKind::OpenAiChatCompletions,
+            ApiKind::OpenAi,
         ))
         .expect("openrouter chat completions client should resolve");
 }
@@ -190,8 +182,8 @@ fn provider_resolver_rejects_model_api_mismatches() {
     registry.register(ProviderSpec {
         id: "untyped-provider".to_owned(),
         display_name: "Untyped".to_owned(),
-        api: ApiKind::OpenAiResponses,
-        supported_apis: vec![ApiKind::OpenAiResponses],
+        api: ApiKind::OpenAiResponse,
+        supported_apis: vec![ApiKind::OpenAiResponse],
         base_url: Some("https://api.example.com/v1".to_owned()),
         api_key: None,
         api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
@@ -235,8 +227,8 @@ fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
     registry.register(ProviderSpec {
         id: "untyped-provider".to_owned(),
         display_name: "Untyped".to_owned(),
-        api: ApiKind::OpenAiResponses,
-        supported_apis: vec![ApiKind::OpenAiResponses],
+        api: ApiKind::OpenAiResponse,
+        supported_apis: vec![ApiKind::OpenAiResponse],
         base_url: Some("https://api.example.com/v1".to_owned()),
         api_key: None,
         api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
@@ -295,7 +287,7 @@ fn provider_resolver_rejects_missing_credentials_and_test_only_fake() {
     let registry = ProviderRegistry::production();
     let resolver = registry.resolver_from(BTreeMap::new());
 
-    let Err(missing) = resolver.resolve(&model("openai", "gpt-test", ApiKind::OpenAiResponses))
+    let Err(missing) = resolver.resolve(&model("openai", "gpt-test", ApiKind::OpenAiResponse))
     else {
         panic!("missing credentials should fail");
     };

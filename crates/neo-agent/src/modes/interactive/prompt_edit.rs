@@ -40,11 +40,85 @@ pub(super) fn image_dimensions_from_data(
         .unwrap_or((0, 0))
 }
 
-pub(super) fn split_skill_invocation(input: &str) -> (&str, &str) {
-    match input.find(' ') {
-        Some(pos) => (&input[..pos], &input[pos + 1..]),
-        None => (input, ""),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InlineSkillInvocation {
+    pub(super) name: String,
+    pub(super) args: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InlineSkillDirectives {
+    pub(super) invocations: Vec<InlineSkillInvocation>,
+    pub(super) body: String,
+}
+
+#[cfg(test)]
+impl InlineSkillDirectives {
+    pub(super) fn names(&self) -> Vec<&str> {
+        self.invocations
+            .iter()
+            .map(|invocation| invocation.name.as_str())
+            .collect()
     }
+}
+
+pub(super) fn parse_inline_skill_directives(input: &str) -> Option<InlineSkillDirectives> {
+    let mut invocations = Vec::new();
+    let mut body_lines = Vec::new();
+
+    for line in input.lines() {
+        let mut cursor = 0;
+        let mut body_line = String::new();
+        while let Some(pos) = next_skill_directive(line, cursor) {
+            body_line.push_str(&line[cursor..pos]);
+
+            let name_start = pos + "/skill:".len();
+            let name_end = line[name_start..]
+                .find(char::is_whitespace)
+                .map_or(line.len(), |offset| name_start + offset);
+            let name = line[name_start..name_end].to_owned();
+            let args_start = skip_inline_whitespace(line, name_end);
+            let args_end = next_skill_directive(line, args_start).unwrap_or(line.len());
+            let args = line[args_start..args_end].trim().to_owned();
+
+            if !args.is_empty() {
+                body_line.push_str(&args);
+            }
+            invocations.push(InlineSkillInvocation { name, args });
+            cursor = args_end;
+        }
+        body_line.push_str(&line[cursor..]);
+        body_lines.push(body_line);
+    }
+
+    (!invocations.is_empty()).then(|| InlineSkillDirectives {
+        invocations,
+        body: body_lines.join("\n").trim().to_owned(),
+    })
+}
+
+fn next_skill_directive(line: &str, start: usize) -> Option<usize> {
+    let mut search_from = start.min(line.len());
+    while let Some(offset) = line[search_from..].find("/skill:") {
+        let pos = search_from + offset;
+        if pos == 0
+            || line[..pos]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            return Some(pos);
+        }
+        search_from = pos + "/skill:".len();
+    }
+    None
+}
+
+fn skip_inline_whitespace(line: &str, start: usize) -> usize {
+    line[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!ch.is_whitespace()).then_some(start + offset))
+        .unwrap_or(line.len())
 }
 
 pub(super) fn expand_slash_skill(
@@ -60,11 +134,70 @@ pub(super) fn expand_slash_skill(
     Ok((expanded, invocation.raw_arguments))
 }
 
-pub(super) fn skill_invocation_args(raw_arguments: &str) -> Option<String> {
-    if raw_arguments.trim().is_empty() {
-        None
-    } else {
-        Some(raw_arguments.to_owned())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_skill_directive_parser_handles_single_skill() {
+        let parsed = parse_inline_skill_directives("/skill:foo hello").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "hello");
+        assert_eq!(parsed.invocations[0].name, "foo");
+        assert_eq!(parsed.invocations[0].args, "hello");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_keeps_prefix_text() {
+        let parsed =
+            parse_inline_skill_directives("foo bar /skill:foo hello").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "foo bar hello");
+        assert_eq!(parsed.invocations[0].args, "hello");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_aggregates_multiple_skills() {
+        let input = "\
+foo
+bar
+/skill:skill_one test test test
+bonjour
+hello
+/skill:skill_two test test test test
+hola
+amigo";
+
+        let parsed = parse_inline_skill_directives(input).expect("skill directives");
+
+        assert_eq!(parsed.names(), ["skill_one", "skill_two"]);
+        assert_eq!(
+            parsed.body,
+            "\
+foo
+bar
+test test test
+bonjour
+hello
+test test test test
+hola
+amigo"
+        );
+        assert_eq!(parsed.invocations[0].args, "test test test");
+        assert_eq!(parsed.invocations[1].args, "test test test test");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_requires_prompt_start_or_whitespace_prefix() {
+        assert!(parse_inline_skill_directives("abc/skill:foo test").is_none());
+
+        let parsed = parse_inline_skill_directives("abc /skill:foo test").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "abc test");
+        assert_eq!(parsed.invocations[0].args, "test");
     }
 }
 

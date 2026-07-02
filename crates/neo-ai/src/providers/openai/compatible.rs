@@ -8,8 +8,13 @@ use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
 };
+
+const EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE: &str =
+    "Provider reported tool calls but emitted no structured tool calls";
+const DEFAULT_REASONING_KEY: &str = "reasoning_content";
+const KNOWN_REASONING_KEYS: &[&str] = &["reasoning_content", "reasoning_details", "reasoning"];
 
 #[derive(Clone)]
 pub struct OpenAiCompatibleClient {
@@ -64,9 +69,14 @@ impl OpenAiCompatibleClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(parse_retry_after);
+            let body = response
+                .text()
+                .await
+                .map(|text| crate::providers::common::error::error_body_excerpt(&text))
+                .ok();
             return Err(ProviderError::HttpStatus {
                 status,
-                body: None,
+                body,
                 retry_after,
             });
         }
@@ -111,7 +121,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         body["max_tokens"] = json!(max_tokens);
     }
     if let Some(reasoning_effort) = request.options.reasoning_effort {
-        body["reasoning_effort"] = json!(reasoning_effort.as_str());
+        body["reasoning_effort"] = json!(openai_reasoning_effort(reasoning_effort)?);
+    } else if request_replays_reasoning(request) {
+        body["reasoning_effort"] = json!(openai_reasoning_effort(ReasoningEffort::Medium)?);
     }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
@@ -163,12 +175,33 @@ fn assistant_message_body(
     content: &[ContentPart],
     tool_calls: &[crate::ToolCall],
 ) -> Result<Value, ProviderError> {
-    let content = content_text(content, "assistant")?;
-    Ok(json!({
+    let text = content_text(content, "assistant")?;
+    let mut body = json!({
         "role": "assistant",
-        "content": content,
-        "tool_calls": tool_calls.iter().map(tool_call_body).collect::<Vec<_>>(),
-    }))
+        "content": text,
+    });
+    if !tool_calls.is_empty() {
+        body["tool_calls"] = json!(tool_calls.iter().map(tool_call_body).collect::<Vec<_>>());
+    }
+    let reasoning = reasoning_text(content);
+    if !reasoning.is_empty() {
+        body[DEFAULT_REASONING_KEY] = json!(reasoning);
+    }
+    Ok(body)
+}
+
+fn openai_reasoning_effort(effort: ReasoningEffort) -> Result<&'static str, ProviderError> {
+    match effort {
+        ReasoningEffort::Low => Ok("low"),
+        ReasoningEffort::Medium => Ok("medium"),
+        ReasoningEffort::High => Ok("high"),
+        ReasoningEffort::Minimal | ReasoningEffort::XHigh => {
+            Err(ProviderError::Unsupported(format!(
+                "OpenAI-compatible provider type 'openai' supports reasoning_effort low, medium, or high; got {}",
+                effort.as_str()
+            )))
+        }
+    }
 }
 
 fn tool_call_body(tool_call: &crate::ToolCall) -> Value {
@@ -200,7 +233,33 @@ fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderE
 }
 
 fn text_content(content: &[ContentPart]) -> String {
-    crate::providers::collect_text_content(content, true)
+    crate::providers::collect_text_content(content, false)
+}
+
+fn reasoning_text(content: &[ContentPart]) -> String {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Thinking {
+                text,
+                redacted: false,
+                ..
+            } => Some(text.as_str()),
+            ContentPart::Text { .. } | ContentPart::Thinking { .. } | ContentPart::Image { .. } => {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn request_replays_reasoning(request: &ChatRequest) -> bool {
+    request.messages.iter().any(|message| match message {
+        ChatMessage::System { content }
+        | ChatMessage::User { content }
+        | ChatMessage::Assistant { content, .. }
+        | ChatMessage::ToolResult { content, .. } => !reasoning_text(content).is_empty(),
+    })
 }
 
 fn user_content(content: &[ContentPart]) -> Value {
@@ -410,10 +469,13 @@ fn sse_payloads(body: &str) -> impl Iterator<Item = String> + '_ {
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,
+    reasoning_started: bool,
     tool_calls: StreamingToolCallAssembler,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     saw_finish_reason: bool,
+    provider_reported_tool_calls: bool,
+    completed_tool_calls: usize,
     finished: bool,
 }
 
@@ -422,10 +484,13 @@ impl Default for ParseState {
         Self {
             events: Vec::new(),
             started: false,
+            reasoning_started: false,
             tool_calls: StreamingToolCallAssembler::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             saw_finish_reason: false,
+            provider_reported_tool_calls: false,
+            completed_tool_calls: 0,
             finished: false,
         }
     }
@@ -447,11 +512,22 @@ impl ParseState {
         };
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.last_stop_reason = stop_reason(reason);
+            self.apply_finish_reason(reason);
             self.saw_finish_reason = true;
         }
         if let Some(delta) = choice.get("delta") {
             self.ingest_delta(delta);
+        }
+    }
+
+    fn apply_finish_reason(&mut self, reason: &str) {
+        match reason {
+            "tool_calls" | "function_call" => {
+                self.provider_reported_tool_calls = true;
+            }
+            "length" => self.last_stop_reason = StopReason::MaxTokens,
+            "content_filter" => self.last_stop_reason = StopReason::Error,
+            _ => self.last_stop_reason = StopReason::EndTurn,
         }
     }
 
@@ -481,6 +557,20 @@ impl ParseState {
     }
 
     fn ingest_delta(&mut self, delta: &Value) {
+        if let Some(reasoning) = reasoning_delta(delta)
+            && !reasoning.is_empty()
+        {
+            if !self.reasoning_started {
+                self.events.push(AiStreamEvent::ThinkingStart {
+                    id: "reasoning".to_owned(),
+                });
+                self.reasoning_started = true;
+            }
+            self.events.push(AiStreamEvent::ThinkingDelta {
+                text: reasoning.to_owned(),
+            });
+        }
+
         if let Some(text) = delta.get("content").and_then(Value::as_str)
             && !text.is_empty()
         {
@@ -537,6 +627,7 @@ impl ParseState {
                     AiStreamEvent::ToolCallArgsDelta { id, json_fragment }
                 }
                 ToolCallAssemblyEvent::End { id, raw_arguments } => {
+                    self.completed_tool_calls += 1;
                     AiStreamEvent::ToolCallEnd { id, raw_arguments }
                 }
             }));
@@ -554,6 +645,23 @@ impl ParseState {
             .map_err(|err| ProviderError::Stream(err.to_string()))?;
         self.push_tool_events(tool_events);
 
+        if self.provider_reported_tool_calls {
+            if self.completed_tool_calls == 0 {
+                self.last_stop_reason = StopReason::Error;
+                self.events.push(AiStreamEvent::Error {
+                    message: EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE.to_owned(),
+                });
+            } else {
+                self.last_stop_reason = StopReason::ToolUse;
+            }
+        }
+        if self.reasoning_started {
+            self.events.push(AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            });
+        }
+
         if self.started {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
@@ -565,13 +673,10 @@ impl ParseState {
     }
 }
 
-fn stop_reason(reason: &str) -> StopReason {
-    match reason {
-        "tool_calls" | "function_call" => StopReason::ToolUse,
-        "length" => StopReason::MaxTokens,
-        "content_filter" => StopReason::Error,
-        _ => StopReason::EndTurn,
-    }
+fn reasoning_delta(delta: &Value) -> Option<&str> {
+    KNOWN_REASONING_KEYS
+        .iter()
+        .find_map(|key| delta.get(*key).and_then(Value::as_str))
 }
 
 #[cfg(test)]

@@ -41,14 +41,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
             "Goal",
             copy_goal(*kind, objective, detail.as_deref(), *turns),
         ),
-        TranscriptEntry::SkillActivation {
-            name,
-            description,
-            args,
-        } => (
-            "Skill",
-            copy_skill(name, description.as_deref(), args.as_deref()),
-        ),
+        TranscriptEntry::SkillActivation { names, body, .. } => ("Skill", copy_skill(names, body)),
         TranscriptEntry::UserMessage(_)
         | TranscriptEntry::AssistantMessage { .. }
         | TranscriptEntry::ThinkingBlock { .. }
@@ -152,11 +145,12 @@ fn copy_goal(
     )
 }
 
-fn copy_skill(name: &str, _description: Option<&str>, args: Option<&str>) -> String {
-    let header = format!("Skill activated: {name}");
-    match args.map(str::trim).filter(|body| !body.is_empty()) {
-        Some(body) => format!("{header}\n{body}"),
-        None => header,
+fn copy_skill(names: &[String], body: &str) -> String {
+    let header = format!("Skill activated: {}", names.join(", "));
+    if body.trim().is_empty() {
+        header
+    } else {
+        format!("{header}\n{}", body.trim())
     }
 }
 

@@ -544,7 +544,7 @@ mod tests {
         let spec = ModelSpec {
             provider: ProviderId("test".to_owned()),
             model: "test-model".to_owned(),
-            api: ApiKind::OpenAiChatCompletions,
+            api: ApiKind::OpenAi,
             capabilities: ModelCapabilities {
                 max_context_tokens: Some(200_000),
                 ..ModelCapabilities::chat()

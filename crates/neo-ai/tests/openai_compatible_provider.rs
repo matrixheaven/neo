@@ -120,12 +120,19 @@ fn status_response(status: u16) -> String {
     format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
 
+fn status_response_with_body(status: u16, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len(),
+    )
+}
+
 fn request(options: RequestOptions) -> ChatRequest {
     ChatRequest {
         model: ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "gpt-test".to_owned(),
-            api: ApiKind::OpenAiChatCompletions,
+            api: ApiKind::OpenAi,
             capabilities: ModelCapabilities::tool_chat(),
         },
         messages: vec![ChatMessage::User {
@@ -148,7 +155,7 @@ fn image_request(image: ImageData) -> ChatRequest {
         model: ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "gpt-test".to_owned(),
-            api: ApiKind::OpenAiChatCompletions,
+            api: ApiKind::OpenAi,
             capabilities: ModelCapabilities::vision_chat(),
         },
         messages: vec![ChatMessage::User {
@@ -262,6 +269,281 @@ async fn openai_compatible_client_serializes_image_parts() {
         sent.body["messages"][0]["content"][1]["image_url"]["url"],
         "https://example.test/cat.png"
     );
+}
+
+#[tokio::test]
+async fn openai_serializes_assistant_without_empty_tool_calls() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-empty-tool-calls",
+        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let mut request = request(RequestOptions::default());
+    request.messages = vec![ChatMessage::Assistant {
+        content: vec![ContentPart::Text {
+            text: "previous answer".to_owned(),
+        }],
+        tool_calls: Vec::new(),
+    }];
+    request.tools = Vec::new();
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"][0]["role"], "assistant");
+    assert_eq!(sent.body["messages"][0]["content"], "previous answer");
+    assert!(
+        sent.body["messages"][0].get("tool_calls").is_none(),
+        "empty assistant tool_calls must be omitted: {}",
+        sent.body["messages"][0]
+    );
+}
+
+#[tokio::test]
+async fn openai_serializes_assistant_thinking_as_reasoning_content() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-reasoning-out",
+        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let mut request = request(RequestOptions::default());
+    request.messages = vec![ChatMessage::Assistant {
+        content: vec![
+            ContentPart::Thinking {
+                text: "plan privately".to_owned(),
+                signature: None,
+                redacted: false,
+            },
+            ContentPart::Text {
+                text: "visible answer".to_owned(),
+            },
+        ],
+        tool_calls: Vec::new(),
+    }];
+    request.tools = Vec::new();
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"][0]["content"], "visible answer");
+    assert_eq!(
+        sent.body["messages"][0]["reasoning_content"],
+        "plan privately"
+    );
+}
+
+#[tokio::test]
+async fn openai_auto_enables_medium_reasoning_effort_when_replaying_thinking() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-reasoning-effort",
+        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let mut request = request(RequestOptions::default());
+    request.options.reasoning_effort = None;
+    request.messages = vec![ChatMessage::Assistant {
+        content: vec![ContentPart::Thinking {
+            text: "plan privately".to_owned(),
+            signature: None,
+            redacted: false,
+        }],
+        tool_calls: Vec::new(),
+    }];
+    request.tools = Vec::new();
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["reasoning_effort"], "medium");
+}
+
+#[tokio::test]
+async fn openai_streams_reasoning_content_as_thinking_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-reasoning-in",
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "plan privately"
+                }
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-reasoning-in",
+            "choices": [{ "delta": { "content": "done" }, "finish_reason": "stop" }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ThinkingStart {
+        id: "reasoning".to_owned(),
+    }));
+    assert!(events.contains(&AiStreamEvent::ThinkingDelta {
+        text: "plan privately".to_owned(),
+    }));
+    assert!(events.contains(&AiStreamEvent::ThinkingEnd {
+        signature: None,
+        redacted: false,
+    }));
+    assert!(events.contains(&AiStreamEvent::TextDelta {
+        text: "done".to_owned(),
+    }));
+}
+
+#[tokio::test]
+async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "id": "chatcmpl-xml-tool",
+            "choices": [{
+                "delta": {
+                    "content": "<tool_call><function=Bash></function></tool_call>"
+                }
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-xml-tool",
+            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+        }),
+    ])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AiStreamEvent::TextDelta { text }
+            if text.contains("<tool_call><function=Bash>")
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AiStreamEvent::ToolCallStart { .. } | AiStreamEvent::ToolCallEnd { .. }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AiStreamEvent::Error { message }
+            if message == "Provider reported tool calls but emitted no structured tool calls"
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::Error,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn openai_tool_calls_finish_reason_with_structured_calls_remains_tool_use() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-structured-tool",
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": { "name": "read_file", "arguments": "{\"path\":\"Cargo.toml\"}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn openai_http_status_error_includes_body_excerpt() {
+    let server = MockServer::start(vec![status_response_with_body(
+        400,
+        r#"{"error":{"message":"bad tool_call_id call_1"}}"#,
+    )]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let err = client
+        .stream_chat(request(RequestOptions::default()))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("http status 400"), "{message}");
+    assert!(message.contains("bad tool_call_id call_1"), "{message}");
+}
+
+#[tokio::test]
+async fn openai_rejects_unsupported_reasoning_effort_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let err = client
+        .stream_chat(request(RequestOptions {
+            reasoning_effort: Some(ReasoningEffort::Minimal),
+            retries: Some(0),
+            ..RequestOptions::default()
+        }))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("low, medium, or high"), "{message}");
+    assert!(message.contains("minimal"), "{message}");
+    assert!(server.requests().is_empty());
 }
 
 fn expected_tool_events() -> Vec<AiStreamEvent> {

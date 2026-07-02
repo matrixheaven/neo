@@ -119,9 +119,9 @@ pub enum TranscriptEntry {
         turns: Option<u32>,
     },
     SkillActivation {
-        name: String,
-        description: Option<String>,
-        args: Option<String>,
+        names: Vec<String>,
+        body: String,
+        expanded: bool,
     },
     Delegate {
         component: DelegateCardComponent,
@@ -316,15 +316,11 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn skill_activated(
-        name: impl Into<String>,
-        description: Option<impl Into<String>>,
-        args: Option<impl Into<String>>,
-    ) -> Self {
+    pub fn skill_activated(names: Vec<String>, body: impl Into<String>) -> Self {
         Self::SkillActivation {
-            name: name.into(),
-            description: description.map(Into::into),
-            args: args.map(Into::into),
+            names,
+            body: body.into(),
+            expanded: false,
         }
     }
 
@@ -462,16 +458,10 @@ impl TranscriptEntry {
                 theme,
             ),
             Self::SkillActivation {
-                name,
-                description,
-                args,
-            } => render_skill_used(
-                name,
-                description.as_deref(),
-                args.as_deref(),
-                inner_width,
-                theme,
-            ),
+                names,
+                body,
+                expanded,
+            } => render_skill_activation(names, body, *expanded, inner_width, theme),
             Self::Delegate { component } => render_delegate_card(component, inner_width, theme),
             Self::DelegateGroup { component } => component.render_with_theme(inner_width, theme),
             Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
@@ -742,35 +732,62 @@ fn render_workflow_card(
     component.render_with_theme(width, theme)
 }
 
-fn render_skill_used(
-    name: &str,
-    _description: Option<&str>,
-    args: Option<&str>,
+const SKILL_ACTIVATION_PREVIEW_LINES: usize = 3;
+
+fn render_skill_activation(
+    names: &[String],
+    body: &str,
+    expanded: bool,
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
     let activation = Style::default().fg(theme.status_warn).bold();
     let skill_name = Style::default().fg(theme.brand).bold();
     let thinking = render_thinking::thinking_style(theme);
+    let muted = Style::default().fg(theme.text_muted);
+    let name_list = names.join(", ");
 
     let mut rows = Vec::new();
     rows.push(
         Line::from_spans(vec![
             Span::styled("✦ Skill activated: ", activation),
-            Span::styled(name.to_owned(), skill_name),
+            Span::styled(name_list, skill_name),
         ])
         .truncate_to_width(width),
     );
     rows.push(Line::styled("━".repeat(width.max(1)), activation));
 
-    if let Some(body) = args.map(str::trim).filter(|body| !body.is_empty()) {
-        for line in wrap_width(body, width.max(1)) {
-            rows.push(Line::styled(line, thinking));
-        }
+    let body_lines = skill_body_lines(body, width.max(1));
+    let visible_count = if expanded {
+        body_lines.len()
+    } else {
+        body_lines.len().min(SKILL_ACTIVATION_PREVIEW_LINES)
+    };
+    for line in body_lines.iter().take(visible_count) {
+        rows.push(Line::styled(line.clone(), thinking));
+    }
+    if !expanded && body_lines.len() > visible_count {
+        let remaining = body_lines.len() - visible_count;
+        rows.push(Line::styled(
+            format!("… {remaining} more lines (ctrl+o to expand)"),
+            muted,
+        ));
     }
 
     rows.push(Line::raw(""));
     rows
+}
+
+fn skill_body_lines(body: &str, width: usize) -> Vec<String> {
+    body.lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_width(line, width)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -858,11 +875,18 @@ mod tests {
     }
 
     #[test]
-    fn skill_activation_renders_header_rule_and_args() {
+    fn skill_activation_renders_aggregate_collapsed_preview() {
         let entry = TranscriptEntry::skill_activated(
-            "brainstorming",
-            Some("Explore user intent, requirements and design before implementation."),
-            Some("我想要 xxxxxxx".to_owned()),
+            vec!["skill_one".to_owned(), "skill_two".to_owned()],
+            "\
+foo
+bar
+test test test
+bonjour
+hello
+test test test test
+hola
+amigo",
         );
         let lines = entry
             .render(60, &TuiTheme::default())
@@ -870,11 +894,16 @@ mod tests {
             .collect::<Vec<_>>();
         let text = lines.iter().map(Line::text).collect::<Vec<_>>();
 
-        assert_eq!(text[0], "✦ Skill activated: brainstorming");
+        assert_eq!(text[0], "✦ Skill activated: skill_one, skill_two");
         assert!(text[1].starts_with("━"));
-        assert_eq!(text[2], "我想要 xxxxxxx");
-        assert!(!text.iter().any(|line| line.contains("Explore user intent")));
-        assert!(!text.iter().any(|line| line.contains("args:")), "{text:?}");
+        assert_eq!(text[2], "foo");
+        assert_eq!(text[3], "bar");
+        assert_eq!(text[4], "test test test");
+        assert_eq!(text[5], "… 5 more lines (ctrl+o to expand)");
+        assert!(
+            !text.iter().any(|line| line.contains("/skill:")),
+            "{text:?}"
+        );
 
         let header_spans = lines[0].spans();
         assert_eq!(header_spans[0].text(), "✦ Skill activated: ");
@@ -882,7 +911,7 @@ mod tests {
             header_spans[0].style().fg,
             Some(TuiTheme::default().status_warn)
         );
-        assert_eq!(header_spans[1].text(), "brainstorming");
+        assert_eq!(header_spans[1].text(), "skill_one, skill_two");
         assert_eq!(header_spans[1].style().fg, Some(TuiTheme::default().brand));
         assert_eq!(
             lines[2].spans()[0].style().fg,
@@ -892,45 +921,25 @@ mod tests {
     }
 
     #[test]
-    fn skill_activation_omits_body_when_args_are_empty() {
+    fn skill_activation_expands_full_body() {
         let entry = TranscriptEntry::skill_activated(
-            "executing-plans",
-            Some("Execute a plan task-by-task."),
-            None::<String>,
+            vec!["skill_one".to_owned(), "skill_two".to_owned()],
+            "foo\nbar\ntest test test\nbonjour\nhello\ntest test test test\nhola\namigo",
         );
+        let mut entry = entry;
+        if let TranscriptEntry::SkillActivation { expanded, .. } = &mut entry {
+            *expanded = true;
+        }
         let lines = entry
             .render(60, &TuiTheme::default())
             .into_iter()
             .map(|l| l.text().clone())
             .collect::<Vec<_>>();
-        assert_eq!(lines[0], "✦ Skill activated: executing-plans");
-        assert!(lines[1].starts_with("━"));
-        assert!(
-            !lines
-                .iter()
-                .any(|l| l.contains("Execute a plan task-by-task."))
-        );
-        assert!(!lines.iter().any(|l| l.contains("args:")));
-    }
 
-    #[test]
-    fn skill_activation_omits_body_when_args_are_whitespace() {
-        let entry = TranscriptEntry::skill_activated(
-            "executing-plans",
-            Some("Execute a plan task-by-task.".to_owned()),
-            Some("   ".to_owned()),
-        );
-        let lines = entry
-            .render(60, &TuiTheme::default())
-            .into_iter()
-            .map(|l| l.text().clone())
-            .collect::<Vec<_>>();
-        assert!(
-            !lines
-                .iter()
-                .any(|l| l.contains("Execute a plan task-by-task."))
-        );
-        assert!(!lines.iter().any(|l| l.contains("args:")));
+        assert_eq!(lines[0], "✦ Skill activated: skill_one, skill_two");
+        assert!(lines.contains(&"bonjour".to_owned()));
+        assert!(lines.contains(&"amigo".to_owned()));
+        assert!(!lines.iter().any(|l| l.contains("ctrl+o to expand")));
     }
 
     #[test]

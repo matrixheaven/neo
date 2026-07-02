@@ -163,7 +163,7 @@ fn image_generation_request() -> ImageGenerationRequest {
         model: ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "gpt-image-1".to_owned(),
-            api: ApiKind::OpenAiResponses,
+            api: ApiKind::OpenAiResponse,
             capabilities: ModelCapabilities::vision_chat(),
         },
         prompt: "draw a quiet terminal".to_owned(),
@@ -392,7 +392,7 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -475,7 +475,7 @@ async fn openai_responses_output_item_done_overrides_argument_preview() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -505,7 +505,7 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiCompatible))
+        .stream_chat(request(ApiKind::OpenAi))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -559,7 +559,7 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
     let mut headers = BTreeMap::new();
     headers.insert("x-neo-trace".to_owned(), "trace-1".to_owned());
-    let mut request = request(ApiKind::OpenAiResponses);
+    let mut request = request(ApiKind::OpenAiResponse);
     request.options = RequestOptions {
         temperature: Some(0.4),
         max_tokens: Some(128),
@@ -621,7 +621,7 @@ async fn openai_responses_client_retries_retryable_http_responses() {
         ]),
     ]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::OpenAiResponses);
+    let mut request = request(ApiKind::OpenAiResponse);
     request.options.retries = Some(1);
 
     let events = client
@@ -653,7 +653,7 @@ async fn openai_responses_client_serializes_reasoning_effort_with_encrypted_hand
         }),
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::OpenAiResponses);
+    let mut request = request(ApiKind::OpenAiResponse);
     request.options.reasoning_effort = Some(ReasoningEffort::High);
 
     client
@@ -680,7 +680,7 @@ async fn openai_responses_client_replays_signed_reasoning_items() {
         }),
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::OpenAiResponses);
+    let mut request = request(ApiKind::OpenAiResponse);
     request.messages.insert(
         1,
         ChatMessage::Assistant {
@@ -728,7 +728,7 @@ async fn openai_responses_client_can_disable_reasoning_replay() {
         }),
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::OpenAiResponses);
+    let mut request = request(ApiKind::OpenAiResponse);
     request.options.replay_reasoning = false;
     request.messages.insert(
         1,
@@ -813,7 +813,7 @@ async fn openai_responses_client_persists_reasoning_item_signature_from_stream()
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -872,7 +872,7 @@ async fn openai_responses_client_streams_reasoning_summary_events() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -939,7 +939,7 @@ async fn openai_responses_client_streams_reasoning_summary_text_done_without_del
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1030,7 +1030,7 @@ async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_s
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1128,7 +1128,7 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_s
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1224,7 +1224,7 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_it
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1301,7 +1301,7 @@ async fn openai_responses_client_keeps_streamed_summary_when_done_text_is_non_pr
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1346,7 +1346,7 @@ async fn openai_responses_client_serializes_image_parts() {
 
     client
         .stream_chat(image_request(
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ImageData::Url("https://example.test/cat.png".to_owned()),
         ))
         .collect::<Vec<_>>()
@@ -1378,7 +1378,7 @@ async fn openai_responses_client_serializes_base64_image_parts_as_data_urls() {
 
     client
         .stream_chat(image_request(
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ImageData::Base64("iVBORw0KGgo=".to_owned()),
         ))
         .collect::<Vec<_>>()
@@ -1402,7 +1402,7 @@ async fn openai_responses_client_rejects_assistant_image_parts_without_posting()
 
     let err = client
         .stream_chat(assistant_image_request(
-            ApiKind::OpenAiResponses,
+            ApiKind::OpenAiResponse,
             ImageData::Base64("iVBORw0KGgo=".to_owned()),
         ))
         .collect::<Vec<_>>()
@@ -1430,7 +1430,7 @@ async fn openai_responses_client_marks_failed_streams_as_error_end() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -1463,7 +1463,7 @@ async fn openai_responses_client_marks_incomplete_streams_as_error_end() {
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
-        .stream_chat(request(ApiKind::OpenAiResponses))
+        .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()

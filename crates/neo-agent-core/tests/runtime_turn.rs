@@ -1683,6 +1683,70 @@ async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
 }
 
 #[tokio::test]
+async fn runtime_stops_on_tool_use_with_empty_tool_calls() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_empty_tools".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_should_not_run".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "followup".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        ToolRegistry::new(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("try a tool"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("empty tool use should fail closed in-band");
+
+    assert!(events.contains(&AgentEvent::Error {
+        turn: 1,
+        message: "Provider reported tool calls but emitted no structured tool calls".to_owned(),
+        code: None,
+        retry_after: None,
+    }));
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: StopReason::Error,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Error,
+        })
+    );
+    assert_eq!(harness.requests().len(), 1);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::MessageStarted { id, .. } if id == "msg_should_not_run"
+    )));
+}
+
+#[tokio::test]
 async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -3488,6 +3552,75 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             ..
         } if id == "tool_1" && stdout.contains("shell-ok") && stderr.is_empty()
     )));
+}
+
+#[tokio::test]
+async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: r#"{"command":"printf shell-ok","cwd":"#.to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let workspace_root = workspace.path().canonicalize().expect("canonicalize");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(&workspace_root)
+            .expect("workspace root"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("run shell"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("shell tool should succeed");
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    let assistant = requests[1]
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            neo_ai::ChatMessage::Assistant { tool_calls, .. } => tool_calls.first(),
+            _ => None,
+        })
+        .expect("assistant tool call replayed");
+    assert_eq!(
+        assistant.raw_arguments, r#"{"command":"printf shell-ok"}"#,
+        "follow-up request must not replay partial JSON tool arguments"
+    );
 }
 
 #[tokio::test]

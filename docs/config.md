@@ -12,7 +12,7 @@ default_model = "openai/gpt-4.1"
 
 # ─── Providers ───
 [providers.openai]
-type = "openai-responses"
+type = "openai_response"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
@@ -23,7 +23,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 # Custom provider with inline API key
 [providers."my-local-llm"]
-type = "openai-compatible"
+type = "openai"
 base_url = "http://localhost:11434/v1"
 api_key = "sk-local-key"
 
@@ -64,9 +64,8 @@ arbitrary name you choose — it can be anything (e.g. `openai`, `anthropic`,
 
 | Type | Wire Protocol | Example Providers |
 |------|--------------|-------------------|
-| `openai-responses` | OpenAI Responses API | OpenAI |
-| `openai-chat` | OpenAI Chat Completions | OpenAI |
-| `openai-compatible` | OpenAI-compatible Chat Completions | OpenRouter, Ollama, vLLM, local LLMs |
+| `openai_response` | OpenAI Responses API | OpenAI |
+| `openai` | OpenAI Chat Completions / OpenAI-compatible Chat Completions | OpenAI, OpenRouter, Ollama, vLLM, local LLMs |
 | `anthropic` | Anthropic Messages API | Anthropic, Amazon Bedrock |
 | `google` | Google Generative AI | Google Gemini |
 
@@ -113,7 +112,7 @@ Each model is defined in a `[models.<alias>]` table. The alias is typically
 neo provider list
 
 # Add a custom provider
-neo provider add my-llm --type openai-compatible --base-url http://localhost:11434/v1 --api-key sk-test
+neo provider add my-llm --type openai --base-url http://localhost:11434/v1 --api-key sk-test
 
 # Remove a provider (also removes its models)
 neo provider remove my-llm

@@ -56,6 +56,46 @@ fn skill_store_with_refactor_skill() -> SkillStore {
     .expect("skill store")
 }
 
+fn skill_store_with_two_prompt_skills() -> SkillStore {
+    SkillStore::load(
+        &[],
+        &[],
+        vec![
+            LoadedSkill {
+                name: "skill_one".to_owned(),
+                root: PathBuf::from("builtin/skill_one"),
+                manifest: SkillManifest {
+                    name: "skill_one".to_owned(),
+                    description: "First skill".to_owned(),
+                    skill_type: SkillType::Prompt,
+                    when_to_use: None,
+                    disable_model_invocation: false,
+                    arguments: Vec::new(),
+                    slash_commands: Vec::new(),
+                },
+                body: "ONE: $ARGUMENTS".to_owned(),
+                source: SkillSource::Builtin,
+            },
+            LoadedSkill {
+                name: "skill_two".to_owned(),
+                root: PathBuf::from("builtin/skill_two"),
+                manifest: SkillManifest {
+                    name: "skill_two".to_owned(),
+                    description: "Second skill".to_owned(),
+                    skill_type: SkillType::Prompt,
+                    when_to_use: None,
+                    disable_model_invocation: false,
+                    arguments: Vec::new(),
+                    slash_commands: Vec::new(),
+                },
+                body: "TWO: $ARGUMENTS".to_owned(),
+                source: SkillSource::Builtin,
+            },
+        ],
+    )
+    .expect("skill store")
+}
+
 fn pending_approval_response(
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
 ) -> PendingApprovalResponse {
@@ -647,7 +687,7 @@ fn neo_tui_draw_replays_finished_tool_before_prompt_chrome() {
                 [neo_agent_core::AgentToolCall {
                     id: "tool-1".to_owned(),
                     name: "Read".to_owned(),
-                    arguments: serde_json::json!({ "path": "README.md" }),
+                    raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -1560,6 +1600,32 @@ async fn event_loop_opens_slash_completion_after_typing_slash() {
 }
 
 #[tokio::test]
+async fn event_loop_opens_slash_completion_after_whitespace() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    controller.type_text("foo ");
+    controller
+        .handle_input_event(InputEvent::Insert('/'))
+        .await
+        .expect("inline slash insert opens completion");
+
+    assert_eq!(controller.chrome().prompt().text, "foo /");
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::PromptCompletion(_))
+    ));
+}
+
+#[tokio::test]
 async fn slash_completion_includes_btw_command() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -1893,6 +1959,153 @@ async fn slash_picker_commands_do_not_enter_streaming_mode() {
             "{command} should leave the prompt empty"
         );
     }
+}
+
+#[tokio::test]
+async fn inline_multi_skill_directives_activate_one_card_then_submit_stripped_prompt() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.skill_store = Some(skill_store_with_two_prompt_skills());
+    let stripped = "\
+foo
+bar
+test test test
+bonjour
+hello
+test test test test
+hola
+amigo";
+    let prompt = "\
+foo
+bar
+/skill:skill_one test test test
+bonjour
+hello
+/skill:skill_two test test test test
+hola
+amigo";
+
+    controller.type_text(prompt);
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("skill activation succeeds");
+
+    assert_eq!(controller.chrome().prompt().text, stripped);
+    assert!(requests.lock().expect("requests lock").is_empty());
+    let entries = transcript_entries(&controller);
+    let skill_cards = entries
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::SkillActivation { .. }))
+        .count();
+    assert_eq!(skill_cards, 1);
+    assert!(matches!(
+        entries.last(),
+        Some(TranscriptEntry::SkillActivation { names, body, .. })
+            if names == &vec!["skill_one".to_owned(), "skill_two".to_owned()] && body == stripped
+    ));
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("stripped prompt submits");
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].prompt, vec![Content::text(stripped)]);
+    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(
+        skill_context.contains("ONE: test test test"),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("TWO: test test test test"),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.find("ONE:").expect("first skill")
+            < skill_context.find("TWO:").expect("second skill"),
+        "{skill_context}"
+    );
+}
+
+#[tokio::test]
+async fn inline_skill_directive_without_whitespace_prefix_submits_as_plain_prompt() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.skill_store = Some(skill_store_with_two_prompt_skills());
+
+    controller.type_text("abc/skill:skill_one test");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("plain prompt submits");
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text("abc/skill:skill_one test")]
+    );
+    assert_eq!(requests[0].skill_context, None);
+}
+
+#[tokio::test]
+async fn inline_skill_directive_unknown_skill_reports_status_without_submitting() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.skill_store = Some(skill_store_with_two_prompt_skills());
+
+    controller.type_text("foo /skill:missing test");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("unknown skill handled");
+
+    assert!(requests.lock().expect("requests lock").is_empty());
+    assert!(transcript_has_status(
+        &controller,
+        "skill `missing` not found"
+    ));
+    assert_eq!(controller.chrome().prompt().text, "foo /skill:missing test");
 }
 
 #[test]
@@ -4317,7 +4530,7 @@ fn rebuild_transcript_from_session_replays_tool_calls_and_results() {
                 [neo_agent_core::AgentToolCall {
                     id: "tool-1".to_owned(),
                     name: "Read".to_owned(),
-                    arguments: serde_json::json!({ "path": "README.md" }),
+                    raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -5019,7 +5232,7 @@ fn model_picker_items_include_parseable_context_window() {
     let item = model_to_picker_item(&neo_ai::ModelSpec {
         provider: neo_ai::ProviderId("test".to_owned()),
         model: "huge".to_owned(),
-        api: neo_ai::ApiKind::OpenAiResponses,
+        api: neo_ai::ApiKind::OpenAiResponse,
         capabilities: neo_ai::ModelCapabilities::tool_chat().with_max_context_tokens(128_000),
     });
 

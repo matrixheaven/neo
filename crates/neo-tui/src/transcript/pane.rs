@@ -530,6 +530,10 @@ impl TranscriptPane {
                     expanded: thinking_expanded,
                     ..
                 } => *thinking_expanded = expanded,
+                TranscriptEntry::SkillActivation {
+                    expanded: skill_expanded,
+                    ..
+                } => *skill_expanded = expanded,
                 TranscriptEntry::Delegate { component } => component.set_expanded(expanded),
                 TranscriptEntry::DelegateSwarm { component } => component.set_expanded(expanded),
                 TranscriptEntry::Workflow { component } => component.set_expanded(expanded),
@@ -719,6 +723,36 @@ impl TranscriptPane {
             if self.should_suppress_delegate_tool_run(turn, kind, &id) {
                 self.transcript.suppress_tool_run(&id);
             }
+        }
+    }
+
+    pub(super) fn mark_unfinished_tools_for_turn(
+        &mut self,
+        turn: u32,
+        status: ToolStatusKind,
+        result: String,
+    ) {
+        let ids = self
+            .tool_call_metadata
+            .iter()
+            .filter(|&(_id, (tool_turn, _tool_name))| *tool_turn == turn)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for id in ids {
+            let Some(tool) = self.transcript.tool_mut(&id) else {
+                continue;
+            };
+            if matches!(
+                tool.status(),
+                ToolStatusKind::Pending | ToolStatusKind::Running
+            ) {
+                tool.set_terminal_status(status, Some(result.clone()));
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_dirty();
         }
     }
 

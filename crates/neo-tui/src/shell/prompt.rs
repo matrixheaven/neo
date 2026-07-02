@@ -765,3 +765,34 @@ fn find_word_forward(text: &str, cursor: usize) -> usize {
 fn is_word_like(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_prefix_after_whitespace_replaces_only_current_slash_token() {
+        let mut prompt = PromptState::new("foo /sk");
+        let prefix = prompt.completion_prefix().expect("completion prefix");
+
+        assert_eq!(prefix.start, 4);
+        assert_eq!(prefix.end, 7);
+        assert_eq!(prefix.text, "/sk");
+
+        let replaced = prompt
+            .replace_completion_prefix(&prefix, "/skill:bar")
+            .expect("replace prefix");
+
+        assert_eq!(replaced, "/skill:bar");
+        assert_eq!(prompt.text, "foo /skill:bar");
+        assert_eq!(prompt.cursor, "foo /skill:bar".chars().count());
+    }
+
+    #[test]
+    fn completion_prefix_without_whitespace_keeps_whole_token() {
+        let prompt = PromptState::new("foo/sk");
+        let prefix = prompt.completion_prefix().expect("completion prefix");
+
+        assert_eq!(prefix.text, "foo/sk");
+    }
+}

@@ -273,7 +273,7 @@ default_model = "minimax-cn-coding-plan/MiniMax-M2"
 default_provider = "deepseek"
 
 [providers.deepseek]
-type = "openai-chat"
+type = "openai"
 base_url = "https://deepseek.example/v1"
 
 [providers."minimax-cn-coding-plan"]
@@ -303,7 +303,7 @@ default_model = "deepseek-v4-pro"
 default_provider = "deepseek"
 
 [providers.deepseek]
-type = "openai-chat"
+type = "openai"
 base_url = "https://deepseek.example/v1"
 "#,
         );
@@ -319,7 +319,7 @@ default_model = "fast"
 default_provider = "openai"
 
 [providers.openai]
-type = "openai-responses"
+type = "openai_response"
 
 [models.fast]
 provider = "openai"
@@ -384,7 +384,7 @@ model = "gpt-4.1"
         let openai = ModelSpec {
             provider: ProviderId("openai".to_owned()),
             model: "gpt-4.1".to_owned(),
-            api: ApiKind::OpenAiResponses,
+            api: ApiKind::OpenAiResponse,
             capabilities: ModelCapabilities::tool_chat(),
         };
         let anthropic = ModelSpec {

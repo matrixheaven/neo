@@ -727,7 +727,7 @@ mod tests {
                 "providers": [{
                     "id": "openai",
                     "name": "OpenAI",
-                    "wire": "openai-responses",
+                    "wire": "openai_response",
                     "model_count": 1,
                 }],
             })
@@ -741,7 +741,7 @@ mod tests {
         let output = super::format_catalog_provider_detail("openai", &entry, false)
             .expect("text catalog detail");
 
-        assert!(output.contains("OpenAI (openai)  wire=openai-responses  models=1"));
+        assert!(output.contains("OpenAI (openai)  wire=openai_response  models=1"));
         assert!(output.contains("gpt-4.1"));
         assert!(output.contains("GPT 4.1"));
         assert!(output.contains("ctx=1000000"));
@@ -755,7 +755,7 @@ mod tests {
             api: Some(format!("https://api.{id}.test/v1")),
             env: Vec::new(),
             npm: None,
-            explicit_type: supported.then(|| "openai-responses".to_owned()),
+            explicit_type: supported.then(|| "openai_response".to_owned()),
             models: BTreeMap::from([(
                 "gpt-4.1".to_owned(),
                 catalog::CatalogModel {

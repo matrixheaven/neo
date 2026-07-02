@@ -119,8 +119,8 @@ use input::ExitConfirmation;
 
 mod prompt_edit;
 use prompt_edit::{
-    content_to_display_text, expand_slash_skill, prompt_edit_for_action, skill_invocation_args,
-    split_skill_invocation,
+    InlineSkillDirectives, content_to_display_text, expand_slash_skill,
+    parse_inline_skill_directives, prompt_edit_for_action,
 };
 
 mod dialog_results;

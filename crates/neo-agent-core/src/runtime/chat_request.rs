@@ -15,6 +15,9 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
+    if let Some(review_context) = review_mode_message(context) {
+        messages.push(review_context.to_chat_message());
+    }
     if config.goal_mode_authoring {
         messages.push(goal_mode_authoring_message().to_chat_message());
     }
@@ -85,10 +88,61 @@ fn goal_mode_authoring_message() -> AgentMessage {
 
 fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     let workspace_root = config.workspace_root.as_ref()?;
+    let permission_mode = config
+        .live_permission_mode
+        .read()
+        .map_or(config.permission_mode, |guard| *guard);
     Some(AgentMessage::system_text(format!(
-        "<environment_context>\n<cwd>{}</cwd>\n</environment_context>\n\nShell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `cwd` field for a workspace subdirectory.",
-        workspace_root.display()
+        "Runtime Context\n\
+         - cwd: {}\n\
+         - permission mode: {}\n\
+         - tool execution mode: {}\n\
+         - Read may accept absolute paths when the user asks for them or the task requires them.\n\
+         - Write, Edit, Bash, and Terminal are governed by Neo's permission layer; write and shell tools are constrained by workspace permissions.\n\
+         - Shell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `cwd` field for a workspace subdirectory.\n\
+         - Network access is not a separate Neo prompt guarantee; it depends on the available tools, host environment, and permission decisions.\n\
+         - If an approval is denied, treat it as the user's decision and choose a different safe path instead of retrying the same request.",
+        workspace_root.display(),
+        permission_mode.label(),
+        tool_execution_mode_label(config.tool_execution_mode)
     )))
+}
+
+fn tool_execution_mode_label(mode: crate::ToolExecutionMode) -> &'static str {
+    match mode {
+        crate::ToolExecutionMode::Sequential => "sequential",
+        crate::ToolExecutionMode::Parallel => "parallel",
+    }
+}
+
+fn review_mode_message(context: &AgentContext) -> Option<AgentMessage> {
+    let latest_user_text = context
+        .messages()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            AgentMessage::User { .. } => Some(message.text()),
+            _ => None,
+        })?;
+    if !looks_like_review_request(&latest_user_text) {
+        return None;
+    }
+    Some(AgentMessage::system_text(
+        "Review Mode\n\
+         The latest user request asks for a review. Findings come first, ordered by severity. \
+         Focus on bugs, behavioral regressions, security risks, missing tests, and concrete maintainability issues. \
+         Ground findings in file and line references when possible. Keep summaries and change descriptions secondary."
+            .to_owned(),
+    ))
+}
+
+fn looks_like_review_request(text: &str) -> bool {
+    let normalized = text.to_lowercase();
+    normalized.contains("review")
+        || normalized.contains("code review")
+        || normalized.contains("审查")
+        || normalized.contains("评审")
+        || normalized.contains("代码审查")
 }
 
 fn prompt_cache_key(config: &AgentConfig) -> Option<String> {
@@ -269,6 +323,54 @@ mod tests {
         assert_eq!(
             request.options.session_id.as_deref(),
             Some("session_00000000-0000-4000-8000-000000000123")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_request_injects_runtime_context_with_permission_and_boundaries() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let config = AgentConfig::for_model(tool_model())
+            .with_system_prompt("Base system")
+            .with_workspace_root(temp.path())
+            .expect("workspace root")
+            .with_permission_mode(crate::PermissionMode::Yolo);
+        let context = AgentContext::new();
+
+        let request = chat_request(&config, &context).await;
+        let system_text = system_texts(&request);
+
+        assert!(system_text.contains("Runtime Context"), "{system_text}");
+        assert!(
+            system_text.contains("permission mode: yolo"),
+            "{system_text}"
+        );
+        assert!(
+            system_text.contains("tool execution mode: parallel"),
+            "{system_text}"
+        );
+        assert!(
+            system_text.contains("write and shell tools are constrained by workspace permissions"),
+            "{system_text}"
+        );
+        assert!(
+            system_text.contains("Read may accept absolute paths"),
+            "{system_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_request_adds_review_mode_reminder_for_review_requests() {
+        let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("Please review this change"));
+
+        let request = chat_request(&config, &context).await;
+        let system_text = system_texts(&request);
+
+        assert!(system_text.contains("Review Mode"), "{system_text}");
+        assert!(
+            system_text.contains("Findings come first, ordered by severity"),
+            "{system_text}"
         );
     }
 }

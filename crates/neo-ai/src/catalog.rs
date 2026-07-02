@@ -154,7 +154,7 @@ pub fn infer_api_type(entry: &CatalogEntry) -> Option<ApiType> {
         return Some(ApiType::Google);
     }
     if npm.contains("openai") {
-        return Some(ApiType::OpenAiChat);
+        return Some(ApiType::OpenAi);
     }
     None
 }
@@ -279,7 +279,7 @@ mod tests {
             explicit_type: None,
             models: BTreeMap::new(),
         };
-        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAiChat));
+        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAi));
     }
 
     #[test]
@@ -290,10 +290,10 @@ mod tests {
             api: None,
             env: vec![],
             npm: None,
-            explicit_type: Some("openai-responses".to_owned()),
+            explicit_type: Some("openai_response".to_owned()),
             models: BTreeMap::new(),
         };
-        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAiResponses));
+        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAiResponse));
     }
 
     #[test]

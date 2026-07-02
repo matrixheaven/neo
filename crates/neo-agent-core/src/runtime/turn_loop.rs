@@ -176,6 +176,21 @@ pub(super) async fn run_agent_turn(
             break;
         };
         let tool_calls = model_tool_calls.clone();
+        if tool_calls.is_empty() {
+            emitter.emit(AgentEvent::Error {
+                turn,
+                message: "Provider reported tool calls but emitted no structured tool calls"
+                    .to_owned(),
+                code: None,
+                retry_after: None,
+            });
+            emitter.emit(AgentEvent::TurnFinished {
+                turn,
+                stop_reason: StopReason::Error,
+            });
+            final_stop_reason = StopReason::Error;
+            break;
+        }
 
         let Some(registry) = &tools else {
             break;

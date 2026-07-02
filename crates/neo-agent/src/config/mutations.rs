@@ -443,7 +443,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
-                provider_type: Some(ApiType::OpenAiResponses),
+                provider_type: Some(ApiType::OpenAiResponse),
                 base_url: Some("https://api.openai.test/v1".to_owned()),
                 api_key: Some("secret".to_owned()),
                 api_key_env: None,
@@ -460,7 +460,7 @@ mod tests {
 
         let text = list_providers(&config, false).expect("provider text");
         assert!(text.contains("openai"));
-        assert!(text.contains("type=openai-responses"));
+        assert!(text.contains("type=openai_response"));
         assert!(text.contains("models=1"));
         assert!(text.contains("cred=api_key"));
         assert!(text.contains("current"));
@@ -473,7 +473,7 @@ mod tests {
             serde_json::json!({
                 "providers": [{
                     "id": "openai",
-                    "type": "openai-responses",
+                    "type": "openai_response",
                     "base_url": "https://api.openai.test/v1",
                     "credential": "api_key",
                     "model_count": 1,
@@ -493,7 +493,7 @@ mod tests {
 default_model = "openai/gpt-4.1"
 
 [providers.openai]
-type = "openai-responses"
+type = "openai_response"
 base_url = "https://api.openai.test/v1"
 
 [providers.anthropic]
@@ -531,7 +531,7 @@ default_model = "fast"
 default_provider = "openai"
 
 [providers.openai]
-type = "openai-responses"
+type = "openai_response"
 
 [models.fast]
 provider = "openai"
@@ -556,7 +556,7 @@ model = "gpt-4.1"
 default_model = "openai/old"
 
 [providers.openai]
-type = "openai-chat"
+type = "openai"
 base_url = "https://old.example/v1"
 
 [models."openai/old"]
@@ -587,7 +587,7 @@ model = "stays"
         assert!(written.contains("default_model = \"openai/gpt-large\""));
         assert!(written.contains("default_provider = \"openai\""));
         assert!(written.contains("[providers.openai]"));
-        assert!(written.contains("type = \"openai-responses\""));
+        assert!(written.contains("type = \"openai_response\""));
         assert!(written.contains("api_key = \"inline-key\""));
         assert!(written.contains("[models.\"openai/gpt-small\"]"));
         assert!(written.contains("[models.\"openai/gpt-large\"]"));
@@ -611,7 +611,7 @@ default_model = "deepseek/old"
 default_provider = "deepseek"
 
 [providers.deepseek]
-type = "openai-chat"
+type = "openai"
 base_url = "https://deepseek.example/v1"
 
 [models."deepseek/old"]
@@ -663,7 +663,7 @@ model = "old"
             api: Some("https://api.openai.test/v1".to_owned()),
             env: vec!["OPENAI_API_KEY".to_owned()],
             npm: None,
-            explicit_type: Some("openai-responses".to_owned()),
+            explicit_type: Some("openai_response".to_owned()),
             models: BTreeMap::from([
                 (
                     "gpt-small".to_owned(),

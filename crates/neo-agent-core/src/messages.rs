@@ -238,7 +238,11 @@ impl AgentMessage {
                 stop_reason: _,
             } => ChatMessage::Assistant {
                 content: content.iter().map(to_content_part).collect(),
-                tool_calls: tool_calls.iter().cloned().map(Into::into).collect(),
+                tool_calls: tool_calls
+                    .iter()
+                    .map(provider_safe_tool_call)
+                    .map(Into::into)
+                    .collect(),
             },
             Self::ToolResult {
                 tool_call_id,
@@ -266,6 +270,160 @@ impl AgentMessage {
             },
         }
     }
+}
+
+fn provider_safe_tool_call(tool_call: &AgentToolCall) -> AgentToolCall {
+    AgentToolCall {
+        id: tool_call.id.clone(),
+        name: tool_call.name.clone(),
+        raw_arguments: provider_safe_tool_arguments(&tool_call.raw_arguments),
+    }
+}
+
+fn provider_safe_tool_arguments(raw_arguments: &str) -> String {
+    if serde_json::from_str::<serde_json::Value>(raw_arguments).is_ok() {
+        return raw_arguments.to_owned();
+    }
+    let Some(object) = complete_top_level_argument_pairs(raw_arguments) else {
+        return "{}".to_owned();
+    };
+    serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or_else(|_| "{}".to_owned())
+}
+
+fn complete_top_level_argument_pairs(
+    raw: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let raw = raw.trim_start();
+    if !raw.starts_with('{') {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut object = serde_json::Map::new();
+    let mut index = 1;
+    loop {
+        skip_ws_and_commas(bytes, &mut index);
+        if index >= bytes.len() || bytes[index] == b'}' {
+            return Some(object);
+        }
+        let (key, after_key) = parse_json_string(raw, index)?;
+        index = after_key;
+        skip_ws(bytes, &mut index);
+        if bytes.get(index).copied()? != b':' {
+            return Some(object);
+        }
+        index += 1;
+        skip_ws(bytes, &mut index);
+        let value_start = index;
+        let Some(value_end) = complete_json_value_end(raw, value_start) else {
+            return Some(object);
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&raw[value_start..value_end]).ok()?;
+        object.insert(key, value);
+        index = value_end;
+    }
+}
+
+fn skip_ws_and_commas(bytes: &[u8], index: &mut usize) {
+    while let Some(byte) = bytes.get(*index) {
+        if byte.is_ascii_whitespace() || *byte == b',' {
+            *index += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn skip_ws(bytes: &[u8], index: &mut usize) {
+    while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+        *index += 1;
+    }
+}
+
+fn parse_json_string(raw: &str, start: usize) -> Option<(String, usize)> {
+    if raw.as_bytes().get(start).copied()? != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    for (offset, ch) in raw[start + 1..].char_indices() {
+        let pos = start + 1 + offset;
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                let end = pos + ch.len_utf8();
+                let parsed = serde_json::from_str::<String>(&raw[start..end]).ok()?;
+                return Some((parsed, end));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn complete_json_value_end(raw: &str, start: usize) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth = 0_i32;
+    let mut saw_value = false;
+    let mut top_level_string = false;
+    let mut top_level_string_complete = false;
+    let mut top_level_composite = false;
+    let mut top_level_composite_complete = false;
+    for (offset, ch) in raw[start..].char_indices() {
+        let pos = start + offset;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+                if top_level_string && depth == 0 {
+                    top_level_string_complete = true;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                if !saw_value && depth == 0 {
+                    top_level_string = true;
+                }
+                in_string = true;
+                saw_value = true;
+            }
+            '{' | '[' => {
+                if !saw_value && depth == 0 {
+                    top_level_composite = true;
+                }
+                depth += 1;
+                saw_value = true;
+            }
+            '}' | ']' => {
+                if depth == 0 {
+                    return saw_value.then_some(pos);
+                }
+                depth -= 1;
+                if top_level_composite && depth == 0 {
+                    top_level_composite_complete = true;
+                }
+            }
+            ',' if depth == 0 => return saw_value.then_some(pos),
+            c if c.is_ascii_whitespace() => {}
+            _ => saw_value = true,
+        }
+    }
+    if !in_string
+        && depth == 0
+        && saw_value
+        && (top_level_string_complete || top_level_composite_complete)
+    {
+        return Some(raw.len());
+    }
+    None
 }
 
 /// Validate and repair tool-call/tool-result exchanges.
@@ -385,6 +543,44 @@ fn to_content_part(content: &Content) -> ContentPart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_chat_message_repairs_partial_tool_arguments_before_provider_request() {
+        let message = AgentMessage::assistant(
+            vec![],
+            vec![AgentToolCall {
+                id: "tc1".to_owned(),
+                name: "Bash".to_owned(),
+                raw_arguments: r#"{"command":"ls -la","cwd":"#.to_owned(),
+            }],
+            StopReason::ToolUse,
+        );
+
+        let ChatMessage::Assistant { tool_calls, .. } = message.to_chat_message() else {
+            panic!("expected assistant chat message");
+        };
+
+        assert_eq!(tool_calls[0].raw_arguments, r#"{"command":"ls -la"}"#);
+    }
+
+    #[test]
+    fn to_chat_message_replaces_unrecoverable_tool_arguments_before_provider_request() {
+        let message = AgentMessage::assistant(
+            vec![],
+            vec![AgentToolCall {
+                id: "tc1".to_owned(),
+                name: "Bash".to_owned(),
+                raw_arguments: r#"{"command":"ls"#.to_owned(),
+            }],
+            StopReason::ToolUse,
+        );
+
+        let ChatMessage::Assistant { tool_calls, .. } = message.to_chat_message() else {
+            panic!("expected assistant chat message");
+        };
+
+        assert_eq!(tool_calls[0].raw_arguments, "{}");
+    }
 
     #[test]
     fn sanitize_keeps_complete_tool_exchange() {

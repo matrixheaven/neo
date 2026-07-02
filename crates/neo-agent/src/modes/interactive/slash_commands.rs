@@ -8,8 +8,8 @@ use neo_tui::dialogs::HelpPanelCommand;
 use super::InteractiveController;
 use super::task_browser;
 use super::{
-    expand_slash_skill, skill_invocation_args, slash_arg, slash_permission_mode,
-    split_skill_invocation,
+    InlineSkillDirectives, expand_slash_skill, parse_inline_skill_directives, slash_arg,
+    slash_permission_mode,
 };
 
 impl InteractiveController {
@@ -105,8 +105,8 @@ impl InteractiveController {
             self.handle_model_slash_command(alias);
             return true;
         }
-        if let Some(arg) = prompt.strip_prefix("/skill:").map(str::trim) {
-            self.handle_skill_slash_command(arg);
+        if let Some(directives) = parse_inline_skill_directives(prompt) {
+            self.handle_skill_slash_command(directives);
             return true;
         }
         false
@@ -157,11 +157,14 @@ impl InteractiveController {
         }
     }
 
-    fn handle_skill_slash_command(&mut self, arg: &str) {
-        self.clear_submitted_prompt();
-        if arg.is_empty() {
+    fn handle_skill_slash_command(&mut self, directives: InlineSkillDirectives) {
+        if directives
+            .invocations
+            .iter()
+            .any(|invocation| invocation.name.is_empty())
+        {
             self.push_status("Usage: /skill:<name> [args]");
-        } else if let Err(err) = self.handle_skill_invocation(arg) {
+        } else if let Err(err) = self.handle_skill_invocation(directives) {
             self.push_status(format!("Skill error: {err}"));
         }
     }
@@ -192,32 +195,33 @@ impl InteractiveController {
         }
     }
 
-    fn handle_skill_invocation(&mut self, arg: &str) -> Result<()> {
+    fn handle_skill_invocation(&mut self, directives: InlineSkillDirectives) -> Result<()> {
         let skill_store = self
             .skill_store
             .as_ref()
             .context("skill store not loaded")?;
-        let (name, args_str) = split_skill_invocation(arg);
-        let skill = skill_store
-            .get(name)
-            .with_context(|| format!("skill `{name}` not found"))?;
-        let description = skill.manifest.description.clone();
-        let (expanded, raw_arguments) = expand_slash_skill(name, args_str, skill)?;
-        self.push_skill_invocation_entry(name, description, &raw_arguments);
-        self.pending_skill_context = Some(expanded);
-        self.replace_prompt_text(args_str);
+        let mut names = Vec::new();
+        let mut expanded = Vec::new();
+        for invocation in &directives.invocations {
+            let skill = skill_store
+                .get(&invocation.name)
+                .with_context(|| format!("skill `{}` not found", invocation.name))?;
+            let (expanded_skill, _) =
+                expand_slash_skill(&invocation.name, &invocation.args, skill)?;
+            names.push(invocation.name.clone());
+            expanded.push(expanded_skill);
+        }
+
+        self.clear_submitted_prompt();
+        self.push_skill_invocation_entry(names, directives.body.as_str());
+        self.pending_skill_context = Some(expanded.join("\n\n"));
+        self.replace_prompt_text(directives.body.as_str());
         Ok(())
     }
 
-    fn push_skill_invocation_entry(
-        &mut self,
-        name: &str,
-        description: String,
-        raw_arguments: &str,
-    ) {
-        let args = skill_invocation_args(raw_arguments);
+    fn push_skill_invocation_entry(&mut self, names: Vec<String>, body: &str) {
         self.transcript_mut().push_transcript(
-            neo_tui::transcript::TranscriptEntry::skill_activated(name, Some(description), args),
+            neo_tui::transcript::TranscriptEntry::skill_activated(names, body),
         );
     }
 

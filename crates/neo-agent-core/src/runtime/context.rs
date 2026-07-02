@@ -100,8 +100,11 @@ impl AgentContext {
         // Inject the LLM-generated summary as a system message so the model
         // has the compacted context when continuing the conversation.
         let summary_msg = AgentMessage::system_text(format!(
-            "<compaction_summary>\nThe following is a summary of the earlier conversation, \
-             compacted to preserve essential context:\n\n{}\n</compaction_summary>",
+            "<compaction_summary>\n\
+             This is a compaction summary of earlier conversation context. \
+             Use it as background only. Before acting, continue from the newest user request and any unsummarized messages after this summary; \
+             do not answer an older request just because it appears in the summary.\n\n\
+             Summary:\n\n{}\n</compaction_summary>",
             summary.summary
         ));
         kept.insert(0, summary_msg);
@@ -219,5 +222,42 @@ impl AgentContext {
             AgentEvent::TodoUpdated { todos, .. } => self.todos.clone_from(todos),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentMessage, CompactionSummary};
+
+    #[test]
+    fn apply_compaction_injects_resume_guardrails() {
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("Earlier request"));
+
+        context.apply_compaction(CompactionSummary {
+            summary: "Old conversation summary.".to_owned(),
+            tokens_before: 100,
+            tokens_after: 50,
+            first_kept_message_index: 1,
+        });
+
+        let Some(AgentMessage::System { content }) = context.messages().first() else {
+            panic!("expected compaction summary system message");
+        };
+        let text = content
+            .iter()
+            .filter_map(crate::Content::as_text)
+            .collect::<String>();
+
+        assert!(text.contains("compaction summary"));
+        assert!(
+            text.contains("continue from the newest user request"),
+            "{text}"
+        );
+        assert!(
+            text.contains("do not answer an older request just because it appears in the summary"),
+            "{text}"
+        );
     }
 }

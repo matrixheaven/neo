@@ -49,6 +49,43 @@ impl TranscriptPane {
                 self.append_assistant_delta(text);
                 true
             }
+            AgentEvent::MessageFinished {
+                turn,
+                stop_reason: neo_agent_core::StopReason::Error,
+                ..
+            } => {
+                self.mark_unfinished_tools_for_turn(
+                    *turn,
+                    ToolStatusKind::Failed,
+                    "Turn ended before this tool executed".to_owned(),
+                );
+                self.finish_active_text_blocks();
+                true
+            }
+            AgentEvent::TurnFinished {
+                turn,
+                stop_reason: neo_agent_core::StopReason::Error,
+            } => {
+                self.mark_unfinished_tools_for_turn(
+                    *turn,
+                    ToolStatusKind::Failed,
+                    "Turn ended before this tool executed".to_owned(),
+                );
+                self.finish_active_text_blocks();
+                true
+            }
+            AgentEvent::TurnFinished {
+                turn,
+                stop_reason: neo_agent_core::StopReason::Cancelled,
+            } => {
+                self.mark_unfinished_tools_for_turn(
+                    *turn,
+                    ToolStatusKind::Cancelled,
+                    "Turn cancelled before this tool executed".to_owned(),
+                );
+                self.finish_active_text_blocks();
+                true
+            }
             AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. } => {
                 self.finish_active_text_blocks();
                 true
@@ -260,12 +297,17 @@ impl TranscriptPane {
             | AgentEvent::FollowUpQueued { .. }
             | AgentEvent::QueueDrained { .. } => true,
             AgentEvent::Error {
+                turn,
                 message,
                 code,
                 retry_after,
-                ..
             } => {
                 use crate::transcript::entry::StatusSeverity;
+                self.mark_unfinished_tools_for_turn(
+                    *turn,
+                    ToolStatusKind::Failed,
+                    format!("Turn ended before this tool executed: {message}"),
+                );
 
                 let severity = match code.as_deref() {
                     Some(
@@ -598,16 +640,7 @@ impl TranscriptPane {
     }
 
     fn push_skill_activation(&mut self, name: String) {
-        let description = self
-            .skill_store
-            .as_ref()
-            .and_then(|store| store.get(&name))
-            .map(|skill| skill.manifest.description.clone());
-        self.push_transcript(TranscriptEntry::skill_activated(
-            name,
-            description,
-            None::<String>,
-        ));
+        self.push_transcript(TranscriptEntry::skill_activated(vec![name], String::new()));
     }
 
     fn push_goal_card(

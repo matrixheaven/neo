@@ -4,7 +4,7 @@ fn model(provider: &str, name: &str, capabilities: ModelCapabilities) -> ModelSp
     ModelSpec {
         provider: ProviderId(provider.to_owned()),
         model: name.to_owned(),
-        api: ApiKind::OpenAiCompatible,
+        api: ApiKind::OpenAi,
         capabilities,
     }
 }
@@ -77,7 +77,7 @@ fn model_registry_can_seed_common_builtin_chat_models() {
     assert!(registry.get("google", "gemini-2.5-pro").is_some());
     assert_eq!(
         registry.get("openai", "gpt-5-mini").map(|model| &model.api),
-        Some(&ApiKind::OpenAiResponses)
+        Some(&ApiKind::OpenAiResponse)
     );
     assert_eq!(
         registry.default_model().map(|model| model.model.as_str()),

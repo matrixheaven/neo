@@ -986,6 +986,100 @@ fn transcript_pane_marks_declared_tool_call_as_queued_until_execution_starts() {
 }
 
 #[test]
+fn transcript_marks_pending_tool_failed_when_turn_errors() {
+    let mut transcript_pane = TranscriptPane::new(80, 12);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Bash".to_owned(),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"command":"echo hi"}"#.to_owned(),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "Provider reported tool calls but emitted no structured tool calls".to_owned(),
+        code: None,
+        retry_after: None,
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 80, 12);
+    assert!(frame.iter().any(|line| line.contains("Failed Bash")));
+    assert!(!frame.iter().any(|line| line.contains("Queued Bash")));
+
+    let state = transcript_pane
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::ToolRun { component } => Some(component.state()),
+            _ => None,
+        })
+        .expect("tool run exists");
+    assert_eq!(state.status, ToolStatusKind::Failed);
+    assert!(
+        state
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("Provider reported tool calls"))
+    );
+}
+
+#[test]
+fn transcript_does_not_render_duplicate_bash_queued_and_used_for_same_id() {
+    let mut transcript_pane = TranscriptPane::new(80, 16);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        json_fragment: r#"{"command":"echo hi"}"#.to_owned(),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        command: "echo hi".to_owned(),
+        cwd: std::path::PathBuf::from("/tmp"),
+        origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        exit_code: Some(0),
+        stdout: "hi\n".to_owned(),
+        stderr: String::new(),
+        truncated: false,
+        origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
+        outcome: neo_agent_core::ShellCommandOutcome::Completed,
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 80, 16);
+    assert_eq!(
+        frame
+            .iter()
+            .filter(|line| {
+                line.contains("Bash")
+                    && (line.contains("Queued")
+                        || line.contains("Using")
+                        || line.contains("Used")
+                        || line.contains("Failed"))
+            })
+            .count(),
+        1,
+        "same tool id should render one Bash card: {frame:?}"
+    );
+    assert!(frame.iter().any(|line| line.contains("Used Bash")));
+    assert!(!frame.iter().any(|line| line.contains("Queued Bash")));
+}
+
+#[test]
 fn transcript_pane_records_tool_execution_updates_on_existing_run() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 

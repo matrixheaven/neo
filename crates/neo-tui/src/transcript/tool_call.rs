@@ -123,6 +123,18 @@ impl ToolCallComponent {
         self.streaming_started_at = None;
     }
 
+    pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) {
+        self.state.result = result;
+        self.state.details = None;
+        self.state.exit_code = None;
+        self.state.status = status;
+        self.progress_lines.clear();
+        self.live_output.clear();
+        self.dropped_live_output_lines = 0;
+        self.live_output_chars = 0;
+        self.streaming_started_at = None;
+    }
+
     #[must_use]
     pub const fn status(&self) -> ToolStatusKind {
         self.state.status

@@ -53,13 +53,13 @@ fn reasoning_policy_auto_is_deterministic_and_model_capability_aware() {
     let reasoning_model = ModelSpec {
         provider: ProviderId("openai".to_owned()),
         model: "gpt-reasoning".to_owned(),
-        api: ApiKind::OpenAiResponses,
+        api: ApiKind::OpenAiResponse,
         capabilities: ModelCapabilities::reasoning_chat(),
     };
     let plain_model = ModelSpec {
         provider: ProviderId("openai".to_owned()),
         model: "gpt-plain".to_owned(),
-        api: ApiKind::OpenAiResponses,
+        api: ApiKind::OpenAiResponse,
         capabilities: ModelCapabilities::tool_chat(),
     };
 
@@ -87,12 +87,12 @@ fn reasoning_policy_auto_is_deterministic_and_model_capability_aware() {
 fn reasoning_continuation_strips_opaque_thinking_across_provider_or_api_boundaries() {
     let origin = ReasoningContinuation {
         provider: ProviderId("openai".to_owned()),
-        api: ApiKind::OpenAiResponses,
+        api: ApiKind::OpenAiResponse,
     };
     let same_target = ModelSpec {
         provider: ProviderId("openai".to_owned()),
         model: "gpt-reasoning".to_owned(),
-        api: ApiKind::OpenAiResponses,
+        api: ApiKind::OpenAiResponse,
         capabilities: ModelCapabilities::reasoning_chat(),
     };
     let cross_provider_target = ModelSpec {

@@ -1,6 +1,6 @@
 use futures::stream::BoxStream;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{AiError, RequestOptions};
 
@@ -9,29 +9,25 @@ pub struct ProviderId(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ApiKind {
-    OpenAiResponses,
-    OpenAiChatCompletions,
+    OpenAiResponse,
+    OpenAi,
     AnthropicMessages,
     GoogleGenerativeAi,
-    OpenAiCompatible,
     Local,
 }
 
 /// Provider protocol type — the user-facing type declared in `config.toml`
 /// `[providers.<id>].type`. It determines which wire-protocol client is used.
 /// This is the config-level counterpart of [`ApiKind`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum ApiType {
     /// `OpenAI` Responses API (`/responses` endpoint).
-    #[serde(rename = "openai-responses")]
-    OpenAiResponses,
-    /// `OpenAI` Chat Completions — third-party compatible endpoints.
-    #[serde(rename = "openai-compatible")]
+    #[serde(rename = "openai_response")]
+    OpenAiResponse,
+    /// `OpenAI` Chat Completions compatible endpoint.
+    #[serde(rename = "openai")]
     #[default]
-    OpenAiCompatible,
-    /// `OpenAI` Chat Completions — native `OpenAI` endpoint.
-    #[serde(rename = "openai-chat")]
-    OpenAiChat,
+    OpenAi,
     /// Anthropic Messages API.
     #[serde(rename = "anthropic")]
     Anthropic,
@@ -40,33 +36,35 @@ pub enum ApiType {
     Google,
 }
 
+impl<'de> Deserialize<'de> for ApiType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_config_str(&value)
+            .ok_or_else(|| serde::de::Error::custom(provider_type_error_message(value.as_str())))
+    }
+}
+
 impl ApiType {
     /// Convert to the internal [`ApiKind`] used by `ModelSpec`.
     #[must_use]
     pub const fn to_api_kind(self) -> ApiKind {
         match self {
-            Self::OpenAiResponses => ApiKind::OpenAiResponses,
-            Self::OpenAiCompatible => ApiKind::OpenAiCompatible,
-            Self::OpenAiChat => ApiKind::OpenAiChatCompletions,
+            Self::OpenAiResponse => ApiKind::OpenAiResponse,
+            Self::OpenAi => ApiKind::OpenAi,
             Self::Anthropic => ApiKind::AnthropicMessages,
             Self::Google => ApiKind::GoogleGenerativeAi,
         }
     }
 
     /// Parse from a config string (case-insensitive, kebab-case preferred).
-    /// Accepts both `"openai-responses"` and `"OpenAiResponses"` style names.
     #[must_use]
     pub fn from_config_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "openai-responses" | "openairesponses" => Some(Self::OpenAiResponses),
-            "openai-compatible" | "openaicompatible" | "openai-completions" => {
-                Some(Self::OpenAiCompatible)
-            }
-            "openai-chat"
-            | "openaichat"
-            | "openai-chat-completions"
-            | "openaichatcompletions"
-            | "openai" => Some(Self::OpenAiChat),
+            "openai_response" => Some(Self::OpenAiResponse),
+            "openai" => Some(Self::OpenAi),
             "anthropic" | "anthropic-messages" | "anthropicmessages" => Some(Self::Anthropic),
             "google" | "google-generative-ai" | "googlegenerativeai" | "google-genai" => {
                 Some(Self::Google)
@@ -79,12 +77,27 @@ impl ApiType {
     #[must_use]
     pub const fn as_config_str(self) -> &'static str {
         match self {
-            Self::OpenAiResponses => "openai-responses",
-            Self::OpenAiCompatible => "openai-compatible",
-            Self::OpenAiChat => "openai-chat",
+            Self::OpenAiResponse => "openai_response",
+            Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::Google => "google",
         }
+    }
+}
+
+fn provider_type_error_message(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "openai-chat" | "openai-compatible" | "openai-completions" | "openai-responses"
+    ) {
+        format!(
+            "provider type '{value}' has been removed; use 'openai' for Chat Completions/OpenAI-compatible providers or 'openai_response' for the Responses API"
+        )
+    } else {
+        format!(
+            "unknown provider type '{value}'; expected 'openai', 'openai_response', 'anthropic', or 'google'"
+        )
     }
 }
 
@@ -94,12 +107,8 @@ mod tests {
 
     #[test]
     fn api_type_config_strings_are_canonical_kebab_case() {
-        assert_eq!(ApiType::OpenAiResponses.as_config_str(), "openai-responses");
-        assert_eq!(
-            ApiType::OpenAiCompatible.as_config_str(),
-            "openai-compatible"
-        );
-        assert_eq!(ApiType::OpenAiChat.as_config_str(), "openai-chat");
+        assert_eq!(ApiType::OpenAiResponse.as_config_str(), "openai_response");
+        assert_eq!(ApiType::OpenAi.as_config_str(), "openai");
         assert_eq!(ApiType::Anthropic.as_config_str(), "anthropic");
         assert_eq!(ApiType::Google.as_config_str(), "google");
     }
@@ -107,9 +116,8 @@ mod tests {
     #[test]
     fn api_type_config_strings_round_trip() {
         for api_type in [
-            ApiType::OpenAiResponses,
-            ApiType::OpenAiCompatible,
-            ApiType::OpenAiChat,
+            ApiType::OpenAiResponse,
+            ApiType::OpenAi,
             ApiType::Anthropic,
             ApiType::Google,
         ] {
@@ -118,6 +126,32 @@ mod tests {
                 Some(api_type)
             );
         }
+    }
+
+    #[test]
+    fn api_type_accepts_only_openai_and_openai_response() {
+        assert_eq!(ApiType::from_config_str("openai"), Some(ApiType::OpenAi));
+        assert_eq!(
+            ApiType::from_config_str("openai_response"),
+            Some(ApiType::OpenAiResponse)
+        );
+
+        for removed in [
+            "openai-chat",
+            "openai-compatible",
+            "openai-completions",
+            "openai-responses",
+        ] {
+            assert_eq!(ApiType::from_config_str(removed), None);
+        }
+    }
+
+    #[test]
+    fn removed_openai_provider_types_report_migration_hint() {
+        let err = serde_json::from_str::<ApiType>(r#""openai-compatible""#).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("has been removed"), "{message}");
+        assert!(message.contains("openai_response"), "{message}");
     }
 }
 
