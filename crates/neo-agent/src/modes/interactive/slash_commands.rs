@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use neo_tui::dialogs::HelpPanelCommand;
 
 use super::InteractiveController;
 use super::task_browser;
@@ -54,6 +55,7 @@ impl InteractiveController {
             }
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
+            "/help" => self.open_help_panel(),
             "/mcp" => self.open_mcp_manager().await,
             "/tasks" => self.show_background_tasks().await,
             "/compact" => {
@@ -70,6 +72,14 @@ impl InteractiveController {
         }
         self.clear_submitted_prompt();
         true
+    }
+
+    fn open_help_panel(&mut self) {
+        let commands = super::session_completion_items(self.skill_store.as_ref())
+            .into_iter()
+            .map(|item| HelpPanelCommand::new(item.value, item.description))
+            .collect();
+        self.tui.chrome_mut().open_help_panel(commands);
     }
 
     pub(super) async fn show_background_tasks(&mut self) {

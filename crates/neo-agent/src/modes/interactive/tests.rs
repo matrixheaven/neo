@@ -1933,6 +1933,19 @@ fn slash_completion_descriptions_hide_internal_metadata() {
 }
 
 #[test]
+fn slash_completions_include_help_command() {
+    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
+        .expect("completions resolve");
+    let help = completions
+        .iter()
+        .find(|item| item.value == "/help")
+        .expect("missing /help completion");
+
+    assert_eq!(help.label, "/help");
+    assert_eq!(help.description.as_deref(), Some("Show help information"));
+}
+
+#[test]
 fn verbose_startup_mentions_local_keybinding_overrides() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
@@ -2066,6 +2079,58 @@ async fn event_loop_slash_resume_opens_local_session_picker() {
     ));
     assert!(controller.chrome().prompt().text.is_empty());
     assert!(requests.lock().expect("recorded requests").is_empty());
+}
+
+#[tokio::test]
+async fn slash_help_opens_help_panel_overlay() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let captured = std::sync::Arc::clone(&captured);
+            async move {
+                captured.lock().expect("recorded requests").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+
+    controller.type_text("/help");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("slash help command runs locally");
+
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::HelpPanel(_))
+    ));
+    assert!(controller.chrome().prompt().text.is_empty());
+    assert!(requests.lock().expect("recorded requests").is_empty());
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageDown))
+        .await
+        .expect("scroll help panel");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageDown))
+        .await
+        .expect("scroll help panel again");
+
+    let snapshot = controller.render_snapshot();
+    assert!(
+        snapshot.contains("help · Esc / Enter / q close"),
+        "{snapshot}"
+    );
+    assert!(snapshot.contains("/help"), "{snapshot}");
+    assert!(snapshot.contains("/ask"), "{snapshot}");
 }
 
 #[test]
