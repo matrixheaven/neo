@@ -47,7 +47,7 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     // tool_calls but no matching tool results.  This guards against incomplete
     // trailing tool turns and against compaction boundaries that accidentally
     // orphan such a message.
-    let context_messages = sanitize_tool_exchange_messages(context_messages);
+    let context_messages = sanitize_tool_exchange_messages(&context_messages);
     messages.extend(context_messages.iter().map(|message| {
         if config.replay_reasoning {
             message.to_chat_message()

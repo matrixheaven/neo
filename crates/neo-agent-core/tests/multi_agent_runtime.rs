@@ -409,6 +409,7 @@ async fn delegate_emits_foreground_events() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -538,6 +539,7 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn delegate_streams_child_activity_updates_before_finish() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -868,7 +870,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
             AgentActivityKind::Tool {
                 id, summary, phase, ..
             } => Some((id.as_str(), summary.as_deref(), *phase)),
-            _ => None,
+            AgentActivityKind::Text { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1000,6 +1002,7 @@ fn latest_tool_output(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {

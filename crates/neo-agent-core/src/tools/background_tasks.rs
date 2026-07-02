@@ -1194,12 +1194,13 @@ impl Tool for TaskOutputTool {
                     swarm.aggregate.timed_out,
                 );
                 for child in &swarm.children {
-                    content.push_str(&format!(
+                    let _ = writeln!(
+                        content,
                         "\n- index: {} agent_id: {} status: {}",
                         child.item_index,
                         child.agent.id.as_str(),
                         child.agent.state.as_str(),
-                    ));
+                    );
                 }
                 return Ok(ToolResult::ok(content)
                     .with_details(super::multi_agent_format::swarm_details(&swarm)));
@@ -1252,7 +1253,7 @@ impl Tool for TaskStopTool {
             if input.task_id.starts_with("swarm_") {
                 match ctx.multi_agent.cancel_swarm(&input.task_id) {
                     Ok(swarm) => {
-                        let _ = ctx
+                        let () = ctx
                             .background_tasks
                             .cancel_delegate_swarm(&input.task_id, swarm.clone())
                             .await;

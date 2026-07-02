@@ -21,12 +21,11 @@ pub(super) async fn maybe_compact(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) {
+    const MIN_REDUCTION_TOKENS: usize = 1024;
     let max_rounds = config
         .compaction
         .as_ref()
-        .map(|s| s.max_rounds)
-        .unwrap_or(5);
-    const MIN_REDUCTION_TOKENS: usize = 1024;
+        .map_or(5, |s| s.max_rounds);
 
     for round in 0..max_rounds {
         let Some(trigger) = evaluate_compaction_need(config, emitter) else {
@@ -149,7 +148,7 @@ fn evaluate_compaction_need(
     // for event emission while still referencing the pre-compaction history.
     // Drop any trailing incomplete tool turn first so it is not treated as a
     // safe suffix boundary.
-    let messages = sanitize_tool_exchange_messages(emitter.context.messages().to_vec());
+    let messages = sanitize_tool_exchange_messages(emitter.context.messages());
     let max_context_tokens = super::config::effective_max_context_tokens(config);
     let used_tokens = super::estimate_messages_tokens(&messages);
 
@@ -284,8 +283,7 @@ fn spawn_summary_task(
     let max_retry_attempts = config
         .compaction
         .as_ref()
-        .map(|s| s.max_retry_attempts)
-        .unwrap_or(5);
+        .map_or(5, |s| s.max_retry_attempts);
     let progress_tx_for_task = progress_tx.clone();
     tokio::spawn(async move {
         let result = compaction::generate_with_retry(
@@ -345,7 +343,7 @@ async fn run_summary_progress_loop(
                 let stream_percent = 15 + ((summary_chars.min(target_summary_chars) * 70)
                     .div_ceil(target_summary_chars))
                     .min(70);
-                progress_percent = progress_percent.max(stream_percent as u8);
+                progress_percent = progress_percent.max(u8::try_from(stream_percent).unwrap_or(u8::MAX));
                 if progress_percent != last_emitted_percent {
                     last_emitted_percent = progress_percent;
                     emitter.emit(AgentEvent::CompactionProgress {
@@ -379,7 +377,7 @@ async fn run_summary_progress_loop(
         let stream_percent = 15
             + ((summary_chars.min(target_summary_chars) * 70).div_ceil(target_summary_chars))
                 .min(70);
-        progress_percent = progress_percent.max(stream_percent as u8);
+        progress_percent = progress_percent.max(u8::try_from(stream_percent).unwrap_or(u8::MAX));
         if progress_percent != last_emitted_percent {
             last_emitted_percent = progress_percent;
             emitter.emit(AgentEvent::CompactionProgress {
@@ -428,7 +426,8 @@ async fn apply_compaction_result(
     // Smoothly animate from the streamed cap to 100% so the user does not see
     // a frozen bar followed by an abrupt jump to complete.
     let animation_steps: u8 = 15;
-    let step = ((100 - progress_percent) as f32 / f32::from(animation_steps)).ceil() as u8;
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let step = (f32::from(100 - progress_percent) / f32::from(animation_steps)).ceil() as u8;
     for _ in 0..animation_steps {
         if progress_percent >= 100 {
             break;

@@ -116,7 +116,7 @@ pub(super) fn enter_plan_mode_state(config: &AgentConfig) -> String {
     }
 }
 
-/// After EnterPlanMode runs and the plan file has been created, inject the plan
+/// After `EnterPlanMode` runs and the plan file has been created, inject the plan
 /// file path into the tool result so the model knows where to write its plan.
 /// Must run *after* [`enter_plan_mode_state`] and *before*
 /// [`append_tool_result_messages`].

@@ -81,6 +81,11 @@ impl CompactionStrategy {
         if max_tokens == 0 {
             return false;
         }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let threshold = (f64::from(u32::try_from(max_tokens).unwrap_or(u32::MAX))
             * self.trigger_ratio) as usize;
         used_tokens >= threshold || self.should_use_reserved_context(used_tokens, max_tokens)
@@ -224,6 +229,11 @@ pub fn compute_compact_count(
                 if can_split_after(messages, split_index) {
                     best_n = Some(split_index + 1);
                 }
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    clippy::cast_precision_loss
+                )]
                 let reaches_max = recent_messages >= strategy.max_recent_messages
                     || (max_context_tokens > 0
                         && recent_size
@@ -282,6 +292,11 @@ pub fn reduce_compact_on_overflow(
     min_reduction_ratio: f64,
     max_context_tokens: usize,
 ) -> usize {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let min_reduced_size = ((max_context_tokens as f64) * min_reduction_ratio).ceil() as usize;
     let mut reduced_size = 0usize;
     let mut best_n: Option<usize> = None;
@@ -606,7 +621,7 @@ where
         let prefix = &messages[..compacted_count];
         let result =
             generate_compaction_summary(model, config, prefix, instruction, cancel_token, |len| {
-                on_progress(len)
+                on_progress(len);
             })
             .await;
 
@@ -1032,47 +1047,7 @@ mod tests {
         // The integration is verified by the multi-round compaction tests in
         // compaction_trigger.rs (Task 7). This test is a compilation marker:
         // if the function signature changes, this fails to compile.
-        type RetryOutput = Result<(String, usize), CompactionError>;
-        type RetryFuture<'a> =
-            std::pin::Pin<Box<dyn std::future::Future<Output = RetryOutput> + Send + 'a>>;
-
-        struct GenerateWithRetryArgs<'a> {
-            model: &'a Arc<dyn ModelClient>,
-            config: &'a AgentConfig,
-            messages: &'a [AgentMessage],
-            strategy: &'a CompactionStrategy,
-            max_context_tokens: usize,
-            instruction: Option<&'a str>,
-            cancel_token: &'a CancellationToken,
-            max_retry_attempts: u32,
-            on_progress: &'a (dyn Fn(usize) + Send + Sync),
-        }
-
-        fn _assert_signature<'a>(args: GenerateWithRetryArgs<'a>) -> RetryFuture<'a> {
-            let GenerateWithRetryArgs {
-                model,
-                config,
-                messages,
-                strategy,
-                max_context_tokens,
-                instruction,
-                cancel_token,
-                max_retry_attempts,
-                on_progress,
-            } = args;
-
-            Box::pin(generate_with_retry(
-                model,
-                config,
-                messages,
-                strategy,
-                max_context_tokens,
-                instruction,
-                cancel_token,
-                max_retry_attempts,
-                on_progress,
-            ))
-        }
+        //
         // If this compiles, the signature is correct.
     }
 
@@ -1134,7 +1109,7 @@ mod tests {
             user_msg("task 2"),
             assistant_with_tools(vec![tool_call("tc1")]),
         ];
-        let messages = crate::sanitize_tool_exchange_messages(messages);
+        let messages = crate::sanitize_tool_exchange_messages(&messages);
         let strategy = CompactionStrategy::default();
         let count = compute_compact_count(&messages, CompactionSource::Manual, &strategy, 0);
         // After dropping the unresolved trailing assistant, manual compaction can

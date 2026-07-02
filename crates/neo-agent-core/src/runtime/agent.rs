@@ -1,3 +1,8 @@
+// Internal sub-module re-exports. Each `*` imports deliberately brings the
+// full surface into scope (orchestrator file); refactoring each to a named
+// import would be churn with no semantic benefit.
+#![allow(clippy::wildcard_imports)]
+
 use std::sync::Arc;
 
 use futures::{StreamExt, stream};

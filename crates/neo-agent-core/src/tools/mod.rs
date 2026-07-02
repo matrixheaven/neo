@@ -143,13 +143,13 @@ pub struct ToolContext {
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
     pub background_tasks: BackgroundTaskManager,
-    /// Shared multi-agent runtime for Delegate and DelegateSwarm tools.
+    /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
-    /// Parent runtime config used to construct real child AgentRuntime instances.
+    /// Parent runtime config used to construct real child `AgentRuntime` instances.
     pub child_config: Option<AgentConfig>,
-    /// Parent model client shared by child AgentRuntime instances.
+    /// Parent model client shared by child `AgentRuntime` instances.
     pub child_model: Option<Arc<dyn ModelClient>>,
-    /// Parent tool registry shared by child AgentRuntime instances.
+    /// Parent tool registry shared by child `AgentRuntime` instances.
     pub child_tools: Option<Arc<ToolRegistry>>,
     /// Current parent turn for lifecycle events emitted by tools.
     pub current_turn: Option<u32>,

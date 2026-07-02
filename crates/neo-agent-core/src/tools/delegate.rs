@@ -69,6 +69,7 @@ impl Tool for DelegateTool {
         schema_with_role_guide::<DelegateRequest>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let request: DelegateRequest = parse_input(self.name(), input)?;
@@ -212,6 +213,7 @@ impl Tool for DelegateSwarmTool {
         schema_with_role_guide::<DelegateSwarmRequest>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let request = parse_delegate_swarm_input(self.name(), input)?;
@@ -266,7 +268,7 @@ impl Tool for DelegateSwarmTool {
                     })?;
                 initial_children.push(SwarmChildSnapshot {
                     item_index,
-                    item: format!("resume:{}", agent_id),
+                    item: format!("resume:{agent_id}"),
                     agent: agent_snapshot,
                 });
                 item_index += 1;
@@ -318,9 +320,7 @@ impl Tool for DelegateSwarmTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "swarm_id: {}\nkind: delegate-swarm\nstatus: running\nitems: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
-                    swarm_id,
-                    total_children,
+                    "swarm_id: {swarm_id}\nkind: delegate-swarm\nstatus: running\nitems: {total_children}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status."
                 ))
                 .with_details(json!({
                     "kind": "delegate_swarm",
@@ -386,6 +386,7 @@ fn parse_delegate_swarm_input(
     parse_input(tool, input)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_swarm_children(
     runtime: crate::multi_agent::MultiAgentRuntime,
     deps: ChildRuntimeDeps,

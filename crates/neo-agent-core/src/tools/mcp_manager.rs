@@ -664,6 +664,7 @@ impl McpConnectionManager {
     }
 
     /// Poll any finished connect/reconnect tasks and update entry state.
+    #[allow(clippy::too_many_lines)]
     async fn poll_finished_connections(&self) {
         let mut completed_connects = Vec::new();
         let mut completed_reconnects = Vec::new();
@@ -1160,7 +1161,7 @@ impl super::Tool for McpAuthenticateTool {
         &self.exposed_name
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Starts OAuth authentication for this MCP server and returns an authorization URL. Callback completion and reconnect are not wired in core yet."
     }
 
@@ -1643,7 +1644,7 @@ mod tests {
         let result = tool.execute(&ctx, input.clone()).await.unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(result.content, format!("mock-echo:echo:{input}"),);
+        assert_eq!(result.content, format!("mock-echo:echo:{input}"));
     }
 
     #[tokio::test]

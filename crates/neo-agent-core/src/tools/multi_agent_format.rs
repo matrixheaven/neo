@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 
 use crate::multi_agent::{
@@ -91,7 +93,7 @@ pub(crate) fn agent_details(
 }
 
 pub(crate) fn delegate_result_content(agent: &AgentSnapshot, context: DelegateContext) -> String {
-    let mut content = format!(
+    let mut summary_text = format!(
         "agent_id: {}\nname: {}\nstatus: {}\nrun_index: {}\nsummary_scope: current_run\ncontext_mode: {}",
         agent.id.as_str(),
         agent.display_name.as_str(),
@@ -100,12 +102,12 @@ pub(crate) fn delegate_result_content(agent: &AgentSnapshot, context: DelegateCo
         context_mode_label(context),
     );
     if let Some(previous) = agent.previous_status {
-        content.push_str(&format!("\nprevious_status: {}", previous.as_str()));
+        let _ = writeln!(summary_text, "\nprevious_status: {}", previous.as_str());
     }
     if let Some(outcome) = &agent.outcome {
-        content.push_str(&format!("\nsummary: {}", outcome.summary));
+        let _ = writeln!(summary_text, "\nsummary: {}", outcome.summary);
     }
-    content
+    summary_text
 }
 
 pub(crate) fn swarm_details(swarm: &SwarmSnapshot) -> Value {

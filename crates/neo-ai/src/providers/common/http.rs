@@ -161,6 +161,6 @@ mod tests {
         };
         let d = compute_backoff_delay(&err, 0);
         // Retry-After of 10s should be capped at RETRY_MAX_MS (5s)
-        assert_eq!(d, std::time::Duration::from_millis(5_000));
+        assert_eq!(d, std::time::Duration::from_secs(5));
     }
 }

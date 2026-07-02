@@ -1,3 +1,7 @@
+// `effective_cwd` / `effective_cmd` share an `effective_` prefix by design —
+// they are the resolved Windows-vs-Unix pair after path translation.
+#![allow(clippy::similar_names)]
+
 use std::{fmt::Write, path::PathBuf, process::Stdio, sync::Arc, sync::LazyLock, time::Duration};
 
 use schemars::JsonSchema;

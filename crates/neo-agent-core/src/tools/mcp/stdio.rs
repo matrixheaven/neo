@@ -15,7 +15,7 @@ pub struct StdioConfig {
     pub env: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
     /// Kept for API compatibility; the actual startup timeout is owned by
-    /// `connect_one` in `mcp_manager.rs` so that serve + list_tools share a
+    /// `connect_one` in `mcp_manager.rs` so that serve + `list_tools` share a
     /// single deadline.
     pub startup_timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,

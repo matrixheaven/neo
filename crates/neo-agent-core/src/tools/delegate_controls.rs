@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use base64::Engine;
@@ -187,6 +188,9 @@ impl DelegateListCursorQuery {
     }
 }
 
+// Pass-by-ref kept for caller convenience (`iter().map(include_label)`); making
+// the enum `Copy` is more invasive than this one-liner deserves.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn include_label(include: &DelegateListInclude) -> String {
     match include {
         DelegateListInclude::Meta => "meta",
@@ -323,6 +327,7 @@ impl Tool for ListDelegatesTool {
         schema::<ListDelegatesInput>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: ListDelegatesInput = parse_input(self.name(), input)?;
@@ -333,7 +338,10 @@ impl Tool for ListDelegatesTool {
                 });
             }
             let include_completed =
-                input.include_completed || input.state.is_some_and(|s| s.is_terminal());
+                input.include_completed
+                    || input
+                        .state
+                        .is_some_and(crate::multi_agent::AgentLifecycleState::is_terminal);
             let cursor_query = DelegateListCursorQuery::from_input(&input, include_completed);
             let offset = parse_list_cursor(self.name(), input.cursor.as_deref(), &cursor_query)?;
             let limit = input.limit;
@@ -469,14 +477,14 @@ impl Tool for ListDelegatesTool {
             let mut content = if page_rows.is_empty() {
                 let mut content = "No delegates found.\n".to_owned();
                 for step in &empty_next_steps {
-                    content.push_str(&format!("next_step: {step}\n"));
+                    let _ = writeln!(content, "next_step: {step}");
                 }
                 content
             } else {
                 format!("total: {total}\n")
             };
             if let Some(cursor) = &next_cursor {
-                content.push_str(&format!("next_cursor: {cursor}\n"));
+                let _ = writeln!(content, "next_cursor: {cursor}");
             }
             let rows: Vec<_> = page_rows.iter().map(|row| row.json.clone()).collect();
             for row in &page_rows {
@@ -501,7 +509,7 @@ impl Tool for ListDelegatesTool {
                         DelegateListKind::Swarm => "swarm",
                         DelegateListKind::All => "all",
                     },
-                    "state": input.state.map(|state| state.as_str()),
+                    "state": input.state.map(crate::multi_agent::AgentLifecycleState::as_str),
                     "state_scope": state_scope_label(input.state_scope),
                 },
                 "delegates": rows,
@@ -546,6 +554,7 @@ impl Tool for WaitDelegateTool {
         schema::<WaitDelegateInput>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: WaitDelegateInput = parse_input(self.name(), input)?;
@@ -711,7 +720,7 @@ impl Tool for InterruptDelegateTool {
             if input.id.starts_with("swarm_") {
                 match ctx.multi_agent.cancel_swarm(&input.id) {
                     Ok(swarm) => {
-                        let _ = ctx
+                        let () = ctx
                             .background_tasks
                             .cancel_delegate_swarm(&input.id, swarm.clone())
                             .await;
@@ -754,7 +763,7 @@ impl Tool for InterruptDelegateTool {
                         DelegateTerminalAction::Interrupt,
                     ));
                 };
-                let _ = ctx
+                let () = ctx
                     .background_tasks
                     .cancel_delegate(&input.id, snapshot.clone())
                     .await;
@@ -825,7 +834,7 @@ impl Tool for MessageDelegateTool {
             if input.id.starts_with("swarm_") {
                 match ctx
                     .multi_agent
-                    .broadcast_live_swarm_message(&input.id, input.message.clone())
+                    .broadcast_live_swarm_message(&input.id, &input.message)
                 {
                     Ok((delivered, skipped)) => {
                         return Ok(ToolResult::ok(format!(
@@ -901,12 +910,13 @@ fn format_swarm_result(swarm: &SwarmSnapshot) -> ToolResult {
         swarm.aggregate.timed_out,
     );
     for child in &swarm.children {
-        content.push_str(&format!(
+        let _ = writeln!(
+            content,
             "\n- index: {} agent_id: {} status: {}",
             child.item_index,
             child.agent.id.as_str(),
             child.agent.state.as_str(),
-        ));
+        );
     }
     ToolResult::ok(content).with_details(super::multi_agent_format::swarm_details(swarm))
 }
@@ -1003,7 +1013,8 @@ mod tests {
         let agent = ctx
             .multi_agent
             .start_foreground_delegate_for_test("calculate 2 + 2");
-        ctx.multi_agent
+        let _ = ctx
+            .multi_agent
             .complete_delegate_for_test(&agent.id, "The answer is 4.");
 
         let message_result = MessageDelegateTool
@@ -1063,7 +1074,8 @@ mod tests {
                 },
             )
             .expect("resume starts");
-        ctx.multi_agent
+        let _ = ctx
+            .multi_agent
             .complete_delegate_for_test(&agent.id, "second run done");
 
         let result = ListDelegatesTool
@@ -1112,7 +1124,8 @@ mod tests {
                 },
             )
             .expect("resume starts");
-        ctx.multi_agent
+        let _ = ctx
+            .multi_agent
             .complete_delegate_for_test(&agent.id, "second run done");
 
         let result = ListDelegatesTool
@@ -1136,7 +1149,8 @@ mod tests {
         let agent = ctx
             .multi_agent
             .start_foreground_delegate_for_test("first run");
-        ctx.multi_agent
+        let _ = ctx
+            .multi_agent
             .complete_delegate_for_test(&agent.id, "first run done");
 
         ctx.multi_agent
@@ -1152,7 +1166,8 @@ mod tests {
                 },
             )
             .expect("second run starts");
-        ctx.multi_agent
+        let _ = ctx
+            .multi_agent
             .complete_delegate_for_test(&agent.id, "second run done");
         ctx.multi_agent
             .start_resume_delegate(

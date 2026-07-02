@@ -119,7 +119,7 @@ pub(super) fn permission_preparation_for_mode(
     let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call);
 
     // 7-8. Cached approvals (persistent prefix rules + session approvals).
-    if let Some(prep) = check_cached_approvals(config, tool_call, &session_scope) {
+    if let Some(prep) = check_cached_approvals(config, tool_call, session_scope.as_ref()) {
         return prep;
     }
 
@@ -172,8 +172,8 @@ fn check_plan_guard(
     None
 }
 
-/// Sections 2-5 — mode/tool-specific early returns: auto-mode AskUserQuestion
-/// deny, background AskUserQuestion run, auto-mode approves-all, EnterPlanMode
+/// Sections 2-5 — mode/tool-specific early returns: auto-mode `AskUserQuestion`
+/// deny, background `AskUserQuestion` run, auto-mode approves-all, `EnterPlanMode`
 /// auto-approve.
 fn check_mode_early_returns(
     tool_call: &AgentToolCall,
@@ -210,7 +210,7 @@ fn check_mode_early_returns(
 fn check_cached_approvals(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    session_scope: &Option<SessionApprovalScope>,
+    session_scope: Option<&SessionApprovalScope>,
 ) -> Option<PermissionPreparation> {
     // Layer 2 — persistent prefix rules (loaded from disk).
     if let Some(argv) = shell_argv_for_prefix_check(config, tool_call)
@@ -238,7 +238,7 @@ fn check_cached_approvals(
     None
 }
 
-/// Sections 9-10 — transition tools: ExitPlanMode and ExitGoalMode. These
+/// Sections 9-10 — transition tools: `ExitPlanMode` and `ExitGoalMode`. These
 /// transitions must never become session-scoped wildcards.
 fn check_transition_tools(
     config: &AgentConfig,

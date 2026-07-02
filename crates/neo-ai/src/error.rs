@@ -127,23 +127,48 @@ mod tests {
     fn is_retryable_for_each_variant() {
         assert!(
             AiError::RateLimit {
-                message: "".into(),
+                message: String::new(),
                 retry_after: Some(Duration::from_secs(5))
             }
             .is_retryable()
         );
-        assert!(AiError::Network { message: "".into() }.is_retryable());
         assert!(
-            AiError::Server {
-                status: 503,
-                message: "".into()
+            AiError::Network {
+                message: String::new()
             }
             .is_retryable()
         );
-        assert!(!AiError::Configuration { message: "".into() }.is_retryable());
-        assert!(!AiError::Auth { message: "".into() }.is_retryable());
-        assert!(!AiError::ContextOverflow { message: "".into() }.is_retryable());
-        assert!(!AiError::Stream { message: "".into() }.is_retryable());
+        assert!(
+            AiError::Server {
+                status: 503,
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::Configuration {
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::Auth {
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::ContextOverflow {
+                message: String::new()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::Stream {
+                message: String::new()
+            }
+            .is_retryable()
+        );
         assert!(!AiError::Cancelled.is_retryable());
     }
 }

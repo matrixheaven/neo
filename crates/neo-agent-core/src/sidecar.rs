@@ -27,7 +27,7 @@ pub const SIDE_QUESTION_SYSTEM_REMINDER: &str = "This is a side-channel conversa
 /// slice is never mutated.
 #[must_use]
 pub fn sidecar_projected_messages(parent: &[AgentMessage]) -> Vec<AgentMessage> {
-    let mut messages = sanitize_tool_exchange_messages(parent.to_vec());
+    let mut messages = sanitize_tool_exchange_messages(parent);
     messages.push(AgentMessage::system_text(SIDE_QUESTION_SYSTEM_REMINDER));
     messages
 }
@@ -77,7 +77,7 @@ mod tests {
         let projected = sidecar_projected_messages(&parent);
 
         assert_eq!(parent, parent_clone, "parent must not be mutated");
-        let texts: Vec<String> = projected.iter().map(|m| m.text()).collect();
+        let texts: Vec<String> = projected.iter().map(AgentMessage::text).collect();
         assert!(texts.iter().any(|t| t == "first"));
         assert!(texts.iter().any(|t| t == "second"));
         assert!(texts.iter().any(|t| t.contains("side-channel")));

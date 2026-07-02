@@ -187,6 +187,7 @@ async fn delegate_background_registers_task() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn task_output_reports_delegate_context_mode_from_current_run() {
     let (registry, ctx) = registry_with_multi_agent();
     let delegate = registry
@@ -285,7 +286,7 @@ async fn task_output_reports_delegate_context_mode_from_current_run() {
         DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
-    resume_ctx
+    let _ = resume_ctx
         .multi_agent
         .complete_delegate_for_test(&original.id, "first run complete");
     let resume_request = DelegateRequest {
@@ -1092,11 +1093,11 @@ struct BlockingProbeTool {
 }
 
 impl Tool for BlockingProbeTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "block_probe"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Test-only blocking probe."
     }
 
@@ -1135,7 +1136,7 @@ async fn list_delegates_can_filter_swarms_and_orders_newest_first() {
             &ctx,
             serde_json::json!({
                 "description": "first swarm",
-                "items": ["a"],
+                "items": [{"title": "a", "value": "a"}],
                 "prompt_template": "inspect {{item}}",
                 "mode": "background"
             }),
@@ -1148,7 +1149,7 @@ async fn list_delegates_can_filter_swarms_and_orders_newest_first() {
             &ctx,
             serde_json::json!({
                 "description": "second swarm",
-                "items": ["b"],
+                "items": [{"title": "b", "value": "b"}],
                 "prompt_template": "inspect {{item}}",
                 "mode": "background"
             }),
@@ -1224,7 +1225,7 @@ async fn wait_and_task_output_return_swarm_aggregate_and_items() {
             &ctx,
             serde_json::json!({
                 "description": "read-only audit",
-                "items": ["core", "tui"],
+                "items": [{"title": "core", "value": "core"}, {"title": "tui", "value": "tui"}],
                 "prompt_template": "Audit {{item}}",
                 "mode": "foreground"
             }),
@@ -1272,7 +1273,7 @@ async fn message_delegate_broadcasts_to_running_swarm_children() {
             &ctx,
             serde_json::json!({
                 "description": "live swarm",
-                "items": ["a", "b"],
+                "items": [{"title": "a", "value": "a"}, {"title": "b", "value": "b"}],
                 "prompt_template": "Wait for follow-up about {{item}}",
                 "mode": "background",
                 "max_concurrency": 2

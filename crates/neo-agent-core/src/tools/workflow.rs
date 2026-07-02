@@ -30,6 +30,7 @@ impl Tool for RunWorkflowTool {
         schema::<RunWorkflowInput>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: RunWorkflowInput = parse_input(self.name(), input)?;

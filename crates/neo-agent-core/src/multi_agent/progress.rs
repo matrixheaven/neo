@@ -1,3 +1,12 @@
+// Cast warnings intentionally suppressed: progress/weight math mixes `usize`
+// counts and elapsed milliseconds with `f32` ratios, which is the entire point
+// of the estimator.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 

@@ -44,7 +44,8 @@ impl McpOAuthService {
         &self.store
     }
 
-    pub async fn has_tokens(&self, identity: &McpOAuthIdentity) -> bool {
+    #[must_use]
+    pub fn has_tokens(&self, identity: &McpOAuthIdentity) -> bool {
         self.store
             .load_tokens(identity)
             .is_ok_and(|tokens| tokens.is_some())
@@ -132,7 +133,7 @@ impl McpOAuthService {
             .ok_or(McpOAuthError::MissingTokens)
     }
 
-    pub async fn invalidate(
+    pub fn invalidate(
         &self,
         identity: &McpOAuthIdentity,
         scope: InvalidateScope,
@@ -208,12 +209,12 @@ impl McpOAuthService {
         ))
     }
 
-    pub async fn persist_rmcp_credentials(
+    pub fn persist_rmcp_credentials(
         &self,
         identity: &McpOAuthIdentity,
-        credentials: StoredCredentials,
+        credentials: &StoredCredentials,
     ) -> Result<(), McpOAuthError> {
-        let Some(tokens) = token_record_from_credentials(&credentials) else {
+        let Some(tokens) = token_record_from_credentials(credentials) else {
             return Err(McpOAuthError::NeedsAuth(
                 "OAuth authorization did not return an access token".to_owned(),
             ));
@@ -227,7 +228,7 @@ impl McpOAuthService {
             .is_none()
         {
             self.store
-                .save_client(identity, &client_record_from_credentials(&credentials))?;
+                .save_client(identity, &client_record_from_credentials(credentials))?;
         }
         Ok(())
     }
@@ -366,8 +367,10 @@ fn token_record_from_credentials(
     let granted_scopes = raw
         .get("scope")
         .and_then(serde_json::Value::as_str)
-        .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| credentials.granted_scopes.clone());
+        .map_or_else(
+            || credentials.granted_scopes.clone(),
+            |scope| scope.split_whitespace().map(str::to_owned).collect(),
+        );
     let token_received_at = credentials.token_received_at.unwrap_or_else(unix_now_secs);
 
     Some(McpOAuthTokenRecord {
@@ -682,7 +685,7 @@ mod tests {
         let (_dir, service, identity) = service();
 
         assert_eq!(service.access_token(&identity).await.unwrap(), None);
-        assert!(!service.has_tokens(&identity).await);
+        assert!(!service.has_tokens(&identity));
     }
 
     #[tokio::test]
@@ -697,7 +700,7 @@ mod tests {
             service.access_token(&identity).await.unwrap(),
             Some("fresh-token".to_owned())
         );
-        assert!(service.has_tokens(&identity).await);
+        assert!(service.has_tokens(&identity));
     }
 
     #[tokio::test]
@@ -866,7 +869,6 @@ mod tests {
 
         service
             .invalidate(&identity, InvalidateScope::TokensOnly)
-            .await
             .unwrap();
 
         assert!(service.store().load_tokens(&identity).unwrap().is_none());
@@ -892,11 +894,9 @@ mod tests {
 
         service
             .invalidate(&identity, InvalidateScope::AllCredentials)
-            .await
             .unwrap();
         service
             .invalidate(&identity, InvalidateScope::AllCredentials)
-            .await
             .unwrap();
 
         assert!(service.store().load_tokens(&identity).unwrap().is_none());
@@ -911,8 +911,7 @@ mod tests {
         let (_dir, service, identity) = service();
 
         service
-            .persist_rmcp_credentials(&identity, stored_credentials("persisted-token", 3600))
-            .await
+            .persist_rmcp_credentials(&identity, &stored_credentials("persisted-token", 3600))
             .unwrap();
 
         let tokens = service.store().load_tokens(&identity).unwrap().unwrap();
@@ -964,8 +963,7 @@ mod tests {
             .unwrap();
 
         service
-            .persist_rmcp_credentials(&identity, stored_credentials("persisted-token", 3600))
-            .await
+            .persist_rmcp_credentials(&identity, &stored_credentials("persisted-token", 3600))
             .unwrap();
 
         let client = service.store().load_client(&identity).unwrap().unwrap();
@@ -979,8 +977,7 @@ mod tests {
         let (_dir, service, identity) = service();
 
         let err = service
-            .persist_rmcp_credentials(&identity, stored_credentials_without_token_response())
-            .await
+            .persist_rmcp_credentials(&identity, &stored_credentials_without_token_response())
             .unwrap_err();
 
         assert!(

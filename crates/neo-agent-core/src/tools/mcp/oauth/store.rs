@@ -294,6 +294,7 @@ fn chmod_file_private(_path: &Path) -> Result<(), McpOAuthError> {
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn store_error(err: io::Error) -> McpOAuthError {
     McpOAuthError::Store(err.to_string())
 }

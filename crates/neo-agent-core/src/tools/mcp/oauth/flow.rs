@@ -53,7 +53,7 @@ impl McpOAuthFlow {
         &self.manager
     }
 
-    pub async fn complete(self, _timeout: Duration) -> Result<(), McpOAuthError> {
+    pub fn complete(self, _timeout: Duration) -> Result<(), McpOAuthError> {
         let Self {
             identity: _,
             service: _,
@@ -192,7 +192,7 @@ mod tests {
             Arc::new(Mutex::new(manager)),
         );
 
-        let err = flow.complete(Duration::from_millis(1)).await.unwrap_err();
+        let err = flow.complete(Duration::from_millis(1)).unwrap_err();
 
         assert!(
             matches!(err, McpOAuthError::Flow(message) if message == "OAuth flow completion is not wired yet")

@@ -59,8 +59,7 @@ fn profiles_carry_non_empty_when_to_use_guidance() {
         let profile = AgentProfile::for_role(role);
         assert!(
             !profile.when_to_use.trim().is_empty(),
-            "role {:?} missing when_to_use",
-            role
+            "role {role:?} missing when_to_use"
         );
     }
 }

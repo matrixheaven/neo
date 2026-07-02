@@ -55,6 +55,7 @@ impl WorkflowHostRecorder {
         steps.push(step);
     }
 
+    #[must_use]
     pub fn calls(&self) -> Vec<String> {
         self.calls
             .lock()
@@ -62,10 +63,12 @@ impl WorkflowHostRecorder {
             .clone()
     }
 
+    #[must_use]
     pub fn steps(&self) -> Vec<super::WorkflowStepRecord> {
         self.steps.lock().expect("workflow steps poisoned").clone()
     }
 
+    #[must_use]
     pub fn reports(&self) -> Vec<serde_json::Value> {
         self.reports
             .lock()

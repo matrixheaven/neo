@@ -96,7 +96,7 @@ impl AgentContext {
         let mut kept = self.messages.split_off(keep_from);
         // Drop any trailing assistant-with-tool-calls whose results were
         // compacted away, so the retained tail is always provider-valid.
-        kept = sanitize_tool_exchange_messages(kept);
+        kept = sanitize_tool_exchange_messages(&kept);
         // Inject the LLM-generated summary as a system message so the model
         // has the compacted context when continuing the conversation.
         let summary_msg = AgentMessage::system_text(format!(
@@ -148,7 +148,7 @@ impl AgentContext {
         for event in events {
             context.apply_replay_event(event);
         }
-        context.messages = sanitize_tool_exchange_messages(context.messages);
+        context.messages = sanitize_tool_exchange_messages(&context.messages);
         context
     }
 

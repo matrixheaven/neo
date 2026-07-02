@@ -148,6 +148,7 @@ impl MultiAgentRuntime {
         Self::default()
     }
 
+    #[must_use]
     pub fn start_foreground_delegate_for_test(&self, task: &str) -> AgentSnapshot {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let display_name: AgentDisplayName = state.names.next_name();
@@ -171,6 +172,7 @@ impl MultiAgentRuntime {
         snapshot
     }
 
+    #[must_use]
     pub fn start_delegate(
         &self,
         task: &str,
@@ -191,6 +193,7 @@ impl MultiAgentRuntime {
         )
     }
 
+    #[must_use]
     pub fn queue_delegate(
         &self,
         task: &str,
@@ -211,6 +214,7 @@ impl MultiAgentRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_delegate(
         &self,
         task: &str,
@@ -246,6 +250,7 @@ impl MultiAgentRuntime {
         snapshot
     }
 
+    #[must_use]
     pub fn mark_delegate_running(&self, id: &AgentId) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
@@ -258,6 +263,7 @@ impl MultiAgentRuntime {
         Some(snapshot.clone())
     }
 
+    #[must_use]
     pub fn complete_delegate(&self, id: &AgentId, update: AgentRunUpdate) -> AgentSnapshot {
         self.update_terminal_delegate(id, AgentLifecycleState::Completed, update, false)
     }
@@ -295,10 +301,12 @@ impl MultiAgentRuntime {
         snapshot.clone()
     }
 
+    #[must_use]
     pub fn fail_delegate(&self, id: &AgentId, update: AgentRunUpdate) -> AgentSnapshot {
         self.update_terminal_delegate(id, AgentLifecycleState::Failed, update, true)
     }
 
+    #[must_use]
     pub fn mark_background_terminal_reason(
         &self,
         id: &AgentId,
@@ -357,6 +365,7 @@ impl MultiAgentRuntime {
         snapshot.clone()
     }
 
+    #[must_use]
     pub fn complete_delegate_for_test(&self, id: &AgentId, summary: &str) -> AgentSnapshot {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state
@@ -420,6 +429,7 @@ impl MultiAgentRuntime {
         state.swarms.insert(swarm_id, snapshot);
     }
 
+    #[must_use]
     pub fn new_swarm_id(&self) -> String {
         loop {
             let id = format!("swarm_{}", Uuid::new_v4().simple());
@@ -434,6 +444,7 @@ impl MultiAgentRuntime {
     ///
     /// Returns `None` and leaves the state unchanged if the agent is already
     /// terminal.
+    #[must_use]
     pub fn cancel_agent(&self, id: &AgentId) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
@@ -452,6 +463,7 @@ impl MultiAgentRuntime {
     ///
     /// Returns `None` and leaves the state unchanged if the agent is already
     /// terminal.
+    #[must_use]
     pub fn cancel_agent_by_id(&self, id: &str) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id)?;
@@ -470,6 +482,7 @@ impl MultiAgentRuntime {
     ///
     /// Returns `None` and leaves the state unchanged if the swarm does not
     /// exist or all of its children are already terminal.
+    #[must_use]
     pub fn cancel_swarm_by_id(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let mut snapshot = state.swarms.get(swarm_id)?.clone();
@@ -567,7 +580,7 @@ impl MultiAgentRuntime {
         agent.state = AgentLifecycleState::Running;
         agent.mode = request.mode;
         agent.context = request.context;
-        agent.task = request.task.clone();
+        agent.task.clone_from(&request.task);
         agent.task_title = derive_title(&request.task, request.title.as_deref());
         agent.run_count = agent.run_count.saturating_add(1);
         agent.live_messages_received = 0;
@@ -616,6 +629,7 @@ impl MultiAgentRuntime {
         }
     }
 
+    #[must_use]
     pub fn deliver_live_message(
         &self,
         agent_id: &str,
@@ -676,6 +690,7 @@ impl MultiAgentRuntime {
     }
 
     /// Create a test swarm with the given children states. Returns the swarm ID.
+    #[must_use]
     pub fn create_swarm_for_test(&self, children: Vec<(&str, AgentLifecycleState)>) -> String {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let swarm_id = format!("swarm-test-{}", state.swarms.len());
@@ -805,7 +820,7 @@ impl MultiAgentRuntime {
     pub fn broadcast_live_swarm_message(
         &self,
         swarm_id: &str,
-        message: String,
+        message: &str,
     ) -> LiveSwarmMessageResult {
         let Some(swarm) = self.swarm_snapshot(swarm_id) else {
             return Err(format!("unknown delegate target `{swarm_id}`"));
@@ -816,7 +831,7 @@ impl MultiAgentRuntime {
             if child.agent.state == AgentLifecycleState::Running {
                 let mailbox_message = super::DelegateMailboxMessage {
                     id: format!("live_{}", uuid::Uuid::new_v4().simple()),
-                    text: message.clone(),
+                    text: message.to_owned(),
                     delivered: false,
                 };
                 if self.deliver_live_message(child.agent.id.as_str(), &mailbox_message) {
@@ -936,10 +951,11 @@ fn now_ms() -> u64 {
 const fn terminal_reason_for_state(state: AgentLifecycleState) -> AgentTerminalReason {
     match state {
         AgentLifecycleState::Completed => AgentTerminalReason::Completed,
-        AgentLifecycleState::Failed => AgentTerminalReason::Error,
+        AgentLifecycleState::Failed
+        | AgentLifecycleState::Queued
+        | AgentLifecycleState::Running => AgentTerminalReason::Error,
         AgentLifecycleState::Cancelled => AgentTerminalReason::CancelledByUser,
         AgentLifecycleState::TimedOut => AgentTerminalReason::TimedOut,
-        AgentLifecycleState::Queued | AgentLifecycleState::Running => AgentTerminalReason::Error,
     }
 }
 
@@ -1072,6 +1088,8 @@ impl MultiAgentRuntime {
         self.finish_child_run(snapshot, started_at, run)
     }
 
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn apply_child_event(
         &self,
         id: &AgentId,
@@ -1205,7 +1223,7 @@ impl MultiAgentRuntime {
                     .is_some_and(|current| current.state == AgentLifecycleState::Cancelled)
                 {
                     let mut current = self.snapshot(&snapshot.id).unwrap_or(snapshot);
-                    current.prior_messages = messages.clone();
+                    current.prior_messages.clone_from(&messages);
                     return ChildRunOutput {
                         snapshot: current,
                         events,
@@ -1608,7 +1626,7 @@ fn upsert_tool_activity(
             if summary.is_some() {
                 *entry_summary = summary;
             }
-            *entry_name = name.to_owned();
+            name.clone_into(entry_name);
             *entry_phase = phase;
             if output.is_some() {
                 *entry_output = output;
@@ -1727,8 +1745,8 @@ fn content_text(content: &[Content]) -> String {
 }
 
 fn compact_line(text: &str) -> String {
-    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX: usize = 96;
+    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() > MAX {
         line = format!(
             "{}...",

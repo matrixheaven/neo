@@ -94,7 +94,7 @@ impl AgentRole {
         AgentRole::Reviewer,
     ];
 
-    /// The snake_case identifier used in tool schemas and persisted snapshots.
+    /// The `snake_case` identifier used in tool schemas and persisted snapshots.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

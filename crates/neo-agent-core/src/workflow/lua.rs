@@ -93,6 +93,7 @@ impl LuaWorkflowRunner {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn install_host_neo_table(
         &self,
         lua: &Lua,
@@ -389,13 +390,13 @@ impl DelegateHandle {
 
 impl mlua::UserData for DelegateHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("id", |_, this, _: ()| Ok(this.agent_id.clone()));
-        methods.add_method("status", |_, this, _: ()| Ok(this.status.clone()));
-        methods.add_method("summary", |_, this, _: ()| Ok(this.summary.clone()));
-        methods.add_method("name", |_, this, _: ()| Ok(this.name.clone()));
-        methods.add_method("result", |lua, this, _: ()| lua.to_value(&this.result));
-        methods.add_method("to_table", |lua, this, _: ()| this.to_lua_table(lua));
-        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, _: ()| {
+        methods.add_method("id", |_, this, ()| Ok(this.agent_id.clone()));
+        methods.add_method("status", |_, this, ()| Ok(this.status.clone()));
+        methods.add_method("summary", |_, this, ()| Ok(this.summary.clone()));
+        methods.add_method("name", |_, this, ()| Ok(this.name.clone()));
+        methods.add_method("result", |lua, this, ()| lua.to_value(&this.result));
+        methods.add_method("to_table", |lua, this, ()| this.to_lua_table(lua));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(this
                 .agent_id
                 .clone()
@@ -440,14 +441,14 @@ impl SwarmHandle {
 
 impl mlua::UserData for SwarmHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("id", |_, this, _: ()| Ok(this.swarm_id.clone()));
-        methods.add_method("status", |_, this, _: ()| Ok(this.status.clone()));
-        methods.add_method("summary", |_, this, _: ()| Ok(this.summary.clone()));
-        methods.add_method("items", |lua, this, _: ()| lua.to_value(&this.items));
-        methods.add_method("results", |lua, this, _: ()| lua.to_value(&this.items));
-        methods.add_method("has_failures", |_, this, _: ()| Ok(this.has_failures));
-        methods.add_method("to_table", |lua, this, _: ()| this.to_lua_table(lua));
-        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, _: ()| {
+        methods.add_method("id", |_, this, ()| Ok(this.swarm_id.clone()));
+        methods.add_method("status", |_, this, ()| Ok(this.status.clone()));
+        methods.add_method("summary", |_, this, ()| Ok(this.summary.clone()));
+        methods.add_method("items", |lua, this, ()| lua.to_value(&this.items));
+        methods.add_method("results", |lua, this, ()| lua.to_value(&this.items));
+        methods.add_method("has_failures", |_, this, ()| Ok(this.has_failures));
+        methods.add_method("to_table", |lua, this, ()| this.to_lua_table(lua));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
             Ok(this
                 .swarm_id
                 .clone()

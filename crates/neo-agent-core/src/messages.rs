@@ -278,7 +278,7 @@ impl AgentMessage {
 /// `tool_calls` must be followed by tool messages responding to each
 /// `tool_call_id`".
 #[must_use]
-pub fn sanitize_tool_exchange_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+pub fn sanitize_tool_exchange_messages(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let mut out = Vec::with_capacity(messages.len());
     let mut i = 0;
     while i < messages.len() {
@@ -402,7 +402,7 @@ mod tests {
             AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
             AgentMessage::user_text("thanks"),
         ];
-        let out = sanitize_tool_exchange_messages(messages.clone());
+        let out = sanitize_tool_exchange_messages(&messages);
         assert_eq!(out.len(), 4);
         assert!(matches!(&out[1], AgentMessage::Assistant { .. }));
     }
@@ -422,7 +422,7 @@ mod tests {
             ),
             AgentMessage::user_text("never mind"),
         ];
-        let out = sanitize_tool_exchange_messages(messages);
+        let out = sanitize_tool_exchange_messages(&messages);
         assert_eq!(out.len(), 2);
         assert!(matches!(&out[0], AgentMessage::User { .. }));
         assert!(matches!(&out[1], AgentMessage::User { .. }));
@@ -450,7 +450,7 @@ mod tests {
             AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
             AgentMessage::user_text("stop"),
         ];
-        let out = sanitize_tool_exchange_messages(messages);
+        let out = sanitize_tool_exchange_messages(&messages);
         assert_eq!(out.len(), 1);
         assert!(matches!(&out[0], AgentMessage::User { .. }));
     }
@@ -462,7 +462,7 @@ mod tests {
             AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
             AgentMessage::user_text("bye"),
         ];
-        let out = sanitize_tool_exchange_messages(messages);
+        let out = sanitize_tool_exchange_messages(&messages);
         assert_eq!(out.len(), 2);
         assert!(matches!(&out[0], AgentMessage::User { .. }));
         assert!(matches!(&out[1], AgentMessage::User { .. }));
@@ -484,7 +484,7 @@ mod tests {
             AgentMessage::tool_result("tc2", "Bash", vec![Content::text("orphan")], false),
             AgentMessage::user_text("next"),
         ];
-        let out = sanitize_tool_exchange_messages(messages);
+        let out = sanitize_tool_exchange_messages(&messages);
         assert_eq!(out.len(), 3);
         assert!(matches!(&out[0], AgentMessage::Assistant { .. }));
         assert!(matches!(&out[1], AgentMessage::ToolResult { .. }));

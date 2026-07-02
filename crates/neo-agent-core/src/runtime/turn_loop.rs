@@ -91,7 +91,7 @@ async fn recover_from_overflow(
         let mut guard = config
             .manual_compact_request
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(String::new());
     }
     maybe_compact(model, config, emitter, cancel_token).await;

@@ -117,27 +117,27 @@ pub fn detect_with(probes: &EnvProbes) -> Result<ShellEnv, ShellEnvError> {
     if probes.is_windows {
         detect_windows(probes)
     } else {
-        detect_unix(probes)
+        Ok(detect_unix(probes))
     }
 }
 
-fn detect_unix(probes: &EnvProbes) -> Result<ShellEnv, ShellEnvError> {
+fn detect_unix(probes: &EnvProbes) -> ShellEnv {
     let mut checked = Vec::new();
     for candidate in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"] {
         let path = Path::new(candidate);
         checked.push(candidate.to_owned());
         if (probes.is_file)(path) {
-            return Ok(ShellEnv {
+            return ShellEnv {
                 is_windows: false,
                 shell_path: path.to_path_buf(),
-            });
+            };
         }
     }
     checked.push("/bin/sh".to_owned());
-    Ok(ShellEnv {
+    ShellEnv {
         is_windows: false,
         shell_path: PathBuf::from("/bin/sh"),
-    })
+    }
 }
 
 fn detect_windows(probes: &EnvProbes) -> Result<ShellEnv, ShellEnvError> {
@@ -224,8 +224,8 @@ fn hardcoded_windows_candidates(probes: &EnvProbes) -> Vec<String> {
     if let Some(local_app_data) = (probes.env_get)("LOCALAPPDATA")
         && !local_app_data.trim().is_empty()
     {
-        candidates.push(format!(r"{}\Programs\Git\bin\bash.exe", local_app_data));
-        candidates.push(format!(r"{}\Programs\Git\usr\bin\bash.exe", local_app_data));
+        candidates.push(format!(r"{local_app_data}\Programs\Git\bin\bash.exe"));
+        candidates.push(format!(r"{local_app_data}\Programs\Git\usr\bin\bash.exe"));
     }
 
     candidates

@@ -97,6 +97,7 @@ impl OAuthStreamableHttpClient {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn oauth_error_to_http(err: McpOAuthError) -> OAuthHttpError {
     if err.is_needs_auth() {
         OAuthHttpError::NeedsAuth(err.to_string())
@@ -268,6 +269,7 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
 /// (`StreamableHttpError`, `AuthRequiredError`, etc.) which are confusing in
 /// the TUI.  This helper detects common failure patterns and returns a clear,
 /// actionable message instead.
+#[allow(clippy::needless_pass_by_value)]
 fn friendly_http_init_error(err: rmcp::service::ClientInitializeError) -> McpError {
     let display = err.to_string();
 
