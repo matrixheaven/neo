@@ -1384,9 +1384,6 @@ impl InteractiveController {
             return Ok(());
         }
 
-        for message in steered_messages {
-            self.push_local_user_message(message);
-        }
         Ok(())
     }
 
@@ -1466,12 +1463,12 @@ impl InteractiveController {
         if text.trim().is_empty() {
             return;
         }
-        if self
+        if let Some(position) = self
             .local_user_message_acks
-            .front()
-            .is_some_and(|pending| pending == &text)
+            .iter()
+            .position(|pending| pending == &text)
         {
-            self.local_user_message_acks.pop_front();
+            self.local_user_message_acks.remove(position);
             return;
         }
         self.tui.transcript_mut().push_user_message(text);

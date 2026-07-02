@@ -137,8 +137,8 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
     .with_theme(app.theme())
     .render(content_width);
     if !pending_input.is_empty() {
-        lines.extend(pending_input);
         lines.push(String::new());
+        lines.extend(pending_input);
     }
     let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
@@ -198,8 +198,8 @@ pub fn render_chrome_lines_mut(
     .with_theme(app.theme())
     .render(content_width);
     if !pending_input.is_empty() {
-        lines.extend(pending_input);
         lines.push(String::new());
+        lines.extend(pending_input);
     }
     let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
@@ -661,5 +661,71 @@ mod tests {
         let stripped = crate::primitive::strip_ansi(&render.lines[dropdown_start]);
         assert!(stripped.starts_with('│'));
         assert!(stripped.ends_with('│'));
+    }
+
+    #[test]
+    fn pending_input_preview_spacer_sits_above_preview_not_prompt() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.pending_input_mut().queue_follow_up("queued follow-up");
+
+        let render = render_chrome_lines(&app, 80, 24);
+        let plain = render
+            .lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(line))
+            .collect::<Vec<_>>();
+        let pending_header = plain
+            .iter()
+            .position(|line| line.contains("Queued follow-up inputs"))
+            .expect("pending follow-up preview should render");
+        let prompt_top = plain
+            .iter()
+            .position(|line| line.contains('╭'))
+            .expect("prompt should render");
+
+        assert!(
+            pending_header > 0,
+            "pending preview needs a spacer above it"
+        );
+        assert_eq!(plain[pending_header - 1], "");
+        assert!(prompt_top > pending_header);
+        assert_ne!(
+            plain[prompt_top - 1],
+            "",
+            "pending preview should sit flush against the prompt box"
+        );
+    }
+
+    #[test]
+    fn mutable_pending_input_preview_spacer_sits_above_preview_not_prompt() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.pending_input_mut().queue_steer("steer now");
+
+        let render = render_chrome_lines_mut(&mut app, 80, 24);
+        let plain = render
+            .lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(line))
+            .collect::<Vec<_>>();
+        let pending_header = plain
+            .iter()
+            .position(|line| line.contains("Messages to be submitted after next tool call"))
+            .expect("pending steer preview should render");
+        let prompt_top = plain
+            .iter()
+            .position(|line| line.contains('╭'))
+            .expect("prompt should render");
+
+        assert!(
+            pending_header > 0,
+            "pending preview needs a spacer above it"
+        );
+        assert_eq!(plain[pending_header - 1], "");
+        assert!(prompt_top > pending_header);
+        assert_ne!(
+            plain[prompt_top - 1],
+            "",
+            "pending preview should sit flush against the prompt box"
+        );
     }
 }

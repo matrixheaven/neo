@@ -150,7 +150,7 @@ impl Default for RuntimeConfig {
             reasoning_effort: None,
             replay_reasoning: true,
             steering_queue_mode: QueueMode::All,
-            follow_up_queue_mode: QueueMode::All,
+            follow_up_queue_mode: QueueMode::OneAtATime,
             tool_execution_mode: ToolExecutionMode::Parallel,
             compaction: None,
         }
@@ -218,6 +218,7 @@ impl Default for TuiConfig {
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use neo_agent_core::QueueMode;
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
     use tempfile::TempDir;
 
@@ -249,6 +250,13 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.permission_mode, PermissionMode::Ask);
+    }
+
+    #[test]
+    fn config_defaults_follow_up_queue_to_one_turn_at_a_time() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
+        assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::OneAtATime);
     }
 
     /// Regression: the model display label must never stitch the provider onto

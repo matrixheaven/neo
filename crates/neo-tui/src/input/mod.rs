@@ -382,6 +382,41 @@ mod tests {
     }
 
     #[test]
+    fn raw_bracketed_paste_preserves_split_utf8() {
+        let mut parser = InputParser::new();
+        let bytes = "测试".as_bytes();
+        assert!(parser.feed_bytes(b"\x1b[200~").is_empty());
+        assert!(parser.feed_bytes(&bytes[..1]).is_empty());
+        assert!(parser.feed_bytes(&bytes[1..4]).is_empty());
+        let mut tail = bytes[4..].to_vec();
+        tail.extend_from_slice(b"\x1b[201~");
+        assert_eq!(
+            parser.feed_bytes(&tail),
+            vec![InputEvent::Paste("测试".into())]
+        );
+    }
+
+    #[test]
+    fn raw_alt_up_with_keybindings_produces_key_event() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let events = parser.feed_bytes(b"\x1b\x1b[A");
+        assert_eq!(
+            events,
+            vec![InputEvent::Key(KeyId::new("alt+up").expect("valid key"))]
+        );
+    }
+
+    #[test]
+    fn raw_csi_alt_up_with_keybindings_produces_key_event() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let events = parser.feed_bytes(b"\x1b[1;3A");
+        assert_eq!(
+            events,
+            vec![InputEvent::Key(KeyId::new("alt+up").expect("valid key"))]
+        );
+    }
+
+    #[test]
     fn raw_bracketed_paste_then_key() {
         let mut parser = InputParser::new();
         let _ = parser.feed_bytes(b"\x1b[200~paste\x1b[201~");
@@ -505,6 +540,17 @@ mod tests {
         let events = parser.feed_bytes("你".as_bytes());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], InputEvent::Insert('你'));
+    }
+
+    #[test]
+    fn feed_bytes_split_cjk_character_waits_for_complete_utf8() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let bytes = "测".as_bytes();
+        assert!(parser.feed_bytes(&bytes[..1]).is_empty());
+        assert_eq!(
+            parser.feed_bytes(&bytes[1..]),
+            vec![InputEvent::Insert('测')]
+        );
     }
 
     #[test]

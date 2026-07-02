@@ -307,6 +307,7 @@ fn csi_u_simple_regex() -> &'static Regex {
 #[derive(Debug, Clone)]
 pub struct RawInputParser {
     buffer: String,
+    pending_utf8: Vec<u8>,
     paste_mode: bool,
     paste_buffer: String,
     pending_kitty_printable_codepoint: Option<i32>,
@@ -323,6 +324,7 @@ impl RawInputParser {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
+            pending_utf8: Vec::new(),
             paste_mode: false,
             paste_buffer: String::new(),
             pending_kitty_printable_codepoint: None,
@@ -331,18 +333,7 @@ impl RawInputParser {
 
     /// Feed raw stdin bytes and return complete events.
     pub fn feed_bytes(&mut self, data: &[u8]) -> Vec<RawEvent> {
-        // Handle high-byte conversion: a single byte > 127 that is NOT a valid
-        // UTF-8 lead byte represents a terminal meta-key (Alt+key sent as
-        // ESC + key). Convert it to ESC + (byte - 128) for meta-key emulation.
-        // Valid multi-byte UTF-8 characters (e.g. CJK, emoji) are decoded as-is.
-        let str_data = if data.len() == 1 && data[0] >= 0x80 && data[0] < 0xc0 {
-            // 0x80-0xBF are UTF-8 continuation bytes, not valid lead bytes.
-            // A single such byte is a terminal meta-key, not a UTF-8 character.
-            let byte = data[0] - 128;
-            format!("\x1b{}", byte as char)
-        } else {
-            String::from_utf8_lossy(data).into_owned()
-        };
+        let str_data = self.decode_input_bytes(data);
 
         if str_data.is_empty() && self.buffer.is_empty() {
             return Vec::new();
@@ -376,6 +367,52 @@ impl RawInputParser {
         let buf = std::mem::take(&mut self.buffer);
         events.extend(self.process_internal(&buf));
         events
+    }
+
+    fn decode_input_bytes(&mut self, data: &[u8]) -> String {
+        if self.pending_utf8.is_empty() && data.len() == 1 && is_meta_continuation_byte(data[0]) {
+            return meta_byte_to_escape_sequence(data[0]);
+        }
+
+        let mut bytes = std::mem::take(&mut self.pending_utf8);
+        bytes.extend_from_slice(data);
+        let mut output = String::new();
+        let mut offset = 0;
+
+        while offset < bytes.len() {
+            match std::str::from_utf8(&bytes[offset..]) {
+                Ok(valid) => {
+                    output.push_str(valid);
+                    break;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid_end = offset + valid_up_to;
+                        output.push_str(
+                            std::str::from_utf8(&bytes[offset..valid_end])
+                                .expect("valid_up_to must split at a UTF-8 boundary"),
+                        );
+                        offset = valid_end;
+                    }
+
+                    let Some(error_len) = error.error_len() else {
+                        self.pending_utf8.extend_from_slice(&bytes[offset..]);
+                        break;
+                    };
+
+                    let invalid_end = offset + error_len;
+                    if error_len == 1 && is_meta_continuation_byte(bytes[offset]) {
+                        output.push_str(&meta_byte_to_escape_sequence(bytes[offset]));
+                    } else {
+                        output.push('\u{fffd}');
+                    }
+                    offset = invalid_end;
+                }
+            }
+        }
+
+        output
     }
 
     fn process_internal(&mut self, data: &str) -> Vec<RawEvent> {
@@ -447,6 +484,10 @@ impl RawInputParser {
 
     /// Force-flush any buffered incomplete sequences.
     pub fn flush(&mut self) -> Vec<RawEvent> {
+        if !self.pending_utf8.is_empty() {
+            let bytes = std::mem::take(&mut self.pending_utf8);
+            self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+        }
         if self.buffer.is_empty() {
             return Vec::new();
         }
@@ -454,6 +495,15 @@ impl RawInputParser {
         self.pending_kitty_printable_codepoint = None;
         vec![RawEvent::Key(seq)]
     }
+}
+
+fn is_meta_continuation_byte(byte: u8) -> bool {
+    (0x80..0xc0).contains(&byte)
+}
+
+fn meta_byte_to_escape_sequence(byte: u8) -> String {
+    let key = byte - 128;
+    format!("\x1b{}", key as char)
 }
 
 // ===========================================================================

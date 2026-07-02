@@ -21,6 +21,7 @@ pub(super) const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::ToolOutputToggle,
     KeybindingAction::TodoPanelToggle,
     KeybindingAction::ModelPickerOpen,
+    KeybindingAction::EditLastQueuedMessage,
     KeybindingAction::EditorCursorUp,
     KeybindingAction::EditorCursorDown,
     KeybindingAction::EditorCursorLeft,

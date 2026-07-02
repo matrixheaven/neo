@@ -177,7 +177,7 @@ impl AgentConfig {
             replay_reasoning: true,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,
-            follow_up_queue_mode: QueueMode::All,
+            follow_up_queue_mode: QueueMode::OneAtATime,
             tool_execution_mode: ToolExecutionMode::Parallel,
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),

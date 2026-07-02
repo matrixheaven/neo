@@ -7471,7 +7471,7 @@ async fn active_turn_ctrl_s_steers_running_turn() {
 }
 
 #[tokio::test]
-async fn active_turn_ctrl_s_updates_transcript_and_pending_preview_immediately() {
+async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -7508,10 +7508,10 @@ async fn active_turn_ctrl_s_updates_transcript_and_pending_preview_immediately()
         .expect("ctrl+s steers");
 
     assert!(
-        transcript_entries(&controller).iter().any(
+        !transcript_entries(&controller).iter().any(
             |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "steer this")
         ),
-        "Ctrl+S should show the steered user prompt in the transcript immediately"
+        "Ctrl+S should wait for MessageAppended before rendering the steered user prompt"
     );
     assert_eq!(
         controller
@@ -7537,6 +7537,19 @@ async fn active_turn_ctrl_s_updates_transcript_and_pending_preview_immediately()
             .collect::<Vec<_>>(),
         vec!["steer this"],
         "runtime steer ack must not duplicate the local preview"
+    );
+    controller.apply_turn_event(AgentEvent::QueueDrained {
+        kind: neo_agent_core::QueueKind::Steering,
+        count: 1,
+    });
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("steer this"),
+    });
+    assert!(
+        transcript_entries(&controller).iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "steer this")
+        ),
+        "steered user prompt should render when the runtime appends it"
     );
 }
 
@@ -7615,7 +7628,30 @@ async fn active_turn_ctrl_s_steers_queued_follow_ups_before_current_prompt() {
         .collect::<Vec<_>>();
     assert_eq!(
         steered_user_messages,
-        vec!["queued one", "queued two", "current steer"]
+        Vec::<&str>::new(),
+        "promoted steers should not render in the transcript before MessageAppended"
+    );
+
+    for text in ["queued one", "queued two", "current steer"] {
+        controller.apply_turn_event(AgentEvent::MessageAppended {
+            message: AgentMessage::user_text(text),
+        });
+    }
+    let steered_user_messages = transcript_entries(&controller)
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::UserMessage(text)
+                if matches!(text.as_str(), "queued one" | "queued two" | "current steer") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steered_user_messages,
+        vec!["queued one", "queued two", "current steer"],
+        "promoted steers should render in runtime append order"
     );
 }
 
@@ -7752,6 +7788,27 @@ async fn empty_ctrl_s_with_no_queue_reports_noop_status() {
     assert!(
         transcript_has_status(&controller, "No queued follow-up to steer"),
         "empty Ctrl+S with no queue should be visible feedback"
+    );
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
+async fn local_user_message_ack_matches_out_of_order_runtime_append() {
+    let mut controller = running_turn_controller().await;
+
+    controller.push_local_user_message("second");
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("second"),
+    });
+
+    let matching_entries = transcript_entries(&controller)
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "second"))
+        .count();
+    assert_eq!(
+        matching_entries, 1,
+        "runtime ack should consume the matching local user message even when it is not first"
     );
 
     controller.cancel_active_turn().await.expect("cancel turn");
@@ -8092,9 +8149,9 @@ async fn shell_mode_ctrl_s_does_not_steer_and_alt_up_edits_recent_shell_queue() 
         .pending_input_mut()
         .queue_shell_command("shell queued");
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::EditLastQueuedMessage))
+        .handle_input_event(InputEvent::Key(KeyId::new("alt+up").expect("valid key")))
         .await
-        .expect("edit queued shell command");
+        .expect("alt+up edits queued shell command");
 
     assert_eq!(controller.chrome().prompt().text, "shell queued");
     assert_eq!(
