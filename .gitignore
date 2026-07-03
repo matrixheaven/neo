@@ -9,6 +9,7 @@ opencode
 kimi-code
 kimi-code.worktrees/
 .superpowers
+docs/superpowers/
 .mimocode
 .codegraph/
 # Per-machine Cargo overrides (sccache, custom linker). Keep the shared
