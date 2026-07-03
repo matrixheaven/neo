@@ -271,6 +271,7 @@ fn fallback_activity(agent: &AgentSnapshot) -> String {
         AgentLifecycleState::Failed => "Failed".to_owned(),
         AgentLifecycleState::Cancelled => "Cancelled".to_owned(),
         AgentLifecycleState::TimedOut => "Timed out".to_owned(),
+        AgentLifecycleState::Interrupted => "Interrupted".to_owned(),
     }
 }
 

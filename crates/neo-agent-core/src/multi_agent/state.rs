@@ -33,6 +33,7 @@ pub enum AgentLifecycleState {
     Failed,
     Cancelled,
     TimedOut,
+    Interrupted,
 }
 
 impl AgentLifecycleState {
@@ -40,7 +41,7 @@ impl AgentLifecycleState {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut | Self::Interrupted
         )
     }
 
@@ -53,6 +54,7 @@ impl AgentLifecycleState {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -88,6 +90,7 @@ pub enum AgentTerminalReason {
     TimedOut,
     Killed,
     Lost,
+    ProcessExited,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -211,6 +214,7 @@ impl SwarmAggregate {
                 AgentLifecycleState::Failed => aggregate.failed += 1,
                 AgentLifecycleState::Cancelled => aggregate.cancelled += 1,
                 AgentLifecycleState::TimedOut => aggregate.timed_out += 1,
+                AgentLifecycleState::Interrupted => aggregate.cancelled += 1,
             }
         }
         aggregate

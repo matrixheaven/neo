@@ -90,7 +90,10 @@ pub(crate) fn agent_details(
     if include_activity {
         value["activity_tail"] = json!(&agent.activity);
     }
-    if agent.terminal_reason == Some(AgentTerminalReason::Lost) {
+    if matches!(
+        agent.terminal_reason,
+        Some(AgentTerminalReason::Lost) | Some(AgentTerminalReason::ProcessExited)
+    ) {
         value["resume_hint"] = json!(format!(
             "Delegate(resume=\"{}\", task=\"continue\")",
             agent.id.as_str()

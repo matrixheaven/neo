@@ -206,8 +206,11 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
     let lost = restored
         .agent_snapshot(&agent_id)
         .expect("restored agent snapshot");
-    assert_eq!(lost.state, AgentLifecycleState::Failed);
-    assert_eq!(lost.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert_eq!(lost.state, AgentLifecycleState::Interrupted);
+    assert_eq!(
+        lost.terminal_reason,
+        Some(AgentTerminalReason::ProcessExited)
+    );
     assert_eq!(
         lost.outcome.as_ref().map(|outcome| outcome.is_error),
         Some(true)
@@ -227,7 +230,10 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
 
     assert_eq!(resumed.id.as_str(), agent_id);
     assert_eq!(resumed.run_count, 2);
-    assert_eq!(resumed.previous_status, Some(AgentLifecycleState::Failed));
+    assert_eq!(
+        resumed.previous_status,
+        Some(AgentLifecycleState::Interrupted)
+    );
     assert_eq!(resumed.state, AgentLifecycleState::Running);
 }
 
@@ -646,15 +652,18 @@ fn replayed_swarm_marks_running_children_lost_and_refreshes_aggregate() {
     let restored_swarm = restored
         .swarm_snapshot(&swarm_id)
         .expect("restored swarm snapshot");
-    assert_eq!(restored_swarm.state, AgentLifecycleState::Failed);
+    assert_eq!(restored_swarm.state, AgentLifecycleState::Cancelled);
     assert_eq!(restored_swarm.aggregate.total, 2);
     assert_eq!(restored_swarm.aggregate.running, 0);
-    assert_eq!(restored_swarm.aggregate.failed, 1);
+    assert_eq!(restored_swarm.aggregate.cancelled, 1);
     assert_eq!(restored_swarm.aggregate.completed, 1);
 
     let interrupted = &restored_swarm.children[0].agent;
-    assert_eq!(interrupted.state, AgentLifecycleState::Failed);
-    assert_eq!(interrupted.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert_eq!(interrupted.state, AgentLifecycleState::Interrupted);
+    assert_eq!(
+        interrupted.terminal_reason,
+        Some(AgentTerminalReason::ProcessExited)
+    );
     let completed = &restored_swarm.children[1].agent;
     assert_eq!(completed.state, AgentLifecycleState::Completed);
     assert_eq!(
@@ -665,7 +674,7 @@ fn replayed_swarm_marks_running_children_lost_and_refreshes_aggregate() {
         restored
             .agent_snapshot(interrupted.id.as_str())
             .map(|agent| agent.state),
-        Some(AgentLifecycleState::Failed)
+        Some(AgentLifecycleState::Interrupted)
     );
     assert_eq!(
         restored

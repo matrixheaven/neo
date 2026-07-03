@@ -2106,6 +2106,7 @@ fn terminal_reason_for_state(state: AgentLifecycleState) -> Option<AgentTerminal
         AgentLifecycleState::Failed => Some(AgentTerminalReason::Error),
         AgentLifecycleState::Cancelled => Some(AgentTerminalReason::CancelledByUser),
         AgentLifecycleState::TimedOut => Some(AgentTerminalReason::TimedOut),
+        AgentLifecycleState::Interrupted => Some(AgentTerminalReason::ProcessExited),
     }
 }
 

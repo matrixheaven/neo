@@ -162,6 +162,7 @@ enum DelegateDisplayPhase {
     Failed,
     Cancelled,
     TimedOut,
+    Interrupted,
     Lost,
     Killed,
 }
@@ -198,6 +199,7 @@ fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
             AgentLifecycleState::Failed => DelegateDisplayPhase::Failed,
             AgentLifecycleState::Cancelled => DelegateDisplayPhase::Cancelled,
             AgentLifecycleState::TimedOut => DelegateDisplayPhase::TimedOut,
+            AgentLifecycleState::Interrupted => DelegateDisplayPhase::Interrupted,
         },
     }
 }
@@ -209,7 +211,7 @@ fn status_color(phase: DelegateDisplayPhase, theme: &TuiTheme) -> crate::primiti
         | DelegateDisplayPhase::TimedOut
         | DelegateDisplayPhase::Lost
         | DelegateDisplayPhase::Killed => theme.status_error,
-        DelegateDisplayPhase::Cancelled => theme.status_warn,
+        DelegateDisplayPhase::Cancelled | DelegateDisplayPhase::Interrupted => theme.status_warn,
         DelegateDisplayPhase::Queued
         | DelegateDisplayPhase::Running
         | DelegateDisplayPhase::Backgrounded => theme.brand,
@@ -224,7 +226,9 @@ fn status_marker(phase: DelegateDisplayPhase) -> &'static str {
         | DelegateDisplayPhase::TimedOut
         | DelegateDisplayPhase::Lost
         | DelegateDisplayPhase::Killed => "✗",
-        DelegateDisplayPhase::Queued | DelegateDisplayPhase::Cancelled => "◌",
+        DelegateDisplayPhase::Queued
+        | DelegateDisplayPhase::Cancelled
+        | DelegateDisplayPhase::Interrupted => "◌",
     }
 }
 
@@ -237,6 +241,7 @@ fn status_text(phase: DelegateDisplayPhase) -> &'static str {
         DelegateDisplayPhase::Failed => "failed",
         DelegateDisplayPhase::Cancelled => "cancelled",
         DelegateDisplayPhase::TimedOut => "timed out",
+        DelegateDisplayPhase::Interrupted => "interrupted",
         DelegateDisplayPhase::Lost => "lost",
         DelegateDisplayPhase::Killed => "killed",
     }

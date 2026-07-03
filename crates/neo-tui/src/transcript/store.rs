@@ -664,6 +664,7 @@ fn child_progress_rank(state: AgentLifecycleState) -> u8 {
         AgentLifecycleState::Completed
         | AgentLifecycleState::Failed
         | AgentLifecycleState::Cancelled
-        | AgentLifecycleState::TimedOut => 2,
+        | AgentLifecycleState::TimedOut
+        | AgentLifecycleState::Interrupted => 2,
     }
 }

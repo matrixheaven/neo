@@ -485,7 +485,7 @@ impl MultiAgentRuntime {
                 _ => {}
             }
         }
-        mark_restored_running_agents_lost_locked(
+        mark_restored_running_agents_interrupted_locked(
             &mut state,
             &restored_agent_ids,
             &restored_swarm_ids,
@@ -1056,7 +1056,7 @@ fn restore_swarm_snapshot_locked(state: &mut MultiAgentState, snapshot: super::S
     state.swarms.insert(swarm_id, restored);
 }
 
-fn mark_restored_running_agents_lost_locked(
+fn mark_restored_running_agents_interrupted_locked(
     state: &mut MultiAgentState,
     agent_ids: &BTreeSet<String>,
     swarm_ids: &BTreeSet<String>,
@@ -1064,7 +1064,7 @@ fn mark_restored_running_agents_lost_locked(
     let now = now_ms();
     for agent_id in agent_ids {
         if let Some(snapshot) = state.agents.get_mut(agent_id) {
-            mark_restored_snapshot_lost(snapshot, now);
+            mark_restored_snapshot_interrupted(snapshot, now);
         }
     }
     for swarm_id in swarm_ids {
@@ -1075,27 +1075,28 @@ fn mark_restored_running_agents_lost_locked(
             if let Some(agent) = state.agents.get(child.agent.id.as_str()) {
                 child.agent = agent.clone();
             } else {
-                mark_restored_snapshot_lost(&mut child.agent, now);
+                mark_restored_snapshot_interrupted(&mut child.agent, now);
             }
         }
         refresh_swarm(swarm);
     }
 }
 
-fn mark_restored_snapshot_lost(snapshot: &mut AgentSnapshot, now: u64) {
+fn mark_restored_snapshot_interrupted(snapshot: &mut AgentSnapshot, now: u64) {
     if !matches!(
         snapshot.state,
         AgentLifecycleState::Queued | AgentLifecycleState::Running
     ) {
         return;
     }
-    snapshot.state = AgentLifecycleState::Failed;
-    snapshot.terminal_reason = Some(AgentTerminalReason::Lost);
+    snapshot.state = AgentLifecycleState::Interrupted;
+    snapshot.terminal_reason = Some(AgentTerminalReason::ProcessExited);
     snapshot.terminal_at_ms.get_or_insert(now);
     snapshot.updated_at_ms = now;
     snapshot.outcome = Some(AgentTerminalOutcome {
         summary: format!(
-            "Delegate lost because the previous Neo process exited before completion. Resume with Delegate(resume=\"{}\", task=\"continue\").",
+            "Interrupted because the previous Neo process exited. \
+             Resume with Delegate(resume=\"{}\", task=\"continue\").",
             snapshot.id.as_str()
         ),
         is_error: true,
@@ -1170,6 +1171,7 @@ const fn terminal_reason_for_state(state: AgentLifecycleState) -> AgentTerminalR
         | AgentLifecycleState::Running => AgentTerminalReason::Error,
         AgentLifecycleState::Cancelled => AgentTerminalReason::CancelledByUser,
         AgentLifecycleState::TimedOut => AgentTerminalReason::TimedOut,
+        AgentLifecycleState::Interrupted => AgentTerminalReason::ProcessExited,
     }
 }
 
@@ -1618,8 +1620,9 @@ impl MultiAgentRuntime {
         let Some(wire_path) = self.child_wire_path(snapshot.id.as_str()) else {
             return snapshot.prior_messages.clone();
         };
-        crate::session::JsonlSessionReader::replay_messages(wire_path)
+        crate::session::JsonlSessionReader::replay_context(wire_path)
             .await
+            .map(|context| context.messages().to_vec())
             .unwrap_or_else(|_| snapshot.prior_messages.clone())
     }
 

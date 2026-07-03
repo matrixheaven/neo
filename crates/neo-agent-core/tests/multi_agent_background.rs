@@ -385,8 +385,11 @@ async fn restored_running_delegate_is_reported_lost_with_resume_hint() {
     );
 
     let snapshot = restored.agent_snapshot(&id).expect("restored");
-    assert_eq!(snapshot.state, AgentLifecycleState::Failed);
-    assert_eq!(snapshot.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert_eq!(snapshot.state, AgentLifecycleState::Interrupted);
+    assert_eq!(
+        snapshot.terminal_reason,
+        Some(AgentTerminalReason::ProcessExited)
+    );
     assert!(
         snapshot
             .outcome

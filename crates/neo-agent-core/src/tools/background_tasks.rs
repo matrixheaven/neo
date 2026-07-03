@@ -1430,7 +1430,8 @@ fn status_from_agent_state(state: crate::multi_agent::AgentLifecycleState) -> Ba
         | crate::multi_agent::AgentLifecycleState::Running => BackgroundTaskStatus::Running,
         crate::multi_agent::AgentLifecycleState::Completed => BackgroundTaskStatus::Completed,
         crate::multi_agent::AgentLifecycleState::Failed => BackgroundTaskStatus::Failed,
-        crate::multi_agent::AgentLifecycleState::Cancelled => BackgroundTaskStatus::Cancelled,
+        crate::multi_agent::AgentLifecycleState::Cancelled
+        | crate::multi_agent::AgentLifecycleState::Interrupted => BackgroundTaskStatus::Cancelled,
         crate::multi_agent::AgentLifecycleState::TimedOut => BackgroundTaskStatus::TimedOut,
     }
 }

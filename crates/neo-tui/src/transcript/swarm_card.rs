@@ -313,7 +313,9 @@ impl SwarmCardComponent {
                 AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => {
                     self.estimator.mark_failed(id, now_ms);
                 }
-                AgentLifecycleState::Cancelled => self.estimator.mark_cancelled(id, now_ms),
+                AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => {
+                    self.estimator.mark_cancelled(id, now_ms);
+                }
                 AgentLifecycleState::Queued | AgentLifecycleState::Running => {}
             }
         }
@@ -508,7 +510,9 @@ fn estimator_phase(state: AgentLifecycleState) -> SwarmEstimatorPhase {
         AgentLifecycleState::Running => SwarmEstimatorPhase::Running,
         AgentLifecycleState::Completed => SwarmEstimatorPhase::Completed,
         AgentLifecycleState::Failed => SwarmEstimatorPhase::Failed,
-        AgentLifecycleState::Cancelled => SwarmEstimatorPhase::Cancelled,
+        AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => {
+            SwarmEstimatorPhase::Cancelled
+        }
         AgentLifecycleState::TimedOut => SwarmEstimatorPhase::TimedOut,
     }
 }
@@ -556,14 +560,16 @@ fn agent_status_color(state: AgentLifecycleState, theme: &TuiTheme) -> Color {
     match state {
         AgentLifecycleState::Completed => theme.status_ok,
         AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => theme.status_error,
-        AgentLifecycleState::Cancelled => theme.status_warn,
+        AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => theme.status_warn,
         AgentLifecycleState::Queued | AgentLifecycleState::Running => theme.brand,
     }
 }
 
 fn marker(state: AgentLifecycleState) -> &'static str {
     match state {
-        AgentLifecycleState::Queued | AgentLifecycleState::Cancelled => "◌",
+        AgentLifecycleState::Queued
+        | AgentLifecycleState::Cancelled
+        | AgentLifecycleState::Interrupted => "◌",
         AgentLifecycleState::Running => "●",
         AgentLifecycleState::Completed => "✓",
         AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "✗",
@@ -578,5 +584,6 @@ fn state_label(state: AgentLifecycleState) -> &'static str {
         AgentLifecycleState::Failed => "failed",
         AgentLifecycleState::Cancelled => "cancelled",
         AgentLifecycleState::TimedOut => "timed out",
+        AgentLifecycleState::Interrupted => "interrupted",
     }
 }
