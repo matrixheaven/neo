@@ -280,6 +280,22 @@ impl TranscriptPane {
             } => {
                 self.replay_assistant_content(content);
                 for tool_call in tool_calls {
+                    if tool_call.name == "Skill" {
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&tool_call.raw_arguments).unwrap_or_default();
+                        let skill_name = parsed
+                            .get("skill")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_owned();
+                        let body = format_replay_skill_arguments(&parsed);
+                        self.completed_tool_result_ids.push(tool_call.id.clone());
+                        self.push_transcript(TranscriptEntry::skill_activated(
+                            vec![skill_name],
+                            body,
+                        ));
+                        continue;
+                    }
                     self.apply_agent_event(&AgentEvent::ToolExecutionStarted {
                         turn: 0,
                         id: tool_call.id.clone(),
@@ -1091,4 +1107,24 @@ fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &
     } else {
         false
     }
+}
+
+/// Format the inner `arguments` object of a Skill tool call into a readable
+/// `key: value` multi-line string for session replay display.
+fn format_replay_skill_arguments(tool_arguments: &serde_json::Value) -> String {
+    let Some(inner) = tool_arguments.get("arguments").and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    let lines: Vec<String> = inner
+        .iter()
+        .filter_map(|(key, value)| {
+            let display = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => return None,
+                other => other.to_string(),
+            };
+            Some(format!("{key}: {display}"))
+        })
+        .collect();
+    lines.join("\n")
 }

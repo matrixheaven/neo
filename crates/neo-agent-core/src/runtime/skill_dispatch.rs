@@ -97,6 +97,27 @@ fn string_skill_arguments(
         .collect()
 }
 
+/// Format the inner `arguments` object of a Skill tool call into a readable
+/// `key: value` multi-line string for display in the `SkillActivation` card.
+/// Returns an empty string when the skill was invoked without extra arguments.
+pub(super) fn format_skill_tool_arguments(tool_arguments: &serde_json::Value) -> String {
+    let Some(inner) = tool_arguments.get("arguments").and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    let lines: Vec<String> = inner
+        .iter()
+        .filter_map(|(key, value)| {
+            let display = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => return None,
+                other => other.to_string(),
+            };
+            Some(format!("{key}: {display}"))
+        })
+        .collect();
+    lines.join("\n")
+}
+
 fn skill_is_manual_only(skill: &crate::skills::LoadedSkill) -> bool {
     matches!(skill.manifest.skill_type, crate::skills::SkillType::Flow)
 }
@@ -267,5 +288,38 @@ arguments:
 
         assert!(!skill_is_manual_only(&prompt));
         assert!(skill_is_manual_only(&flow));
+    }
+
+    #[test]
+    fn format_skill_tool_arguments_formats_inner_arguments() {
+        let args = json!({
+            "skill": "review",
+            "arguments": {
+                "target": "src/lib.rs",
+                "severity": "high"
+            }
+        });
+        let body = super::format_skill_tool_arguments(&args);
+        assert_eq!(body, "severity: high\ntarget: src/lib.rs");
+    }
+
+    #[test]
+    fn format_skill_tool_arguments_empty_when_no_inner_arguments() {
+        let args = json!({ "skill": "brainstorming" });
+        let body = super::format_skill_tool_arguments(&args);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn format_skill_tool_arguments_skips_null_values() {
+        let args = json!({
+            "skill": "review",
+            "arguments": {
+                "target": "src/lib.rs",
+                "optional": null
+            }
+        });
+        let body = super::format_skill_tool_arguments(&args);
+        assert_eq!(body, "target: src/lib.rs");
     }
 }

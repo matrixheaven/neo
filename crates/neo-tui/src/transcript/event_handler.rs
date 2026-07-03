@@ -379,8 +379,8 @@ impl TranscriptPane {
     }
 
     fn apply_skill_goal_event(&mut self, event: &AgentEvent) {
-        if let AgentEvent::SkillActivated { name, .. } = event {
-            self.push_skill_activation(name.clone());
+        if let AgentEvent::SkillActivated { name, body, .. } = event {
+            self.push_skill_activation(name.clone(), body.clone());
             return;
         }
         self.apply_goal_event(event);
@@ -485,6 +485,9 @@ impl TranscriptPane {
         self.streaming_tool_args
             .insert(tool_call.id.clone(), arguments.clone());
         self.remember_tool_call(turn, &tool_call.id, &tool_call.name);
+        if is_skill_tool(&tool_call.name) {
+            return;
+        }
         self.upsert_tool(
             &tool_call.id,
             tool_call.name,
@@ -496,6 +499,9 @@ impl TranscriptPane {
 
     fn start_tool_call(&mut self, turn: u32, id: &str, name: String) {
         self.remember_tool_call(turn, id, &name);
+        if is_skill_tool(&name) {
+            return;
+        }
         self.upsert_tool(id, name, None, ToolStatusKind::Pending);
         self.mark_dirty();
     }
@@ -513,6 +519,9 @@ impl TranscriptPane {
             .cloned()
             .unwrap_or_else(|| arguments.to_string());
         self.remember_tool_call(turn, id, &name);
+        if is_skill_tool(&name) {
+            return;
+        }
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
         self.mark_dirty();
     }
@@ -554,6 +563,11 @@ impl TranscriptPane {
 
     fn finish_tool_execution(&mut self, turn: u32, id: String, name: String, result: ToolResult) {
         self.remember_tool_call(turn, &id, &name);
+        if is_skill_tool(&name) {
+            self.streaming_tool_args.remove(&id);
+            self.completed_tool_result_ids.push(id);
+            return;
+        }
         let tool_name = name.clone();
         self.upsert_tool(&id, name, None, ToolStatusKind::Running);
         self.streaming_tool_args.remove(&id);
@@ -639,8 +653,8 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn push_skill_activation(&mut self, name: String) {
-        self.push_transcript(TranscriptEntry::skill_activated(vec![name], String::new()));
+    fn push_skill_activation(&mut self, name: String, body: String) {
+        self.push_transcript(TranscriptEntry::skill_activated(vec![name], body));
     }
 
     fn push_goal_card(
@@ -687,4 +701,11 @@ fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Op
         }
         neo_agent_core::StopReason::EndTurn | neo_agent_core::StopReason::ToolUse => None,
     }
+}
+
+/// Returns `true` when the tool name belongs to the model-invoked `Skill`
+/// tool. These tool calls are rendered as `SkillActivation` cards instead of
+/// the standard tool-call card.
+fn is_skill_tool(name: &str) -> bool {
+    name == "Skill"
 }

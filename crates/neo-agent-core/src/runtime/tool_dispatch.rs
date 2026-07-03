@@ -15,8 +15,8 @@ use super::permission::{
     PermissionPreparation, current_permission_mode, permission_preparation_for_mode,
     prepare_tool_call,
 };
-use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
-use super::skill_dispatch::execute_invoke_skill;
+use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
+use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
 use super::tool_arguments::prepare_tool_arguments;
 use crate::skills::SkillStore;
 use crate::tools::execute_model_bash_for_runtime;
@@ -108,8 +108,8 @@ pub(super) async fn execute_tool_calls(
     let tool_specs = registry.specs();
     let prepared = prepare_tool_calls_for_execution(tool_calls, &tool_specs);
 
-    if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
-        return execute_tool_calls_sequential(
+    let results = if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
+        execute_tool_calls_sequential(
             config,
             Arc::clone(&model),
             Arc::clone(&registry),
@@ -120,10 +120,8 @@ pub(super) async fn execute_tool_calls(
             cancel_token,
             process_supervisor,
         )
-        .await;
-    }
-
-    if prepared.iter().any(|(tool_call, parsed)| {
+        .await
+    } else if prepared.iter().any(|(tool_call, parsed)| {
         let prep = match parsed {
             Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
             Err(_) => return false, // invalid args bypass scheduling — handled inline
@@ -135,7 +133,7 @@ pub(super) async fn execute_tool_calls(
             parsed_prepared_arguments(parsed),
         ) == ToolSchedulingClass::BlockingDialog
     }) {
-        return execute_tool_calls_sequential(
+        execute_tool_calls_sequential(
             config,
             Arc::clone(&model),
             Arc::clone(&registry),
@@ -146,10 +144,8 @@ pub(super) async fn execute_tool_calls(
             cancel_token,
             process_supervisor,
         )
-        .await;
-    }
-
-    if prepared.iter().any(|(tool_call, parsed)| {
+        .await
+    } else if prepared.iter().any(|(tool_call, parsed)| {
         let prep = match parsed {
             Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
             Err(_) => return false,
@@ -161,7 +157,7 @@ pub(super) async fn execute_tool_calls(
             parsed_prepared_arguments(parsed),
         ) == ToolSchedulingClass::Exclusive
     }) {
-        return execute_tool_calls_sequential(
+        execute_tool_calls_sequential(
             config,
             Arc::clone(&model),
             Arc::clone(&registry),
@@ -172,21 +168,39 @@ pub(super) async fn execute_tool_calls(
             cancel_token,
             process_supervisor,
         )
-        .await;
-    }
+        .await
+    } else {
+        execute_tool_calls_parallel(
+            config,
+            model,
+            registry,
+            skills,
+            turn,
+            &prepared,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await
+    };
 
-    execute_tool_calls_parallel(
-        config,
-        model,
-        registry,
-        skills,
-        turn,
-        &prepared,
-        emitter,
-        cancel_token,
-        process_supervisor,
-    )
-    .await
+    let mut results = results?;
+    // Attach plan details while plan mode is still active, before the side-effect
+    // events below flip it off.
+    attach_exit_plan_details(config, &mut results);
+    // Re-emit the finished event for ExitPlanMode so the TUI can render the
+    // plan box from the freshly attached details.
+    for (tool_call, result) in &results {
+        if tool_call.name == "ExitPlanMode" {
+            emitter.emit(AgentEvent::ToolExecutionFinished {
+                turn,
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+                result: result.clone(),
+            });
+        }
+    }
+    Ok(results)
 }
 
 /// Helper to extract the parsed arguments reference for scheduling decisions.
@@ -583,6 +597,7 @@ async fn prepare_and_run_tool(
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown")
                         .to_owned(),
+                    body: format_skill_tool_arguments(arguments),
                 });
             }
             Ok(result)

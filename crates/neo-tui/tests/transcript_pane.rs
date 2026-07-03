@@ -1223,3 +1223,77 @@ fn pop_pending_follow_up_removes_oldest_queued_entry() {
         "popped entry should be removed from transcript"
     );
 }
+
+#[test]
+fn skill_tool_call_renders_as_skill_activation_card_not_tool_card() {
+    let mut pane = TranscriptPane::new(80, 20);
+    // Simulate the full Skill tool-call lifecycle.
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "skill-1".to_owned(),
+        name: "Skill".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "skill-1".to_owned(),
+        name: "Skill".to_owned(),
+        arguments: serde_json::json!({ "skill": "brainstorming" }),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "skill-1".to_owned(),
+        name: "Skill".to_owned(),
+        result: neo_agent_core::ToolResult::ok("expanded skill body"),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillActivated {
+        turn: 1,
+        name: "brainstorming".to_owned(),
+        body: String::new(),
+    });
+
+    let entries = pane.transcript().entries();
+    // No ToolRun entry should exist for the Skill tool.
+    assert!(
+        !entries
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::ToolRun { .. })),
+        "Skill tool should not produce a ToolRun entry"
+    );
+    // A SkillActivation card should be present.
+    let skill_card = entries
+        .iter()
+        .find(|e| matches!(e, TranscriptEntry::SkillActivation { .. }))
+        .expect("SkillActivation card should exist");
+    assert!(
+        matches!(
+            skill_card,
+            TranscriptEntry::SkillActivation { names, .. }
+                if names == &vec!["brainstorming".to_owned()]
+        ),
+        "skill card should name brainstorming"
+    );
+}
+
+#[test]
+fn skill_tool_with_arguments_shows_them_in_activation_body() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillActivated {
+        turn: 1,
+        name: "review".to_owned(),
+        body: "target: src/lib.rs".to_owned(),
+    });
+
+    let entries = pane.transcript().entries();
+    let card = entries
+        .iter()
+        .find(|e| matches!(e, TranscriptEntry::SkillActivation { .. }))
+        .expect("SkillActivation card");
+    assert!(
+        matches!(
+            card,
+            TranscriptEntry::SkillActivation { body, .. }
+                if body == "target: src/lib.rs"
+        ),
+        "body should contain formatted arguments"
+    );
+}

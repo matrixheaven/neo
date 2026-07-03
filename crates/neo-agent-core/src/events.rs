@@ -123,6 +123,8 @@ pub enum AgentEvent {
     SkillActivated {
         turn: u32,
         name: String,
+        #[serde(default)]
+        body: String,
     },
     GoalStarted {
         turn: u32,
