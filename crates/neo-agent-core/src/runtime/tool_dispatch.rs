@@ -604,6 +604,12 @@ async fn run_tool_with_cancel(
     if tool_call.name == "Bash" {
         return run_model_bash_with_cancel(arguments, tool_context, cancel_token).await;
     }
+    if matches!(tool_call.name.as_str(), "Delegate" | "DelegateSwarm") {
+        return registry
+            .run(&tool_call.name, tool_context, arguments.clone())
+            .await
+            .unwrap_or_else(|err| ToolResult::error(err.to_string()));
+    }
     tokio::select! {
         biased;
         result = registry.run(&tool_call.name, tool_context, arguments.clone()) => {
@@ -644,6 +650,14 @@ fn default_tool_context(
     } else {
         std::env::current_dir()?
     };
+    let multi_agent = if let Some(session_directory) = &config.session_directory {
+        config
+            .multi_agent
+            .clone()
+            .with_session_directory(session_directory.clone())
+    } else {
+        config.multi_agent.clone()
+    };
     ToolContext::new(workspace_root)
         .map(|context| {
             context
@@ -651,7 +665,7 @@ fn default_tool_context(
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
-                .with_multi_agent(config.multi_agent.clone())
+                .with_multi_agent(multi_agent)
                 .with_child_runtime(config.clone(), model, registry, turn)
         })
         .map(|context| {

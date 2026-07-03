@@ -347,7 +347,12 @@ impl AgentConfig {
     /// Set the session directory used for plan files and image blobs.
     #[must_use]
     pub fn with_session_directory(mut self, session_directory: impl Into<PathBuf>) -> Self {
-        self.session_directory = Some(session_directory.into());
+        let session_directory = session_directory.into();
+        self.multi_agent = self
+            .multi_agent
+            .clone()
+            .with_session_directory(session_directory.clone());
+        self.session_directory = Some(session_directory);
         self
     }
 
@@ -439,7 +444,11 @@ impl AgentConfig {
     /// Replace the shared multi-agent runtime.
     #[must_use]
     pub fn with_multi_agent(mut self, multi_agent: MultiAgentRuntime) -> Self {
-        self.multi_agent = multi_agent;
+        self.multi_agent = if let Some(session_directory) = &self.session_directory {
+            multi_agent.with_session_directory(session_directory.clone())
+        } else {
+            multi_agent
+        };
         self
     }
 }

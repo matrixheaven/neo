@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -8,10 +9,13 @@ use futures::StreamExt;
 use neo_ai::ModelClient;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::runtime::{ActiveTurnInput, AgentConfig, AgentContext, SteerInputHandle};
-use crate::{AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, ToolRegistry};
+use crate::{
+    AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, StopReason, ToolRegistry,
+};
 
 use super::state::derive_title;
 use super::{
@@ -140,12 +144,20 @@ impl MultiAgentState {
 #[derive(Debug, Clone, Default)]
 pub struct MultiAgentRuntime {
     state: Arc<Mutex<MultiAgentState>>,
+    session_state_update_lock: Arc<tokio::sync::Mutex<()>>,
+    session_directory: Option<PathBuf>,
 }
 
 impl MultiAgentRuntime {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_session_directory(mut self, session_directory: PathBuf) -> Self {
+        self.session_directory = Some(session_directory);
+        self
     }
 
     #[must_use]
@@ -1069,6 +1081,7 @@ pub struct ChildRuntimeDeps {
     pub model: Arc<dyn ModelClient>,
     pub tools: Arc<ToolRegistry>,
     pub role: AgentRole,
+    pub cancel_token: CancellationToken,
 }
 
 impl ChildRuntimeDeps {
@@ -1079,6 +1092,7 @@ impl ChildRuntimeDeps {
             model,
             tools,
             role: AgentRole::Coder,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -1086,6 +1100,13 @@ impl ChildRuntimeDeps {
     #[must_use]
     pub fn with_role(mut self, role: AgentRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// Set the parent cancellation token for foreground child runs.
+    #[must_use]
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = cancel_token;
         self
     }
 }
@@ -1107,8 +1128,21 @@ impl MultiAgentRuntime {
         );
         let started_at = Instant::now();
         let prompt = child_prompt(&request.task, request.context, request.actual_role());
-        let run =
-            run_agent_snapshot(deps, prompt, Vec::new(), SteerInputHandle::new(), |_| {}).await;
+        let child_wire_path = self.child_wire_path(snapshot.id.as_str());
+        let run = match self.register_persistent_agent(&snapshot, None, None).await {
+            Ok(()) => {
+                run_agent_snapshot(
+                    deps,
+                    prompt,
+                    Vec::new(),
+                    SteerInputHandle::new(),
+                    child_wire_path,
+                    |_| {},
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
 
@@ -1125,18 +1159,28 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
+        if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
+            return self.finish_child_run(snapshot, started_at, Err(error));
+        }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_messages = snapshot.prior_messages.clone();
+        let prior_messages = self.replay_child_prior_messages(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
-        let steer_input = self.register_live_steer(agent_id.as_str());
-        let run = run_agent_snapshot(deps, prompt, prior_messages, steer_input, |event| {
-            if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
-                on_update(updated);
-            }
-        })
+        let live_steer = self.register_live_steer(agent_id.as_str());
+        let child_wire_path = self.child_wire_path(agent_id.as_str());
+        let run = run_agent_snapshot(
+            deps,
+            prompt,
+            prior_messages,
+            live_steer.handle(),
+            child_wire_path,
+            |event| {
+                if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
+                    on_update(updated);
+                }
+            },
+        )
         .await;
-        self.unregister_live_steer(agent_id.as_str());
         self.finish_child_run(snapshot, started_at, run)
     }
 
@@ -1159,8 +1203,24 @@ impl MultiAgentRuntime {
         );
         let started_at = Instant::now();
         let prompt = child_prompt(&task, DelegateContext::None, request.role);
-        let run =
-            run_agent_snapshot(deps, prompt, Vec::new(), SteerInputHandle::new(), |_| {}).await;
+        let child_wire_path = self.child_wire_path(snapshot.id.as_str());
+        let run = match self
+            .register_persistent_agent(&snapshot, Some(swarm_id), Some(item))
+            .await
+        {
+            Ok(()) => {
+                run_agent_snapshot(
+                    deps,
+                    prompt,
+                    Vec::new(),
+                    SteerInputHandle::new(),
+                    child_wire_path,
+                    |_| {},
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
 
@@ -1168,6 +1228,8 @@ impl MultiAgentRuntime {
         &self,
         deps: ChildRuntimeDeps,
         snapshot: AgentSnapshot,
+        swarm_id: &str,
+        swarm_item: &str,
         context: DelegateContext,
         mut on_update: F,
     ) -> ChildRunOutput
@@ -1177,18 +1239,31 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
+        if let Err(error) = self
+            .register_persistent_agent(&snapshot, Some(swarm_id), Some(swarm_item))
+            .await
+        {
+            return self.finish_child_run(snapshot, started_at, Err(error));
+        }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_messages = snapshot.prior_messages.clone();
+        let prior_messages = self.replay_child_prior_messages(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
-        let steer_input = self.register_live_steer(agent_id.as_str());
-        let run = run_agent_snapshot(deps, prompt, prior_messages, steer_input, |event| {
-            if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
-                on_update(updated);
-            }
-        })
+        let live_steer = self.register_live_steer(agent_id.as_str());
+        let child_wire_path = self.child_wire_path(agent_id.as_str());
+        let run = run_agent_snapshot(
+            deps,
+            prompt,
+            prior_messages,
+            live_steer.handle(),
+            child_wire_path,
+            |event| {
+                if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
+                    on_update(updated);
+                }
+            },
+        )
         .await;
-        self.unregister_live_steer(agent_id.as_str());
         self.finish_child_run(snapshot, started_at, run)
     }
 
@@ -1335,7 +1410,14 @@ impl MultiAgentRuntime {
                     };
                 }
                 let update = summarize_child_events(&events, started_at.elapsed());
-                let completed = if child_events_have_error(&events) {
+                let completed = if child_events_were_cancelled(&events) {
+                    self.update_terminal_delegate(
+                        &snapshot.id,
+                        AgentLifecycleState::Cancelled,
+                        update,
+                        true,
+                    )
+                } else if child_events_have_error(&events) {
                     self.fail_delegate(&snapshot.id, update)
                 } else {
                     self.complete_delegate_with_messages(&snapshot.id, update, &messages)
@@ -1367,22 +1449,79 @@ impl MultiAgentRuntime {
         }
     }
 
-    fn register_live_steer(&self, agent_id: &str) -> SteerInputHandle {
+    fn register_live_steer(&self, agent_id: &str) -> LiveSteerRegistration {
         let handle = SteerInputHandle::new();
         self.state
             .lock()
             .expect("multi-agent state poisoned")
             .steer_handles
             .insert(agent_id.to_owned(), handle.clone());
-        handle
+        LiveSteerRegistration {
+            runtime: self.clone(),
+            agent_id: agent_id.to_owned(),
+            handle,
+        }
     }
 
-    fn unregister_live_steer(&self, agent_id: &str) {
-        self.state
+    fn child_wire_path(&self, agent_id: &str) -> Option<PathBuf> {
+        self.session_directory
+            .as_ref()
+            .map(|session_dir| crate::session::agent_wire_path(session_dir, agent_id))
+    }
+
+    async fn replay_child_prior_messages(&self, snapshot: &AgentSnapshot) -> Vec<AgentMessage> {
+        let Some(wire_path) = self.child_wire_path(snapshot.id.as_str()) else {
+            return snapshot.prior_messages.clone();
+        };
+        crate::session::JsonlSessionReader::replay_messages(wire_path)
+            .await
+            .unwrap_or_else(|_| snapshot.prior_messages.clone())
+    }
+
+    async fn register_persistent_agent(
+        &self,
+        snapshot: &AgentSnapshot,
+        swarm_id: Option<&str>,
+        swarm_item: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(session_dir) = &self.session_directory else {
+            return Ok(());
+        };
+        let store = crate::session::SessionStateStore::new(session_dir);
+        let _guard = self.session_state_update_lock.lock().await;
+        let mut state = store.read().await.map_err(|err| err.to_string())?;
+        state.upsert_agent(crate::session::SessionAgentRecord {
+            kind: crate::session::SessionAgentKind::Sub,
+            record_dir: crate::session::relative_agent_record_dir(snapshot.id.as_str()),
+            parent_agent_id: Some(crate::session::MAIN_AGENT_ID.to_owned()),
+            role: Some(snapshot.role.as_str().to_owned()),
+            swarm_id: swarm_id.map(str::to_owned),
+            swarm_item: swarm_item.map(str::to_owned),
+        });
+        store.write(&state).await.map_err(|err| err.to_string())
+    }
+}
+
+struct LiveSteerRegistration {
+    runtime: MultiAgentRuntime,
+    agent_id: String,
+    handle: SteerInputHandle,
+}
+
+impl LiveSteerRegistration {
+    fn handle(&self) -> SteerInputHandle {
+        self.handle.clone()
+    }
+}
+
+impl Drop for LiveSteerRegistration {
+    fn drop(&mut self) {
+        self.runtime
+            .state
             .lock()
             .expect("multi-agent state poisoned")
             .steer_handles
-            .remove(agent_id);
+            .remove(&self.agent_id);
     }
 }
 
@@ -1391,10 +1530,38 @@ async fn run_agent_snapshot(
     prompt: String,
     prior_messages: Vec<AgentMessage>,
     steer_input: SteerInputHandle,
+    child_wire_path: Option<PathBuf>,
     mut on_event: impl FnMut(&AgentEvent) + Send,
 ) -> Result<(Vec<AgentEvent>, Vec<AgentMessage>), String> {
     let child_config = child_config(deps.config, deps.role);
     let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
+    let parent_cancel_token = deps.cancel_token.clone();
+    let cancel_token = CancellationToken::new();
+    if parent_cancel_token.is_cancelled() {
+        cancel_token.cancel();
+    }
+    let cancel_bridge_token = cancel_token.clone();
+    let bridge_parent = parent_cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            () = bridge_parent.cancelled() => cancel_bridge_token.cancel(),
+            () = cancel_bridge_token.cancelled() => {}
+        }
+    });
+    let mut writer = if let Some(path) = child_wire_path {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+        Some(
+            crate::session::JsonlSessionWriter::open_append(path)
+                .await
+                .map_err(|err| err.to_string())?,
+        )
+    } else {
+        None
+    };
     let child_runtime =
         AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);
@@ -1402,18 +1569,52 @@ async fn run_agent_snapshot(
     for message in prior_messages {
         context.append_message(message);
     }
-    let mut stream = child_runtime.run_turn(&mut context, AgentMessage::user_text(prompt));
+    let mut stream = child_runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text(prompt),
+        cancel_token.clone(),
+    );
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
-        let event = event.map_err(|err| err.to_string())?;
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => {
+                flush_child_writer(&mut writer).await?;
+                cancel_token.cancel();
+                return Err(err.to_string());
+            }
+        };
+        if let Some(child_writer) = writer.as_mut() {
+            if let Err(err) = child_writer.append_event(&event).await {
+                cancel_token.cancel();
+                drain_child_stream(&mut stream).await;
+                let _ = flush_child_writer(&mut writer).await;
+                return Err(err.to_string());
+            }
+        }
         on_event(&event);
         events.push(event);
     }
+    flush_child_writer(&mut writer).await?;
+    cancel_token.cancel();
     drop(stream);
     // Extract the accumulated messages (prior + this turn) so they can be
     // stored on the snapshot for future resume.
     let messages = context.messages().to_vec();
     Ok((events, messages))
+}
+
+async fn flush_child_writer(
+    writer: &mut Option<crate::session::JsonlSessionWriter>,
+) -> Result<(), String> {
+    if let Some(writer) = writer.as_mut() {
+        writer.flush().await.map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+async fn drain_child_stream(stream: &mut crate::runtime::AgentEventStream<'_>) {
+    while stream.next().await.is_some() {}
 }
 
 fn child_config(mut config: AgentConfig, role: AgentRole) -> AgentConfig {
@@ -1550,6 +1751,21 @@ fn child_events_have_error(events: &[AgentEvent]) -> bool {
     events
         .iter()
         .any(|event| matches!(event, AgentEvent::Error { .. }))
+}
+
+fn child_events_were_cancelled(events: &[AgentEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::TurnFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            } | AgentEvent::RunFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            }
+        )
+    })
 }
 
 fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {

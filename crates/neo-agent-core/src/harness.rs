@@ -21,6 +21,17 @@ impl FakeHarness {
 
     #[must_use]
     pub fn from_turns(turns: impl IntoIterator<Item = Vec<AiStreamEvent>>) -> Self {
+        Self::from_result_turns(
+            turns
+                .into_iter()
+                .map(|turn| turn.into_iter().map(Ok).collect()),
+        )
+    }
+
+    #[must_use]
+    pub fn from_result_turns(
+        turns: impl IntoIterator<Item = Vec<Result<AiStreamEvent, AiError>>>,
+    ) -> Self {
         Self {
             model: fake_model(),
             client: Arc::new(RecordingFakeModelClient::new(turns.into_iter().collect())),
@@ -44,12 +55,12 @@ impl FakeHarness {
 }
 
 struct RecordingFakeModelClient {
-    turns: Mutex<Vec<Vec<AiStreamEvent>>>,
+    turns: Mutex<Vec<Vec<Result<AiStreamEvent, AiError>>>>,
     requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl RecordingFakeModelClient {
-    fn new(turns: Vec<Vec<AiStreamEvent>>) -> Self {
+    fn new(turns: Vec<Vec<Result<AiStreamEvent, AiError>>>) -> Self {
         let mut turns = turns;
         turns.reverse();
         Self {
@@ -78,7 +89,7 @@ impl ModelClient for RecordingFakeModelClient {
             .expect("turn lock poisoned")
             .pop()
             .unwrap_or_default();
-        stream::iter(events.into_iter().map(Ok)).boxed()
+        stream::iter(events).boxed()
     }
 }
 

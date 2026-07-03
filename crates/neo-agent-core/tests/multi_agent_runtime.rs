@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, AgentPathKind, AgentRole, AgentRunMode,
@@ -10,9 +10,12 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, PermissionMode,
     ToolExecutionMode,
 };
-use neo_ai::{AiStreamEvent, StopReason};
+use neo_ai::{
+    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, StopReason,
+};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn display_name_pool_is_deterministic() {
@@ -226,6 +229,400 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
     assert_eq!(resumed.run_count, 2);
     assert_eq!(resumed.previous_status, Some(AgentLifecycleState::Failed));
     assert_eq!(resumed.state, AgentLifecycleState::Running);
+}
+
+#[tokio::test]
+async fn child_run_appends_events_to_agent_wire() {
+    use neo_agent_core::{
+        multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},
+        session::{
+            MAIN_AGENT_ID, SessionAgentKind, SessionState, SessionStateStore, agent_wire_path,
+        },
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path();
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .expect("state");
+
+    let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let harness = FakeHarness::from_turns([child_text_turn("child done")]);
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+    let request = DelegateRequest {
+        task: "say done".to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+
+    let output = runtime
+        .run_child_turn(deps, &request, AgentRunMode::Foreground)
+        .await
+        .expect("child run");
+    let wire = agent_wire_path(session_dir, output.snapshot.id.as_str());
+
+    assert!(
+        wire.is_file(),
+        "child wire should exist at {}",
+        wire.display()
+    );
+    let replayed = neo_agent_core::session::JsonlSessionReader::read_all(&wire)
+        .await
+        .expect("read wire");
+    assert!(
+        replayed.iter().any(|event| matches!(
+            event,
+            AgentEvent::MessageAppended {
+                message: AgentMessage::Assistant { .. }
+            }
+        )),
+        "{replayed:#?}"
+    );
+
+    let state = SessionStateStore::new(session_dir)
+        .read()
+        .await
+        .expect("read state");
+    let record = state
+        .agents
+        .get(output.snapshot.id.as_str())
+        .expect("subagent record");
+    assert_eq!(record.kind, SessionAgentKind::Sub);
+    assert_eq!(record.parent_agent_id.as_deref(), Some(MAIN_AGENT_ID));
+    assert_eq!(record.role.as_deref(), Some("coder"));
+    assert_eq!(
+        record.record_dir,
+        std::path::PathBuf::from("agents").join(output.snapshot.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
+    use neo_agent_core::{
+        multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},
+        session::{SessionState, SessionStateStore},
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path();
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .expect("state");
+
+    let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let harness = FakeHarness::from_turns([
+        child_text_turn("first child answer"),
+        child_text_turn("second child answer"),
+    ]);
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+    let first_request = DelegateRequest {
+        task: "first task".to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+    let first_output = runtime
+        .run_child_turn(deps.clone(), &first_request, AgentRunMode::Foreground)
+        .await
+        .expect("first child run");
+
+    let mut replayed_snapshot = first_output.snapshot;
+    let agent_id = replayed_snapshot.id.as_str().to_owned();
+    replayed_snapshot.prior_messages.clear();
+    let restored = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let events = vec![AgentEvent::DelegateFinished {
+        turn: 1,
+        agent: replayed_snapshot,
+    }];
+    restored.restore_from_replay(events.iter());
+
+    let resume_request = DelegateRequest {
+        task: "second task".to_owned(),
+        resume: Some(agent_id.clone()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+    let resumed = restored
+        .start_resume_delegate(&agent_id, &resume_request)
+        .expect("start resume");
+    let _ = restored
+        .run_started_child_turn(deps, resumed, DelegateContext::None, |_| {})
+        .await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2, "{requests:#?}");
+    let resumed_messages = request_text(&requests[1].messages);
+    assert!(
+        resumed_messages.contains("first child answer"),
+        "{resumed_messages}"
+    );
+    assert!(
+        resumed_messages.contains("second task"),
+        "{resumed_messages}"
+    );
+}
+
+#[tokio::test]
+async fn failed_child_run_flushes_partial_agent_wire() {
+    use neo_agent_core::{
+        multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},
+        session::{JsonlSessionReader, SessionState, SessionStateStore, agent_wire_path},
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path();
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .expect("state");
+
+    let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let harness = FakeHarness::from_result_turns([vec![
+        Ok(AiStreamEvent::MessageStart {
+            id: "child_partial".to_owned(),
+        }),
+        Ok(AiStreamEvent::TextDelta {
+            text: "partial child answer".to_owned(),
+        }),
+        Err(AiError::Stream {
+            message: "child stream failed".to_owned(),
+        }),
+    ]]);
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+    let request = DelegateRequest {
+        task: "fail after partial".to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+
+    let output = runtime
+        .run_child_turn(deps, &request, AgentRunMode::Foreground)
+        .await
+        .expect("child run returns failed snapshot");
+    assert_eq!(output.snapshot.state, AgentLifecycleState::Failed);
+    let wire = agent_wire_path(session_dir, output.snapshot.id.as_str());
+    let replayed = JsonlSessionReader::read_all(&wire)
+        .await
+        .expect("read partial wire");
+
+    assert!(
+        replayed.iter().any(|event| matches!(
+            event,
+            AgentEvent::MessageAppended {
+                message: AgentMessage::User { .. }
+            }
+        )),
+        "{replayed:#?}"
+    );
+    assert!(
+        replayed
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "partial child answer")),
+        "{replayed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_swarm_child_runs_preserve_all_state_records() {
+    use neo_agent_core::{
+        multi_agent::{ChildRuntimeDeps, DelegateSwarmItem, DelegateSwarmRequest},
+        session::{SessionAgentKind, SessionState, SessionStateStore},
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path();
+    let mut state = SessionState::new();
+    state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&state)
+        .await
+        .expect("state");
+
+    let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let harness = FakeHarness::from_turns([
+        child_text_turn("core ok"),
+        child_text_turn("tui ok"),
+        child_text_turn("runtime ok"),
+    ]);
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+    let request = DelegateSwarmRequest {
+        description: "inspect modules".to_owned(),
+        items: vec![
+            DelegateSwarmItem {
+                title: "core".to_owned(),
+                value: "core".to_owned(),
+            },
+            DelegateSwarmItem {
+                title: "tui".to_owned(),
+                value: "tui".to_owned(),
+            },
+            DelegateSwarmItem {
+                title: "runtime".to_owned(),
+                value: "runtime".to_owned(),
+            },
+        ],
+        prompt_template: Some("Check {{item}}".to_owned()),
+        resume_agent_ids: std::collections::BTreeMap::new(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        max_concurrency: Some(3),
+    };
+    let swarm_id = runtime.new_swarm_id();
+    let outputs = futures::stream::iter(request.items.iter().map(|item| {
+        runtime.run_swarm_child_turn(
+            deps.clone(),
+            &request,
+            &swarm_id,
+            item.value.as_str(),
+            AgentRunMode::Foreground,
+        )
+    }))
+    .buffer_unordered(3)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("swarm children");
+
+    let state = SessionStateStore::new(session_dir)
+        .read()
+        .await
+        .expect("read state");
+    for output in outputs {
+        let record = state
+            .agents
+            .get(output.snapshot.id.as_str())
+            .expect("child record should survive concurrent registration");
+        assert_eq!(record.kind, SessionAgentKind::Sub);
+        assert_eq!(record.swarm_id.as_deref(), Some(swarm_id.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn child_run_uses_parent_cancellation_token() {
+    use neo_agent_core::multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest};
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let harness = FakeHarness::from_turns([child_text_turn("should not run")]);
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    )
+    .with_cancel_token(cancel);
+    let request = DelegateRequest {
+        task: "cancel child".to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+
+    let output = MultiAgentRuntime::new()
+        .run_child_turn(deps, &request, AgentRunMode::Foreground)
+        .await
+        .expect("child run returns failed snapshot");
+
+    assert_eq!(output.snapshot.state, AgentLifecycleState::Cancelled);
+    assert!(harness.requests().is_empty(), "{:#?}", harness.requests());
+}
+
+#[tokio::test]
+async fn foreground_delegate_cancel_marks_child_cancelled_when_tool_future_is_dropped() {
+    let multi_agent = MultiAgentRuntime::new();
+    let model = Arc::new(DelayedTurnModel::new(vec![
+        vec![
+            DelayedStep::Event(AiStreamEvent::MessageStart {
+                id: "parent".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::ToolCallStart {
+                id: "delegate_call".to_owned(),
+                name: "Delegate".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::ToolCallArgsDelta {
+                id: "delegate_call".to_owned(),
+                json_fragment: r#"{"task":"slow child"}"#.to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::ToolCallEnd {
+                id: "delegate_call".to_owned(),
+                raw_arguments: r#"{"task":"slow child"}"#.to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            }),
+        ],
+        vec![DelayedStep::Delay(std::time::Duration::from_secs(30))],
+    ]));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(neo_agent_core::harness::fake_model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_multi_agent(multi_agent.clone()),
+        model,
+        ToolRegistry::with_builtin_tools(),
+    );
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::new();
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("delegate"),
+        cancel.clone(),
+    );
+    let mut agent_id = None;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("runtime event");
+            if let AgentEvent::DelegateStarted { agent, .. } = event {
+                agent_id = Some(agent.id.as_str().to_owned());
+                cancel.cancel();
+            }
+        }
+    })
+    .await
+    .expect("cancelled delegate turn should finish");
+
+    let agent_id = agent_id.expect("delegate started");
+    let snapshot = multi_agent
+        .agent_snapshot(&agent_id)
+        .expect("delegate snapshot");
+    assert_eq!(snapshot.state, AgentLifecycleState::Cancelled);
 }
 
 #[test]
@@ -1461,6 +1858,65 @@ fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
             usage: None,
         },
     ]
+}
+
+fn request_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .flat_map(|message| match message {
+            ChatMessage::System { content }
+            | ChatMessage::User { content }
+            | ChatMessage::Assistant { content, .. }
+            | ChatMessage::ToolResult { content, .. } => content.iter(),
+        })
+        .filter_map(|part| match part {
+            ContentPart::Text { text } | ContentPart::Thinking { text, .. } => Some(text.as_str()),
+            ContentPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct DelayedTurnModel {
+    turns: Mutex<Vec<Vec<DelayedStep>>>,
+}
+
+impl DelayedTurnModel {
+    fn new(turns: Vec<Vec<DelayedStep>>) -> Self {
+        let mut turns = turns;
+        turns.reverse();
+        Self {
+            turns: Mutex::new(turns),
+        }
+    }
+}
+
+enum DelayedStep {
+    Event(AiStreamEvent),
+    Delay(std::time::Duration),
+}
+
+impl ModelClient for DelayedTurnModel {
+    fn stream_chat(
+        &self,
+        _request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        let steps = self
+            .turns
+            .lock()
+            .expect("turns lock poisoned")
+            .pop()
+            .unwrap_or_default();
+        stream::unfold(steps.into_iter(), |mut steps| async move {
+            loop {
+                match steps.next()? {
+                    DelayedStep::Event(event) => return Some((Ok(event), steps)),
+                    DelayedStep::Delay(duration) => tokio::time::sleep(duration).await,
+                }
+            }
+        })
+        .boxed()
+    }
 }
 
 fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {

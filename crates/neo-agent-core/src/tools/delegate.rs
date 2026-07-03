@@ -1,5 +1,6 @@
 use futures::{StreamExt, stream};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
     SummaryScope, agent_details, context_mode_label, delegate_result_content, swarm_details,
@@ -104,6 +105,7 @@ impl Tool for DelegateTool {
             // Background mode: register the agent in the background task manager
             // and return immediately.
             if request.mode == AgentRunMode::Background {
+                deps = deps.with_cancel_token(CancellationToken::new());
                 ctx.emit_event(AgentEvent::DelegateStarted {
                     turn,
                     agent: snapshot.clone(),
@@ -290,6 +292,7 @@ impl Tool for DelegateSwarmTool {
             // and return immediately.
             ctx.multi_agent.register_swarm(initial_snapshot.clone());
             if request.mode == AgentRunMode::Background {
+                deps = deps.with_cancel_token(CancellationToken::new());
                 ctx.emit_event(AgentEvent::DelegateSwarmStarted {
                     turn,
                     swarm: initial_snapshot.clone(),
@@ -415,6 +418,8 @@ async fn run_swarm_children(
                     .run_started_swarm_child_turn(
                         deps,
                         child.agent,
+                        &initial_snapshot.swarm_id,
+                        &item,
                         DelegateContext::None,
                         |agent| {
                             let snapshot = {
@@ -558,7 +563,7 @@ fn child_runtime_deps(ctx: &ToolContext) -> Result<ChildRuntimeDeps, ToolError> 
             tool: "Delegate".to_owned(),
             message: "Delegate requires tool registry in ToolContext".to_owned(),
         })?;
-    Ok(ChildRuntimeDeps::new(config, model, tools))
+    Ok(ChildRuntimeDeps::new(config, model, tools).with_cancel_token(ctx.cancel_token.clone()))
 }
 
 fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<(), ToolError> {
