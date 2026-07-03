@@ -286,7 +286,18 @@ impl NeoChromeState {
                 None
             }
             InputEvent::Submit
-            | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) => {
+            | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) =>
+            {
+                // When "Reject with feedback" (Revise) is selected, don't
+                // submit on the first Enter. Require non-empty feedback so
+                // the user can type their revision note. A subsequent Enter
+                // after typing submits.
+                if let Some(approval) = self.pending_approvals.front()
+                    && approval.is_collecting_feedback()
+                    && approval.feedback_input.is_empty()
+                {
+                    return None;
+                }
                 self.confirm_approval()
             }
             InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {

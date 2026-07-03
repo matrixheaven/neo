@@ -13,7 +13,7 @@ mod list;
 mod mcp;
 mod mcp_manager;
 mod multi_agent_format;
-mod plan_mode;
+pub mod plan_mode;
 mod process_supervisor;
 mod read;
 mod sessions;

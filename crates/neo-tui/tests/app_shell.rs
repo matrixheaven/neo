@@ -489,6 +489,7 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
         arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     assert_eq!(app.mode(), ChromeMode::Approval);
@@ -507,6 +508,7 @@ fn plan_review_modal_offers_only_approve_reject_revise() {
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
     assert!(app.approval_is_pending());
 
@@ -530,6 +532,7 @@ fn plan_review_number_two_is_reject_in_three_option_modal() {
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     // In the 3-option plan review modal, number 2 = Reject (no feedback).
@@ -556,6 +559,7 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     // Number 3 = Revise does NOT confirm yet; it enters feedback collection.
@@ -577,6 +581,49 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
 }
 
 #[test]
+fn arrow_nav_to_revise_then_enter_does_not_submit_with_empty_feedback() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({ "plan_summary": "Ready" }),
+        session_scope: None,
+        prefix_rule: None,
+        suggestions: vec![],
+    });
+
+    use neo_tui::input::{InputEvent, KeybindingAction};
+
+    // Options: [0] Approve, [1] Reject, [2] Reject with feedback.
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [1] Reject
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [2] Revise
+    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
+
+    // Enter on Revise with empty feedback must NOT submit — the user
+    // should be able to type their revision note first.
+    let result = app.handle_pending_approval_input(InputEvent::Submit);
+    assert!(
+        result.is_none(),
+        "Enter on Revise with empty feedback should not submit"
+    );
+    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
+
+    // Type feedback.
+    app.handle_pending_approval_input(InputEvent::Insert('f'));
+    app.handle_pending_approval_input(InputEvent::Insert('x'));
+
+    // Now Enter should submit with the feedback.
+    let result = app
+        .handle_pending_approval_input(InputEvent::Submit)
+        .expect("Enter after typing feedback should submit");
+    assert_eq!(result.request_id, "exit-plan-1");
+    assert_eq!(result.choice, ApprovalChoice::Revise);
+    assert_eq!(result.feedback.as_deref(), Some("fx"));
+}
+
+#[test]
 fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
@@ -587,6 +634,7 @@ fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     // The plan review modal has only 3 options, so number 4 is out of range and
@@ -616,6 +664,7 @@ fn plan_review_renders_model_options_as_picker_choices() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
     assert!(app.approval_is_pending());
 
@@ -654,6 +703,7 @@ fn plan_review_approve_option_a_surfaces_its_label() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     // Number 1 is the first model option (Option A).
@@ -681,6 +731,7 @@ fn plan_review_reject_does_not_surface_a_selected_label() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     // Reject is now number 3 in the 5-option layout (A, B, Reject, Revise).
@@ -705,6 +756,7 @@ fn scope_less_tool_approval_omits_approve_for_session_option() {
         arguments: serde_json::json!({ "command": "cargo test" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let result = app
@@ -725,6 +777,7 @@ fn scoped_tool_approval_number_two_is_approve_for_session() {
         arguments: serde_json::json!({ "path": "approved.txt" }),
         session_scope: Some(write_session_scope()),
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let result = app
@@ -749,6 +802,7 @@ fn prefix_tool_approval_marks_prefix_choice() {
             prefix: vec!["cargo".to_owned(), "test".to_owned()],
             label: "cargo test".to_owned(),
         }),
+        suggestions: vec![],
     });
 
     let result = app
@@ -807,6 +861,7 @@ fn pending_approval_hides_composer_prompt() {
         arguments: serde_json::json!({ "command": "echo hi" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));

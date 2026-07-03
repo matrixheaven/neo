@@ -13,6 +13,7 @@ use crate::permissions::{
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
 };
 use crate::tools::normalize_path;
+use crate::tools::plan_mode::prevalidate_exit_plan_mode;
 use crate::{
     AgentEvent, AgentToolCall, PermissionApprovalDecision, PermissionMode, PermissionOperation,
     PlanModeGuard, ToolAccess, ToolResult, check_plan_mode_guard, is_active_plan_file_path,
@@ -255,7 +256,12 @@ fn check_transition_tools(
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     if tool_call.name.as_ref() == "ExitPlanMode" {
-        if exit_plan_mode_has_reviewable_plan(config) {
+        if exit_plan_mode_has_reviewable_plan(config)
+            && serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments)
+                .ok()
+                .and_then(|v| prevalidate_exit_plan_mode(&v).ok())
+                .is_some()
+        {
             return Some(PermissionPreparation::Ask {
                 operation: PermissionOperation::PlanTransition,
                 subject: "Exit plan mode".to_owned(),

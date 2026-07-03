@@ -184,6 +184,25 @@ impl Tool for ExitPlanModeTool {
     }
 }
 
+/// Pre-validates `ExitPlanMode` input without executing the tool. Used by the
+/// permission layer to skip the approval dialog when the input is invalid —
+/// the tool will still run and return the error, but the user won't see a
+/// meaningless approval prompt for an invocation that can never succeed.
+pub fn prevalidate_exit_plan_mode(input: &Value) -> Result<(), ToolError> {
+    let parsed: ExitPlanModeInput =
+        serde_json::from_value(input.clone()).map_err(|err| ToolError::InvalidInput {
+            tool: "ExitPlanMode".to_owned(),
+            message: err.to_string(),
+        })?;
+    if let Some(ref options) = parsed.options {
+        validate_exit_plan_mode_options(options)?;
+    }
+    if let Some(ref suggestions) = parsed.suggestions {
+        validate_exit_plan_mode_suggestions(suggestions)?;
+    }
+    Ok(())
+}
+
 /// Validates that option labels are unique and do not collide with reserved approval labels.
 fn validate_exit_plan_mode_options(options: &[ExitPlanModeOption]) -> Result<(), ToolError> {
     if options.len() > 3 {
@@ -361,6 +380,37 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn prevalidate_accepts_valid_input() {
+        let input = json!({
+            "plan_summary": "Add feature",
+            "options": [
+                {"label": "Approach A", "description": "Simple"},
+                {"label": "Approach B", "description": "Fast"}
+            ]
+        });
+        assert!(prevalidate_exit_plan_mode(&input).is_ok());
+    }
+
+    #[test]
+    fn prevalidate_rejects_reserved_label() {
+        let input = json!({
+            "options": [{"label": "Approve"}]
+        });
+        assert!(prevalidate_exit_plan_mode(&input).is_err());
+    }
+
+    #[test]
+    fn prevalidate_rejects_duplicate_label() {
+        let input = json!({
+            "options": [
+                {"label": "Same"},
+                {"label": "same"}
+            ]
+        });
+        assert!(prevalidate_exit_plan_mode(&input).is_err());
     }
 
     #[test]
