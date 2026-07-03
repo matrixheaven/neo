@@ -7,6 +7,8 @@ use std::{
 };
 
 const TRANSCRIPT: &str = "{\"kind\":\"neo.session.metadata\",\"format\":\"neo.session.jsonl\",\"schema_version\":1,\"created_at\":\"0\"}\n";
+// Migration fixture: old sessions used transcript.jsonl before the agent layout.
+const LEGACY_TRANSCRIPT_FILENAME: &str = "transcript.jsonl";
 
 fn python_command() -> Command {
     if let Some(python) = env::var_os("PYTHON").filter(|python| !python.is_empty()) {
@@ -49,7 +51,7 @@ fn create_session(neo_home: &Path, id: &str) -> PathBuf {
         .join("wd_neo_000000000000")
         .join(id);
     fs::create_dir_all(&session_dir).expect("mkdir session");
-    fs::write(session_dir.join("transcript.jsonl"), TRANSCRIPT).expect("write transcript");
+    fs::write(session_dir.join(LEGACY_TRANSCRIPT_FILENAME), TRANSCRIPT).expect("write transcript");
     session_dir
 }
 
@@ -94,7 +96,7 @@ fn migration_script_moves_transcript_to_main_wire_and_writes_state() {
     assert_eq!(state["schema_version"], 1);
     assert_eq!(state["agents"]["main"]["kind"], "main");
     assert_eq!(state["agents"]["main"]["record_dir"], "agents/main");
-    assert!(!session_dir.join("transcript.jsonl").exists());
+    assert!(!session_dir.join(LEGACY_TRANSCRIPT_FILENAME).exists());
 }
 
 #[test]
@@ -119,7 +121,7 @@ fn migration_script_dry_run_leaves_transcript_in_place() {
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
-    assert!(session_dir.join("transcript.jsonl").is_file());
+    assert!(session_dir.join(LEGACY_TRANSCRIPT_FILENAME).is_file());
     assert!(!main_wire_path(&session_dir).exists());
 }
 
@@ -182,7 +184,7 @@ fn migration_script_repairs_half_migrated_session_when_transcript_remains() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(session_dir.join("state.json").is_file());
-    assert!(!session_dir.join("transcript.jsonl").exists());
+    assert!(!session_dir.join(LEGACY_TRANSCRIPT_FILENAME).exists());
 }
 
 #[test]

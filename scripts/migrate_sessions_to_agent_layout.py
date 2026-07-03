@@ -77,6 +77,7 @@ def copy_transcript(transcript_path: Path, wire_path: Path) -> None:
 
 
 def migrate_session(session_dir: Path, apply: bool, backup: bool) -> None:
+    # Migration source: old sessions used transcript.jsonl before the agent layout.
     transcript_path = session_dir / "transcript.jsonl"
     agent_dir = session_dir / "agents" / "main"
     wire_path = agent_dir / "wire.jsonl"
