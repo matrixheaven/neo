@@ -146,7 +146,7 @@ impl NeoChromeState {
     }
 
     #[must_use]
-    pub fn approval_selection(&self) -> Option<(&str, usize, &str, Option<usize>)> {
+    pub fn approval_selection(&self) -> Option<(&str, usize, &str, Option<usize>, bool)> {
         self.pending_approvals.front().map(|approval| {
             let plan_option_count = approval.plan_option_labels.len();
             let suggestion_index = approval.modal.selected.saturating_sub(plan_option_count);
@@ -159,6 +159,7 @@ impl NeoChromeState {
                 approval.modal.selected,
                 approval.feedback_input.as_str(),
                 selected_suggestion,
+                approval.is_collecting_feedback(),
             )
         })
     }
@@ -170,7 +171,10 @@ impl NeoChromeState {
         }
         approval.modal.selected = number - 1;
         approval.apply_suggestion_feedback();
-        if approval.is_collecting_feedback() {
+        // Same two-step gate as the arrow-key + Enter path: pressing the
+        // number for Revise activates feedback collection but does not submit.
+        // The caller stays in the dialog until the user types and presses Enter.
+        if approval.begin_feedback_collection() {
             return None;
         }
         self.confirm_approval()

@@ -69,6 +69,12 @@ pub struct ApprovalRequestModal {
     pub request_id: String,
     pub modal: ApprovalModal,
     pub feedback_input: String,
+    /// Explicit flag separate from `selected_choice == Revise`. Without this,
+    /// navigating to "Reject with feedback" would immediately enter feedback
+    /// input mode — a misclick or arrow-over would show the input box before
+    /// the user intended to revise. The flag is only set after the user
+    /// explicitly confirms (Enter or number key) while Revise is selected.
+    collecting_feedback: bool,
     /// Model-supplied plan-review option labels, in the order they were rendered
     /// as the leading approve choices. Empty for non-plan-review approvals.
     /// `confirm_approval` reads the entry at the selected index to populate
@@ -123,6 +129,7 @@ impl ApprovalRequestModal {
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
+            collecting_feedback: false,
             plan_option_labels: Vec::new(),
             suggestions: Vec::new(),
             modal: ApprovalModal::new(title, body, options),
@@ -139,6 +146,7 @@ impl ApprovalRequestModal {
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
+            collecting_feedback: false,
             plan_option_labels: Vec::new(),
             suggestions: Vec::new(),
             modal: ApprovalModal::new(
@@ -193,6 +201,7 @@ impl ApprovalRequestModal {
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
+            collecting_feedback: false,
             plan_option_labels,
             suggestions,
             modal: ApprovalModal::new(title, body, options),
@@ -229,11 +238,11 @@ impl ApprovalRequestModal {
                 .feedback
                 .clone()
                 .unwrap_or_else(|| suggestion.description.clone());
+            self.collecting_feedback = true;
             return;
         }
-        if !self.is_collecting_feedback() {
-            self.feedback_input.clear();
-        }
+        self.collecting_feedback = false;
+        self.feedback_input.clear();
     }
 
     /// Returns the preset suggestion currently selected, if any.
@@ -245,7 +254,20 @@ impl ApprovalRequestModal {
 
     #[must_use]
     pub fn is_collecting_feedback(&self) -> bool {
-        self.modal.selected_choice() == Some(ApprovalChoice::Revise)
+        self.collecting_feedback
+    }
+
+    /// Activates feedback collection mode. Called only when the user explicitly
+    /// confirms (Enter / number key) while "Reject with feedback" is selected.
+    /// Returns `false` (no-op) if the current selection isn't Revise, so callers
+    /// can use the return value to decide whether to stay in the dialog or
+    /// proceed to `confirm_approval`.
+    pub fn begin_feedback_collection(&mut self) -> bool {
+        if self.modal.selected_choice() != Some(ApprovalChoice::Revise) {
+            return false;
+        }
+        self.collecting_feedback = true;
+        true
     }
 
     pub fn insert_feedback(&mut self, text: &str) {

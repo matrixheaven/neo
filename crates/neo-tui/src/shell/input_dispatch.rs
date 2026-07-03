@@ -288,15 +288,23 @@ impl NeoChromeState {
             InputEvent::Submit
             | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) =>
             {
-                // When "Reject with feedback" (Revise) is selected, don't
-                // submit on the first Enter. Require non-empty feedback so
-                // the user can type their revision note. A subsequent Enter
-                // after typing submits.
-                if let Some(approval) = self.pending_approvals.front()
-                    && approval.is_collecting_feedback()
-                    && approval.feedback_input.is_empty()
+                // Two-step Enter for Revise:
+                // 1st Enter — if Revise is selected but feedback collection
+                //   hasn't started yet, activate it and stay in the dialog.
+                //   The user can then type their revision note.
+                // 2nd Enter — once feedback is non-empty, submit.
+                // An empty Enter after collection starts is a no-op (prevents
+                // accidental empty submissions).
+                if let Some(approval) = self.pending_approvals.front_mut()
+                    && approval.modal.selected_choice() == Some(approval::ApprovalChoice::Revise)
                 {
-                    return None;
+                    if !approval.is_collecting_feedback() {
+                        approval.begin_feedback_collection();
+                        return None;
+                    }
+                    if approval.feedback_input.is_empty() {
+                        return None;
+                    }
                 }
                 self.confirm_approval()
             }
