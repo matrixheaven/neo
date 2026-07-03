@@ -336,6 +336,9 @@ pub(crate) struct InteractiveController {
     /// Suppress the matching runtime user-message echo so the transcript does
     /// not show the same body twice.
     pending_skill_user_message_to_suppress: Option<String>,
+    /// User prompt already rendered optimistically on idle submit. Suppress the
+    /// matching runtime append event so the transcript does not duplicate it.
+    pending_local_user_message_to_suppress: Option<String>,
     goal_manager: Option<Arc<neo_agent_core::goal::GoalManager>>,
     plan_mode: Arc<RwLock<PlanMode>>,
     /// Current permission mode for the session.
@@ -704,6 +707,7 @@ impl InteractiveController {
             skill_store: None,
             pending_skill_context: None,
             pending_skill_user_message_to_suppress: None,
+            pending_local_user_message_to_suppress: None,
             goal_manager: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
@@ -1312,7 +1316,7 @@ impl InteractiveController {
             let Some(prompt) = self.submit_prompt_text(stripped_prompt) else {
                 return Ok(());
             };
-            self.start_turn_from_submitted_prompt(prompt)?;
+            self.start_turn_from_submitted_prompt(prompt, false)?;
             self.drain_active_turn().await?;
             return self.start_pending_background_question_followups().await;
         }
@@ -1325,7 +1329,7 @@ impl InteractiveController {
         let Some(prompt) = self.tui.chrome_mut().submit_prompt() else {
             return Ok(());
         };
-        self.start_turn_from_submitted_prompt(prompt)?;
+        self.start_turn_from_submitted_prompt(prompt, true)?;
         self.drain_active_turn().await?;
         self.start_pending_background_question_followups().await
     }
@@ -1335,7 +1339,11 @@ impl InteractiveController {
         self.tui.chrome_mut().submit_prompt()
     }
 
-    fn start_turn_from_submitted_prompt(&mut self, prompt: String) -> Result<()> {
+    fn start_turn_from_submitted_prompt(
+        &mut self,
+        prompt: String,
+        render_local_user_message: bool,
+    ) -> Result<()> {
         let PromptSubmission {
             prompt,
             model_override,
@@ -1353,7 +1361,14 @@ impl InteractiveController {
         // Persist the resolved user prompt (after @model/prompt-template
         // expansion) to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
-        self.append_prompt_history(&content_to_display_text(&content));
+        let display_text = content_to_display_text(&content);
+        self.append_prompt_history(&display_text);
+        if render_local_user_message {
+            self.tui
+                .transcript_mut()
+                .push_user_message(display_text.clone());
+            self.pending_local_user_message_to_suppress = Some(display_text);
+        }
         self.start_turn_with_prompt(content, model_override);
         Ok(())
     }
@@ -1516,6 +1531,14 @@ impl InteractiveController {
             .is_some_and(|expected| expected.trim() == text.trim())
         {
             self.pending_skill_user_message_to_suppress = None;
+            return;
+        }
+        if self
+            .pending_local_user_message_to_suppress
+            .as_deref()
+            .is_some_and(|expected| expected.trim() == text.trim())
+        {
+            self.pending_local_user_message_to_suppress = None;
             return;
         }
         self.tui.transcript_mut().push_user_message(text);

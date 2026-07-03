@@ -8120,7 +8120,7 @@ async fn appended_user_prompt_renders_single_transcript_entry() {
 }
 
 #[tokio::test]
-async fn idle_submit_renders_user_prompt_only_after_runtime_append() {
+async fn idle_submit_renders_user_prompt_immediately_without_duplicate_runtime_append() {
     let mut controller = InteractiveController::new(
         "neo",
         "test-session",
@@ -8143,11 +8143,15 @@ async fn idle_submit_renders_user_prompt_only_after_runtime_append() {
         .await
         .expect("submit starts turn");
 
-    assert!(
-        !transcript_entries(&controller).iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
-        ),
-        "normal submits should not add a local transcript preview before the runtime append event"
+    let matching_entries = transcript_entries(&controller)
+        .iter()
+        .filter(|entry| {
+            matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
+        })
+        .count();
+    assert_eq!(
+        matching_entries, 1,
+        "normal submits should render the user prompt immediately"
     );
 
     controller.apply_turn_event(AgentEvent::MessageAppended {
