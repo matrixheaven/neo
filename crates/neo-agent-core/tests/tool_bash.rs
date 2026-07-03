@@ -1,3 +1,4 @@
+use neo_agent_core::execute_model_bash_for_runtime;
 use neo_agent_core::{ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -119,6 +120,30 @@ async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
             .as_ref()
             .and_then(|details| details["stderr"].as_str()),
         Some("err")
+    );
+}
+
+#[tokio::test]
+async fn model_bash_timeout_without_output_returns_visible_failure_text() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all());
+
+    let result = execute_model_bash_for_runtime(
+        &context,
+        json!({
+            "command": "sleep 1",
+            "timeout": 0,
+        }),
+    )
+    .await
+    .expect("model bash should return a tool result");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("Timed out."),
+        "timeout with no shell output must still be visible to the model: {result:?}"
     );
 }
 

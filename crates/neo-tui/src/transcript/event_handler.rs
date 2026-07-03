@@ -588,7 +588,15 @@ impl TranscriptPane {
                 .and_then(|details| details.get("exit_code"))
                 .and_then(serde_json::Value::as_i64)
                 .and_then(|code| i32::try_from(code).ok());
-            tool.set_result(Some(result.content), details, is_error, exit_code);
+            let content = if tool_name == "Bash" && result.content.is_empty() {
+                details
+                    .as_ref()
+                    .and_then(shell_detail_from_tool_result_details)
+                    .unwrap_or(result.content)
+            } else {
+                result.content
+            };
+            tool.set_result(Some(content), details, is_error, exit_code);
         }
         self.reconcile_delegate_tool_result(
             turn,
@@ -698,6 +706,49 @@ fn shell_finished_detail(
         detail.push_str(&line);
     }
     detail
+}
+
+fn shell_detail_from_tool_result_details(details: &serde_json::Value) -> Option<String> {
+    let stdout = details
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let stderr = details
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let exit_code = details
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let signal = details
+        .get("signal")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|sig| i32::try_from(sig).ok());
+    let truncated = details
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let outcome = shell_outcome_from_tool_result_details(details);
+    let detail = shell_finished_detail(exit_code, signal, stdout, stderr, truncated, &outcome);
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn shell_outcome_from_tool_result_details(details: &serde_json::Value) -> ShellCommandOutcome {
+    match details.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("cancelled") => ShellCommandOutcome::Cancelled,
+        Some("timed_out") => ShellCommandOutcome::TimedOut,
+        Some("backgrounded") => {
+            let task_id = details
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            ShellCommandOutcome::Backgrounded {
+                task_id: task_id.into(),
+            }
+        }
+        _ => ShellCommandOutcome::Completed,
+    }
 }
 
 fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {

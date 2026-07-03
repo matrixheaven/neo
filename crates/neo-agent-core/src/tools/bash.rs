@@ -225,8 +225,7 @@ const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 fn shell_command_result(result: &ShellExecutionResult) -> ToolResult {
     let truncated = result.truncated || result.stdout_truncated || result.stderr_truncated;
     let mut content = format!("{}{}", result.stdout, result.stderr);
-    if result.exit_code != Some(0) && matches!(result.outcome, ShellCommandOutcome::Completed) {
-        let failure_msg = super::format_shell_failure(result.exit_code, result.signal);
+    if let Some(failure_msg) = shell_outcome_message(result) {
         if !content.ends_with('\n') && !content.is_empty() {
             content.push('\n');
         }
@@ -238,12 +237,32 @@ fn shell_command_result(result: &ShellExecutionResult) -> ToolResult {
         }
         content.push_str("[output truncated]");
     }
-    let tool_result = if result.exit_code == Some(0) {
+    let tool_result = if shell_outcome_is_success(result) {
         ToolResult::ok(content)
     } else {
         ToolResult::error(content)
     };
     tool_result.with_details(shell_execution_details(result))
+}
+
+fn shell_outcome_is_success(result: &ShellExecutionResult) -> bool {
+    match result.outcome {
+        ShellCommandOutcome::Completed => result.exit_code == Some(0),
+        ShellCommandOutcome::Backgrounded { .. } => true,
+        ShellCommandOutcome::Cancelled | ShellCommandOutcome::TimedOut => false,
+    }
+}
+
+fn shell_outcome_message(result: &ShellExecutionResult) -> Option<String> {
+    match result.outcome {
+        ShellCommandOutcome::Completed => (result.exit_code != Some(0))
+            .then(|| super::format_shell_failure(result.exit_code, result.signal)),
+        ShellCommandOutcome::Cancelled => Some("Cancelled.".to_owned()),
+        ShellCommandOutcome::TimedOut => Some("Timed out.".to_owned()),
+        ShellCommandOutcome::Backgrounded { .. } => {
+            Some("Moved to background. Use /tasks to view.".to_owned())
+        }
+    }
 }
 
 fn shell_execution_details(result: &ShellExecutionResult) -> serde_json::Value {

@@ -413,6 +413,61 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
 }
 
 #[test]
+fn bash_shell_failure_summary_survives_empty_tool_result_finish() {
+    use neo_agent_core::{AgentEvent, ShellCommandOrigin, ShellCommandOutcome};
+    use neo_tui::primitive::strip_ansi;
+
+    let mut runtime = TranscriptPane::new(80, 20);
+    runtime.apply_agent_event(AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        command: "git push origin main".to_owned(),
+        cwd: "/workspace/neo".into(),
+        origin: ShellCommandOrigin::ModelBashTool,
+    });
+    runtime.apply_agent_event(AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        exit_code: Some(1),
+        signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        truncated: false,
+        origin: ShellCommandOrigin::ModelBashTool,
+        outcome: ShellCommandOutcome::Completed,
+    });
+    runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        result: neo_agent_core::ToolResult::error("").with_details(serde_json::json!({
+            "exit_code": 1,
+            "signal": null,
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "truncated": false,
+            "outcome": "completed"
+        })),
+    });
+
+    let frame = runtime
+        .render_frame(80, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("Command failed with exit code: 1.")),
+        "failed Bash card must not render with an empty body: {frame:?}"
+    );
+}
+
+#[test]
 fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
     // Regression for the post-turn duplicate/right-shift bug: tool-card rows
     // were rendered at the full terminal width, then the TUI applied a 1-col
