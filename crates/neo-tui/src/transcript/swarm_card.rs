@@ -11,24 +11,42 @@ use crate::transcript::{
     render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwarmCardComponent {
     snapshot: SwarmSnapshot,
     expanded: bool,
     estimator: SwarmProgressEstimator,
     now_ms: Option<u64>,
+    /// Pre-computed per-child (progress, confidence) from the last
+    /// `sync_estimator_from_snapshot` call.  Keeping the results here — rather
+    /// than cloning the estimator inside `child_progresses` — ensures
+    /// `display_ticks` mutations persist across frames (Fix 1).
+    cached_child_progress: Vec<ChildProgressEntry>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChildProgressEntry {
+    progress: f32,
+    confidence: f32,
+}
+
+// Eq is sound: all fields implement Eq except `SwarmProgressEstimator` which
+// has a manual `impl Eq`, and `ChildProgressEntry` (f32 fields, but the
+// derived PartialEq is fine for structural comparison in tests).
+impl Eq for SwarmCardComponent {}
 
 impl SwarmCardComponent {
     #[must_use]
     pub fn new(snapshot: SwarmSnapshot) -> Self {
+        let now_ms = snapshot_time_ms(&snapshot);
         let mut component = Self {
             snapshot,
             expanded: false,
             estimator: SwarmProgressEstimator::default(),
             now_ms: None,
+            cached_child_progress: Vec::new(),
         };
-        component.sync_estimator_from_snapshot(snapshot_time_ms(&component.snapshot));
+        component.sync_estimator_from_snapshot(now_ms);
         component
     }
 
@@ -65,7 +83,7 @@ impl SwarmCardComponent {
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
         let child_progress = self.child_progresses();
-        let progress = aggregate_progress(&child_progress);
+        let progress = self.weighted_progress();
         let mut lines = Vec::new();
         let total = self.snapshot.children.len();
         let running = self
@@ -275,23 +293,9 @@ impl SwarmCardComponent {
     }
 
     fn child_progresses(&self) -> Vec<f32> {
-        let now_ms = self
-            .now_ms
-            .unwrap_or_else(|| snapshot_time_ms(&self.snapshot));
-        let mut estimator = self.estimator.clone();
-        self.snapshot
-            .children
+        self.cached_child_progress
             .iter()
-            .map(|child| {
-                estimator
-                    .estimate(
-                        child.agent.id.as_str(),
-                        estimator_phase(child.agent.state),
-                        1.0,
-                        now_ms,
-                    )
-                    .progress
-            })
+            .map(|entry| entry.progress)
             .collect()
     }
 
@@ -319,6 +323,47 @@ impl SwarmCardComponent {
                 AgentLifecycleState::Queued | AgentLifecycleState::Running => {}
             }
         }
+
+        // After syncing state, compute estimates for all children.  This
+        // persists `display_ticks` into the real estimator so the monotone
+        // constraint (`display_ticks = max(prev, target)`) survives across
+        // frames — fixing the backwards-jump bug.
+        self.cached_child_progress = self
+            .snapshot
+            .children
+            .iter()
+            .map(|child| {
+                let estimate = self.estimator.estimate(
+                    child.agent.id.as_str(),
+                    estimator_phase(child.agent.state),
+                    1.0,
+                    now_ms,
+                );
+                ChildProgressEntry {
+                    progress: estimate.progress,
+                    confidence: estimate.confidence,
+                }
+            })
+            .collect();
+    }
+}
+
+impl SwarmCardComponent {
+    #[must_use]
+    pub fn weighted_progress(&self) -> f32 {
+        if self.cached_child_progress.is_empty() {
+            return 1.0;
+        }
+        let mut weighted_sum = 0.0_f32;
+        let mut weight_sum = 0.0_f32;
+        for entry in &self.cached_child_progress {
+            weighted_sum += entry.progress * entry.confidence;
+            weight_sum += entry.confidence;
+        }
+        if weight_sum <= 0.0 {
+            return 0.0;
+        }
+        (weighted_sum / weight_sum).clamp(0.0, 0.95)
     }
 }
 
@@ -484,17 +529,6 @@ fn progress_meter(progress: f32, theme: &TuiTheme) -> Span {
         "┄".repeat(width.saturating_sub(filled))
     );
     Span::styled(text, Style::default().fg(theme.status_warn))
-}
-
-fn aggregate_progress(child_progress: &[f32]) -> f32 {
-    if child_progress.is_empty() {
-        return 1.0;
-    }
-    // child_progress.len() is a small bounded count; precision loss in the
-    // usize -> f32 cast does not affect the resulting progress ratio.
-    #[allow(clippy::cast_precision_loss)]
-    let len = child_progress.len() as f32;
-    child_progress.iter().sum::<f32>() / len
 }
 
 fn child_tool_ids(agent: &AgentSnapshot) -> impl Iterator<Item = &str> {

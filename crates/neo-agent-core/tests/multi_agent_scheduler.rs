@@ -83,7 +83,7 @@ fn partial_swarm_resume_skips_completed_items() {
 
 #[test]
 fn progress_estimate_never_claims_completion_while_items_are_active() {
-    let progress = estimate_swarm_progress(SwarmProgressInput {
+    let progress = estimate_swarm_progress(&SwarmProgressInput {
         total: 4,
         completed: 3,
         failed: 0,
@@ -91,7 +91,7 @@ fn progress_estimate_never_claims_completion_while_items_are_active() {
         queued: 0,
         suspended: 0,
         median_completed_duration: Some(Duration::from_secs(10)),
-        longest_running_duration: Duration::from_secs(100),
+        running_durations: vec![Duration::from_secs(100)],
     });
 
     assert!(progress < 1.0);
@@ -100,7 +100,7 @@ fn progress_estimate_never_claims_completion_while_items_are_active() {
 
 #[test]
 fn progress_estimate_returns_full_when_all_terminal() {
-    let progress = estimate_swarm_progress(SwarmProgressInput {
+    let progress = estimate_swarm_progress(&SwarmProgressInput {
         total: 3,
         completed: 2,
         failed: 1,
@@ -108,7 +108,7 @@ fn progress_estimate_returns_full_when_all_terminal() {
         queued: 0,
         suspended: 0,
         median_completed_duration: None,
-        longest_running_duration: Duration::ZERO,
+        running_durations: vec![],
     });
 
     assert!((progress - 1.0).abs() < f32::EPSILON);
@@ -116,7 +116,7 @@ fn progress_estimate_returns_full_when_all_terminal() {
 
 #[test]
 fn progress_estimate_increases_with_running_duration() {
-    let early = estimate_swarm_progress(SwarmProgressInput {
+    let early = estimate_swarm_progress(&SwarmProgressInput {
         total: 4,
         completed: 0,
         failed: 0,
@@ -124,10 +124,10 @@ fn progress_estimate_increases_with_running_duration() {
         queued: 3,
         suspended: 0,
         median_completed_duration: Some(Duration::from_secs(60)),
-        longest_running_duration: Duration::from_secs(5),
+        running_durations: vec![Duration::from_secs(5)],
     });
 
-    let late = estimate_swarm_progress(SwarmProgressInput {
+    let late = estimate_swarm_progress(&SwarmProgressInput {
         total: 4,
         completed: 0,
         failed: 0,
@@ -135,7 +135,7 @@ fn progress_estimate_increases_with_running_duration() {
         queued: 3,
         suspended: 0,
         median_completed_duration: Some(Duration::from_secs(60)),
-        longest_running_duration: Duration::from_secs(50),
+        running_durations: vec![Duration::from_secs(50)],
     });
 
     assert!(late > early);

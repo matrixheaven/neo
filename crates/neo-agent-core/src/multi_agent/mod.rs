@@ -12,8 +12,8 @@ pub use mailbox::DelegateMailboxMessage;
 pub use names::{DEFAULT_AGENT_NAMES, DisplayNamePool};
 pub use profile::{AgentProfile, ToolPolicy};
 pub use progress::{
-    SwarmEstimatorPhase, SwarmProgressEstimate, SwarmProgressEstimator, SwarmProgressInput,
-    estimate_swarm_progress,
+    SwarmEstimatorConfig, SwarmEstimatorPhase, SwarmProgressEstimate, SwarmProgressEstimator,
+    SwarmProgressInput, estimate_swarm_progress,
 };
 pub use runtime::{
     AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateRequest, DelegateSwarmItem,
