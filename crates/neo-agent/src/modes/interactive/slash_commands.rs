@@ -8,8 +8,8 @@ use neo_tui::dialogs::HelpPanelCommand;
 use super::InteractiveController;
 use super::task_browser;
 use super::{
-    InlineSkillDirectives, expand_slash_skill, parse_inline_skill_directives, slash_arg,
-    slash_permission_mode,
+    InlineSkillDirectives, InlineSkillInvocation, expand_slash_skill,
+    parse_inline_skill_directives, slash_arg, slash_permission_mode,
 };
 
 impl InteractiveController {
@@ -168,8 +168,11 @@ impl InteractiveController {
             .any(|invocation| invocation.name.is_empty())
         {
             self.push_status("Usage: /skill:<name> [args]");
-        } else if let Err(err) = self.handle_skill_invocation(directives) {
-            self.push_status(format!("Skill error: {err}"));
+        } else {
+            match self.activate_skill_directives(directives) {
+                Ok(_) => self.clear_submitted_prompt(),
+                Err(err) => self.push_status(format!("Skill error: {err}")),
+            }
         }
     }
 
@@ -199,13 +202,16 @@ impl InteractiveController {
         }
     }
 
-    fn handle_skill_invocation(&mut self, directives: InlineSkillDirectives) -> Result<()> {
+    pub(super) fn activate_skill_directives(
+        &mut self,
+        directives: InlineSkillDirectives,
+    ) -> Result<String> {
         let skill_store = self
             .skill_store
             .as_ref()
             .context("skill store not loaded")?;
         let mut names = Vec::new();
-        let mut expanded = Vec::new();
+        let mut loaded_blocks = Vec::new();
         for invocation in &directives.invocations {
             let skill = skill_store
                 .get(&invocation.name)
@@ -213,14 +219,20 @@ impl InteractiveController {
             let (expanded_skill, _) =
                 expand_slash_skill(&invocation.name, &invocation.args, skill)?;
             names.push(invocation.name.clone());
-            expanded.push(expanded_skill);
+            loaded_blocks.push(render_loaded_skill_block(
+                skill,
+                invocation.args.as_str(),
+                expanded_skill.as_str(),
+            ));
         }
 
-        self.clear_submitted_prompt();
         self.push_skill_invocation_entry(names, directives.body.as_str());
-        self.pending_skill_context = Some(expanded.join("\n\n"));
-        self.replace_prompt_text(directives.body.as_str());
-        Ok(())
+        self.pending_skill_context = Some(render_user_slash_skill_context(
+            &directives.invocations,
+            &loaded_blocks,
+            directives.body.as_str(),
+        ));
+        Ok(directives.body)
     }
 
     fn push_skill_invocation_entry(&mut self, names: Vec<String>, body: &str) {
@@ -251,4 +263,65 @@ fn strip_goal_separator(text: &str) -> &str {
     text.trim()
         .strip_prefix("--")
         .map_or(text.trim(), str::trim)
+}
+
+fn render_user_slash_skill_context(
+    invocations: &[InlineSkillInvocation],
+    loaded_blocks: &[String],
+    body: &str,
+) -> String {
+    let names = invocations
+        .iter()
+        .map(|invocation| format!("\"{}\"", escape_xml_text(&invocation.name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let label = if invocations.len() == 1 {
+        format!("the skill {names}")
+    } else {
+        format!("the skills {names}")
+    };
+    let mut context = format!(
+        "User activated {label}. Follow the loaded skill instructions for this request.\n\n{}",
+        loaded_blocks.join("\n\n")
+    );
+    if !body.trim().is_empty() {
+        context.push_str("\n\nUser request after removing /skill control syntax:\n");
+        context.push_str("<neo-user-request>\n");
+        context.push_str(body);
+        context.push_str("\n</neo-user-request>");
+    }
+    context
+}
+
+fn render_loaded_skill_block(
+    skill: &neo_agent_core::skills::LoadedSkill,
+    args: &str,
+    body: &str,
+) -> String {
+    format!(
+        "<neo-skill-loaded name=\"{}\" trigger=\"user-slash\" source=\"{}\" dir=\"{}\" args=\"{}\">\n{}\n</neo-skill-loaded>",
+        escape_xml_attr(&skill.name),
+        escape_xml_attr(skill_source_label(skill.source)),
+        escape_xml_attr(&skill.root.to_string_lossy()),
+        escape_xml_attr(args),
+        body
+    )
+}
+
+const fn skill_source_label(source: neo_agent_core::skills::SkillSource) -> &'static str {
+    match source {
+        neo_agent_core::skills::SkillSource::Builtin => "builtin",
+        neo_agent_core::skills::SkillSource::Extra => "extra",
+        neo_agent_core::skills::SkillSource::User => "user",
+    }
+}
+
+fn escape_xml_attr(text: &str) -> String {
+    escape_xml_text(text).replace('"', "&quot;")
+}
+
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

@@ -119,7 +119,7 @@ use input::ExitConfirmation;
 
 mod prompt_edit;
 use prompt_edit::{
-    InlineSkillDirectives, content_to_display_text, expand_slash_skill,
+    InlineSkillDirectives, InlineSkillInvocation, content_to_display_text, expand_slash_skill,
     parse_inline_skill_directives, prompt_edit_for_action,
 };
 
@@ -330,8 +330,13 @@ pub(crate) struct InteractiveController {
     pending_mcp_add_transport: Option<&'static str>,
     mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
-    /// Expanded skill body waiting to be injected as context for the next turn.
+    /// Kimi-style skill activation prompt waiting to be injected as context for
+    /// the next turn.
     pending_skill_context: Option<String>,
+    /// Stripped prompt body already rendered inside a skill activation card.
+    /// Suppress the matching runtime user-message echo so the transcript does
+    /// not show the same body twice.
+    pending_skill_user_message_to_suppress: Option<String>,
     goal_manager: Option<Arc<neo_agent_core::goal::GoalManager>>,
     plan_mode: Arc<RwLock<PlanMode>>,
     /// Current permission mode for the session.
@@ -700,6 +705,7 @@ impl InteractiveController {
             mcp_manager: Some(mcp_manager_with_oauth_service()),
             skill_store: None,
             pending_skill_context: None,
+            pending_skill_user_message_to_suppress: None,
             goal_manager: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
@@ -1268,6 +1274,35 @@ impl InteractiveController {
             return Ok(());
         }
 
+        if let Some(directives) = parse_inline_skill_directives(&prompt) {
+            if directives
+                .invocations
+                .iter()
+                .any(|invocation| invocation.name.is_empty())
+            {
+                self.push_status("Usage: /skill:<name> [args]");
+                return Ok(());
+            }
+            let stripped_prompt = match self.activate_skill_directives(directives) {
+                Ok(body) => body,
+                Err(err) => {
+                    self.push_status(format!("Skill error: {err}"));
+                    return Ok(());
+                }
+            };
+            if stripped_prompt.trim().is_empty() {
+                self.clear_submitted_prompt();
+                return Ok(());
+            }
+            self.pending_skill_user_message_to_suppress = Some(stripped_prompt.clone());
+            let Some(prompt) = self.submit_prompt_text(stripped_prompt) else {
+                return Ok(());
+            };
+            self.start_turn_from_submitted_prompt(prompt)?;
+            self.drain_active_turn().await?;
+            return self.start_pending_background_question_followups().await;
+        }
+
         // Slash commands: handle without submitting a turn or entering streaming mode.
         if self.handle_slash_command(&prompt).await {
             return Ok(());
@@ -1276,6 +1311,17 @@ impl InteractiveController {
         let Some(prompt) = self.tui.chrome_mut().submit_prompt() else {
             return Ok(());
         };
+        self.start_turn_from_submitted_prompt(prompt)?;
+        self.drain_active_turn().await?;
+        self.start_pending_background_question_followups().await
+    }
+
+    fn submit_prompt_text(&mut self, prompt: String) -> Option<String> {
+        self.tui.chrome_mut().prompt_mut().set_text(prompt);
+        self.tui.chrome_mut().submit_prompt()
+    }
+
+    fn start_turn_from_submitted_prompt(&mut self, prompt: String) -> Result<()> {
         let PromptSubmission {
             prompt,
             model_override,
@@ -1295,8 +1341,7 @@ impl InteractiveController {
         // above, so they never reach this point. Append failures are non-fatal.
         self.append_prompt_history(&content_to_display_text(&content));
         self.start_turn_with_prompt(content, model_override);
-        self.drain_active_turn().await?;
-        self.start_pending_background_question_followups().await
+        Ok(())
     }
 
     /// Queue the current composer text as a follow-up message into the running
@@ -1454,6 +1499,14 @@ impl InteractiveController {
         };
         let text = content_to_display_text(content);
         if text.trim().is_empty() {
+            return;
+        }
+        if self
+            .pending_skill_user_message_to_suppress
+            .as_deref()
+            .is_some_and(|expected| expected.trim() == text.trim())
+        {
+            self.pending_skill_user_message_to_suppress = None;
             return;
         }
         self.tui.transcript_mut().push_user_message(text);

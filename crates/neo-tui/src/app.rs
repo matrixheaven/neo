@@ -73,6 +73,7 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
+        self.transcript.tick_cached_live_entries_for_parent_render();
         let mut lines = self
             .transcript
             .render_frame(width, height)

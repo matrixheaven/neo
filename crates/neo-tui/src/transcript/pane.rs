@@ -605,6 +605,18 @@ impl TranscriptPane {
         }
     }
 
+    pub fn tick_cached_live_entries_for_parent_render(&mut self) {
+        if self.dirty {
+            return;
+        }
+        let now_ms = current_time_ms();
+        let live_entries_changed = self.transcript.tick_live_entries(now_ms);
+        if live_entries_changed || self.has_streaming_thinking() {
+            self.activity_frame = self.activity_frame.wrapping_add(1);
+            self.mark_dirty();
+        }
+    }
+
     /// Render a single flat frame of all non-chrome content lines as ANSI
     /// strings.
     ///

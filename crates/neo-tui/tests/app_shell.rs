@@ -49,6 +49,13 @@ fn render_transcript(width: usize, height: usize, transcript: &mut TranscriptPan
         .collect()
 }
 
+fn strip_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect()
+}
+
 fn task_browser_item(id: &str, status: TaskBrowserStatus) -> TaskBrowserItem {
     TaskBrowserItem {
         id: id.to_owned(),
@@ -123,6 +130,23 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
     assert!(cursor.is_none());
     assert!(rendered.contains("TASK BROWSER"));
     assert!(!rendered.contains("old transcript line should be hidden"));
+}
+
+#[test]
+fn app_shell_render_tick_animates_transcript_thinking_spinner() {
+    let chrome = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
+    let mut transcript = TranscriptPane::new(80, 20);
+    transcript.push_transcript(neo_tui::transcript::TranscriptEntry::thinking_streaming(
+        "working it out",
+    ));
+    let mut tui = neo_tui::NeoTui::new(chrome, transcript);
+
+    let first = strip_lines(tui.render_frame(80, 20).0).join("\n");
+    tui.chrome_mut().advance_activity_frame();
+    let second = strip_lines(tui.render_frame(80, 20).0).join("\n");
+
+    assert!(first.contains("⠋ thinking..."), "first frame: {first}");
+    assert!(second.contains("⠙ thinking..."), "second frame: {second}");
 }
 
 #[test]

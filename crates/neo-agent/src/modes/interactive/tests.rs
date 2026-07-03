@@ -2005,23 +2005,9 @@ async fn slash_picker_commands_do_not_enter_streaming_mode() {
 }
 
 #[tokio::test]
-async fn inline_multi_skill_directives_activate_one_card_then_submit_stripped_prompt() {
+async fn inline_multi_skill_directives_activate_one_card_and_submit_stripped_prompt() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
     let seen_requests = std::sync::Arc::clone(&requests);
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        move |request| {
-            let seen_requests = std::sync::Arc::clone(&seen_requests);
-            async move {
-                seen_requests.lock().expect("requests lock").push(request);
-                Ok(Vec::<AgentEvent>::new())
-            }
-        },
-    );
-    controller.skill_store = Some(skill_store_with_two_prompt_skills());
     let stripped = "\
 foo
 bar
@@ -2031,6 +2017,24 @@ hello
 test test test test
 hola
 amigo";
+    let stripped_for_event = stripped.to_owned();
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            let stripped_for_event = stripped_for_event.clone();
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(vec![AgentEvent::MessageAppended {
+                    message: AgentMessage::user_text(stripped_for_event),
+                }])
+            }
+        },
+    );
+    controller.skill_store = Some(skill_store_with_two_prompt_skills());
     let prompt = "\
 foo
 bar
@@ -2047,8 +2051,7 @@ amigo";
         .await
         .expect("skill activation succeeds");
 
-    assert_eq!(controller.chrome().prompt().text, stripped);
-    assert!(requests.lock().expect("requests lock").is_empty());
+    assert!(controller.chrome().prompt().text.is_empty());
     let entries = transcript_entries(&controller);
     let skill_cards = entries
         .iter()
@@ -2062,13 +2065,25 @@ amigo";
     ));
 
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .wait_for_active_turn()
         .await
-        .expect("stripped prompt submits");
+        .expect("stripped prompt turn completes");
     let requests = requests.lock().expect("requests lock");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].prompt, vec![Content::text(stripped)]);
     let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(
+        skill_context.contains("User activated the skills \"skill_one\", \"skill_two\""),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("<neo-skill-loaded name=\"skill_one\" trigger=\"user-slash\""),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("<neo-user-request>\nfoo\nbar\ntest test test"),
+        "{skill_context}"
+    );
     assert!(
         skill_context.contains("ONE: test test test"),
         "{skill_context}"
@@ -2081,6 +2096,12 @@ amigo";
         skill_context.find("ONE:").expect("first skill")
             < skill_context.find("TWO:").expect("second skill"),
         "{skill_context}"
+    );
+    assert!(
+        !transcript_entries(&controller)
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == stripped)),
+        "skill activation body should not be rendered again as a user message"
     );
 }
 
@@ -2109,6 +2130,10 @@ async fn inline_skill_directive_without_whitespace_prefix_submits_as_plain_promp
         .await
         .expect("plain prompt submits");
 
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("plain prompt turn completes");
     let requests = requests.lock().expect("requests lock");
     assert_eq!(requests.len(), 1);
     assert_eq!(
