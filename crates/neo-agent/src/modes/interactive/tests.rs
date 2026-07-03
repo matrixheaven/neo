@@ -4599,6 +4599,271 @@ fn rebuild_transcript_from_session_replays_tool_calls_and_results() {
 }
 
 #[test]
+fn replay_session_into_transcript_suppresses_delegate_tool_when_delegate_card_replays() {
+    let mut transcript = TranscriptPane::new(100, 16);
+    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+        .start_foreground_delegate_for_test("audit replay duplication");
+    let agent_id = snapshot.id.as_str().to_owned();
+    let loaded = LoadedSessionTranscript::new(
+        "alpha",
+        Vec::new(),
+        [
+            AgentMessage::assistant(
+                [Content::text("delegating")],
+                [neo_agent_core::AgentToolCall {
+                    id: "delegate-tool-1".to_owned(),
+                    name: "Delegate".to_owned(),
+                    raw_arguments: r#"{"task":"audit replay duplication"}"#.to_owned(),
+                }],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::tool_result(
+                "delegate-tool-1",
+                "Delegate",
+                [Content::text(format!("agent_id: {agent_id}"))],
+                false,
+            ),
+        ],
+    )
+    .with_events([
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("delegating")],
+                [neo_agent_core::AgentToolCall {
+                    id: "delegate-tool-1".to_owned(),
+                    name: "Delegate".to_owned(),
+                    raw_arguments: r#"{"task":"audit replay duplication"}"#.to_owned(),
+                }],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::DelegateStarted {
+            turn: 7,
+            agent: snapshot.clone(),
+        },
+        AgentEvent::DelegateFinished {
+            turn: 7,
+            agent: snapshot,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "delegate-tool-1",
+                "Delegate",
+                [Content::text(format!("agent_id: {agent_id}"))],
+                false,
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(100, 16)
+        .expect("render frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered.contains("· Delegate"), "{rendered}");
+    assert!(rendered.contains("audit replay duplication"), "{rendered}");
+    assert!(
+        !rendered.contains("Used Delegate"),
+        "Delegate tool run should be represented by the delegate card only: {rendered}"
+    );
+    assert!(rendered.contains("delegating"), "{rendered}");
+}
+
+#[test]
+fn replay_session_into_transcript_keeps_delegate_card_in_event_order() {
+    let mut transcript = TranscriptPane::new(120, 30);
+    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+        .start_foreground_delegate_for_test("audit after read");
+    let agent_id = snapshot.id.as_str().to_owned();
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::<AgentMessage>::new())
+        .with_events([
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    [Content::text("inspect then delegate")],
+                    [
+                        neo_agent_core::AgentToolCall {
+                            id: "read-tool-1".to_owned(),
+                            name: "Read".to_owned(),
+                            raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
+                        },
+                        neo_agent_core::AgentToolCall {
+                            id: "delegate-tool-1".to_owned(),
+                            name: "Delegate".to_owned(),
+                            raw_arguments: r#"{"task":"audit after read"}"#.to_owned(),
+                        },
+                    ],
+                    StopReason::ToolUse,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "read-tool-1",
+                    "Read",
+                    [Content::text("README contents")],
+                    false,
+                ),
+            },
+            AgentEvent::DelegateStarted {
+                turn: 7,
+                agent: snapshot.clone(),
+            },
+            AgentEvent::DelegateFinished {
+                turn: 7,
+                agent: snapshot,
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "delegate-tool-1",
+                    "Delegate",
+                    [Content::text(format!("agent_id: {agent_id}"))],
+                    false,
+                ),
+            },
+        ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(120, 30)
+        .expect("render frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let read_index = rendered
+        .find("README contents")
+        .expect("read result visible");
+    let delegate_index = rendered.find("· Delegate").expect("delegate card visible");
+    assert!(
+        read_index < delegate_index,
+        "delegate card should replay at its original event position: {rendered}"
+    );
+    assert!(rendered.contains("Used Read (README.md)"), "{rendered}");
+    assert!(
+        !rendered.contains("Used Delegate"),
+        "restored delegate should be represented by the delegate card only: {rendered}"
+    );
+}
+
+#[test]
+fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_tool() {
+    let mut transcript = TranscriptPane::new(120, 20);
+    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+        .start_foreground_delegate_for_test("successful restored delegate");
+    let agent_id = snapshot.id.as_str().to_owned();
+    let loaded = LoadedSessionTranscript::new(
+        "alpha",
+        Vec::new(),
+        [
+            AgentMessage::assistant(
+                [Content::text("trying two delegates")],
+                [
+                    neo_agent_core::AgentToolCall {
+                        id: "delegate-failed".to_owned(),
+                        name: "Delegate".to_owned(),
+                        raw_arguments: r#"{"task":""}"#.to_owned(),
+                    },
+                    neo_agent_core::AgentToolCall {
+                        id: "delegate-success".to_owned(),
+                        name: "Delegate".to_owned(),
+                        raw_arguments: r#"{"task":"successful restored delegate"}"#.to_owned(),
+                    },
+                ],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::tool_result(
+                "delegate-failed",
+                "Delegate",
+                [Content::text(
+                    "invalid input for Delegate: task must not be empty",
+                )],
+                true,
+            ),
+            AgentMessage::tool_result(
+                "delegate-success",
+                "Delegate",
+                [Content::text(format!("agent_id: {agent_id}"))],
+                false,
+            ),
+        ],
+    )
+    .with_events([
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("trying two delegates")],
+                [
+                    neo_agent_core::AgentToolCall {
+                        id: "delegate-failed".to_owned(),
+                        name: "Delegate".to_owned(),
+                        raw_arguments: r#"{"task":""}"#.to_owned(),
+                    },
+                    neo_agent_core::AgentToolCall {
+                        id: "delegate-success".to_owned(),
+                        name: "Delegate".to_owned(),
+                        raw_arguments: r#"{"task":"successful restored delegate"}"#.to_owned(),
+                    },
+                ],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "delegate-failed",
+                "Delegate",
+                [Content::text(
+                    "invalid input for Delegate: task must not be empty",
+                )],
+                true,
+            ),
+        },
+        AgentEvent::DelegateStarted {
+            turn: 7,
+            agent: snapshot.clone(),
+        },
+        AgentEvent::DelegateFinished {
+            turn: 7,
+            agent: snapshot,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "delegate-success",
+                "Delegate",
+                [Content::text(format!("agent_id: {agent_id}"))],
+                false,
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(120, 20)
+        .expect("render frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered.contains("· Delegate"), "{rendered}");
+    assert!(
+        rendered.contains("successful restored delegate"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Failed Delegate"), "{rendered}");
+    assert!(
+        rendered.contains("invalid input for Delegate: task must not be empty"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Used Delegate"),
+        "successful Delegate tool run should be represented by the delegate card only: {rendered}"
+    );
+}
+
+#[test]
 fn rebuild_transcript_from_session_initializes_context_window_usage() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -4686,6 +4951,41 @@ async fn load_session_transcript_replays_token_usage_for_footer() {
         169_200
     );
     assert_eq!(loaded.main_agent_token_usage.input_cache_write_tokens, 0);
+}
+
+#[tokio::test]
+async fn load_session_transcript_preserves_delegate_events_for_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+        .start_foreground_delegate_for_test("audit paths");
+    writer
+        .append(&AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: snapshot,
+        })
+        .await
+        .expect("append delegate");
+    writer.flush().await.expect("flush session");
+
+    let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect("load transcript");
+
+    assert!(
+        loaded
+            .events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::DelegateStarted { .. })),
+        "delegate events should be preserved for transcript replay"
+    );
 }
 
 #[test]

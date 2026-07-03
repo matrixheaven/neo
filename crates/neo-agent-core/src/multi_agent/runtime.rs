@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -427,6 +427,40 @@ impl MultiAgentRuntime {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         state.register_swarm_order(&swarm_id);
         state.swarms.insert(swarm_id, snapshot);
+    }
+
+    pub fn restore_from_replay<'a>(&self, events: impl IntoIterator<Item = &'a AgentEvent>) {
+        let mut restored_agent_ids = BTreeSet::new();
+        let mut restored_swarm_ids = BTreeSet::new();
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        for event in events {
+            match event {
+                AgentEvent::DelegateStarted { agent, .. }
+                | AgentEvent::DelegateUpdated { agent, .. }
+                | AgentEvent::DelegateFinished { agent, .. } => {
+                    restored_agent_ids.insert(agent.id.as_str().to_owned());
+                    restore_agent_snapshot_locked(&mut state, agent.clone());
+                }
+                AgentEvent::DelegateSwarmStarted { swarm, .. }
+                | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+                | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+                    restored_swarm_ids.insert(swarm.swarm_id.clone());
+                    restored_agent_ids.extend(
+                        swarm
+                            .children
+                            .iter()
+                            .map(|child| child.agent.id.as_str().to_owned()),
+                    );
+                    restore_swarm_snapshot_locked(&mut state, swarm.clone());
+                }
+                _ => {}
+            }
+        }
+        mark_restored_running_agents_lost_locked(
+            &mut state,
+            &restored_agent_ids,
+            &restored_swarm_ids,
+        );
     }
 
     #[must_use]
@@ -887,6 +921,76 @@ pub struct ChildRunOutput {
 }
 
 type LiveSwarmMessageResult = Result<(Vec<String>, Vec<(String, AgentLifecycleState)>), String>;
+
+fn restore_agent_snapshot_locked(
+    state: &mut MultiAgentState,
+    snapshot: AgentSnapshot,
+) -> AgentSnapshot {
+    let agent_id = snapshot.id.as_str().to_owned();
+    state.register_agent_order(&agent_id);
+    match state.agents.get(&agent_id) {
+        Some(existing) if existing.updated_at_ms > snapshot.updated_at_ms => existing.clone(),
+        _ => {
+            state.agents.insert(agent_id, snapshot.clone());
+            snapshot
+        }
+    }
+}
+
+fn restore_swarm_snapshot_locked(state: &mut MultiAgentState, snapshot: super::SwarmSnapshot) {
+    let swarm_id = snapshot.swarm_id.clone();
+    state.register_swarm_order(&swarm_id);
+    let mut restored = snapshot;
+    for child in &mut restored.children {
+        child.agent = restore_agent_snapshot_locked(state, child.agent.clone());
+    }
+    refresh_swarm(&mut restored);
+    state.swarms.insert(swarm_id, restored);
+}
+
+fn mark_restored_running_agents_lost_locked(
+    state: &mut MultiAgentState,
+    agent_ids: &BTreeSet<String>,
+    swarm_ids: &BTreeSet<String>,
+) {
+    let now = now_ms();
+    for agent_id in agent_ids {
+        if let Some(snapshot) = state.agents.get_mut(agent_id) {
+            mark_restored_snapshot_lost(snapshot, now);
+        }
+    }
+    for swarm_id in swarm_ids {
+        let Some(swarm) = state.swarms.get_mut(swarm_id) else {
+            continue;
+        };
+        for child in &mut swarm.children {
+            if let Some(agent) = state.agents.get(child.agent.id.as_str()) {
+                child.agent = agent.clone();
+            } else {
+                mark_restored_snapshot_lost(&mut child.agent, now);
+            }
+        }
+        refresh_swarm(swarm);
+    }
+}
+
+fn mark_restored_snapshot_lost(snapshot: &mut AgentSnapshot, now: u64) {
+    if !matches!(
+        snapshot.state,
+        AgentLifecycleState::Queued | AgentLifecycleState::Running
+    ) {
+        return;
+    }
+    snapshot.state = AgentLifecycleState::Failed;
+    snapshot.terminal_reason = Some(AgentTerminalReason::Lost);
+    snapshot.terminal_at_ms.get_or_insert(now);
+    snapshot.updated_at_ms = now;
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: "Delegate lost because the previous Neo process exited before completion."
+            .to_owned(),
+        is_error: true,
+    });
+}
 
 struct AgentSnapshotSeed<'a> {
     id: AgentId,

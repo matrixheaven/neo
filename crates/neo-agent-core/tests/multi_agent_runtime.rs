@@ -155,6 +155,130 @@ fn agent_snapshot_records_run_metadata_and_resume_origin() {
 }
 
 #[test]
+fn replayed_delegate_snapshot_can_be_resumed_after_session_restore() {
+    use neo_agent_core::multi_agent::{DelegateContext, DelegateRequest};
+
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("audit session paths");
+    let agent_id = snapshot.id.as_str().to_owned();
+    let events = vec![AgentEvent::DelegateFinished {
+        turn: 3,
+        agent: snapshot,
+    }];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let request = DelegateRequest {
+        task: "continue audit".to_owned(),
+        resume: Some(agent_id.clone()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+    };
+    let resumed = restored
+        .start_resume_delegate(&agent_id, &request)
+        .expect("resume restored agent");
+
+    assert_eq!(resumed.id.as_str(), agent_id);
+    assert_eq!(resumed.run_count, 2);
+}
+
+#[test]
+fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
+    use neo_agent_core::multi_agent::{DelegateContext, DelegateRequest};
+
+    let runtime = MultiAgentRuntime::new();
+    let snapshot = runtime.start_foreground_delegate_for_test("resume interrupted audit");
+    let agent_id = snapshot.id.as_str().to_owned();
+    let events = vec![AgentEvent::DelegateStarted {
+        turn: 3,
+        agent: snapshot,
+    }];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let lost = restored
+        .agent_snapshot(&agent_id)
+        .expect("restored agent snapshot");
+    assert_eq!(lost.state, AgentLifecycleState::Failed);
+    assert_eq!(lost.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert_eq!(
+        lost.outcome.as_ref().map(|outcome| outcome.is_error),
+        Some(true)
+    );
+
+    let request = DelegateRequest {
+        task: "continue interrupted audit".to_owned(),
+        resume: Some(agent_id.clone()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+    };
+    let resumed = restored
+        .start_resume_delegate(&agent_id, &request)
+        .expect("resume lost restored agent");
+
+    assert_eq!(resumed.id.as_str(), agent_id);
+    assert_eq!(resumed.run_count, 2);
+    assert_eq!(resumed.previous_status, Some(AgentLifecycleState::Failed));
+    assert_eq!(resumed.state, AgentLifecycleState::Running);
+}
+
+#[test]
+fn replayed_swarm_marks_running_children_lost_and_refreshes_aggregate() {
+    let runtime = MultiAgentRuntime::new();
+    let swarm_id = runtime.create_swarm_for_test(vec![
+        ("interrupted child", AgentLifecycleState::Running),
+        ("completed child", AgentLifecycleState::Completed),
+    ]);
+    let snapshot = runtime
+        .swarm_snapshot(&swarm_id)
+        .expect("source swarm snapshot");
+    let events = vec![AgentEvent::DelegateSwarmStarted {
+        turn: 4,
+        swarm: snapshot,
+    }];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let restored_swarm = restored
+        .swarm_snapshot(&swarm_id)
+        .expect("restored swarm snapshot");
+    assert_eq!(restored_swarm.state, AgentLifecycleState::Failed);
+    assert_eq!(restored_swarm.aggregate.total, 2);
+    assert_eq!(restored_swarm.aggregate.running, 0);
+    assert_eq!(restored_swarm.aggregate.failed, 1);
+    assert_eq!(restored_swarm.aggregate.completed, 1);
+
+    let interrupted = &restored_swarm.children[0].agent;
+    assert_eq!(interrupted.state, AgentLifecycleState::Failed);
+    assert_eq!(interrupted.terminal_reason, Some(AgentTerminalReason::Lost));
+    let completed = &restored_swarm.children[1].agent;
+    assert_eq!(completed.state, AgentLifecycleState::Completed);
+    assert_eq!(
+        completed.terminal_reason,
+        Some(AgentTerminalReason::Completed)
+    );
+    assert_eq!(
+        restored
+            .agent_snapshot(interrupted.id.as_str())
+            .map(|agent| agent.state),
+        Some(AgentLifecycleState::Failed)
+    );
+    assert_eq!(
+        restored
+            .agent_snapshot(completed.id.as_str())
+            .map(|agent| agent.state),
+        Some(AgentLifecycleState::Completed)
+    );
+}
+
+#[test]
 fn background_terminal_reason_records_lost_without_claiming_completion() {
     let runtime = MultiAgentRuntime::new();
     let snapshot = runtime.start_foreground_delegate_for_test("background work");

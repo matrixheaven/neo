@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fmt::Write as _,
     future::Future,
@@ -543,6 +543,7 @@ pub(crate) struct LoadedSessionTranscript {
     label: String,
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
+    events: Vec<AgentEvent>,
     estimated_context_tokens: Option<u32>,
     main_agent_token_usage: MainAgentTokenUsage,
 }
@@ -558,9 +559,16 @@ impl LoadedSessionTranscript {
             label: label.into(),
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
+            events: Vec::new(),
             estimated_context_tokens: None,
             main_agent_token_usage: MainAgentTokenUsage::default(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_events(mut self, events: impl IntoIterator<Item = AgentEvent>) -> Self {
+        self.events = events.into_iter().collect();
+        self
     }
 
     #[must_use]
@@ -1742,6 +1750,7 @@ async fn load_session_transcript(
     let events = JsonlSessionReader::read_all(&path)
         .await
         .with_context(|| format!("failed to replay session {}", path.display()))?;
+    config.multi_agent.restore_from_replay(events.iter());
     let context = neo_agent_core::AgentContext::from_replay(events.iter());
     let main_agent_token_usage = replay_main_agent_token_usage(events.iter());
     let mut notices = Vec::new();
@@ -1763,6 +1772,7 @@ async fn load_session_transcript(
     let estimated_context_tokens = context.estimated_context_tokens();
     Ok(
         LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
+            .with_events(events)
             .with_estimated_context_tokens(estimated_context_tokens)
             .with_main_agent_token_usage(main_agent_token_usage),
     )
@@ -1790,8 +1800,182 @@ fn replay_session_into_transcript(
     for notice in &loaded.notices {
         transcript.push_transcript(neo_tui::transcript::TranscriptEntry::status(notice.clone()));
     }
-    for message in &loaded.messages {
-        transcript.replay_message(message);
+    let mut suppressor = DelegateReplaySuppressor::from_events(&loaded.events);
+    if loaded.events.is_empty() {
+        for message in &loaded.messages {
+            suppressor.replay_message(transcript, message);
+        }
+    } else {
+        for event in &loaded.events {
+            match event {
+                AgentEvent::MessageAppended { message } => {
+                    suppressor.replay_message(transcript, message);
+                }
+                AgentEvent::DelegateStarted { .. }
+                | AgentEvent::DelegateUpdated { .. }
+                | AgentEvent::DelegateFinished { .. }
+                | AgentEvent::DelegateSwarmStarted { .. }
+                | AgentEvent::DelegateSwarmUpdated { .. }
+                | AgentEvent::DelegateSwarmFinished { .. } => {
+                    transcript.apply_agent_event(event);
+                }
+                _ => {}
+            }
+        }
+    }
+    suppressor.finish(transcript);
+}
+
+#[derive(Debug, Default)]
+struct DelegateReplaySuppressor {
+    delegate_ids: BTreeSet<String>,
+    swarm_ids: BTreeSet<String>,
+    pending: BTreeMap<String, PendingDelegateToolCall>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDelegateToolCall {
+    kind: DelegateReplayKind,
+    tool_call: neo_agent_core::AgentToolCall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelegateReplayKind {
+    Delegate,
+    DelegateSwarm,
+}
+
+impl DelegateReplaySuppressor {
+    fn from_events(events: &[AgentEvent]) -> Self {
+        let mut suppressor = Self::default();
+        for event in events {
+            match event {
+                AgentEvent::DelegateStarted { agent, .. }
+                | AgentEvent::DelegateUpdated { agent, .. }
+                | AgentEvent::DelegateFinished { agent, .. } => {
+                    suppressor.delegate_ids.insert(agent.id.as_str().to_owned());
+                }
+                AgentEvent::DelegateSwarmStarted { swarm, .. }
+                | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+                | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+                    suppressor.swarm_ids.insert(swarm.swarm_id.clone());
+                }
+                _ => {}
+            }
+        }
+        suppressor
+    }
+
+    fn replay_message(&mut self, transcript: &mut TranscriptPane, message: &AgentMessage) {
+        match message {
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                stop_reason,
+            } => {
+                self.flush_pending(transcript);
+                let tool_calls = tool_calls
+                    .iter()
+                    .filter(|tool_call| !self.defer_delegate_tool_call(tool_call))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !content.is_empty() || !tool_calls.is_empty() {
+                    transcript.replay_message(&AgentMessage::Assistant {
+                        content: content.clone(),
+                        tool_calls,
+                        stop_reason: *stop_reason,
+                    });
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(pending) = self.pending.remove(tool_call_id) {
+                    if *is_error || !self.result_matches_restored_target(pending.kind, content) {
+                        Self::replay_tool_call(transcript, pending.tool_call);
+                        transcript.replay_message(message);
+                    }
+                } else {
+                    transcript.replay_message(message);
+                }
+            }
+            _ => {
+                self.flush_pending(transcript);
+                transcript.replay_message(message);
+            }
+        }
+    }
+
+    fn finish(&mut self, transcript: &mut TranscriptPane) {
+        self.flush_pending(transcript);
+    }
+
+    fn defer_delegate_tool_call(&mut self, tool_call: &neo_agent_core::AgentToolCall) -> bool {
+        let Some(kind) = DelegateReplayKind::from_tool_name(&tool_call.name) else {
+            return false;
+        };
+        if !self.has_targets(kind) {
+            return false;
+        }
+        self.pending.insert(
+            tool_call.id.clone(),
+            PendingDelegateToolCall {
+                kind,
+                tool_call: tool_call.clone(),
+            },
+        );
+        true
+    }
+
+    fn has_targets(&self, kind: DelegateReplayKind) -> bool {
+        match kind {
+            DelegateReplayKind::Delegate => !self.delegate_ids.is_empty(),
+            DelegateReplayKind::DelegateSwarm => !self.swarm_ids.is_empty(),
+        }
+    }
+
+    fn result_matches_restored_target(
+        &self,
+        kind: DelegateReplayKind,
+        content: &[Content],
+    ) -> bool {
+        let text = content
+            .iter()
+            .filter_map(Content::as_text)
+            .collect::<Vec<_>>()
+            .join("");
+        match kind {
+            DelegateReplayKind::Delegate => self.delegate_ids.iter().any(|id| text.contains(id)),
+            DelegateReplayKind::DelegateSwarm => self.swarm_ids.iter().any(|id| text.contains(id)),
+        }
+    }
+
+    fn flush_pending(&mut self, transcript: &mut TranscriptPane) {
+        let pending = std::mem::take(&mut self.pending);
+        for pending in pending.into_values() {
+            Self::replay_tool_call(transcript, pending.tool_call);
+        }
+    }
+
+    fn replay_tool_call(transcript: &mut TranscriptPane, tool_call: neo_agent_core::AgentToolCall) {
+        transcript.replay_message(&AgentMessage::Assistant {
+            content: Vec::new(),
+            tool_calls: vec![tool_call],
+            stop_reason: neo_agent_core::StopReason::ToolUse,
+        });
+    }
+}
+
+impl DelegateReplayKind {
+    fn from_tool_name(name: &str) -> Option<Self> {
+        match name {
+            "Delegate" => Some(Self::Delegate),
+            "DelegateSwarm" => Some(Self::DelegateSwarm),
+            _ => None,
+        }
     }
 }
 
