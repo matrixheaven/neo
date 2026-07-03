@@ -54,6 +54,12 @@ impl NeoTui {
         &mut self.transcript
     }
 
+    /// Whether the transcript pane has pending changes requiring a re-render.
+    #[must_use]
+    pub fn is_transcript_dirty(&self) -> bool {
+        self.transcript.is_dirty()
+    }
+
     pub fn render_frame(
         &mut self,
         width: usize,

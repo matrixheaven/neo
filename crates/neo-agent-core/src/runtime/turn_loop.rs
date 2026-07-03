@@ -3,9 +3,7 @@ use std::sync::Arc;
 use neo_ai::{AiError, ModelClient};
 use tokio_util::sync::CancellationToken;
 
-use super::chat_request::{
-    chat_request, chat_request_for_context_estimate, validate_model_capabilities,
-};
+use super::chat_request::{chat_request, validate_model_capabilities};
 use super::compaction_trigger::maybe_compact;
 use super::config::AgentConfig;
 use super::error::AgentRuntimeError;
@@ -19,7 +17,7 @@ use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
 use super::stream_aggregator::run_model_turn;
-use super::tokens::{estimate_chat_request_tokens, estimate_messages_tokens};
+use super::tokens::{estimate_messages_tokens, estimate_tokens_with_config};
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
@@ -145,7 +143,11 @@ pub(super) async fn run_agent_turn(
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context).await;
-        emit_context_window_update(emitter, turn, estimate_chat_request_tokens(&request));
+        emit_context_window_update(
+            emitter,
+            turn,
+            estimate_tokens_with_config(&request.messages, &config),
+        );
         validate_model_capabilities(&request)?;
         let assistant =
             run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
@@ -216,7 +218,7 @@ pub(super) async fn run_agent_turn(
         // emit_tool_side_effect_events.
         let has_enter_plan_mode = tool_results
             .iter()
-            .any(|(tc, _)| tc.name == "EnterPlanMode");
+            .any(|(tc, _)| tc.name.as_ref() == "EnterPlanMode");
         if has_enter_plan_mode {
             enter_plan_mode_state(&config);
             attach_enter_plan_details(&config, &mut tool_results);
@@ -275,9 +277,9 @@ fn emit_tool_side_effect_events(
     emitter: &mut EventEmitter,
 ) {
     for (tool_call, result) in tool_results {
-        emit_plan_tool_event(turn, config, tool_call.name.as_str(), result, emitter);
-        emit_todo_event(turn, config, tool_call.name.as_str(), result, emitter);
-        emit_goal_event_from_result(turn, tool_call.name.as_str(), result, emitter);
+        emit_plan_tool_event(turn, config, tool_call.name.as_ref(), result, emitter);
+        emit_todo_event(turn, config, tool_call.name.as_ref(), result, emitter);
+        emit_goal_event_from_result(turn, tool_call.name.as_ref(), result, emitter);
     }
 }
 
@@ -317,8 +319,17 @@ pub(super) async fn emit_effective_context_window(
     emitter: &mut EventEmitter,
     turn: u32,
 ) {
-    let request = chat_request_for_context_estimate(config, &emitter.context).await;
-    emit_context_window_update(emitter, turn, estimate_chat_request_tokens(&request));
+    // Avoid rebuilding the entire ChatRequest just to count tokens.
+    // Use the cached incremental estimate from AgentContext plus the cached
+    // tool-spec tokens from AgentConfig.  This is approximate (omits system
+    // prompt / workspace preamble overhead) but sufficiently accurate for the
+    // context-window bar display, and avoids 3-4 O(n) message rebuilds per
+    // turn iteration.
+    let tool_tokens = *config
+        .cached_tool_spec_tokens
+        .get_or_init(|| super::tokens::estimate_tool_specs_tokens(&config.tools));
+    let used_tokens = emitter.context.estimated_tokens() + tool_tokens;
+    emit_context_window_update(emitter, turn, used_tokens);
 }
 
 fn terminal_pre_model_stop(

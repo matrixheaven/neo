@@ -163,7 +163,7 @@ async fn user_shell_runner_reports_current_foreground_task_id() {
     assert!(matches!(
         result.outcome,
         ShellCommandOutcome::Backgrounded { task_id: outcome_task_id }
-            if outcome_task_id == task_id
+            if outcome_task_id.as_ref() == task_id.as_str()
     ));
     let _ = manager
         .stop(&task_id, "test cleanup", 1024)

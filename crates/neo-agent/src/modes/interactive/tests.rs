@@ -279,11 +279,11 @@ fn refresh_git_status_now_updates_after_write_tool_finished() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.set_git_status_provider(Arc::new(|_| Some("main [+2 -1]".to_owned())));
+    controller.set_git_status_provider(Arc::new(|_| Some("main [+2 -1]".into())));
     controller
         .tui
         .chrome_mut()
-        .set_git_status_label(Some("main [+1 -1]".to_owned()));
+        .set_git_status_label(Some("main [+1 -1]".into()));
 
     controller.apply_turn_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -304,11 +304,11 @@ fn refresh_git_status_now_updates_after_edit_tool_finished() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.set_git_status_provider(Arc::new(|_| Some("main [+3 -2]".to_owned())));
+    controller.set_git_status_provider(Arc::new(|_| Some("main [+3 -2]".into())));
     controller
         .tui
         .chrome_mut()
-        .set_git_status_label(Some("main [+1 -1]".to_owned()));
+        .set_git_status_label(Some("main [+1 -1]".into()));
 
     controller.apply_turn_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -323,8 +323,8 @@ fn refresh_git_status_now_updates_after_edit_tool_finished() {
 #[test]
 fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
     let statuses = Arc::new(std::sync::Mutex::new(VecDeque::from([
-        Some("main [↑1]".to_owned()),
-        Some("main".to_owned()),
+        Some("main [↑1]".into()),
+        Some("main".into()),
     ])));
     let provider_statuses = Arc::clone(&statuses);
     let mut controller = InteractiveController::new_for_test(
@@ -344,7 +344,7 @@ fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
     controller
         .tui
         .chrome_mut()
-        .set_git_status_label(Some("main [+1 -1]".to_owned()));
+        .set_git_status_label(Some("main [+1 -1]".into()));
 
     controller.apply_turn_event(AgentEvent::ShellCommandFinished {
         turn: 1,
@@ -387,7 +387,7 @@ fn refresh_git_status_if_due_uses_30s_interval() {
     controller
         .tui
         .chrome_mut()
-        .set_git_status_label(Some("main".to_owned()));
+        .set_git_status_label(Some("main".into()));
 
     controller.set_last_git_status_refresh(Some(
         Instant::now()
@@ -424,7 +424,7 @@ fn refresh_git_status_now_clears_badge_when_git_unavailable() {
     controller
         .tui
         .chrome_mut()
-        .set_git_status_label(Some("main [+1 -1]".to_owned()));
+        .set_git_status_label(Some("main [+1 -1]".into()));
 
     controller.refresh_git_status_now();
 
@@ -459,6 +459,18 @@ fn transcript_has_status(controller: &InteractiveController, expected: &str) -> 
 
 fn transcript_scrollback(controller: &InteractiveController) -> usize {
     controller.transcript().transcript().viewport().scrollback()
+}
+
+/// Replay the active session's JSONL to recover `AgentMessage` values for
+/// assertions.  Used in place of the removed `session_messages` field.
+async fn replay_session_messages(controller: &InteractiveController) -> Vec<AgentMessage> {
+    let config = controller.local_config.as_ref().expect("config");
+    let session_id = controller.active_session_id.as_ref().expect("session id");
+    let path = crate::modes::sessions::session_path(session_id, config).expect("session path");
+    neo_agent_core::session::JsonlSessionReader::replay_context(&path)
+        .await
+        .map(|ctx| ctx.messages().to_vec())
+        .unwrap_or_default()
 }
 
 fn render_tui_snapshot(tui: &neo_tui::NeoTui) -> String {
@@ -515,7 +527,7 @@ async fn resolving_question_records_collected_answers_in_transcript() {
         id: "question-1".to_owned(),
         questions: vec![neo_agent_core::QuestionEventData {
             question: "Pick a side?".to_owned(),
-            header: Some("Choice".to_owned()),
+            header: Some("Choice".into()),
             body: None,
             options: vec![
                 neo_agent_core::QuestionOptionData {
@@ -571,7 +583,7 @@ async fn background_question_answer_starts_followup_turn() {
         id: "question-1".to_owned(),
         questions: vec![neo_agent_core::QuestionEventData {
             question: "Pick a side?".to_owned(),
-            header: Some("Choice".to_owned()),
+            header: Some("Choice".into()),
             body: None,
             options: vec![
                 neo_agent_core::QuestionOptionData {
@@ -729,9 +741,9 @@ fn neo_tui_draw_replays_finished_tool_before_prompt_chrome() {
             AgentMessage::assistant(
                 [Content::text("reading")],
                 [neo_agent_core::AgentToolCall {
-                    id: "tool-1".to_owned(),
-                    name: "Read".to_owned(),
-                    raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
+                    id: "tool-1".into(),
+                    name: "Read".into(),
+                    raw_arguments: r#"{"path":"README.md"}"#.into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -3127,7 +3139,7 @@ async fn event_loop_model_picker_action_opens_model_picker() {
             ModelConfig {
                 provider: "openai".to_owned(),
                 model: "gpt-4.1".to_owned(),
-                display_name: Some("test model".to_owned()),
+                display_name: Some("test model".into()),
                 ..ModelConfig::default()
             },
         )]),
@@ -3286,7 +3298,7 @@ async fn event_loop_opens_command_palette_and_runs_local_model_command() {
             ModelConfig {
                 provider: "anthropic".to_owned(),
                 model: "claude-sonnet".to_owned(),
-                display_name: Some("messages".to_owned()),
+                display_name: Some("messages".into()),
                 ..ModelConfig::default()
             },
         )]),
@@ -3655,16 +3667,16 @@ async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
                     id: "question-1".to_owned(),
                     questions: vec![neo_agent_core::QuestionEventData {
                         question: "1 + 1 = ?".to_owned(),
-                        header: Some("Math".to_owned()),
+                        header: Some("Math".into()),
                         body: None,
                         options: vec![
                             neo_agent_core::QuestionOptionData {
                                 label: "2".to_owned(),
-                                description: Some("Correct".to_owned()),
+                                description: Some("Correct".into()),
                             },
                             neo_agent_core::QuestionOptionData {
                                 label: "3".to_owned(),
-                                description: Some("Too high".to_owned()),
+                                description: Some("Too high".into()),
                             },
                         ],
                         multi_select: false,
@@ -3779,7 +3791,7 @@ async fn approval_number_shortcut_confirms_session_approval() {
             decision_tx,
             feedback_tx: None,
             selected_label_tx: None,
-            session_option_label: Some("Approve writes to this file for this session".to_owned()),
+            session_option_label: Some("Approve writes to this file for this session".into()),
             prefix_option_label: None,
         },
     );
@@ -3837,8 +3849,8 @@ async fn prefix_approval_choice_dispatches_prefix_decision() {
             decision_tx,
             feedback_tx: None,
             selected_label_tx: None,
-            session_option_label: Some("Approve this exact command for this session".to_owned()),
-            prefix_option_label: Some("Approve commands starting with cargo test".to_owned()),
+            session_option_label: Some("Approve this exact command for this session".into()),
+            prefix_option_label: Some("Approve commands starting with cargo test".into()),
         },
     );
 
@@ -3875,7 +3887,7 @@ async fn question_dialog_consumes_keyboard_before_prompt_editing() {
         questions: vec![
             neo_agent_core::QuestionEventData {
                 question: "2 + 2 = ?".to_owned(),
-                header: Some("Single".to_owned()),
+                header: Some("Single".into()),
                 body: None,
                 options: vec![
                     neo_agent_core::QuestionOptionData {
@@ -3891,7 +3903,7 @@ async fn question_dialog_consumes_keyboard_before_prompt_editing() {
             },
             neo_agent_core::QuestionEventData {
                 question: "Pick primes".to_owned(),
-                header: Some("Multi".to_owned()),
+                header: Some("Multi".into()),
                 body: None,
                 options: vec![
                     neo_agent_core::QuestionOptionData {
@@ -3985,7 +3997,7 @@ async fn question_dialog_prioritizes_real_keybindings_before_prompt_editing() {
         id: "question-1".to_owned(),
         questions: vec![neo_agent_core::QuestionEventData {
             question: "Pick one".to_owned(),
-            header: Some("Single".to_owned()),
+            header: Some("Single".into()),
             body: None,
             options: vec![
                 neo_agent_core::QuestionOptionData {
@@ -4665,9 +4677,9 @@ fn rebuild_transcript_from_session_replays_tool_calls_and_results() {
             AgentMessage::assistant(
                 [Content::text("reading")],
                 [neo_agent_core::AgentToolCall {
-                    id: "tool-1".to_owned(),
-                    name: "Read".to_owned(),
-                    raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
+                    id: "tool-1".into(),
+                    name: "Read".into(),
+                    raw_arguments: r#"{"path":"README.md"}"#.into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -4705,9 +4717,9 @@ fn replay_session_into_transcript_suppresses_delegate_tool_when_delegate_card_re
             AgentMessage::assistant(
                 [Content::text("delegating")],
                 [neo_agent_core::AgentToolCall {
-                    id: "delegate-tool-1".to_owned(),
-                    name: "Delegate".to_owned(),
-                    raw_arguments: r#"{"task":"audit replay duplication"}"#.to_owned(),
+                    id: "delegate-tool-1".into(),
+                    name: "Delegate".into(),
+                    raw_arguments: r#"{"task":"audit replay duplication"}"#.into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -4724,9 +4736,9 @@ fn replay_session_into_transcript_suppresses_delegate_tool_when_delegate_card_re
             message: AgentMessage::assistant(
                 [Content::text("delegating")],
                 [neo_agent_core::AgentToolCall {
-                    id: "delegate-tool-1".to_owned(),
-                    name: "Delegate".to_owned(),
-                    raw_arguments: r#"{"task":"audit replay duplication"}"#.to_owned(),
+                    id: "delegate-tool-1".into(),
+                    name: "Delegate".into(),
+                    raw_arguments: r#"{"task":"audit replay duplication"}"#.into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -4780,14 +4792,14 @@ fn replay_session_into_transcript_keeps_delegate_card_in_event_order() {
                     [Content::text("inspect then delegate")],
                     [
                         neo_agent_core::AgentToolCall {
-                            id: "read-tool-1".to_owned(),
-                            name: "Read".to_owned(),
-                            raw_arguments: r#"{"path":"README.md"}"#.to_owned(),
+                            id: "read-tool-1".into(),
+                            name: "Read".into(),
+                            raw_arguments: r#"{"path":"README.md"}"#.into(),
                         },
                         neo_agent_core::AgentToolCall {
-                            id: "delegate-tool-1".to_owned(),
-                            name: "Delegate".to_owned(),
-                            raw_arguments: r#"{"task":"audit after read"}"#.to_owned(),
+                            id: "delegate-tool-1".into(),
+                            name: "Delegate".into(),
+                            raw_arguments: r#"{"task":"audit after read"}"#.into(),
                         },
                     ],
                     StopReason::ToolUse,
@@ -4857,14 +4869,14 @@ fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_t
                 [Content::text("trying two delegates")],
                 [
                     neo_agent_core::AgentToolCall {
-                        id: "delegate-failed".to_owned(),
-                        name: "Delegate".to_owned(),
-                        raw_arguments: r#"{"task":""}"#.to_owned(),
+                        id: "delegate-failed".into(),
+                        name: "Delegate".into(),
+                        raw_arguments: r#"{"task":""}"#.into(),
                     },
                     neo_agent_core::AgentToolCall {
-                        id: "delegate-success".to_owned(),
-                        name: "Delegate".to_owned(),
-                        raw_arguments: r#"{"task":"successful restored delegate"}"#.to_owned(),
+                        id: "delegate-success".into(),
+                        name: "Delegate".into(),
+                        raw_arguments: r#"{"task":"successful restored delegate"}"#.into(),
                     },
                 ],
                 StopReason::ToolUse,
@@ -4891,14 +4903,14 @@ fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_t
                 [Content::text("trying two delegates")],
                 [
                     neo_agent_core::AgentToolCall {
-                        id: "delegate-failed".to_owned(),
-                        name: "Delegate".to_owned(),
-                        raw_arguments: r#"{"task":""}"#.to_owned(),
+                        id: "delegate-failed".into(),
+                        name: "Delegate".into(),
+                        raw_arguments: r#"{"task":""}"#.into(),
                     },
                     neo_agent_core::AgentToolCall {
-                        id: "delegate-success".to_owned(),
-                        name: "Delegate".to_owned(),
-                        raw_arguments: r#"{"task":"successful restored delegate"}"#.to_owned(),
+                        id: "delegate-success".into(),
+                        name: "Delegate".into(),
+                        raw_arguments: r#"{"task":"successful restored delegate"}"#.into(),
                     },
                 ],
                 StopReason::ToolUse,
@@ -5556,7 +5568,7 @@ async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
                 ModelConfig {
                     provider: "openai".to_owned(),
                     model: "gpt-4.1".to_owned(),
-                    display_name: Some("Responses".to_owned()),
+                    display_name: Some("Responses".into()),
                     ..ModelConfig::default()
                 },
             ),
@@ -5565,7 +5577,7 @@ async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
                 ModelConfig {
                     provider: "anthropic".to_owned(),
                     model: "claude-sonnet-4-5".to_owned(),
-                    display_name: Some("Messages · ctx 200000".to_owned()),
+                    display_name: Some("Messages · ctx 200000".into()),
                     max_context_tokens: Some(200_000),
                     ..ModelConfig::default()
                 },
@@ -5703,13 +5715,13 @@ async fn session_catalog_and_loader_use_real_local_session_store() {
         .summarize(SESSION_A, "Local branch summary".to_owned())
         .expect("summarize session");
     let child = store
-        .fork(SESSION_A, Some("Parser branch".to_owned()))
+        .fork(SESSION_A, Some("Parser branch".into()))
         .expect("fork session");
     store
         .record_activity(
             SESSION_A,
             Some(temp.path().display().to_string()),
-            Some("hello".to_owned()),
+            Some("hello".into()),
             "100".to_owned(),
         )
         .expect("record session activity");
@@ -5717,7 +5729,7 @@ async fn session_catalog_and_loader_use_real_local_session_store() {
         .record_activity(
             &child.id,
             Some(temp.path().display().to_string()),
-            Some("child prompt".to_owned()),
+            Some("child prompt".into()),
             "200".to_owned(),
         )
         .expect("record child activity");
@@ -5832,7 +5844,7 @@ async fn session_picker_ctrl_a_toggles_scope() {
         .record_activity(
             SESSION_A,
             Some(project_a.display().to_string()),
-            Some("alpha prompt".to_owned()),
+            Some("alpha prompt".into()),
             "200".to_owned(),
         )
         .expect("record alpha");
@@ -5852,7 +5864,7 @@ async fn session_picker_ctrl_a_toggles_scope() {
         .record_activity(
             SESSION_B,
             Some(project_b.display().to_string()),
-            Some("beta prompt".to_owned()),
+            Some("beta prompt".into()),
             "100".to_owned(),
         )
         .expect("record beta");
@@ -5937,8 +5949,8 @@ async fn session_picker_cross_cwd_shows_resume_command() {
         PickerCatalogs {
             session_items: vec![SessionSummary {
                 id: SESSION_A.to_owned(),
-                title: Some("Alpha session".to_owned()),
-                last_prompt: Some("hello".to_owned()),
+                title: Some("Alpha session".into()),
+                last_prompt: Some("hello".into()),
                 work_dir: other_dir.path().to_path_buf(),
                 updated_at: String::new(),
                 metadata: None,
@@ -6364,7 +6376,7 @@ async fn revise_exit_plan_mode_feedback_is_forwarded_with_current_approval() {
         decision_rx.await.expect("decision"),
         PermissionApprovalDecision::Reject
     );
-    assert_eq!(feedback_rx.await.expect("feedback"), Some("r".to_owned()));
+    assert_eq!(feedback_rx.await.expect("feedback"), Some("r".into()));
 }
 
 #[tokio::test]
@@ -6400,7 +6412,7 @@ async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
             decision_tx: first_tx,
             feedback_tx: None,
             selected_label_tx: None,
-            session_option_label: Some("Approve this exact command for this session".to_owned()),
+            session_option_label: Some("Approve this exact command for this session".into()),
             prefix_option_label: None,
         },
     );
@@ -7330,7 +7342,7 @@ async fn mcp_manager_auth_action_shows_status_on_oauth_failure() {
         enabled: true,
         transport: crate::config::McpTransport::Http,
         command: None,
-        url: Some("https://example.com/mcp".to_owned()),
+        url: Some("https://example.com/mcp".into()),
         args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         headers: std::collections::BTreeMap::new(),
@@ -7369,7 +7381,7 @@ async fn mcp_manager_auth_action_ignored_for_stdio_server() {
         id: "fs".to_owned(),
         enabled: true,
         transport: crate::config::McpTransport::Stdio,
-        command: Some("mcp-server".to_owned()),
+        command: Some("mcp-server".into()),
         url: None,
         args: Vec::new(),
         env: std::collections::BTreeMap::new(),
@@ -7549,7 +7561,7 @@ async fn mcp_add_form_stdio_submits_to_config() {
     assert_eq!(servers[0].transport, crate::config::McpTransport::Stdio);
     assert_eq!(
         servers[0].command,
-        Some("npx".to_owned()),
+        Some("npx".into()),
         "command is parsed into program"
     );
     assert_eq!(
@@ -7642,10 +7654,7 @@ async fn mcp_add_form_http_submits_to_config() {
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].id, "linear");
     assert_eq!(servers[0].transport, crate::config::McpTransport::Http);
-    assert_eq!(
-        servers[0].url,
-        Some("https://example.invalid/mcp".to_owned())
-    );
+    assert_eq!(servers[0].url, Some("https://example.invalid/mcp".into()));
     assert_eq!(
         servers[0].headers.get("Authorization"),
         Some(&"Bearer secret".to_owned()),
@@ -7716,10 +7725,7 @@ async fn mcp_add_form_sse_submits_to_config() {
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].id, "events");
     assert_eq!(servers[0].transport, crate::config::McpTransport::Sse);
-    assert_eq!(
-        servers[0].url,
-        Some("https://events.invalid/sse".to_owned())
-    );
+    assert_eq!(servers[0].url, Some("https://events.invalid/sse".into()));
     assert!(servers[0].headers.is_empty());
 }
 
@@ -7895,7 +7901,7 @@ async fn question_up_down_does_not_recall_prompt_history() {
         id: "question-1".to_owned(),
         questions: vec![neo_agent_core::QuestionEventData {
             question: "Pick one".to_owned(),
-            header: Some("Single".to_owned()),
+            header: Some("Single".into()),
             body: None,
             options: vec![
                 neo_agent_core::QuestionOptionData {
@@ -8904,15 +8910,18 @@ async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
         "finished shell command should return chrome to editing state"
     );
     assert!(
-        controller.session_messages.iter().any(|message| matches!(
-            message,
-            AgentMessage::ShellCommand {
-                command,
-                stdout,
-                outcome: neo_agent_core::ShellCommandOutcome::Completed,
-                ..
-            } if command == "printf neo" && stdout == "neo\n"
-        )),
+        replay_session_messages(&controller)
+            .await
+            .iter()
+            .any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    command,
+                    stdout,
+                    outcome: neo_agent_core::ShellCommandOutcome::Completed,
+                    ..
+                } if command.as_ref() == "printf neo" && stdout.as_ref() == "neo\n"
+            )),
         "shell command result should be persisted as AgentMessage::ShellCommand"
     );
     assert!(
@@ -9153,13 +9162,16 @@ async fn shell_mode_ctrl_b_detaches_running_command() {
 
     assert!(!controller.chrome().shell_running());
     assert!(
-        controller.session_messages.iter().any(|message| matches!(
-            message,
-            AgentMessage::ShellCommand {
-                outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { .. },
-                ..
-            }
-        )),
+        replay_session_messages(&controller)
+            .await
+            .iter()
+            .any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { .. },
+                    ..
+                }
+            )),
         "detached shell command should persist as backgrounded"
     );
 }
@@ -9223,13 +9235,16 @@ async fn shell_mode_ctrl_b_detaches_current_shell_task_not_other_background_task
         .expect("question remains");
     assert!(question_after.elapsed >= question_before.elapsed);
     assert!(
-        controller.session_messages.iter().any(|message| matches!(
-            message,
-            AgentMessage::ShellCommand {
-                outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { task_id },
-                ..
-            } if task_id == &shell_task_id
-        )),
+        replay_session_messages(&controller)
+            .await
+            .iter()
+            .any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { task_id },
+                    ..
+                } if task_id.as_ref() == shell_task_id.as_str()
+            )),
         "ctrl+b should persist the actual foreground shell task id"
     );
     let _ = controller
@@ -9718,13 +9733,16 @@ async fn shell_mode_esc_cancels_running_command() {
 
     assert!(!controller.chrome().shell_running());
     assert!(
-        controller.session_messages.iter().any(|message| matches!(
-            message,
-            AgentMessage::ShellCommand {
-                outcome: neo_agent_core::ShellCommandOutcome::Cancelled,
-                ..
-            }
-        )),
+        replay_session_messages(&controller)
+            .await
+            .iter()
+            .any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Cancelled,
+                    ..
+                }
+            )),
         "cancelled shell command should persist as cancelled"
     );
 }
@@ -10213,7 +10231,7 @@ async fn slash_btw_inherits_main_context_with_single_sidecar_projection() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.local_config = Some(btw_test_config(&project_dir));
-    controller.active_session_id = Some("session-current".to_owned());
+    controller.active_session_id = Some("session-current".into());
     controller.apply_turn_event(AgentEvent::MessageAppended {
         message: AgentMessage::user_text("main context in memory"),
     });

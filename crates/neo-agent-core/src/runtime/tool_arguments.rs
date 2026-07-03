@@ -50,16 +50,16 @@ pub fn prepare_tool_arguments(
 ) -> Result<PreparedToolCall, ToolResult> {
     match parse_tool_arguments(tool_call, tool_specs) {
         ToolArgumentsOutcome::Valid(arguments) => Ok(PreparedToolCall {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            raw_arguments: tool_call.raw_arguments.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            raw_arguments: tool_call.raw_arguments.to_string(),
             arguments,
             warning: None,
         }),
         ToolArgumentsOutcome::Repaired { arguments, warning } => Ok(PreparedToolCall {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            raw_arguments: tool_call.raw_arguments.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            raw_arguments: tool_call.raw_arguments.to_string(),
             arguments,
             warning: Some(warning),
         }),
@@ -123,7 +123,9 @@ fn repair_partial_object(
 }
 
 fn required_fields(tool_call: &AgentToolCall, tool_specs: &[ToolSpec]) -> Option<Vec<String>> {
-    let spec = tool_specs.iter().find(|spec| spec.name == tool_call.name)?;
+    let spec = tool_specs
+        .iter()
+        .find(|spec| spec.name == tool_call.name.as_ref())?;
     Some(
         spec.input_schema
             .get("required")
@@ -299,9 +301,9 @@ mod tests {
 
     fn call(raw_arguments: &str) -> AgentToolCall {
         AgentToolCall {
-            id: "call-1".to_owned(),
-            name: "Bash".to_owned(),
-            raw_arguments: raw_arguments.to_owned(),
+            id: "call-1".into(),
+            name: "Bash".into(),
+            raw_arguments: raw_arguments.into(),
         }
     }
 
@@ -353,9 +355,9 @@ mod tests {
         };
         let outcome = parse_tool_arguments(
             &AgentToolCall {
-                id: "call-1".to_owned(),
-                name: "NumberTool".to_owned(),
-                raw_arguments: r#"{"limit": 1"#.to_owned(),
+                id: "call-1".into(),
+                name: "NumberTool".into(),
+                raw_arguments: r#"{"limit": 1"#.into(),
             },
             &[spec],
         );
@@ -367,9 +369,9 @@ mod tests {
     fn rejects_unknown_tool_partial_json() {
         let outcome = parse_tool_arguments(
             &AgentToolCall {
-                id: "call-1".to_owned(),
-                name: "Unknown".to_owned(),
-                raw_arguments: r#"{"command":"uname -a","description": "#.to_owned(),
+                id: "call-1".into(),
+                name: "Unknown".into(),
+                raw_arguments: r#"{"command":"uname -a","description": "#.into(),
             },
             &[bash_spec()],
         );

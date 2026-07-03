@@ -145,9 +145,12 @@ fn evaluate_compaction_need(
     // for event emission while still referencing the pre-compaction history.
     // Drop any trailing incomplete tool turn first so it is not treated as a
     // safe suffix boundary.
-    let messages = sanitize_tool_exchange_messages(emitter.context.messages());
+    let messages = sanitize_tool_exchange_messages(emitter.context.messages()).into_owned();
     let max_context_tokens = super::config::effective_max_context_tokens(config);
-    let used_tokens = super::estimate_messages_tokens(&messages);
+    // Use the cached incremental token estimate from AgentContext instead of
+    // re-walking all messages.  This is approximate (sanitize may have dropped
+    // orphaned tool exchanges) but the threshold check tolerates small error.
+    let used_tokens = emitter.context.estimated_tokens();
 
     let strategy = build_compaction_strategy(&settings);
 

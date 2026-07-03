@@ -343,9 +343,9 @@ async fn jsonl_session_replay_context_drops_incomplete_trailing_tool_turn() {
             message: AgentMessage::assistant(
                 [],
                 [AgentToolCall {
-                    id: "call-1".to_owned(),
-                    name: "Read".to_owned(),
-                    raw_arguments: json!({ "path": "README.md" }).to_string(),
+                    id: "call-1".into(),
+                    name: "Read".into(),
+                    raw_arguments: json!({ "path": "README.md" }).to_string().into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -381,9 +381,9 @@ async fn jsonl_session_replay_context_keeps_complete_trailing_tool_turn() {
     let assistant = AgentMessage::assistant(
         [],
         [AgentToolCall {
-            id: "call-1".to_owned(),
-            name: "Read".to_owned(),
-            raw_arguments: json!({ "path": "README.md" }).to_string(),
+            id: "call-1".into(),
+            name: "Read".into(),
+            raw_arguments: json!({ "path": "README.md" }).to_string().into(),
         }],
         StopReason::ToolUse,
     );

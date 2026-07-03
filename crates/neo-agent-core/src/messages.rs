@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use neo_ai::{ChatMessage, ContentPart, ImageData, ToolCall};
 use schemars::JsonSchema;
@@ -11,7 +12,7 @@ pub enum ShellCommandOutcome {
     Completed,
     Cancelled,
     TimedOut,
-    Backgrounded { task_id: String },
+    Backgrounded { task_id: Arc<str> },
 }
 
 impl ShellCommandOutcome {
@@ -29,27 +30,31 @@ impl ShellCommandOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Content {
     Text {
-        text: String,
+        text: Arc<str>,
     },
     Thinking {
-        text: String,
-        signature: Option<String>,
+        text: Arc<str>,
+        signature: Option<Arc<str>>,
         redacted: bool,
     },
     Image {
-        mime_type: String,
+        mime_type: Arc<str>,
         data: ImageRef,
     },
 }
 
 impl Content {
     #[must_use]
-    pub fn text(text: impl Into<String>) -> Self {
+    pub fn text(text: impl Into<Arc<str>>) -> Self {
         Self::Text { text: text.into() }
     }
 
     #[must_use]
-    pub fn thinking(text: impl Into<String>, signature: Option<String>, redacted: bool) -> Self {
+    pub fn thinking(
+        text: impl Into<Arc<str>>,
+        signature: Option<Arc<str>>,
+        redacted: bool,
+    ) -> Self {
         Self::Thinking {
             text: text.into(),
             signature,
@@ -68,25 +73,25 @@ impl Content {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ImageRef {
-    Base64(String),
-    Url(String),
+    Base64(Arc<str>),
+    Url(Arc<str>),
     /// SHA-256 reference to a blob file stored in the session directory.
-    Blob(String),
+    Blob(Arc<str>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentToolCall {
-    pub id: String,
-    pub name: String,
-    pub raw_arguments: String,
+    pub id: Arc<str>,
+    pub name: Arc<str>,
+    pub raw_arguments: Arc<str>,
 }
 
 impl From<ToolCall> for AgentToolCall {
     fn from(value: ToolCall) -> Self {
         Self {
-            id: value.id,
-            name: value.name,
-            raw_arguments: value.raw_arguments,
+            id: value.id.into(),
+            name: value.name.into(),
+            raw_arguments: value.raw_arguments.into(),
         }
     }
 }
@@ -94,9 +99,9 @@ impl From<ToolCall> for AgentToolCall {
 impl From<AgentToolCall> for ToolCall {
     fn from(value: AgentToolCall) -> Self {
         Self {
-            id: value.id,
-            name: value.name,
-            raw_arguments: value.raw_arguments,
+            id: value.id.to_string(),
+            name: value.name.to_string(),
+            raw_arguments: value.raw_arguments.to_string(),
         }
     }
 }
@@ -115,15 +120,15 @@ pub enum AgentMessage {
         stop_reason: StopReason,
     },
     ToolResult {
-        tool_call_id: String,
-        tool_name: String,
+        tool_call_id: Arc<str>,
+        tool_name: Arc<str>,
         content: Vec<Content>,
         is_error: bool,
     },
     ShellCommand {
-        command: String,
-        stdout: String,
-        stderr: String,
+        command: Arc<str>,
+        stdout: Arc<str>,
+        stderr: Arc<str>,
         exit_code: Option<i32>,
         outcome: ShellCommandOutcome,
         #[serde(default)]
@@ -133,14 +138,14 @@ pub enum AgentMessage {
 
 impl AgentMessage {
     #[must_use]
-    pub fn system_text(text: impl Into<String>) -> Self {
+    pub fn system_text(text: impl Into<Arc<str>>) -> Self {
         Self::System {
             content: vec![Content::text(text)],
         }
     }
 
     #[must_use]
-    pub fn user_text(text: impl Into<String>) -> Self {
+    pub fn user_text(text: impl Into<Arc<str>>) -> Self {
         Self::User {
             content: vec![Content::text(text)],
         }
@@ -161,8 +166,8 @@ impl AgentMessage {
 
     #[must_use]
     pub fn tool_result(
-        tool_call_id: impl Into<String>,
-        tool_name: impl Into<String>,
+        tool_call_id: impl Into<Arc<str>>,
+        tool_name: impl Into<Arc<str>>,
         content: impl Into<Vec<Content>>,
         is_error: bool,
     ) -> Self {
@@ -176,9 +181,9 @@ impl AgentMessage {
 
     #[must_use]
     pub fn shell_command(
-        command: impl Into<String>,
-        stdout: impl Into<String>,
-        stderr: impl Into<String>,
+        command: impl Into<Arc<str>>,
+        stdout: impl Into<Arc<str>>,
+        stderr: impl Into<Arc<str>>,
         exit_code: Option<i32>,
         outcome: ShellCommandOutcome,
         truncated: bool,
@@ -250,7 +255,7 @@ impl AgentMessage {
                 content,
                 is_error,
             } => ChatMessage::ToolResult {
-                tool_call_id: tool_call_id.clone(),
+                tool_call_id: tool_call_id.to_string(),
                 content: content.iter().map(to_content_part).collect(),
                 is_error: *is_error,
             },
@@ -276,7 +281,7 @@ fn provider_safe_tool_call(tool_call: &AgentToolCall) -> AgentToolCall {
     AgentToolCall {
         id: tool_call.id.clone(),
         name: tool_call.name.clone(),
-        raw_arguments: provider_safe_tool_arguments(&tool_call.raw_arguments),
+        raw_arguments: provider_safe_tool_arguments(&tool_call.raw_arguments).into(),
     }
 }
 
@@ -435,23 +440,74 @@ fn complete_json_value_end(raw: &str, start: usize) -> Option<usize> {
 /// This prevents provider 400 errors such as "an assistant message with
 /// `tool_calls` must be followed by tool messages responding to each
 /// `tool_call_id`".
+///
+/// Returns [`Cow::Borrowed`] when no repair is needed (the common case),
+/// avoiding a full-Vec clone.
 #[must_use]
-pub fn sanitize_tool_exchange_messages(messages: &[AgentMessage]) -> Vec<AgentMessage> {
-    let mut out = Vec::with_capacity(messages.len());
+pub fn sanitize_tool_exchange_messages(
+    messages: &[AgentMessage],
+) -> std::borrow::Cow<'_, [AgentMessage]> {
+    // First pass: detect whether any repair is needed.
+    let mut needs_repair = false;
     let mut i = 0;
     while i < messages.len() {
         match &messages[i] {
             AgentMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                 let ids: HashSet<&str> = tool_calls
                     .iter()
-                    .map(|tool_call| tool_call.id.as_str())
+                    .map(|tool_call| tool_call.id.as_ref())
                     .collect();
                 let mut j = i + 1;
                 let mut seen = HashSet::new();
                 while j < messages.len() {
                     if let AgentMessage::ToolResult { tool_call_id, .. } = &messages[j] {
-                        if ids.contains(tool_call_id.as_str()) {
-                            seen.insert(tool_call_id.as_str());
+                        if ids.contains(tool_call_id.as_ref()) {
+                            seen.insert(tool_call_id.as_ref());
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if seen.len() != ids.len() {
+                    needs_repair = true;
+                    break;
+                }
+                i = j;
+            }
+            AgentMessage::ToolResult { .. } => {
+                // Orphaned tool result (no preceding assistant with matching ids).
+                needs_repair = true;
+                break;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    if !needs_repair {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+
+    // Second pass: build the repaired Vec.
+    let mut out = Vec::with_capacity(messages.len());
+    i = 0;
+    while i < messages.len() {
+        match &messages[i] {
+            AgentMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
+                let ids: HashSet<&str> = tool_calls
+                    .iter()
+                    .map(|tool_call| tool_call.id.as_ref())
+                    .collect();
+                let mut j = i + 1;
+                let mut seen = HashSet::new();
+                while j < messages.len() {
+                    if let AgentMessage::ToolResult { tool_call_id, .. } = &messages[j] {
+                        if ids.contains(tool_call_id.as_ref()) {
+                            seen.insert(tool_call_id.as_ref());
                             j += 1;
                         } else {
                             break;
@@ -476,7 +532,7 @@ pub fn sanitize_tool_exchange_messages(messages: &[AgentMessage]) -> Vec<AgentMe
             }
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 fn shell_command_model_text(
@@ -512,24 +568,26 @@ fn escape_xml_attr(value: &str) -> String {
 
 fn to_content_part(content: &Content) -> ContentPart {
     match content {
-        Content::Text { text } => ContentPart::Text { text: text.clone() },
+        Content::Text { text } => ContentPart::Text {
+            text: text.to_string(),
+        },
         Content::Thinking {
             text,
             signature,
             redacted,
         } => ContentPart::Thinking {
-            text: text.clone(),
-            signature: signature.clone(),
+            text: text.to_string(),
+            signature: signature.as_ref().map(|s| s.to_string()),
             redacted: *redacted,
         },
         Content::Image { mime_type, data } => match data {
             ImageRef::Base64(value) => ContentPart::Image {
-                mime_type: mime_type.clone(),
-                data: ImageData::Base64(value.clone()),
+                mime_type: mime_type.to_string(),
+                data: ImageData::Base64(value.to_string()),
             },
             ImageRef::Url(value) => ContentPart::Image {
-                mime_type: mime_type.clone(),
-                data: ImageData::Url(value.clone()),
+                mime_type: mime_type.to_string(),
+                data: ImageData::Url(value.to_string()),
             },
             // Blob references must be resolved to base64 before conversion.
             // If an unresolved blob reaches here, emit a text placeholder
@@ -549,9 +607,9 @@ mod tests {
         let message = AgentMessage::assistant(
             vec![],
             vec![AgentToolCall {
-                id: "tc1".to_owned(),
-                name: "Bash".to_owned(),
-                raw_arguments: r#"{"command":"ls -la","cwd":"#.to_owned(),
+                id: "tc1".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"ls -la","cwd":"#.into(),
             }],
             StopReason::ToolUse,
         );
@@ -568,9 +626,9 @@ mod tests {
         let message = AgentMessage::assistant(
             vec![],
             vec![AgentToolCall {
-                id: "tc1".to_owned(),
-                name: "Bash".to_owned(),
-                raw_arguments: r#"{"command":"ls"#.to_owned(),
+                id: "tc1".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"ls"#.into(),
             }],
             StopReason::ToolUse,
         );
@@ -589,9 +647,9 @@ mod tests {
             AgentMessage::assistant(
                 vec![],
                 vec![AgentToolCall {
-                    id: "tc1".to_owned(),
-                    name: "Bash".to_owned(),
-                    raw_arguments: "null".to_owned(),
+                    id: "tc1".into(),
+                    name: "Bash".into(),
+                    raw_arguments: "null".into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -610,9 +668,9 @@ mod tests {
             AgentMessage::assistant(
                 vec![],
                 vec![AgentToolCall {
-                    id: "tc1".to_owned(),
-                    name: "Bash".to_owned(),
-                    raw_arguments: "null".to_owned(),
+                    id: "tc1".into(),
+                    name: "Bash".into(),
+                    raw_arguments: "null".into(),
                 }],
                 StopReason::ToolUse,
             ),
@@ -631,14 +689,14 @@ mod tests {
                 vec![],
                 vec![
                     AgentToolCall {
-                        id: "tc1".to_owned(),
-                        name: "Bash".to_owned(),
-                        raw_arguments: "null".to_owned(),
+                        id: "tc1".into(),
+                        name: "Bash".into(),
+                        raw_arguments: "null".into(),
                     },
                     AgentToolCall {
-                        id: "tc2".to_owned(),
-                        name: "Bash".to_owned(),
-                        raw_arguments: "null".to_owned(),
+                        id: "tc2".into(),
+                        name: "Bash".into(),
+                        raw_arguments: "null".into(),
                     },
                 ],
                 StopReason::ToolUse,
@@ -670,9 +728,9 @@ mod tests {
             AgentMessage::assistant(
                 vec![],
                 vec![AgentToolCall {
-                    id: "tc1".to_owned(),
-                    name: "Bash".to_owned(),
-                    raw_arguments: "null".to_owned(),
+                    id: "tc1".into(),
+                    name: "Bash".into(),
+                    raw_arguments: "null".into(),
                 }],
                 StopReason::ToolUse,
             ),

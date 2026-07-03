@@ -244,13 +244,13 @@ pub(super) fn emit_shell_started(
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "Bash" {
+    if tool_call.name.as_ref() != "Bash" {
         return;
     }
     if let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) {
         emitter.emit(AgentEvent::ShellCommandStarted {
             turn,
-            id: tool_call.id.clone(),
+            id: tool_call.id.to_string(),
             command: command.to_owned(),
             cwd: tool_context.workspace_root().to_path_buf(),
             origin: ShellCommandOrigin::ModelBashTool,
@@ -264,7 +264,7 @@ pub(super) fn emit_shell_finished(
     result: &ToolResult,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "Bash" {
+    if tool_call.name.as_ref() != "Bash" {
         return;
     }
     let Some(details) = &result.details else {
@@ -295,7 +295,7 @@ pub(super) fn emit_shell_finished(
     let outcome = shell_command_outcome_from_details(details);
     emitter.emit(AgentEvent::ShellCommandFinished {
         turn,
-        id: tool_call.id.clone(),
+        id: tool_call.id.to_string(),
         exit_code,
         signal,
         stdout,
@@ -314,9 +314,10 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
             let task_id = details
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            ShellCommandOutcome::Backgrounded { task_id }
+                .unwrap_or_default();
+            ShellCommandOutcome::Backgrounded {
+                task_id: task_id.into(),
+            }
         }
         _ if details.get("kind").and_then(serde_json::Value::as_str) == Some("bash")
             && details.get("status").and_then(serde_json::Value::as_str) == Some("running") =>
@@ -324,9 +325,10 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
             let task_id = details
                 .get("task_id")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            ShellCommandOutcome::Backgrounded { task_id }
+                .unwrap_or_default();
+            ShellCommandOutcome::Backgrounded {
+                task_id: task_id.into(),
+            }
         }
         _ => ShellCommandOutcome::Completed,
     }
@@ -340,7 +342,7 @@ pub(super) fn emit_terminal_events(
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "Terminal" {
+    if tool_call.name.as_ref() != "Terminal" {
         return;
     }
     let Some(details) = &result.details else {
@@ -372,7 +374,7 @@ pub(super) fn emit_terminal_events(
                 .unwrap_or(24);
             emitter.emit(AgentEvent::TerminalSessionStarted {
                 turn,
-                id: tool_call.id.clone(),
+                id: tool_call.id.to_string(),
                 handle,
                 command,
                 cwd: tool_context.workspace_root().to_path_buf(),
@@ -395,7 +397,7 @@ pub(super) fn emit_terminal_events(
                 .unwrap_or(false);
             emitter.emit(AgentEvent::TerminalSessionOutput {
                 turn,
-                id: tool_call.id.clone(),
+                id: tool_call.id.to_string(),
                 handle,
                 output,
                 truncated,
@@ -413,7 +415,7 @@ pub(super) fn emit_terminal_events(
                 .and_then(|code| i32::try_from(code).ok());
             emitter.emit(AgentEvent::TerminalSessionFinished {
                 turn,
-                id: tool_call.id.clone(),
+                id: tool_call.id.to_string(),
                 handle,
                 status,
                 exit_code,

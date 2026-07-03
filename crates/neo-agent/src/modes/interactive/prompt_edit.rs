@@ -30,7 +30,7 @@ pub(super) fn image_dimensions_from_data(
 ) -> (u32, u32) {
     let bytes = match data {
         neo_agent_core::ImageRef::Base64(b64) => {
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.as_ref()).ok()
         }
         _ => None,
     };

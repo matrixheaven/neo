@@ -486,16 +486,16 @@ impl TranscriptPane {
     }
 
     fn finish_tool_call(&mut self, turn: u32, tool_call: AgentToolCall) {
-        let arguments = tool_call.raw_arguments.clone();
+        let arguments = tool_call.raw_arguments.to_string();
         self.streaming_tool_args
-            .insert(tool_call.id.clone(), arguments.clone());
+            .insert(tool_call.id.to_string(), arguments.clone());
         self.remember_tool_call(turn, &tool_call.id, &tool_call.name);
         if is_skill_tool(&tool_call.name) {
             return;
         }
         self.upsert_tool(
             &tool_call.id,
-            tool_call.name,
+            tool_call.name.to_string(),
             Some(arguments),
             ToolStatusKind::Pending,
         );

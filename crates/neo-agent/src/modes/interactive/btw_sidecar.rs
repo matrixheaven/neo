@@ -94,9 +94,6 @@ impl InteractiveController {
         &self,
         config: &crate::config::AppConfig,
     ) -> Vec<AgentMessage> {
-        if !self.session_messages.is_empty() {
-            return self.session_messages.clone();
-        }
         let Some(session_id) = self.active_session_id.as_ref() else {
             return Vec::new();
         };

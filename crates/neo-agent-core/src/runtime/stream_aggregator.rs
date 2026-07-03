@@ -129,7 +129,9 @@ impl ModelTurnState {
     fn apply_thinking_delta(&mut self, turn: u32, text: String, emitter: &mut EventEmitter) {
         let index = self.ensure_active_thinking();
         if let Some(Content::Thinking { text: thinking, .. }) = self.content.get_mut(index) {
-            thinking.push_str(&text);
+            let mut s = String::from(&**thinking);
+            s.push_str(&text);
+            *thinking = Arc::from(s);
         }
         emitter.emit(AgentEvent::ThinkingDelta { turn, text });
     }
@@ -148,13 +150,15 @@ impl ModelTurnState {
             ..
         }) = self.content.get_mut(index)
         {
-            *thinking_signature = signature;
+            *thinking_signature = signature.map(Arc::from);
             *thinking_redacted = redacted;
         }
         emitter.emit(AgentEvent::ThinkingFinished {
             turn,
             signature: match self.content.get(index) {
-                Some(Content::Thinking { signature, .. }) => signature.clone(),
+                Some(Content::Thinking { signature, .. }) => {
+                    signature.as_ref().map(|s| s.to_string())
+                }
                 _ => None,
             },
             redacted,
@@ -175,9 +179,9 @@ impl ModelTurnState {
         emitter: &mut EventEmitter,
     ) {
         let tool_call = AgentToolCall {
-            name: self.tool_names.remove(&id).unwrap_or_default(),
-            id,
-            raw_arguments,
+            name: self.tool_names.remove(&id).unwrap_or_default().into(),
+            id: id.into(),
+            raw_arguments: raw_arguments.into(),
         };
         emitter.emit(AgentEvent::ToolCallFinished {
             turn,
@@ -210,7 +214,9 @@ impl ModelTurnState {
         if let Some(index) = self.active_text_index
             && let Some(Content::Text { text }) = self.content.get_mut(index)
         {
-            text.push_str(delta);
+            let mut s = String::from(&**text);
+            s.push_str(delta);
+            *text = Arc::from(s);
             return;
         }
 

@@ -128,7 +128,6 @@ impl InteractiveController {
             None,
         );
         replay_session_into_transcript(&mut transcript, loaded);
-        self.session_messages.clone_from(&loaded.messages);
         *self.tui.transcript_mut() = transcript;
     }
 
@@ -175,7 +174,6 @@ impl InteractiveController {
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         self.goal_manager = None;
         self.active_session_id = None;
-        self.session_messages.clear();
         self.tui.chrome_mut().set_session_label("new");
         self.rebuild_empty_welcome_transcript();
     }

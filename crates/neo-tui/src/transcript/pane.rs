@@ -280,7 +280,7 @@ impl TranscriptPane {
             } => {
                 self.replay_assistant_content(content);
                 for tool_call in tool_calls {
-                    if tool_call.name == "Skill" {
+                    if tool_call.name.as_ref() == "Skill" {
                         let parsed: serde_json::Value =
                             serde_json::from_str(&tool_call.raw_arguments).unwrap_or_default();
                         let skill_name = parsed
@@ -289,7 +289,8 @@ impl TranscriptPane {
                             .unwrap_or("unknown")
                             .to_owned();
                         let body = format_replay_skill_arguments(&parsed);
-                        self.completed_tool_result_ids.push(tool_call.id.clone());
+                        self.completed_tool_result_ids
+                            .push(tool_call.id.to_string());
                         self.push_transcript(TranscriptEntry::skill_activated(
                             vec![skill_name],
                             body,
@@ -298,8 +299,8 @@ impl TranscriptPane {
                     }
                     self.apply_agent_event(&AgentEvent::ToolExecutionStarted {
                         turn: 0,
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
+                        id: tool_call.id.to_string(),
+                        name: tool_call.name.to_string(),
                         arguments: serde_json::from_str(&tool_call.raw_arguments)
                             .unwrap_or_default(),
                     });
@@ -317,8 +318,8 @@ impl TranscriptPane {
                 let text = content_display_text(content);
                 self.apply_agent_event(&AgentEvent::ToolExecutionFinished {
                     turn: 0,
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
+                    id: tool_call_id.to_string(),
+                    name: tool_name.to_string(),
                     result: neo_agent_core::ToolResult {
                         content: text,
                         is_error: *is_error,
@@ -344,9 +345,9 @@ impl TranscriptPane {
                 let id = format!("replay-shell-{}", self.transcript.entries().len());
                 self.push_transcript(TranscriptEntry::shell_run(ShellRunComponent::finished(
                     id,
-                    command.clone(),
-                    stdout.clone(),
-                    stderr.clone(),
+                    command.to_string(),
+                    stdout.to_string(),
+                    stderr.to_string(),
                     *exit_code,
                     None,
                     outcome.clone(),
@@ -386,7 +387,9 @@ impl TranscriptPane {
         };
         self.flush_replayed_assistant_text(text);
         if !thinking_text.is_empty() {
-            self.push_transcript(TranscriptEntry::thinking_complete(thinking_text.clone()));
+            self.push_transcript(TranscriptEntry::thinking_complete(
+                thinking_text.to_string(),
+            ));
         } else if *redacted {
             self.push_transcript(TranscriptEntry::thinking_complete("[Reasoning redacted]"));
         }
@@ -590,6 +593,12 @@ impl TranscriptPane {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /// Whether the transcript has pending changes requiring a re-render.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {
@@ -960,29 +969,37 @@ impl TranscriptPane {
     }
 
     fn render_transcript_rows(&mut self, width: usize) -> Vec<Line> {
-        let mut rows = Vec::new();
-        let mut tool_run = Vec::new();
-        let entries = self.transcript.entries().to_owned();
+        self.transcript.ensure_cache_width(width);
 
-        for entry in entries {
-            match entry {
-                TranscriptEntry::ToolRun { component } => {
-                    if self.transcript.is_tool_run_suppressed(component.id()) {
-                        append_transcript_block(
-                            &mut rows,
-                            self.flush_tool_run(&mut tool_run, width),
-                        );
-                    } else {
-                        tool_run.push(component);
-                    }
-                }
-                entry => {
+        let mut rows = Vec::new();
+        let mut tool_run: Vec<ToolCallComponent> = Vec::new();
+        let entry_count = self.transcript.entries().len();
+
+        for index in 0..entry_count {
+            // Extract whether this is a ToolRun (and its id) in a short-lived
+            // borrow scope so we can freely call &mut self methods afterward.
+            let tool_run_id: Option<String> = match self.transcript.entries().get(index) {
+                Some(TranscriptEntry::ToolRun { component }) => Some(component.id().to_owned()),
+                _ => None,
+            };
+
+            if let Some(id) = tool_run_id {
+                if self.transcript.is_tool_run_suppressed(&id) {
                     append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-                    append_transcript_block(
-                        &mut rows,
-                        entry.render_with_activity_frame(width, &self.theme, self.activity_frame),
-                    );
+                } else if let Some(TranscriptEntry::ToolRun { component }) =
+                    self.transcript.entries().get(index)
+                {
+                    tool_run.push(component.clone());
                 }
+            } else {
+                append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+                let lines = self.transcript.render_entry_cached(
+                    index,
+                    width,
+                    &self.theme,
+                    self.activity_frame,
+                );
+                append_transcript_block(&mut rows, lines);
             }
         }
         append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
@@ -1047,7 +1064,7 @@ fn content_display_text(content: &[Content]) -> String {
 
 fn content_visible_text(content: &Content) -> Option<String> {
     match content {
-        Content::Text { text } => Some(text.clone()),
+        Content::Text { text } => Some(text.to_string()),
         Content::Thinking { .. } => None,
         Content::Image { mime_type, data } => Some(image_summary(mime_type, data)),
     }

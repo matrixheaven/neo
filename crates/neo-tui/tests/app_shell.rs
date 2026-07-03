@@ -1245,7 +1245,7 @@ fn transcript_pane_inline_images_are_structured_entries() {
     let mut runtime = TranscriptPane::new(100, 12);
     runtime.push_image(
         "image/png",
-        &neo_agent_core::ImageRef::Base64("aGVsbG8=".to_owned()),
+        &neo_agent_core::ImageRef::Base64("aGVsbG8=".into()),
     );
 
     assert!(matches!(

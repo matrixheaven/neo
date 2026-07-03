@@ -4,8 +4,9 @@
 //! emits styled [`Line`]s. Code blocks are syntax-highlighted with
 //! [`syntect`]. Styling mirrors the Neo markdown theme.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{
@@ -54,6 +55,25 @@ fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
 fn theme_set() -> &'static syntect::highlighting::ThemeSet {
     static THEME_SET: OnceLock<syntect::highlighting::ThemeSet> = OnceLock::new();
     THEME_SET.get_or_init(syntect::highlighting::ThemeSet::load_defaults)
+}
+
+/// Global cache for syntax-highlighted code blocks, keyed by (hash, lang).
+/// Avoids re-running syntect regex tokenization on identical code across
+/// renders. Bounded to 256 entries to cap memory.
+static HIGHLIGHT_CACHE: OnceLock<Mutex<HashMap<(u64, String), Vec<String>>>> = OnceLock::new();
+const HIGHLIGHT_CACHE_CAP: usize = 256;
+
+fn highlight_cache() -> &'static Mutex<HashMap<(u64, String), Vec<String>>> {
+    HIGHLIGHT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// FxHash-style hash for quick cache key generation.
+fn quick_hash(s: &str) -> u64 {
+    // Use std DefaultHasher — not cryptographic, just a cache key.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +651,27 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span>> {
 }
 
 fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
+    // Check the global highlight cache first.
+    let key = (quick_hash(code), lang.to_owned());
+    if let Ok(cache) = highlight_cache().lock() {
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+    }
+
+    let result = highlight_code_uncached(code, lang, theme);
+
+    // Store in cache (evict if over capacity — simple strategy, not LRU).
+    if let Ok(mut cache) = highlight_cache().lock() {
+        if cache.len() >= HIGHLIGHT_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+    }
+    result
+}
+
+fn highlight_code_uncached(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     let fallback = || {
         code.trim_end_matches('\n')
             .lines()

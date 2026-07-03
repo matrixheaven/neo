@@ -296,7 +296,6 @@ pub(crate) struct InteractiveController {
     active_session_id: Option<String>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
-    session_messages: Vec<AgentMessage>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
     shell_driver: ShellDriver,
@@ -673,7 +672,6 @@ impl InteractiveController {
             active_session_id: None,
             local_config: None,
             active_model: None,
-            session_messages: Vec::new(),
             current_thinking: false,
             active_turn: None,
             shell_driver,
@@ -1035,6 +1033,13 @@ impl InteractiveController {
         mut events: impl TerminalEvents,
     ) -> Result<()> {
         render(&mut self.tui)?;
+        // Cap render frequency to ~30 FPS (33ms). During streaming, multiple
+        // TextDelta events arrive within one 50ms poll cycle; without a cap,
+        // the loop renders on every iteration even when the previous render
+        // was only milliseconds ago. The cap is a floor, not a ceiling —
+        // user input (keyboard, resize) always renders immediately.
+        const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+        let mut last_render = Instant::now();
         loop {
             match events.poll_input_event(Duration::from_millis(50))? {
                 Some(event) => {
@@ -1055,6 +1060,7 @@ impl InteractiveController {
                     if self.take_suspend_requested() {
                         suspend()?;
                         render(&mut self.tui)?;
+                        last_render = Instant::now();
                     }
                 }
                 None => tokio::task::yield_now().await,
@@ -1070,7 +1076,15 @@ impl InteractiveController {
             self.poll_pending_catalog_fetch().await;
             self.poll_pending_mcp_probe().await;
             self.tui.chrome_mut().advance_activity_frame();
-            render(&mut self.tui)?;
+            // Throttle rendering during streaming to avoid O(n) re-render
+            // storms when there are hundreds of transcript entries.
+            let now = Instant::now();
+            if self.tui.is_transcript_dirty()
+                || now.duration_since(last_render) >= MIN_RENDER_INTERVAL
+            {
+                render(&mut self.tui)?;
+                last_render = now;
+            }
         }
         Ok(())
     }
@@ -1466,11 +1480,6 @@ impl InteractiveController {
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
         let should_refresh_git_status = event_should_refresh_git_status(&event);
-        if let AgentEvent::MessageAppended { message } = &event
-            && self.session_messages.last() != Some(message)
-        {
-            self.session_messages.push(message.clone());
-        }
         self.render_appended_user_message_if_needed(&event);
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"
@@ -1951,7 +1960,7 @@ impl DelegateReplaySuppressor {
                 is_error,
                 ..
             } => {
-                if let Some(pending) = self.pending.remove(tool_call_id) {
+                if let Some(pending) = self.pending.remove(tool_call_id.as_ref()) {
                     if *is_error || !self.result_matches_restored_target(pending.kind, content) {
                         Self::replay_tool_call(transcript, pending.tool_call);
                         transcript.replay_message(message);
@@ -1979,7 +1988,7 @@ impl DelegateReplaySuppressor {
             return false;
         }
         self.pending.insert(
-            tool_call.id.clone(),
+            tool_call.id.to_string(),
             PendingDelegateToolCall {
                 kind,
                 tool_call: tool_call.clone(),

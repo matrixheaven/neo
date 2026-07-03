@@ -77,10 +77,10 @@ pub(super) async fn resolve_content_blobs(
                 };
                 Content::Image {
                     mime_type,
-                    data: ImageRef::Base64(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &bytes,
-                    )),
+                    data: ImageRef::Base64(
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+                            .into(),
+                    ),
                 }
             }
             other => other,
@@ -94,6 +94,14 @@ pub(super) async fn read_blob_bytes(
     sha256: &str,
 ) -> Option<Vec<u8>> {
     let blob_dir = session_dir.join("blobs");
+
+    // Fast path: try direct file name `<sha256>.bin` to avoid directory scan.
+    let direct_path = blob_dir.join(format!("{sha256}.bin"));
+    if let Ok(bytes) = tokio::fs::read(&direct_path).await {
+        return Some(bytes);
+    }
+
+    // Fallback: directory scan for any file starting with <sha256>.
     let mut entries = tokio::fs::read_dir(&blob_dir).await.ok()?;
     while let Some(entry) = entries.next_entry().await.ok()? {
         let name = entry.file_name();

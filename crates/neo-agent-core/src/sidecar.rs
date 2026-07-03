@@ -27,7 +27,7 @@ pub const SIDE_QUESTION_SYSTEM_REMINDER: &str = "This is a side-channel conversa
 /// slice is never mutated.
 #[must_use]
 pub fn sidecar_projected_messages(parent: &[AgentMessage]) -> Vec<AgentMessage> {
-    let mut messages = sanitize_tool_exchange_messages(parent);
+    let mut messages = sanitize_tool_exchange_messages(parent).into_owned();
     messages.push(AgentMessage::system_text(SIDE_QUESTION_SYSTEM_REMINDER));
     messages
 }
@@ -50,9 +50,9 @@ mod tests {
     #[test]
     fn deny_sidecar_tool_call_returns_error() {
         let call = AgentToolCall {
-            id: "t1".to_owned(),
-            name: "bash".to_owned(),
-            raw_arguments: "{}".to_owned(),
+            id: "t1".into(),
+            name: "bash".into(),
+            raw_arguments: "{}".into(),
         };
         let result = deny_sidecar_tool_call(&call).expect("hook should return a result");
         assert!(result.is_error);
@@ -90,9 +90,9 @@ mod tests {
             AgentMessage::Assistant {
                 content: vec![crate::Content::text("ok")],
                 tool_calls: vec![AgentToolCall {
-                    id: "t1".to_owned(),
-                    name: "bash".to_owned(),
-                    raw_arguments: serde_json::json!({"command": "echo hi"}).to_string(),
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    raw_arguments: serde_json::json!({"command": "echo hi"}).to_string().into(),
                 }],
                 stop_reason: StopReason::ToolUse,
             },

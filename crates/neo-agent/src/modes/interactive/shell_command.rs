@@ -414,7 +414,9 @@ impl InteractiveController {
                 stdout_truncated: false,
                 stderr_truncated: false,
                 truncated: false,
-                outcome: ShellCommandOutcome::Backgrounded { task_id },
+                outcome: ShellCommandOutcome::Backgrounded {
+                    task_id: task_id.into(),
+                },
                 foreground_task_id: shell.foreground_task_id,
             };
             self.finish_shell_command(shell.id, shell.command, result)

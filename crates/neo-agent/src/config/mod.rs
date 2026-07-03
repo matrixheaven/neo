@@ -180,7 +180,7 @@ impl Default for RuntimeCompactionConfig {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: false,
+            micro_enabled: true,
             micro_keep_recent: 20,
             max_rounds: 5,
             max_retry_attempts: 5,

@@ -472,7 +472,7 @@ async fn execute_manager_owned_shell_command(
             return Ok(shell_result_from_output(
                 output,
                 ShellCommandOutcome::Backgrounded {
-                    task_id: task_id.clone(),
+                    task_id: task_id.clone().into(),
                 },
                 Some(task_id),
                 request.max_output_bytes,

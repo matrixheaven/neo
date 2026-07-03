@@ -166,6 +166,13 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub multi_agent: MultiAgentRuntime,
+    /// Cached token estimate for `tools`. Computed once on first access;
+    /// reset to default on clone (the value is unchanged because `tools`
+    /// is cloned by value, but re-computation is cheap relative to the
+    /// avoidance of repeated `input_schema.to_string()` calls).
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub cached_tool_spec_tokens: std::sync::OnceLock<usize>,
 }
 
 impl AgentConfig {
@@ -207,6 +214,7 @@ impl AgentConfig {
             background_tasks: BackgroundTaskManager::new(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
+            cached_tool_spec_tokens: std::sync::OnceLock::new(),
         }
     }
 
@@ -546,7 +554,7 @@ impl CompactionSettings {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: false,
+            micro_enabled: true,
             micro_keep_recent: 20,
             max_rounds: 5,
             max_retry_attempts: 5,

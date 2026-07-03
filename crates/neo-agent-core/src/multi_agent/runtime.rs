@@ -1869,7 +1869,7 @@ fn block_forbidden_subagent_tool_call(
     // Shell access (Bash/Terminal): denied unless the role's policy allows it.
     // Read-only behavior for Explorer/Reviewer is enforced by the profile's
     // `prompt_addendum`, not by command-syntax classification — see profile.rs.
-    let is_shell = matches!(tool_call.name.as_str(), "Bash" | "Terminal");
+    let is_shell = matches!(tool_call.name.as_ref(), "Bash" | "Terminal");
     if is_shell && !profile.tool_policy.allow_shell {
         return Some(crate::ToolResult::error(format!(
             "{} agents may not run shell commands",
@@ -1878,7 +1878,7 @@ fn block_forbidden_subagent_tool_call(
     }
 
     // File writes (Write/Edit): denied unless the role's policy allows it.
-    if matches!(tool_call.name.as_str(), "Write" | "Edit") && !profile.tool_policy.allow_file_writes
+    if matches!(tool_call.name.as_ref(), "Write" | "Edit") && !profile.tool_policy.allow_file_writes
     {
         return Some(crate::ToolResult::error(format!(
             "{} agents may not edit or write files",
@@ -1966,7 +1966,7 @@ fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {
         let text = content
             .iter()
             .filter_map(|part| match part {
-                Content::Text { text } => Some(text.as_str()),
+                Content::Text { text } => Some(text.as_ref()),
                 _ => None,
             })
             .collect::<String>();
@@ -2244,7 +2244,7 @@ fn content_text(content: &[Content]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text } => Some(text.as_ref()),
             _ => None,
         })
         .collect::<String>()

@@ -498,6 +498,33 @@ impl TranscriptEntry {
         }
     }
 
+    /// Whether this entry's rendered output is static — does not depend on
+    /// `activity_frame` or per-tick internal animation. Static entries can be
+    /// render-cached; live entries must be re-rendered every frame.
+    ///
+    /// `ToolRun` entries are excluded because they go through group rendering
+    /// (`render_ordered_tools`), not the per-entry cache path.
+    #[must_use]
+    pub fn is_render_cacheable(&self) -> bool {
+        match self {
+            // MCP startup status uses activity_frame spinner when connecting.
+            Self::McpStartupStatus { data } => !matches!(data.phase, McpStartupPhase::Connecting),
+            // ThinkingBlock uses activity_frame spinner when streaming.
+            Self::ThinkingBlock { phase, .. } => *phase == ThinkingPhase::Complete,
+            // Live entries (per-tick animation) and ToolRun (group rendering)
+            // are never cached individually.
+            Self::Delegate { .. }
+            | Self::DelegateGroup { .. }
+            | Self::DelegateSwarm { .. }
+            | Self::Compaction { .. }
+            | Self::ToolRun { .. } => false,
+            // All other entries (Banner, UserMessage, AssistantMessage, Status,
+            // QueuedMessage, ShellRun, ApprovalPrompt, Image, GoalCard,
+            // SkillActivation, Workflow) are static.
+            _ => true,
+        }
+    }
+
     #[must_use]
     pub fn copy_parts(&self) -> (&'static str, String) {
         if let Some(parts) = copy::simple_copy_parts(self) {

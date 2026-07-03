@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::estimate_messages_tokens;
+use super::{estimate_message_tokens, estimate_messages_tokens};
 use crate::{
     AgentEvent, AgentMessage, CompactionSummary, QueueKind, TodoEventData,
     sanitize_tool_exchange_messages,
@@ -45,6 +45,15 @@ pub struct AgentContext {
     /// Latest todo list state, restored on resume replay.
     #[serde(default)]
     pub(super) todos: Vec<TodoEventData>,
+    /// Running estimate of token count for `messages`. Updated incrementally
+    /// on `append_message`; recomputed after `apply_compaction`. Avoids
+    /// repeated O(n) char-walks of the full message history.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) estimated_tokens: usize,
+}
+
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 impl AgentContext {
@@ -60,7 +69,13 @@ impl AgentContext {
 
     #[must_use]
     pub fn estimated_context_tokens(&self) -> u32 {
-        u32::try_from(estimate_messages_tokens(&self.messages)).unwrap_or(u32::MAX)
+        u32::try_from(self.estimated_tokens).unwrap_or(u32::MAX)
+    }
+
+    /// Raw `usize` token estimate for internal use (avoids `u32` truncation).
+    #[must_use]
+    pub fn estimated_tokens(&self) -> usize {
+        self.estimated_tokens
     }
 
     #[must_use]
@@ -69,6 +84,7 @@ impl AgentContext {
     }
 
     pub fn append_message(&mut self, message: AgentMessage) {
+        self.estimated_tokens += estimate_message_tokens(&message);
         self.messages.push(message);
     }
 
@@ -96,7 +112,7 @@ impl AgentContext {
         let mut kept = self.messages.split_off(keep_from);
         // Drop any trailing assistant-with-tool-calls whose results were
         // compacted away, so the retained tail is always provider-valid.
-        kept = sanitize_tool_exchange_messages(&kept);
+        kept = sanitize_tool_exchange_messages(&kept).into_owned();
         // Inject the LLM-generated summary as a system message so the model
         // has the compacted context when continuing the conversation.
         let summary_msg = AgentMessage::system_text(format!(
@@ -109,6 +125,8 @@ impl AgentContext {
         ));
         kept.insert(0, summary_msg);
         self.messages = kept;
+        // Recompute token estimate after compaction rewrites the message list.
+        self.estimated_tokens = estimate_messages_tokens(&self.messages);
         self.compaction_summary = Some(summary);
     }
 
@@ -151,7 +169,9 @@ impl AgentContext {
         for event in events {
             context.apply_replay_event(event);
         }
-        context.messages = sanitize_tool_exchange_messages(&context.messages);
+        context.messages = sanitize_tool_exchange_messages(&context.messages).into_owned();
+        // sanitize may have dropped orphaned tool exchanges; recompute.
+        context.estimated_tokens = estimate_messages_tokens(&context.messages);
         context
     }
 

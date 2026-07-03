@@ -98,7 +98,7 @@ pub struct PromptApprovalRequest {
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
-    let content = vec![Content::text(&prompt_text)];
+    let content = vec![Content::text(prompt_text.as_str())];
     let session_path = create_session_path(config).await?;
     let session_id = session_id_from_path(&session_path)?;
     let mut writer = JsonlSessionWriter::create(&session_path)
@@ -138,7 +138,7 @@ pub async fn run_prompt_ephemeral(
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
-    let content = vec![Content::text(&prompt_text)];
+    let content = vec![Content::text(prompt_text.as_str())];
     let mut writer = SessionEventWriter::memory();
     let (user_message, events) = append_user_event(content, &mut writer).await?;
     let runtime = runtime_for_config(
@@ -171,7 +171,7 @@ pub async fn run_prompt_in_session(
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
-    let user_content = vec![Content::text(&prompt_text)];
+    let user_content = vec![Content::text(prompt_text.as_str())];
     let session_path = sessions::session_path(session_id, config)?;
     let context = JsonlSessionReader::replay_context(&session_path)
         .await

@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 
@@ -10,7 +10,7 @@ use crate::{AgentMessage, PlanModeInjector, sanitize_tool_exchange_messages};
 pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
-        messages.push(AgentMessage::system_text(system_prompt).to_chat_message());
+        messages.push(AgentMessage::system_text(system_prompt.as_str()).to_chat_message());
     }
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
@@ -230,20 +230,6 @@ fn request_messages_contain_image(messages: &[ChatMessage]) -> bool {
             .iter()
             .any(|part| matches!(part, ContentPart::Image { .. }))
     })
-}
-
-pub(super) async fn chat_request_for_context_estimate(
-    config: &AgentConfig,
-    context: &AgentContext,
-) -> ChatRequest {
-    let mut config = config.clone();
-    let plan_mode = config
-        .plan_mode
-        .read()
-        .expect("plan mode lock poisoned")
-        .clone();
-    config.plan_mode = Arc::new(RwLock::new(plan_mode));
-    chat_request(&config, context).await
 }
 
 #[cfg(test)]

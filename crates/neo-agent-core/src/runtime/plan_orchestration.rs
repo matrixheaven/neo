@@ -24,7 +24,7 @@ pub(super) fn attach_exit_plan_details(
     };
     let mut selected_labels = config.plan_review_selected_label.lock().ok();
     for (tool_call, result) in tool_results {
-        if tool_call.name == "ExitPlanMode" {
+        if tool_call.name.as_ref() == "ExitPlanMode" {
             if result.details.is_none() {
                 result.details = Some(serde_json::json!({
                     "plan_content": plan_data.content,
@@ -36,7 +36,7 @@ pub(super) fn attach_exit_plan_details(
             // only the selected branch. The label is consumed once.
             if !result.is_error
                 && let Some(labels) = selected_labels.as_mut()
-                && let Some(label) = labels.remove(&tool_call.id)
+                && let Some(label) = labels.remove(tool_call.id.as_ref())
                 && !label.trim().is_empty()
             {
                 result.content = format!(
@@ -133,7 +133,7 @@ pub(super) fn attach_enter_plan_details(
         return;
     };
     for (tool_call, result) in tool_results {
-        if tool_call.name == "EnterPlanMode" && !result.is_error {
+        if tool_call.name.as_ref() == "EnterPlanMode" && !result.is_error {
             result.content = format!(
                 "{}\n\nThe plan file is at: {plan_path}\nWrite your plan to this file.",
                 result.content

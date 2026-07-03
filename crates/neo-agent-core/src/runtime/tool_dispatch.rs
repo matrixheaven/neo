@@ -62,7 +62,7 @@ pub(super) fn continues_after_terminating_batch(
         // and goal continuation (`goal_continuation_messages`) drives subsequent
         // turns on the next `run_agent_turn` entry by design. Continuing inline
         // here would re-feed the continuation message every turn and spin.
-        !result.is_error && matches!(call.name.as_str(), "EnterPlanMode" | "ExitPlanMode")
+        !result.is_error && matches!(call.name.as_ref(), "EnterPlanMode" | "ExitPlanMode")
     })
 }
 
@@ -161,11 +161,11 @@ pub(super) async fn execute_tool_calls(
     // Re-emit the finished event for ExitPlanMode so the TUI can render the
     // plan box from the freshly attached details.
     for (tool_call, result) in &results {
-        if tool_call.name == "ExitPlanMode" {
+        if tool_call.name.as_ref() == "ExitPlanMode" {
             emitter.emit(AgentEvent::ToolExecutionFinished {
                 turn,
-                id: tool_call.id.clone(),
-                name: tool_call.name.clone(),
+                id: tool_call.id.to_string(),
+                name: tool_call.name.to_string(),
                 result: result.clone(),
             });
         }
@@ -194,20 +194,22 @@ fn scheduling_class_for_preparation(
     if matches!(preparation, PermissionPreparation::Ask { .. }) {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(arguments) {
+    if tool_call.name.as_ref() == "AskUserQuestion" && !ask_user_runs_in_background(arguments) {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "ExitPlanMode"
+    if tool_call.name.as_ref() == "ExitPlanMode"
         && current_permission_mode(config) != PermissionMode::Auto
         && exit_plan_mode_has_reviewable_plan(config)
     {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "ExitGoalMode" && current_permission_mode(config) != PermissionMode::Auto {
+    if tool_call.name.as_ref() == "ExitGoalMode"
+        && current_permission_mode(config) != PermissionMode::Auto
+    {
         return ToolSchedulingClass::BlockingDialog;
     }
     if matches!(
-        tool_call.name.as_str(),
+        tool_call.name.as_ref(),
         "Bash" | "Terminal" | "Write" | "Edit"
     ) {
         return ToolSchedulingClass::Exclusive;
@@ -254,8 +256,8 @@ async fn execute_tool_calls_sequential(
                 let result = error_result.clone();
                 emitter.emit(AgentEvent::ToolExecutionFinished {
                     turn,
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
+                    id: tool_call.id.to_string(),
+                    name: tool_call.name.to_string(),
                     result: result.clone(),
                 });
                 results.push(((*tool_call).clone(), result));
@@ -264,8 +266,8 @@ async fn execute_tool_calls_sequential(
         };
         emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
             arguments: prepared_call.arguments.clone(),
         });
         let mut result =
@@ -299,8 +301,8 @@ async fn execute_tool_calls_sequential(
         );
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
             result: result.clone(),
         });
         results.push(((*tool_call).clone(), result));
@@ -349,8 +351,8 @@ async fn execute_tool_calls_parallel(
                 let result = error_result;
                 emitter.emit(AgentEvent::ToolExecutionFinished {
                     turn,
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
+                    id: tool_call.id.to_string(),
+                    name: tool_call.name.to_string(),
                     result: result.clone(),
                 });
                 completed.push((index, (*tool_call).clone(), result));
@@ -360,8 +362,8 @@ async fn execute_tool_calls_parallel(
 
         emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
             arguments: prepared_call.arguments.clone(),
         });
         if let Some(mut result) = before_tool_result(config, tool_call, cancel_token).await {
@@ -379,8 +381,8 @@ async fn execute_tool_calls_parallel(
             );
             emitter.emit(AgentEvent::ToolExecutionFinished {
                 turn,
-                id: tool_call.id.clone(),
-                name: tool_call.name.clone(),
+                id: tool_call.id.to_string(),
+                name: tool_call.name.to_string(),
                 result: result.clone(),
             });
             completed.push((index, (*tool_call).clone(), result));
@@ -410,8 +412,8 @@ async fn execute_tool_calls_parallel(
                 );
                 emitter.emit(AgentEvent::ToolExecutionFinished {
                     turn,
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
+                    id: tool_call.id.to_string(),
+                    name: tool_call.name.to_string(),
                     result: result.clone(),
                 });
                 completed.push((index, (*tool_call).clone(), result));
@@ -430,8 +432,8 @@ async fn execute_tool_calls_parallel(
                 .with_tool_update(make_tool_update_callback(
                     sink.clone(),
                     turn,
-                    tool_call.id.clone(),
-                    tool_call.name.clone(),
+                    tool_call.id.to_string(),
+                    tool_call.name.to_string(),
                 ))
                 .with_tool_event(make_tool_event_callback(sink));
             let mut result = run_tool_with_cancel(
@@ -468,8 +470,8 @@ async fn execute_tool_calls_parallel(
         );
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
             result: result.clone(),
         });
         completed.push((index, tool_call, result));
@@ -543,11 +545,11 @@ async fn prepare_and_run_tool(
                 .with_tool_update(make_tool_update_callback(
                     sink.clone(),
                     turn,
-                    tool_call.id.clone(),
-                    tool_call.name.clone(),
+                    tool_call.id.to_string(),
+                    tool_call.name.to_string(),
                 ))
                 .with_tool_event(make_tool_event_callback(sink));
-            if tool_call.name == "Bash" {
+            if tool_call.name.as_ref() == "Bash" {
                 emit_shell_started(turn, arguments, tool_call, &context, emitter);
             }
             let result = run_tool_with_cancel(
@@ -559,7 +561,7 @@ async fn prepare_and_run_tool(
                 cancel_token,
             )
             .await;
-            if tool_call.name == "Skill" && !result.is_error {
+            if tool_call.name.as_ref() == "Skill" && !result.is_error {
                 emitter.emit(AgentEvent::SkillActivated {
                     turn,
                     name: arguments
@@ -583,13 +585,13 @@ async fn run_tool_with_cancel(
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
 ) -> ToolResult {
-    if tool_call.name == "Skill" {
+    if tool_call.name.as_ref() == "Skill" {
         return execute_invoke_skill(skills, arguments);
     }
-    if tool_call.name == "Bash" {
+    if tool_call.name.as_ref() == "Bash" {
         return run_model_bash_with_cancel(arguments, tool_context, cancel_token).await;
     }
-    if matches!(tool_call.name.as_str(), "Delegate" | "DelegateSwarm") {
+    if matches!(tool_call.name.as_ref(), "Delegate" | "DelegateSwarm") {
         return registry
             .run(&tool_call.name, tool_context, arguments.clone())
             .await

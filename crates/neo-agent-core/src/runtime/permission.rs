@@ -146,7 +146,7 @@ pub(super) fn permission_preparation_for_mode(
 
     // 14. Ask fallback prompt.
     let (operation, subject) = permission_operation_for_tool(tool_call, arguments)
-        .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
+        .unwrap_or((PermissionOperation::Tool, tool_call.name.to_string()));
     PermissionPreparation::Ask {
         operation,
         subject,
@@ -188,14 +188,14 @@ fn check_mode_early_returns(
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     // 2. Auto mode hard deny for AskUserQuestion.
-    if tool_call.name == "AskUserQuestion" && mode == PermissionMode::Auto {
+    if tool_call.name.as_ref() == "AskUserQuestion" && mode == PermissionMode::Auto {
         return Some(PermissionPreparation::Deny(
             "AskUserQuestion is disabled while auto permission mode is active".to_owned(),
         ));
     }
 
     // 3. Background AskUserQuestion does not need an approval dialog in any mode.
-    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(arguments) {
+    if tool_call.name.as_ref() == "AskUserQuestion" && ask_user_runs_in_background(arguments) {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
 
@@ -205,7 +205,7 @@ fn check_mode_early_returns(
     }
 
     // 5. EnterPlanMode is auto-approved in all modes.
-    if tool_call.name == "EnterPlanMode" {
+    if tool_call.name.as_ref() == "EnterPlanMode" {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
 
@@ -254,7 +254,7 @@ fn check_transition_tools(
     tool_call: &AgentToolCall,
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
-    if tool_call.name == "ExitPlanMode" {
+    if tool_call.name.as_ref() == "ExitPlanMode" {
         if exit_plan_mode_has_reviewable_plan(config) {
             return Some(PermissionPreparation::Ask {
                 operation: PermissionOperation::PlanTransition,
@@ -266,7 +266,7 @@ fn check_transition_tools(
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
 
-    if tool_call.name == "ExitGoalMode" {
+    if tool_call.name.as_ref() == "ExitGoalMode" {
         if mode == PermissionMode::Auto {
             return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
         }
@@ -287,7 +287,7 @@ fn check_plan_file_write(
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,
 ) -> Option<PermissionPreparation> {
-    if !matches!(tool_call.name.as_str(), "Write" | "Edit") {
+    if !matches!(tool_call.name.as_ref(), "Write" | "Edit") {
         return None;
     }
     let plan_mode = config.plan_mode.read().ok()?;
@@ -318,7 +318,7 @@ fn check_safe_or_prompt(
     if let Some(argv) = shell_argv_for_prefix_check(config, tool_call, arguments) {
         if command_might_be_dangerous(&argv) {
             let (operation, subject) = permission_operation_for_tool(tool_call, arguments)
-                .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
+                .unwrap_or((PermissionOperation::Tool, tool_call.name.to_string()));
             return Some(PermissionPreparation::Ask {
                 operation,
                 subject,
@@ -351,7 +351,7 @@ pub(super) fn current_permission_mode(config: &AgentConfig) -> PermissionMode {
 
 fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
     matches!(
-        tool_call.name.as_str(),
+        tool_call.name.as_ref(),
         "Read"
             | "List"
             | "Grep"
@@ -366,7 +366,7 @@ fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
 }
 
 fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
-    match tool_call.name.as_str() {
+    match tool_call.name.as_ref() {
         "Read" | "List" | "Grep" | "Find" | "Glob" => ToolAccess {
             file_read: grant,
             ..ToolAccess::none()
@@ -423,7 +423,7 @@ async fn resolve_approval(
     let suggestions = parse_plan_suggestions(arguments);
     let request = ApprovalRequest {
         turn,
-        id: tool_call.id.clone(),
+        id: tool_call.id.to_string(),
         operation,
         subject: subject.clone(),
         arguments: approval_arguments,
@@ -484,14 +484,14 @@ async fn resolve_approval(
         }
         PermissionApprovalDecision::Reject => {
             // Review feedback is delivered via the review-feedback side-channel.
-            if matches!(tool_call.name.as_str(), "ExitPlanMode" | "ExitGoalMode")
+            if matches!(tool_call.name.as_ref(), "ExitPlanMode" | "ExitGoalMode")
                 && let Some(feedback) = config
                     .plan_review_feedback
                     .lock()
                     .ok()
-                    .and_then(|mut m| m.remove(&tool_call.id))
+                    .and_then(|mut m| m.remove(tool_call.id.as_ref()))
             {
-                let target = if tool_call.name == "ExitGoalMode" {
+                let target = if tool_call.name.as_ref() == "ExitGoalMode" {
                     "Goal mode"
                 } else {
                     "Plan mode"
@@ -557,14 +557,14 @@ fn permission_operation_for_tool(
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,
 ) -> Option<(PermissionOperation, String)> {
-    match tool_call.name.as_str() {
+    match tool_call.name.as_ref() {
         "Read" | "List" | "Grep" | "Find" | "Glob" => Some((
             PermissionOperation::FileRead,
-            path_subject(arguments).unwrap_or_else(|| tool_call.name.clone()),
+            path_subject(arguments).unwrap_or_else(|| tool_call.name.to_string()),
         )),
         "Write" | "Edit" => Some((
             PermissionOperation::FileWrite,
-            path_subject(arguments).unwrap_or_else(|| tool_call.name.clone()),
+            path_subject(arguments).unwrap_or_else(|| tool_call.name.to_string()),
         )),
         "Bash" | "Terminal" | "TaskStop" => Some((
             PermissionOperation::Shell,
@@ -573,7 +573,7 @@ fn permission_operation_for_tool(
                 .and_then(serde_json::Value::as_str)
                 .or_else(|| arguments.get("task_id").and_then(serde_json::Value::as_str))
                 .or_else(|| arguments.get("handle").and_then(serde_json::Value::as_str))
-                .unwrap_or(tool_call.name.as_str())
+                .unwrap_or(tool_call.name.as_ref())
                 .to_owned(),
         )),
         "AskUserQuestion" => Some((
@@ -747,7 +747,7 @@ fn shell_argv(
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,
 ) -> Option<Vec<String>> {
-    if tool_call.name != "Bash" {
+    if tool_call.name.as_ref() != "Bash" {
         return None;
     }
     let background = arguments
@@ -782,10 +782,10 @@ fn approval_scope_for_tool_call(
     arguments: &serde_json::Value,
 ) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
     // Review transitions and dangerous commands never offer scope/prefix.
-    if matches!(tool_call.name.as_str(), "ExitPlanMode" | "ExitGoalMode") {
+    if matches!(tool_call.name.as_ref(), "ExitPlanMode" | "ExitGoalMode") {
         return (None, None);
     }
-    match tool_call.name.as_str() {
+    match tool_call.name.as_ref() {
         "Bash" => bash_approval_scope(config, arguments),
         "Write" => {
             let (scope, _) =

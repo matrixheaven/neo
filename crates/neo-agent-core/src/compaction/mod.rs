@@ -794,9 +794,9 @@ mod tests {
 
     fn tool_call(id: &str) -> AgentToolCall {
         AgentToolCall {
-            id: id.to_owned(),
-            name: "bash".to_owned(),
-            raw_arguments: serde_json::json!({"command": "ls"}).to_string(),
+            id: id.into(),
+            name: "bash".into(),
+            raw_arguments: serde_json::json!({"command": "ls"}).to_string().into(),
         }
     }
 
