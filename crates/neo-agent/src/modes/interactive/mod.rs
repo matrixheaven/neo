@@ -306,6 +306,10 @@ pub(crate) struct InteractiveController {
     #[cfg(test)]
     btw_client: Option<Arc<dyn neo_ai::ModelClient>>,
     pending_approvals: BTreeMap<String, PendingApprovalResponse>,
+    /// Approvals resolved by the TUI before `PromptApprovalRequest` arrived
+    /// from the runtime (a race between event processing and channel setup).
+    /// Stores `(decision, feedback)` so the user's Revise feedback survives
+    /// the deferred handoff in `register_pending_approval`.
     resolved_approvals: BTreeMap<String, (PermissionApprovalDecision, Option<String>)>,
     /// Pending `AskUser` question response channels, keyed by question id.
     pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
@@ -1561,6 +1565,10 @@ impl InteractiveController {
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
+        // Pre-resolved entry: the user already responded via the TUI before
+        // this channel was registered. Forward the preserved feedback so the
+        // runtime receives it — sending None here caused the model to lose
+        // the user's revision note entirely.
         if let Some((decision, feedback)) = self.resolved_approvals.remove(&approval.id) {
             if let Some(tx) = approval.feedback_tx {
                 let _ = tx.send(feedback);

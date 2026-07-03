@@ -127,6 +127,12 @@ fn approval_prompt(
                     .get("plan_path")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                // Extract model-supplied option labels so the transcript
+                // renders the same option list as the chrome. Without this
+                // the transcript hardcoded a single "Approve once" while the
+                // chrome had N custom options, causing the selected index to
+                // be off by N-1 — selecting "Reject with feedback" in the
+                // UI actually selected "Reject" in the chrome.
                 let plan_option_labels = arguments
                     .get("options")
                     .and_then(serde_json::Value::as_array)

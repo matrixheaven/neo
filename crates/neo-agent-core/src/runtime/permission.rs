@@ -256,6 +256,12 @@ fn check_transition_tools(
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     if tool_call.name.as_ref() == "ExitPlanMode" {
+        // Pre-validate before showing the approval dialog. Without this,
+        // invalid input (e.g. a reserved label like "Approve") would still
+        // pop the dialog, and if the user approved it the tool would then
+        // fail with InvalidInput — showing both "approval: Approved" and
+        // the error simultaneously. By validating here we skip the dialog
+        // and let execute() return the error directly to the model.
         if exit_plan_mode_has_reviewable_plan(config)
             && serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments)
                 .ok()

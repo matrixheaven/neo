@@ -150,6 +150,11 @@ impl InteractiveController {
             }
             let _ = pending.decision_tx.send(decision);
         } else {
+            // PromptApprovalRequest hasn't arrived yet (pre-resolution).
+            // Store feedback alongside the decision so it can be forwarded
+            // when register_pending_approval runs. Without this the feedback
+            // was discarded here, and the model received "approval denied"
+            // instead of the user's revision note.
             self.resolved_approvals
                 .insert(result.request_id.clone(), (decision, feedback));
         }
