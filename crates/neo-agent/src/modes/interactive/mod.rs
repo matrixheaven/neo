@@ -1283,8 +1283,8 @@ impl InteractiveController {
                 self.push_status("Usage: /skill:<name> [args]");
                 return Ok(());
             }
-            let stripped_prompt = match self.activate_skill_directives(directives) {
-                Ok(body) => body,
+            let (stripped_prompt, display_body) = match self.activate_skill_directives(directives) {
+                Ok(pair) => pair,
                 Err(err) => {
                     self.push_status(format!("Skill error: {err}"));
                     return Ok(());
@@ -1294,7 +1294,7 @@ impl InteractiveController {
                 self.clear_submitted_prompt();
                 return Ok(());
             }
-            self.pending_skill_user_message_to_suppress = Some(stripped_prompt.clone());
+            self.pending_skill_user_message_to_suppress = Some(display_body);
             let Some(prompt) = self.submit_prompt_text(stripped_prompt) else {
                 return Ok(());
             };

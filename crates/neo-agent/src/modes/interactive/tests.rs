@@ -2106,6 +2106,74 @@ amigo";
 }
 
 #[tokio::test]
+async fn inline_skill_directive_with_paste_marker_renders_one_card() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let paste_text = "line one\nline two\nline three";
+    let expected_display = format!("{paste_text}review this");
+    let expanded_for_event = expected_display.clone();
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            let expanded_for_event = expanded_for_event.clone();
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(vec![AgentEvent::MessageAppended {
+                    message: AgentMessage::user_text(expanded_for_event),
+                }])
+            }
+        },
+    );
+    controller.skill_store = Some(skill_store_with_two_prompt_skills());
+    controller.paste_store.insert(1, paste_text.to_owned());
+
+    controller.type_text("/skill:skill_one [paste #1 +3 lines]review this");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("skill activation succeeds");
+
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    let entries = transcript_entries(&controller);
+    let skill_card_count = entries
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::SkillActivation { .. }))
+        .count();
+    assert_eq!(
+        skill_card_count, 1,
+        "expected exactly one skill activation card"
+    );
+    let skill_card = entries
+        .iter()
+        .find(|entry| matches!(entry, TranscriptEntry::SkillActivation { .. }))
+        .expect("one skill activation card");
+    assert!(matches!(
+        skill_card,
+        TranscriptEntry::SkillActivation { names, body, .. }
+            if names == &vec!["skill_one".to_owned()] && body == &expected_display
+    ));
+
+    assert!(
+        !entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == &expected_display)
+        ),
+        "expanded skill activation body should not be rendered again as a user message"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].prompt, vec![Content::text(expected_display)]);
+}
+
+#[tokio::test]
 async fn inline_skill_directive_without_whitespace_prefix_submits_as_plain_prompt() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
     let seen_requests = std::sync::Arc::clone(&requests);

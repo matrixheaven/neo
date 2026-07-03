@@ -8,7 +8,7 @@ use neo_tui::dialogs::HelpPanelCommand;
 use super::InteractiveController;
 use super::task_browser;
 use super::{
-    InlineSkillDirectives, InlineSkillInvocation, expand_slash_skill,
+    InlineSkillDirectives, InlineSkillInvocation, content_to_display_text, expand_slash_skill,
     parse_inline_skill_directives, slash_arg, slash_permission_mode,
 };
 
@@ -202,16 +202,23 @@ impl InteractiveController {
         }
     }
 
+    /// Activate inline skill directives.
+    ///
+    /// Returns `(raw_stripped_body, expanded_display_body)`:
+    /// - `raw_stripped_body`: the prompt with `/skill:` syntax removed, still containing
+    ///   `[paste ...]` / `[image ...]` markers. Used for turn submission and skill context.
+    /// - `expanded_display_body`: the same text with markers expanded, used for the
+    ///   `SkillActivation` transcript card and for suppressing the runtime user-message echo.
     pub(super) fn activate_skill_directives(
         &mut self,
         directives: InlineSkillDirectives,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         let skill_store = self
             .skill_store
             .as_ref()
             .context("skill store not loaded")?;
-        let mut names = Vec::new();
-        let mut loaded_blocks = Vec::new();
+        let mut names = Vec::with_capacity(directives.invocations.len());
+        let mut loaded_blocks = Vec::with_capacity(directives.invocations.len());
         for invocation in &directives.invocations {
             let skill = skill_store
                 .get(&invocation.name)
@@ -226,13 +233,20 @@ impl InteractiveController {
             ));
         }
 
-        self.push_skill_invocation_entry(names, directives.body.as_str());
+        let expanded_content = crate::prompt::parts::expand_prompt_markers(
+            &directives.body,
+            &self.paste_store,
+            &self.image_attachment_store,
+        );
+        let display_body = content_to_display_text(&expanded_content);
+
+        self.push_skill_invocation_entry(names, &display_body);
         self.pending_skill_context = Some(render_user_slash_skill_context(
             &directives.invocations,
             &loaded_blocks,
             directives.body.as_str(),
         ));
-        Ok(directives.body)
+        Ok((directives.body, display_body))
     }
 
     fn push_skill_invocation_entry(&mut self, names: Vec<String>, body: &str) {
