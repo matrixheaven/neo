@@ -1,8 +1,8 @@
 use std::borrow::Borrow;
 
 use neo_agent_core::{
-    AgentEvent, AgentToolCall, PermissionOperation, ShellCommandOrigin, ShellCommandOutcome,
-    ToolResult,
+    AgentEvent, AgentToolCall, PermissionOperation, PlanSuggestion, ShellCommandOrigin,
+    ShellCommandOutcome, ToolResult,
 };
 
 use crate::shell::ToolStatusKind;
@@ -185,6 +185,7 @@ impl TranscriptPane {
                 arguments,
                 session_scope,
                 prefix_rule,
+                suggestions,
                 ..
             } => {
                 let mut session_label = session_scope
@@ -212,6 +213,7 @@ impl TranscriptPane {
                     arguments,
                     session_label,
                     prefix_label,
+                    suggestions.clone(),
                 );
                 true
             }
@@ -529,6 +531,7 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn request_approval(
         &mut self,
         id: String,
@@ -537,6 +540,7 @@ impl TranscriptPane {
         arguments: &serde_json::Value,
         session_option_label: Option<String>,
         prefix_option_label: Option<String>,
+        suggestions: Vec<PlanSuggestion>,
     ) {
         self.upsert_approval(
             id,
@@ -545,6 +549,7 @@ impl TranscriptPane {
             arguments,
             session_option_label,
             prefix_option_label,
+            suggestions,
         );
         self.mark_dirty();
     }

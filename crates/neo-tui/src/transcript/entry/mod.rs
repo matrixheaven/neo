@@ -12,6 +12,7 @@ use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
 use crate::transcript::ToolCallComponent;
 use crate::transcript::WorkflowCardComponent;
+use neo_agent_core::PlanSuggestion;
 use serde::{Deserialize, Serialize};
 
 mod copy;
@@ -57,6 +58,15 @@ pub struct ApprovalPromptData {
     /// Plan file path for the box title (`PlanTransition` only).
     #[serde(default)]
     pub plan_path: Option<String>,
+    /// Preset revision suggestions for plan review (`PlanTransition` only).
+    #[serde(default)]
+    pub suggestions: Vec<PlanSuggestion>,
+    /// Index of the currently selected preset suggestion, if any. When set,
+    /// the corresponding suggestion's feedback text is populated into
+    /// [`Self::feedback_input`] and the option selection moves to
+    /// "Reject with feedback".
+    #[serde(default)]
+    pub selected_suggestion: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +598,33 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         }
         rows.push(Line::raw(""));
     }
+    // Render preset revision suggestions (PlanTransition only).
+    if !data.suggestions.is_empty() {
+        rows.push(Line::styled("  Suggestions:", title));
+        for (index, suggestion) in data.suggestions.iter().enumerate() {
+            let number = index + 1;
+            let is_selected = data.selected_suggestion == Some(index);
+            let prefix = if is_selected { "  ▶ " } else { "    " };
+            let style = if is_selected { selected } else { body };
+            rows.extend(styled_wrap_with_prefix(
+                &format!("{}. {}", number, suggestion.label),
+                width,
+                prefix,
+                "     ",
+                style,
+            ));
+            if !suggestion.description.is_empty() {
+                rows.extend(styled_wrap_with_indent(
+                    &suggestion.description,
+                    width,
+                    7,
+                    7,
+                    muted,
+                ));
+            }
+        }
+        rows.push(Line::raw(""));
+    }
     // Build the option list dynamically. The session-approval (Layer 1) and
     // prefix-rule (Layer 2) options appear only when their labels are `Some`,
     // so numeric shortcuts and the feedback-input index track the visible list.
@@ -982,5 +1019,78 @@ amigo",
         assert!(text.contains("852"), "{text}");
         assert!(text.contains("192k"), "{text}");
         assert!(text.contains("24k"), "{text}");
+    }
+
+    #[test]
+    fn approval_prompt_renders_suggestions() {
+        let data = ApprovalPromptData {
+            id: "test-id".to_owned(),
+            title: "Plan Review".to_owned(),
+            details: vec!["Ready to build with this plan?".to_owned()],
+            queued_label: String::new(),
+            queued_count: 0,
+            selected: 0,
+            feedback_input: String::new(),
+            resolved: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            plan_content: None,
+            plan_path: None,
+            suggestions: vec![
+                PlanSuggestion {
+                    label: "Keep 85% window".to_owned(),
+                    description: "Keep compaction window at 85%.".to_owned(),
+                    feedback: Some("Keep compaction at 85%.".to_owned()),
+                },
+                PlanSuggestion {
+                    label: "Accept as-is".to_owned(),
+                    description: "No changes needed.".to_owned(),
+                    feedback: Some("No changes.".to_owned()),
+                },
+            ],
+            selected_suggestion: None,
+        };
+        let lines = TranscriptEntry::ApprovalPrompt(data)
+            .render(80, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        assert!(text.contains("Suggestions:"), "{text}");
+        assert!(text.contains("1. Keep 85% window"), "{text}");
+        assert!(text.contains("Keep compaction window at 85%."), "{text}");
+        assert!(text.contains("2. Accept as-is"), "{text}");
+    }
+
+    #[test]
+    fn approval_prompt_highlights_selected_suggestion() {
+        let data = ApprovalPromptData {
+            id: "test-id".to_owned(),
+            title: "Plan Review".to_owned(),
+            details: vec!["Ready?".to_owned()],
+            queued_label: String::new(),
+            queued_count: 0,
+            // With no session/prefix options, "Reject with feedback" is at index 2.
+            selected: 2,
+            feedback_input: "Keep compaction at 85%.".to_owned(),
+            resolved: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            plan_content: None,
+            plan_path: None,
+            suggestions: vec![PlanSuggestion {
+                label: "Keep 85% window".to_owned(),
+                description: "Keep compaction window at 85%.".to_owned(),
+                feedback: Some("Keep compaction at 85%.".to_owned()),
+            }],
+            selected_suggestion: Some(0),
+        };
+        let lines = TranscriptEntry::ApprovalPrompt(data)
+            .render(80, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        assert!(text.contains("feedback: Keep compaction at 85%."), "{text}");
     }
 }

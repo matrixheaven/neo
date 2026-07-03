@@ -6,6 +6,18 @@ use std::path::PathBuf;
 use crate::multi_agent::{AgentSnapshot, SwarmSnapshot};
 use crate::{AgentMessage, AgentToolCall, PermissionOperation, ShellCommandOutcome, ToolResult};
 
+/// A preset revision suggestion offered during plan review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlanSuggestion {
+    /// Short label shown as the suggestion title.
+    pub label: String,
+    /// Longer explanation shown under the label.
+    pub description: String,
+    /// Feedback text to populate when the user selects this suggestion.
+    #[serde(default)]
+    pub feedback: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ShellCommandOrigin {
     ModelBashTool,
@@ -162,6 +174,9 @@ pub enum AgentEvent {
         /// option should be offered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_rule: Option<crate::permissions::PrefixApprovalRule>,
+        /// Preset revision suggestions for plan review (`PlanTransition` only).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suggestions: Vec<PlanSuggestion>,
     },
     ShellCommandStarted {
         turn: u32,

@@ -79,6 +79,24 @@ pub struct ExitPlanModeOption {
     pub description: Option<String>,
 }
 
+/// A preset revision suggestion offered during plan review.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExitPlanModeSuggestion {
+    /// Short label shown as the suggestion title.
+    #[schemars(description = "Short label shown as the suggestion title.")]
+    pub label: String,
+    /// Longer explanation shown under the label.
+    #[schemars(description = "Longer explanation shown under the label.")]
+    pub description: String,
+    /// Feedback text to populate when the user selects this suggestion.
+    #[schemars(
+        description = "Feedback text to populate when the user selects this suggestion. Defaults to description."
+    )]
+    #[serde(default)]
+    pub feedback: Option<String>,
+}
+
 /// Input payload for [`ExitPlanModeTool`].
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +111,12 @@ pub struct ExitPlanModeInput {
         description = "When the plan contains multiple alternative approaches, list them here so the user can choose which one to execute. Provide up to 3 options; 2-3 distinct approaches work best when the plan offers a real choice. Passing a single option is allowed and is equivalent to a plain plan approval."
     )]
     pub options: Option<Vec<ExitPlanModeOption>>,
+    /// Optional preset revision suggestions shown below the plan box.
+    #[schemars(
+        description = "Optional preset revision suggestions shown below the plan box. Each suggestion has a label, description, and optional feedback text that is populated when the user selects it."
+    )]
+    #[serde(default)]
+    pub suggestions: Option<Vec<ExitPlanModeSuggestion>>,
 }
 
 /// Tool that requests exiting plan mode.
@@ -131,7 +155,8 @@ impl Tool for ExitPlanModeTool {
          - If auto permission mode is not active and you have multiple approaches and have not narrowed down yet, consider using AskUserQuestion first to let the user choose, then write a plan for the chosen approach only.\n\
          - Once your plan is finalized, use THIS tool to request approval.\n\
          - Do NOT use AskUserQuestion to ask \"Is this plan OK?\" or \"Should I proceed?\" - that is exactly what ExitPlanMode does.\n\
-         - If rejected, revise based on feedback and call ExitPlanMode again."
+         - If rejected, revise based on feedback and call ExitPlanMode again.
+         - You may include preset revision suggestions in the `suggestions` parameter to help the user quickly request common changes."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -144,6 +169,9 @@ impl Tool for ExitPlanModeTool {
 
             if let Some(ref options) = input.options {
                 validate_exit_plan_mode_options(options)?;
+            }
+            if let Some(ref suggestions) = input.suggestions {
+                validate_exit_plan_mode_suggestions(suggestions)?;
             }
 
             let summary = input
@@ -188,6 +216,37 @@ fn validate_exit_plan_mode_options(options: &[ExitPlanModeOption]) -> Result<(),
             return Err(ToolError::InvalidInput {
                 tool: "ExitPlanMode".to_owned(),
                 message: format!("duplicate option label `{}`", option.label),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_exit_plan_mode_suggestions(
+    suggestions: &[ExitPlanModeSuggestion],
+) -> Result<(), ToolError> {
+    if suggestions.len() > 5 {
+        return Err(ToolError::InvalidInput {
+            tool: "ExitPlanMode".to_owned(),
+            message: format!(
+                "suggestions must contain at most 5 items, got {}",
+                suggestions.len()
+            ),
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    for suggestion in suggestions {
+        let normalized = suggestion.label.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(ToolError::InvalidInput {
+                tool: "ExitPlanMode".to_owned(),
+                message: "suggestion label must not be empty".to_owned(),
+            });
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(ToolError::InvalidInput {
+                tool: "ExitPlanMode".to_owned(),
+                message: format!("duplicate suggestion label `{}`", suggestion.label),
             });
         }
     }

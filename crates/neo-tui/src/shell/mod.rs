@@ -146,12 +146,19 @@ impl NeoChromeState {
     }
 
     #[must_use]
-    pub fn approval_selection(&self) -> Option<(&str, usize, &str)> {
+    pub fn approval_selection(&self) -> Option<(&str, usize, &str, Option<usize>)> {
         self.pending_approvals.front().map(|approval| {
+            let plan_option_count = approval.plan_option_labels.len();
+            let suggestion_index = approval.modal.selected.saturating_sub(plan_option_count);
+            let selected_suggestion = approval
+                .suggestions
+                .get(suggestion_index)
+                .map(|_| suggestion_index);
             (
                 approval.request_id.as_str(),
                 approval.modal.selected,
                 approval.feedback_input.as_str(),
+                selected_suggestion,
             )
         })
     }
@@ -162,6 +169,7 @@ impl NeoChromeState {
             return None;
         }
         approval.modal.selected = number - 1;
+        approval.apply_suggestion_feedback();
         if approval.is_collecting_feedback() {
             return None;
         }

@@ -1,4 +1,5 @@
 use neo_agent_core::PermissionOperation;
+use neo_agent_core::PlanSuggestion;
 
 use crate::transcript::pane::TranscriptPane;
 use crate::transcript::{ApprovalPromptData, TranscriptEntry};
@@ -9,6 +10,7 @@ struct ApprovalPromptSummary {
     queued_label: String,
     plan_content: Option<String>,
     plan_path: Option<String>,
+    suggestions: Vec<PlanSuggestion>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -35,6 +37,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            suggestions: Vec::new(),
         }
     } else if is_terminal {
         ApprovalPromptSummary {
@@ -43,6 +46,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            suggestions: Vec::new(),
         }
     } else if is_edit {
         ApprovalPromptSummary {
@@ -54,6 +58,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            suggestions: Vec::new(),
         }
     } else {
         match operation {
@@ -63,6 +68,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
             PermissionOperation::FileWrite => ApprovalPromptSummary {
                 title: "Write file?".to_owned(),
@@ -70,6 +76,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
             PermissionOperation::FileRead => ApprovalPromptSummary {
                 title: "Read workspace data?".to_owned(),
@@ -83,6 +90,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
             PermissionOperation::Tool => ApprovalPromptSummary {
                 title: "Run tool?".to_owned(),
@@ -90,6 +98,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
             PermissionOperation::UserQuestion => ApprovalPromptSummary {
                 title: "User question".to_owned(),
@@ -97,6 +106,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
             PermissionOperation::PlanTransition => {
                 let plan_content = arguments
@@ -108,12 +118,40 @@ fn approval_prompt(
                     .get("plan_path")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                let suggestions = arguments
+                    .get("suggestions")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let label = item.get("label")?.as_str()?.to_owned();
+                                let description = item
+                                    .get("description")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(&label)
+                                    .to_owned();
+                                let feedback = item
+                                    .get("feedback")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                                    .or_else(|| Some(description.clone()));
+                                Some(PlanSuggestion {
+                                    label,
+                                    description,
+                                    feedback,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 ApprovalPromptSummary {
                     title: "Plan Review".to_owned(),
                     details: compact_details([Some("Ready to build with this plan?".to_owned())]),
                     queued_label: String::new(),
                     plan_content,
                     plan_path,
+                    suggestions,
                 }
             }
             PermissionOperation::GoalTransition => ApprovalPromptSummary {
@@ -122,6 +160,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                suggestions: Vec::new(),
             },
         }
     }
@@ -199,9 +238,16 @@ fn non_empty_details(details: Vec<String>, fallback: impl FnOnce() -> Vec<String
 }
 
 impl TranscriptPane {
-    pub fn select_approval(&mut self, id: &str, selected: usize, feedback_input: &str) {
+    pub fn select_approval(
+        &mut self,
+        id: &str,
+        selected: usize,
+        feedback_input: &str,
+        selected_suggestion: Option<usize>,
+    ) {
         if let Some(approval) = self.transcript.approval_mut(id) {
             approval.selected = selected;
+            approval.selected_suggestion = selected_suggestion;
             feedback_input.clone_into(&mut approval.feedback_input);
             self.mark_dirty();
         }
@@ -237,6 +283,7 @@ impl TranscriptPane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn upsert_approval(
         &mut self,
         id: String,
@@ -245,8 +292,12 @@ impl TranscriptPane {
         arguments: &serde_json::Value,
         session_option_label: Option<String>,
         prefix_option_label: Option<String>,
+        suggestions: Vec<PlanSuggestion>,
     ) {
-        let prompt = approval_prompt(operation, subject, arguments);
+        let mut prompt = approval_prompt(operation, subject, arguments);
+        if !suggestions.is_empty() {
+            prompt.suggestions = suggestions;
+        }
 
         if let Some(approval) = self.transcript.approval_mut(&id) {
             approval.title = prompt.title;
@@ -254,6 +305,8 @@ impl TranscriptPane {
             approval.queued_label = prompt.queued_label;
             approval.plan_content = prompt.plan_content;
             approval.plan_path = prompt.plan_path;
+            approval.suggestions = prompt.suggestions;
+            approval.selected_suggestion = None;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
             approval
@@ -278,6 +331,8 @@ impl TranscriptPane {
             prefix_option_label,
             plan_content: prompt.plan_content,
             plan_path: prompt.plan_path,
+            suggestions: prompt.suggestions,
+            selected_suggestion: None,
         };
         if self.active_approval_mut().is_some() {
             self.queued_approvals.push_back(data);

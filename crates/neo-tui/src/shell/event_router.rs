@@ -1,4 +1,4 @@
-use neo_agent_core::{AgentEvent, PermissionOperation};
+use neo_agent_core::{AgentEvent, PermissionOperation, PlanSuggestion};
 
 use crate::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus};
@@ -118,11 +118,39 @@ impl NeoChromeState {
                             }
                             _ => options_body,
                         };
+                        let suggestions = arguments
+                            .get("suggestions")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|item| {
+                                        let label = item.get("label")?.as_str()?.to_owned();
+                                        let description = item
+                                            .get("description")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or(&label)
+                                            .to_owned();
+                                        let feedback = item
+                                            .get("feedback")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(str::to_owned)
+                                            .or_else(|| Some(description.clone()));
+                                        Some(PlanSuggestion {
+                                            label,
+                                            description,
+                                            feedback,
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         ApprovalRequestModal::new_plan_review(
                             id,
                             crate::primitive::theme::review_title(operation),
                             body,
                             option_labels,
+                            suggestions,
                         )
                     } else if is_review {
                         ApprovalRequestModal::new_review(

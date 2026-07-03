@@ -1513,14 +1513,19 @@ impl InteractiveController {
     }
 
     fn sync_inline_approval_selection(&mut self) {
-        let Some((id, selected, feedback_input)) = self.tui.chrome().approval_selection() else {
+        let Some((id, selected, feedback_input, selected_suggestion)) =
+            self.tui.chrome().approval_selection()
+        else {
             return;
         };
         let id = id.to_owned();
         let feedback_input = feedback_input.to_owned();
-        self.tui
-            .transcript_mut()
-            .select_approval(&id, selected, &feedback_input);
+        self.tui.transcript_mut().select_approval(
+            &id,
+            selected,
+            &feedback_input,
+            selected_suggestion,
+        );
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {

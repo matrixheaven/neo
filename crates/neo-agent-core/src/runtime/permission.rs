@@ -32,6 +32,9 @@ pub struct ApprovalRequest {
     /// should be offered (compound/opaque commands, non-shell tools).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_rule: Option<PrefixApprovalRule>,
+    /// Preset revision suggestions for plan review (`PlanTransition` only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<crate::PlanSuggestion>,
 }
 
 pub(super) enum PermissionPreparation {
@@ -417,6 +420,7 @@ async fn resolve_approval(
             serde_json::Value::String(plan_data.path.display().to_string()),
         );
     }
+    let suggestions = parse_plan_suggestions(arguments);
     let request = ApprovalRequest {
         turn,
         id: tool_call.id.clone(),
@@ -425,6 +429,7 @@ async fn resolve_approval(
         arguments: approval_arguments,
         session_scope: session_scope.clone(),
         prefix_rule: prefix_rule.clone(),
+        suggestions: suggestions.clone(),
     };
     emitter.emit(AgentEvent::ApprovalRequested {
         turn: request.turn,
@@ -434,6 +439,7 @@ async fn resolve_approval(
         arguments: request.arguments.clone(),
         session_scope: request.session_scope.clone(),
         prefix_rule: request.prefix_rule.clone(),
+        suggestions,
     });
     let decision = if let Some(handler) = &config.approval_handler {
         handler(&request)
@@ -497,6 +503,37 @@ async fn resolve_approval(
             Some(permission_error(operation, &subject, "approval denied"))
         }
     }
+}
+
+/// Extract preset revision suggestions from `ExitPlanMode`/`ExitGoalMode` arguments.
+fn parse_plan_suggestions(arguments: &serde_json::Value) -> Vec<crate::PlanSuggestion> {
+    arguments
+        .get("suggestions")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let label = item.get("label")?.as_str()?.to_owned();
+                    let description = item
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&label)
+                        .to_owned();
+                    let feedback = item
+                        .get("feedback")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| Some(description.clone()));
+                    Some(crate::PlanSuggestion {
+                        label,
+                        description,
+                        feedback,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn permission_error(

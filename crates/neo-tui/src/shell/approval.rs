@@ -1,4 +1,5 @@
 use crate::primitive::theme::TuiTheme;
+use neo_agent_core::PlanSuggestion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalChoice {
@@ -73,6 +74,11 @@ pub struct ApprovalRequestModal {
     /// `confirm_approval` reads the entry at the selected index to populate
     /// `ApprovalResult.selected_option_label`.
     pub plan_option_labels: Vec<String>,
+    /// Preset revision suggestions for plan review. Each suggestion is rendered
+    /// as an option immediately after the plan options and before Reject /
+    /// Revise. Selecting a suggestion fills [`Self::feedback_input`] with its
+    /// feedback text and behaves like [`ApprovalChoice::Revise`].
+    pub suggestions: Vec<neo_agent_core::PlanSuggestion>,
 }
 
 impl ApprovalRequestModal {
@@ -118,6 +124,7 @@ impl ApprovalRequestModal {
             request_id: request_id.into(),
             feedback_input: String::new(),
             plan_option_labels: Vec::new(),
+            suggestions: Vec::new(),
             modal: ApprovalModal::new(title, body, options),
         }
     }
@@ -133,6 +140,7 @@ impl ApprovalRequestModal {
             request_id: request_id.into(),
             feedback_input: String::new(),
             plan_option_labels: Vec::new(),
+            suggestions: Vec::new(),
             modal: ApprovalModal::new(
                 title,
                 body,
@@ -146,7 +154,8 @@ impl ApprovalRequestModal {
     }
 
     /// Create a plan-review modal that renders the model-supplied options as
-    /// leading approve choices (one per label), followed by Reject and Revise.
+    /// leading approve choices (one per label), followed by preset revision
+    /// suggestions, Reject and Revise.
     /// Mirrors kimi-code's plan-review picker. When `plan_option_labels` is
     /// empty, falls back to a single generic Approve choice (same as
     /// [`Self::new_review`]) so a plan with no alternatives still reviews.
@@ -158,13 +167,23 @@ impl ApprovalRequestModal {
         title: impl Into<String>,
         body: impl Into<String>,
         plan_option_labels: Vec<String>,
+        suggestions: Vec<PlanSuggestion>,
     ) -> Self {
         let mut options: Vec<ApprovalOption> = plan_option_labels
             .iter()
             .map(|label| ApprovalOption::new(ApprovalChoice::Approve, format!("Approach: {label}")))
             .collect();
-        if options.is_empty() {
+        let plan_option_labels = if plan_option_labels.is_empty() {
             options.push(ApprovalOption::new(ApprovalChoice::Approve, "Approve"));
+            vec!["Approve".to_owned()]
+        } else {
+            plan_option_labels
+        };
+        for suggestion in &suggestions {
+            options.push(ApprovalOption::new(
+                ApprovalChoice::Revise,
+                format!("Suggestion: {}", suggestion.label),
+            ));
         }
         options.push(ApprovalOption::new(ApprovalChoice::Deny, "Reject"));
         options.push(ApprovalOption::new(
@@ -175,6 +194,7 @@ impl ApprovalRequestModal {
             request_id: request_id.into(),
             feedback_input: String::new(),
             plan_option_labels,
+            suggestions,
             modal: ApprovalModal::new(title, body, options),
         }
     }
@@ -187,6 +207,7 @@ impl ApprovalRequestModal {
         } else {
             self.modal.selected -= 1;
         }
+        self.apply_suggestion_feedback();
     }
 
     pub fn move_down(&mut self) {
@@ -195,6 +216,31 @@ impl ApprovalRequestModal {
         } else {
             self.modal.selected = (self.modal.selected + 1) % self.modal.options.len();
         }
+        self.apply_suggestion_feedback();
+    }
+
+    /// If the current option selection lands on a preset suggestion, populate
+    /// the feedback input with that suggestion's feedback text. If it lands on
+    /// a non-revise option, clear any feedback text so the user doesn't submit
+    /// stale suggestion text by accident.
+    pub(super) fn apply_suggestion_feedback(&mut self) {
+        if let Some(suggestion) = self.selected_suggestion() {
+            self.feedback_input = suggestion
+                .feedback
+                .clone()
+                .unwrap_or_else(|| suggestion.description.clone());
+            return;
+        }
+        if !self.is_collecting_feedback() {
+            self.feedback_input.clear();
+        }
+    }
+
+    /// Returns the preset suggestion currently selected, if any.
+    fn selected_suggestion(&self) -> Option<&PlanSuggestion> {
+        let plan_option_count = self.plan_option_labels.len();
+        let suggestion_index = self.modal.selected.saturating_sub(plan_option_count);
+        self.suggestions.get(suggestion_index)
     }
 
     #[must_use]
@@ -239,5 +285,62 @@ pub(super) fn approval_number(character: char) -> Option<usize> {
         '3' => Some(3),
         '4' => Some(4),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_review_renders_suggestion_options() {
+        let suggestions = vec![PlanSuggestion {
+            label: "Keep 85% window".to_owned(),
+            description: "Keep compaction window at 85%.".to_owned(),
+            feedback: Some("Keep compaction at 85%.".to_owned()),
+        }];
+        let modal = ApprovalRequestModal::new_plan_review(
+            "id",
+            "Plan Review",
+            "Ready?",
+            Vec::new(),
+            suggestions,
+        );
+        let labels: Vec<_> = modal
+            .modal
+            .options
+            .iter()
+            .map(|opt| opt.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Approve",
+                "Suggestion: Keep 85% window",
+                "Reject",
+                "Reject with feedback",
+            ]
+        );
+    }
+
+    #[test]
+    fn selecting_suggestion_populates_feedback() {
+        let suggestions = vec![PlanSuggestion {
+            label: "Keep 85% window".to_owned(),
+            description: "Keep compaction window at 85%.".to_owned(),
+            feedback: Some("Keep compaction at 85%.".to_owned()),
+        }];
+        let mut modal = ApprovalRequestModal::new_plan_review(
+            "id",
+            "Plan Review",
+            "Ready?",
+            Vec::new(),
+            suggestions,
+        );
+        // With one plan option (Approve) and one suggestion, the suggestion is at index 1.
+        modal.modal.selected = 1;
+        modal.apply_suggestion_feedback();
+        assert_eq!(modal.feedback_input, "Keep compaction at 85%.");
+        assert!(modal.is_collecting_feedback());
     }
 }
