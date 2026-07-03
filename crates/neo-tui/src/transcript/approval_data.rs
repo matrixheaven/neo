@@ -10,6 +10,7 @@ struct ApprovalPromptSummary {
     queued_label: String,
     plan_content: Option<String>,
     plan_path: Option<String>,
+    plan_option_labels: Vec<String>,
     suggestions: Vec<PlanSuggestion>,
 }
 
@@ -37,6 +38,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            plan_option_labels: Vec::new(),
             suggestions: Vec::new(),
         }
     } else if is_terminal {
@@ -46,6 +48,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            plan_option_labels: Vec::new(),
             suggestions: Vec::new(),
         }
     } else if is_edit {
@@ -58,6 +61,7 @@ fn approval_prompt(
             queued_label: String::new(),
             plan_content: None,
             plan_path: None,
+            plan_option_labels: Vec::new(),
             suggestions: Vec::new(),
         }
     } else {
@@ -68,6 +72,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
             PermissionOperation::FileWrite => ApprovalPromptSummary {
@@ -76,6 +81,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
             PermissionOperation::FileRead => ApprovalPromptSummary {
@@ -90,6 +96,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
             PermissionOperation::Tool => ApprovalPromptSummary {
@@ -98,6 +105,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
             PermissionOperation::UserQuestion => ApprovalPromptSummary {
@@ -106,6 +114,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
             PermissionOperation::PlanTransition => {
@@ -118,6 +127,16 @@ fn approval_prompt(
                     .get("plan_path")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                let plan_option_labels = arguments
+                    .get("options")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("label")?.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let suggestions = arguments
                     .get("suggestions")
                     .and_then(serde_json::Value::as_array)
@@ -151,6 +170,7 @@ fn approval_prompt(
                     queued_label: String::new(),
                     plan_content,
                     plan_path,
+                    plan_option_labels,
                     suggestions,
                 }
             }
@@ -160,6 +180,7 @@ fn approval_prompt(
                 queued_label: String::new(),
                 plan_content: None,
                 plan_path: None,
+                plan_option_labels: Vec::new(),
                 suggestions: Vec::new(),
             },
         }
@@ -306,6 +327,7 @@ impl TranscriptPane {
             approval.plan_content = prompt.plan_content;
             approval.plan_path = prompt.plan_path;
             approval.suggestions = prompt.suggestions;
+            approval.plan_option_labels = prompt.plan_option_labels;
             approval.selected_suggestion = None;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
@@ -331,6 +353,7 @@ impl TranscriptPane {
             prefix_option_label,
             plan_content: prompt.plan_content,
             plan_path: prompt.plan_path,
+            plan_option_labels: prompt.plan_option_labels,
             suggestions: prompt.suggestions,
             selected_suggestion: None,
         };

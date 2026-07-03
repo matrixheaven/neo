@@ -58,6 +58,11 @@ pub struct ApprovalPromptData {
     /// Plan file path for the box title (`PlanTransition` only).
     #[serde(default)]
     pub plan_path: Option<String>,
+    /// Model-supplied option labels for plan review (`PlanTransition` only).
+    /// When non-empty, these replace the generic "Approve once" option so
+    /// that the rendered option list matches the chrome's one-to-one.
+    #[serde(default)]
+    pub plan_option_labels: Vec<String>,
     /// Preset revision suggestions for plan review (`PlanTransition` only).
     #[serde(default)]
     pub suggestions: Vec<PlanSuggestion>,
@@ -652,15 +657,28 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         }
         rows.push(Line::raw(""));
     }
-    // Build the option list dynamically. The session-approval (Layer 1) and
-    // prefix-rule (Layer 2) options appear only when their labels are `Some`,
-    // so numeric shortcuts and the feedback-input index track the visible list.
-    let mut options: Vec<String> = vec!["Approve once".to_owned()];
+    // Build the option list dynamically. For plan reviews with custom
+    // options, use the model-supplied labels so the list matches the
+    // chrome one-to-one. Otherwise fall back to a single "Approve once".
+    // The session-approval (Layer 1) and prefix-rule (Layer 2) options
+    // appear only when their labels are `Some`, so numeric shortcuts and
+    // the feedback-input index track the visible list.
+    let mut options: Vec<String> = if data.plan_option_labels.is_empty() {
+        vec!["Approve once".to_owned()]
+    } else {
+        data.plan_option_labels
+            .iter()
+            .map(|label| format!("Approach: {label}"))
+            .collect()
+    };
     if let Some(label) = &data.session_option_label {
         options.push(label.clone());
     }
     if let Some(label) = &data.prefix_option_label {
         options.push(label.clone());
+    }
+    for suggestion in &data.suggestions {
+        options.push(format!("Suggestion: {}", suggestion.label));
     }
     options.push("Reject".to_owned());
     options.push("Reject with feedback".to_owned());
@@ -1063,6 +1081,7 @@ amigo",
             prefix_option_label: None,
             plan_content: None,
             plan_path: None,
+            plan_option_labels: Vec::new(),
             suggestions: vec![
                 PlanSuggestion {
                     label: "Keep 85% window".to_owned(),
@@ -1097,14 +1116,15 @@ amigo",
             details: vec!["Ready?".to_owned()],
             queued_label: String::new(),
             queued_count: 0,
-            // With no session/prefix options, "Reject with feedback" is at index 2.
-            selected: 2,
+            // Options: [0] Approve once, [1] Suggestion, [2] Reject, [3] Revise.
+            selected: 3,
             feedback_input: "Keep compaction at 85%.".to_owned(),
             resolved: None,
             session_option_label: None,
             prefix_option_label: None,
             plan_content: None,
             plan_path: None,
+            plan_option_labels: Vec::new(),
             suggestions: vec![PlanSuggestion {
                 label: "Keep 85% window".to_owned(),
                 description: "Keep compaction window at 85%.".to_owned(),

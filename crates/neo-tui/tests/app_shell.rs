@@ -624,6 +624,51 @@ fn arrow_nav_to_revise_then_enter_does_not_submit_with_empty_feedback() {
 }
 
 #[test]
+fn plan_review_with_options_aligns_chrome_and_transcript_revise_index() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({
+            "plan_summary": "Ready",
+            "options": [
+                {"label": "Approach A", "description": "Simple"},
+                {"label": "Approach B", "description": "Fast"},
+            ]
+        }),
+        session_scope: None,
+        prefix_rule: None,
+        suggestions: vec![],
+    });
+
+    use neo_tui::input::{InputEvent, KeybindingAction};
+
+    // Chrome has 4 options: [0] A, [1] B, [2] Reject, [3] Revise.
+    // Navigate to Revise (index 3).
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 1
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 2
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 3
+    assert_eq!(
+        app.approval_choice(),
+        Some(ApprovalChoice::Revise),
+        "Chrome should be on Revise at index 3"
+    );
+
+    // Typing must work because the chrome is truly on Revise.
+    app.handle_pending_approval_input(InputEvent::Insert('f'));
+    app.handle_pending_approval_input(InputEvent::Insert('x'));
+
+    // Verify feedback was collected.
+    let result = app
+        .handle_pending_approval_input(InputEvent::Submit)
+        .expect("Submit after typing should produce a result");
+    assert_eq!(result.choice, ApprovalChoice::Revise);
+    assert_eq!(result.feedback.as_deref(), Some("fx"));
+}
+
+#[test]
 fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
