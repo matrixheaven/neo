@@ -950,7 +950,9 @@ impl MultiAgentRuntime {
     /// Broadcast a live message to all running children in a swarm.
     ///
     /// Returns `(delivered, skipped)` on success, or an error if the swarm is
-    /// unknown or has no running children.
+    /// unknown. When no children received the message (all terminal), the
+    /// result is still `Ok` — the caller decides how to present an
+    /// all-skipped outcome.
     pub fn broadcast_live_swarm_message(
         &self,
         swarm_id: &str,
@@ -977,12 +979,6 @@ impl MultiAgentRuntime {
             } else {
                 skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
             }
-        }
-        if delivered.is_empty() {
-            return Err(
-                "swarm has no running children; use DelegateSwarm with resume_agent_ids to continue unfinished children"
-                    .to_owned(),
-            );
         }
         Ok((delivered, skipped))
     }

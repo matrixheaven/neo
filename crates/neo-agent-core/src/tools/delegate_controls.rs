@@ -844,6 +844,25 @@ impl Tool for MessageDelegateTool {
                     .broadcast_live_swarm_message(&input.id, &input.message)
                 {
                     Ok((delivered, skipped)) => {
+                        let details = json!({
+                            "target": input.id,
+                            "delivered": delivered,
+                            "skipped": skipped.iter().map(|(agent_id, state)| {
+                                json!({ "agent_id": agent_id, "state": state.as_str() })
+                            }).collect::<Vec<_>>(),
+                        });
+                        if delivered.is_empty() {
+                            return Ok(ToolResult::error(format!(
+                                "target: {}\nno running children to receive message\nskipped: {}",
+                                input.id,
+                                skipped
+                                    .iter()
+                                    .map(|(id, state)| format!("{id} ({})", state.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            ))
+                            .with_details(details));
+                        }
                         return Ok(ToolResult::ok(format!(
                             "target: {}\ndelivered: {}\nskipped: {}",
                             input.id,
@@ -854,13 +873,7 @@ impl Tool for MessageDelegateTool {
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         ))
-                        .with_details(json!({
-                            "target": input.id,
-                            "delivered": delivered,
-                            "skipped": skipped.iter().map(|(agent_id, state)| {
-                                json!({ "agent_id": agent_id, "state": state.as_str() })
-                            }).collect::<Vec<_>>(),
-                        })));
+                        .with_details(details));
                     }
                     Err(message) => {
                         return Ok(ToolResult::error(message));

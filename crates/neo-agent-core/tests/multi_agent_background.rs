@@ -1400,14 +1400,102 @@ async fn message_delegate_broadcasts_to_running_swarm_children() {
 
     // Message may fail if children already completed (FakeHarness completes instantly).
     // The test just verifies the swarm routing works without crashing.
-    // If delivered, check format; if error, check that it's the "no running children" error.
+    // If delivered, check format; if error, verify it has structured skipped details.
     if !message.is_error {
         assert!(
             message.content.contains("delivered:"),
             "{}",
             message.content
         );
+    } else {
+        assert!(
+            message.content.contains("no running children"),
+            "{}",
+            message.content
+        );
+        let details = message.details.as_ref().expect("error must have details");
+        assert!(
+            details["skipped"].is_array(),
+            "skipped must be an array: {details}"
+        );
+        assert!(
+            details["delivered"]
+                .as_array()
+                .is_some_and(|d| d.is_empty()),
+            "delivered must be empty: {details}"
+        );
     }
+}
+
+#[tokio::test]
+async fn message_delegate_swarm_all_completed_returns_structured_skipped() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let started = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "fast swarm",
+                "items": [{"title": "x", "value": "x"}, {"title": "y", "value": "y"}],
+                "prompt_template": "Process {{item}}",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("swarm starts and completes");
+    let swarm_id = started
+        .details
+        .as_ref()
+        .and_then(|details| {
+            details
+                .get("swarm_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    details
+                        .get("swarm")
+                        .and_then(|swarm| swarm.get("swarm_id"))
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
+        .expect("swarm_id")
+        .to_owned();
+
+    let message = registry
+        .run(
+            "MessageDelegate",
+            &ctx,
+            serde_json::json!({
+                "id": swarm_id,
+                "message": "post-completion guidance"
+            }),
+        )
+        .await
+        .expect("message returns result");
+
+    // All children completed — must return an error with structured details.
+    assert!(message.is_error, "{}", message.content);
+    assert!(
+        message.content.contains("no running children"),
+        "{}",
+        message.content
+    );
+    let details = message.details.as_ref().expect("details required");
+    let skipped = details["skipped"]
+        .as_array()
+        .expect("skipped must be an array");
+    assert_eq!(skipped.len(), 2, "both children should be skipped");
+    assert!(
+        skipped
+            .iter()
+            .all(|entry| { entry["state"].as_str().is_some_and(|s| s == "completed") }),
+        "all skipped children should show completed state: {skipped:?}"
+    );
+    assert!(
+        details["delivered"]
+            .as_array()
+            .is_some_and(|d| d.is_empty()),
+        "delivered must be empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
