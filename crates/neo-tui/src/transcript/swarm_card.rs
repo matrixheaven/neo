@@ -90,7 +90,7 @@ impl SwarmCardComponent {
         lines.push(
             Line::from_spans(vec![
                 Span::styled(marker(self.snapshot.state), brand),
-                Span::styled(" DelegateSwarm · ", muted),
+                Span::styled(" DelegateSwarm · ", brand),
                 Span::styled(state_label(self.snapshot.state), brand),
                 Span::styled(" · ", muted),
                 Span::styled(self.snapshot.description.as_str(), primary),

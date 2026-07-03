@@ -76,6 +76,7 @@ impl DelegateCardComponent {
     pub fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let phase = display_phase(&self.snapshot);
         let accent = Style::default().fg(status_color(phase, theme));
+        let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
         let elapsed = display_elapsed(&self.snapshot, self.now_ms);
@@ -91,7 +92,7 @@ impl DelegateCardComponent {
                     role_badge(&self.snapshot),
                     role_badge_style(self.snapshot.role, theme),
                 ),
-                Span::styled(" · Delegate", muted),
+                Span::styled(" · Delegate", brand),
                 Span::styled(delegate_stats_line(&self.snapshot, phase, elapsed), primary),
             ])
             .truncate_to_width(width),
