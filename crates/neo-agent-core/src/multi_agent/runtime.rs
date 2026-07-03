@@ -998,8 +998,10 @@ fn mark_restored_snapshot_lost(snapshot: &mut AgentSnapshot, now: u64) {
     snapshot.terminal_at_ms.get_or_insert(now);
     snapshot.updated_at_ms = now;
     snapshot.outcome = Some(AgentTerminalOutcome {
-        summary: "Delegate lost because the previous Neo process exited before completion."
-            .to_owned(),
+        summary: format!(
+            "Delegate lost because the previous Neo process exited before completion. Resume with Delegate(resume=\"{}\", task=\"continue\").",
+            snapshot.id.as_str()
+        ),
         is_error: true,
     });
 }

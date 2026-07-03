@@ -3,7 +3,8 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 
 use crate::multi_agent::{
-    AgentLifecycleState, AgentRunMode, AgentSnapshot, DelegateContext, SwarmSnapshot,
+    AgentLifecycleState, AgentRunMode, AgentSnapshot, AgentTerminalReason, DelegateContext,
+    SwarmSnapshot,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +89,12 @@ pub(crate) fn agent_details(
     }
     if include_activity {
         value["activity_tail"] = json!(&agent.activity);
+    }
+    if agent.terminal_reason == Some(AgentTerminalReason::Lost) {
+        value["resume_hint"] = json!(format!(
+            "Delegate(resume=\"{}\", task=\"continue\")",
+            agent.id.as_str()
+        ));
     }
     value
 }

@@ -4,7 +4,8 @@ use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-    AgentSnapshot, DelegateContext, DelegateRequest, MultiAgentRuntime, SwarmAggregate,
+    AgentSnapshot, AgentTerminalReason, DelegateContext, DelegateRequest, MultiAgentRuntime,
+    SwarmAggregate,
 };
 use neo_agent_core::tools::{
     BackgroundTaskKind, BackgroundTaskManager, Tool, ToolContext, ToolFuture, ToolRegistry,
@@ -367,6 +368,92 @@ async fn list_delegates_reports_background_delegate() {
 
     assert!(result.content.contains(agent.id.as_str()));
     assert!(result.content.contains("inspect background registry"));
+}
+
+#[tokio::test]
+async fn restored_running_delegate_is_reported_lost_with_resume_hint() {
+    let runtime = MultiAgentRuntime::new();
+    let running = runtime.start_foreground_delegate_for_test("long audit");
+    let id = running.id.as_str().to_owned();
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(
+        [AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: running,
+        }]
+        .iter(),
+    );
+
+    let snapshot = restored.agent_snapshot(&id).expect("restored");
+    assert_eq!(snapshot.state, AgentLifecycleState::Failed);
+    assert_eq!(snapshot.terminal_reason, Some(AgentTerminalReason::Lost));
+    assert!(
+        snapshot
+            .outcome
+            .as_ref()
+            .expect("outcome")
+            .summary
+            .contains(&format!("Delegate(resume=\"{id}\"")),
+        "{}",
+        snapshot.outcome.as_ref().expect("outcome").summary
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path())
+        .unwrap()
+        .with_multi_agent(restored);
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let output = registry
+        .run("TaskOutput", &ctx, json!({ "task_id": id }))
+        .await
+        .expect("TaskOutput should return delegate output");
+    assert_eq!(
+        output
+            .details
+            .as_ref()
+            .and_then(|details| details.get("resume_hint"))
+            .and_then(serde_json::Value::as_str),
+        Some(format!("Delegate(resume=\"{id}\", task=\"continue\")").as_str())
+    );
+
+    let listed = registry
+        .run(
+            "ListDelegates",
+            &ctx,
+            json!({
+                "kind": "agent",
+                "include_completed": true,
+                "include": ["summary"]
+            }),
+        )
+        .await
+        .expect("ListDelegates should return restored delegate");
+    let listed_hint = listed
+        .details
+        .as_ref()
+        .and_then(|details| details.get("delegates"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|delegates| delegates.iter().find(|row| row["id"] == id))
+        .and_then(|row| row.get("resume_hint"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(
+        listed_hint,
+        Some(format!("Delegate(resume=\"{id}\", task=\"continue\")").as_str())
+    );
+
+    let waited = registry
+        .run("WaitDelegate", &ctx, json!({ "id": id, "timeout_ms": 1 }))
+        .await
+        .expect("WaitDelegate should return restored delegate");
+    assert_eq!(
+        waited
+            .details
+            .as_ref()
+            .and_then(|details| details.get("resume_hint"))
+            .and_then(serde_json::Value::as_str),
+        Some(format!("Delegate(resume=\"{id}\", task=\"continue\")").as_str())
+    );
 }
 
 #[tokio::test]

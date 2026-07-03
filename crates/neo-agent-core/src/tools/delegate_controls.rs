@@ -632,17 +632,25 @@ impl Tool for WaitDelegateTool {
                         .as_ref()
                         .map(|o| o.summary.clone())
                         .unwrap_or_default();
+                    let mut details = super::multi_agent_format::agent_details(
+                        "delegate_wait",
+                        &snapshot,
+                        Some(snapshot.context),
+                        super::multi_agent_format::SummaryScope::CurrentRun,
+                        true,
+                        true,
+                        false,
+                    );
+                    details["kind"] = json!("delegate_wait");
+                    details["agent"] = json!(snapshot.clone());
+                    details["outcome"] = json!(state_label);
                     return Ok(ToolResult::ok(format!(
                         "id: {}\nstatus: {}\nsummary: {}",
                         snapshot.id.as_str(),
                         state_label,
                         summary,
                     ))
-                    .with_details(json!({
-                        "kind": "delegate_wait",
-                        "agent": snapshot,
-                        "outcome": state_label,
-                    })));
+                    .with_details(details));
                 }
 
                 // Also check background task state.
