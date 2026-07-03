@@ -198,10 +198,21 @@ impl InteractiveController {
 
     fn show_goal_status(&mut self, manager: &GoalManager) -> bool {
         match manager.active() {
-            Some(goal) => self.push_status(format!(
-                "Goal: {} | status: {:?}",
-                goal.objective, goal.status
-            )),
+            Some(goal) => {
+                let queue_len = manager.queue().len();
+                let artifact = goal
+                    .artifact_dir
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), |path| path.display().to_string());
+                self.push_status(format!(
+                    "Goal: {} | status: {:?} | elapsed: {} | queue: {} | artifact: {}",
+                    goal.objective,
+                    goal.status,
+                    format_elapsed(goal.created_at),
+                    queue_len,
+                    artifact
+                ));
+            }
             None => self.push_status("No active goal."),
         }
         true
@@ -237,12 +248,18 @@ impl InteractiveController {
         command: &str,
     ) -> bool {
         if let Some(objective) = command.strip_prefix("replace ") {
-            return self.replace_goal(manager, objective.trim()).await;
+            return self
+                .replace_goal(manager, goal_objective_text(objective))
+                .await;
         }
         if let Some(objective) = command.strip_prefix("next ") {
-            return self.queue_next_goal(manager, objective.trim()).await;
+            let objective = goal_objective_text(objective);
+            if objective == "manage" {
+                return self.show_goal_queue(manager);
+            }
+            return self.queue_next_goal(manager, objective).await;
         }
-        self.start_goal(manager, command).await
+        self.start_goal(manager, goal_objective_text(command)).await
     }
 
     async fn replace_goal(&mut self, manager: &GoalManager, objective: &str) -> bool {
@@ -259,14 +276,36 @@ impl InteractiveController {
     }
 
     async fn queue_next_goal(&mut self, manager: &GoalManager, objective: &str) -> bool {
+        let had_active_goal = manager.active().is_some();
         let goal = neo_agent_core::goal::Goal::new(objective);
         match manager.queue_next(goal).await {
-            Ok(()) => self.push_status(format!("Queued goal: {objective}")),
+            Ok(()) if had_active_goal => self.push_status(format!("Queued goal: {objective}")),
+            Ok(()) => {
+                self.push_status(format!("Started goal: {objective}"));
+                self.push_goal_status("▶ Goal started", objective);
+                return false;
+            }
             Err(err) => {
                 self.push_status(format!("Failed to queue goal: {err}"));
                 return true;
             }
         }
+        true
+    }
+
+    fn show_goal_queue(&mut self, manager: &GoalManager) -> bool {
+        let queue = manager.queue();
+        if queue.is_empty() {
+            self.push_status("No queued goals.");
+            return true;
+        }
+        let summary = queue
+            .iter()
+            .enumerate()
+            .map(|(index, goal)| format!("{}. {}", index + 1, goal.objective))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        self.push_status(format!("Queued goals: {summary}"));
         true
     }
 
@@ -294,5 +333,32 @@ impl InteractiveController {
             .push_transcript(neo_tui::transcript::TranscriptEntry::status(format!(
                 "{prefix}: {objective}"
             )));
+    }
+}
+
+fn goal_objective_text(text: &str) -> &str {
+    text.trim()
+        .strip_prefix("--")
+        .map_or(text.trim(), str::trim)
+}
+
+fn format_elapsed(created_at: u64) -> String {
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    let seconds = now.saturating_sub(created_at) / 1000;
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }

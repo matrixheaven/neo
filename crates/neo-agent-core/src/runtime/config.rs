@@ -138,8 +138,8 @@ pub struct AgentConfig {
     pub prefix_approval_rules: Arc<Mutex<ApprovalRuleStore>>,
     /// Home directory for persistent state (e.g. `~/.neo`, approval rules).
     pub home_dir: Option<PathBuf>,
-    /// Session directory for this turn. Used to store plan files (`plans/`) and
-    /// image blobs scoped to the active session.
+    /// Session directory for this turn. Used to store agent-scoped plans, goals,
+    /// tasks, and image blobs scoped to the active session.
     #[serde(skip)]
     #[schemars(skip)]
     pub session_directory: Option<PathBuf>,

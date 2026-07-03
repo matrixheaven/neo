@@ -9,12 +9,15 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
+use crate::session::main_agent_goals_dir;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GoalStatus {
     Active,
     Paused,
     Blocked,
+    Queued,
     Complete,
 }
 
@@ -134,7 +137,10 @@ impl GoalStore {
     }
 
     pub fn dequeue_next(&mut self) -> Option<Goal> {
-        self.queue.pop_front()
+        let mut goal = self.queue.pop_front()?;
+        goal.status = GoalStatus::Active;
+        goal.touch();
+        Some(goal)
     }
 
     #[must_use]
@@ -153,7 +159,7 @@ impl GoalStore {
 }
 
 fn goals_dir(session_dir: &Path) -> PathBuf {
-    session_dir.join("goals")
+    main_agent_goals_dir(session_dir)
 }
 
 fn goal_path(session_dir: &Path, id: &str) -> PathBuf {
@@ -246,6 +252,8 @@ pub async fn load_goal_store(session_dir: &Path) -> Result<GoalStore> {
             } else {
                 store.queue.push_back(goal);
             }
+        } else if matches!(goal.status, GoalStatus::Queued) {
+            store.queue.push_back(goal);
         }
     }
     Ok(store)
@@ -348,7 +356,13 @@ impl GoalManager {
         ensure_goal_artifacts(&self.session_dir, &mut goal).await?;
         {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
-            store.queue_next(goal.clone());
+            if store.active().is_some() {
+                goal.status = GoalStatus::Queued;
+                goal.touch();
+                store.queue_next(goal.clone());
+            } else {
+                let _ = store.start(goal.clone());
+            }
         }
         save_goal(&self.session_dir, &goal).await?;
         Ok(())
@@ -373,7 +387,7 @@ impl GoalManager {
         status: GoalStatus,
         reason: Option<String>,
     ) -> Result<Option<Goal>> {
-        let goal = {
+        let (goal, next) = {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             let Some(mut goal) = store.active_mut().cloned() else {
                 return Ok(None);
@@ -383,18 +397,25 @@ impl GoalManager {
             goal.touch();
             if matches!(status, GoalStatus::Complete) {
                 let _ = store.cancel();
-                Some(goal)
+                let next = store.dequeue_next();
+                if let Some(next) = next.clone() {
+                    store.start(next);
+                }
+                (Some(goal), next)
             } else if let Some(active) = store.active_mut() {
                 *active = goal.clone();
-                Some(goal)
+                (Some(goal), None)
             } else {
-                Some(goal)
+                (Some(goal), None)
             }
         };
         match status {
             GoalStatus::Complete => {
                 if let Some(ref goal) = goal {
                     delete_goal(&self.session_dir, &goal.id).await?;
+                }
+                if let Some(ref next) = next {
+                    save_goal(&self.session_dir, next).await?;
                 }
             }
             _ => {

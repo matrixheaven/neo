@@ -121,11 +121,37 @@ impl Tool for UpdateGoalStatusTool {
                 })?;
             let status = args.status.into();
             match manager.update_status(status, args.reason.clone()).await {
-                Ok(Some(goal)) => Ok(ToolResult::ok(format!(
-                    "Goal `{}` status updated to {:?}.",
-                    goal.objective, goal.status
-                ))
-                .with_details(goal_details("updated", &goal))),
+                Ok(Some(goal)) => {
+                    let next_goal = if matches!(status, GoalStatus::Complete) {
+                        manager.active()
+                    } else {
+                        None
+                    };
+                    let content = next_goal.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "Goal `{}` status updated to {:?}.",
+                                goal.objective, goal.status
+                            )
+                        },
+                        |next| {
+                            format!(
+                                "Goal `{}` status updated to {:?}. Started next goal `{}`.",
+                                goal.objective, goal.status, next.objective
+                            )
+                        },
+                    );
+                    let mut details = goal_details("updated", &goal);
+                    if let Some(next) = next_goal
+                        && let Some(object) = details.as_object_mut()
+                    {
+                        object.insert(
+                            "next_objective".to_owned(),
+                            serde_json::Value::String(next.objective),
+                        );
+                    }
+                    Ok(ToolResult::ok(content).with_details(details))
+                }
                 Ok(None) => Ok(ToolResult::error("no active goal to update")),
                 Err(err) => Ok(ToolResult::error(format!("failed to update goal: {err}"))),
             }
@@ -319,6 +345,7 @@ const fn goal_status_label(status: GoalStatus) -> &'static str {
         GoalStatus::Active => "active",
         GoalStatus::Paused => "paused",
         GoalStatus::Blocked => "blocked",
+        GoalStatus::Queued => "queued",
         GoalStatus::Complete => "complete",
     }
 }
@@ -486,6 +513,38 @@ mod tests {
             completed.content
         );
         assert!(manager.active().is_none());
+    }
+
+    #[tokio::test]
+    async fn completing_goal_reports_started_next_goal_details() {
+        let (_temp, manager) = make_manager().await;
+        let start = StartGoalTool::new(Arc::clone(&manager));
+        let update = UpdateGoalStatusTool::new(Arc::clone(&manager));
+        let ctx = ToolContext::new(".").expect("context");
+
+        start
+            .execute(&ctx, json!({"objective": "First goal"}))
+            .await
+            .expect("start first");
+        manager
+            .queue_next(Goal::new("Second goal"))
+            .await
+            .expect("queue second");
+
+        let completed = update
+            .execute(&ctx, json!({"status": "complete"}))
+            .await
+            .expect("complete first");
+
+        assert_eq!(manager.active().unwrap().objective, "Second goal");
+        assert_eq!(
+            completed
+                .details
+                .as_ref()
+                .and_then(|details| details.get("next_objective"))
+                .and_then(serde_json::Value::as_str),
+            Some("Second goal")
+        );
     }
 
     #[tokio::test]

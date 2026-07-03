@@ -6,6 +6,7 @@ pub const AGENTS_DIR: &str = "agents";
 pub const WIRE_FILE: &str = "wire.jsonl";
 pub const TASKS_DIR: &str = "tasks";
 pub const PLANS_DIR: &str = "plans";
+pub const GOALS_DIR: &str = "goals";
 
 #[must_use]
 pub fn session_state_path(session_dir: &Path) -> PathBuf {
@@ -45,6 +46,16 @@ pub fn agent_plans_dir(session_dir: &Path, agent_id: &str) -> PathBuf {
 #[must_use]
 pub fn main_agent_plans_dir(session_dir: &Path) -> PathBuf {
     agent_plans_dir(session_dir, MAIN_AGENT_ID)
+}
+
+#[must_use]
+pub fn agent_goals_dir(session_dir: &Path, agent_id: &str) -> PathBuf {
+    agent_record_dir(session_dir, agent_id).join(GOALS_DIR)
+}
+
+#[must_use]
+pub fn main_agent_goals_dir(session_dir: &Path) -> PathBuf {
+    agent_goals_dir(session_dir, MAIN_AGENT_ID)
 }
 
 #[must_use]

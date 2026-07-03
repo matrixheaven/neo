@@ -138,8 +138,12 @@ impl InteractiveController {
         let Some(arg) = slash_arg(prompt, "/goal") else {
             return false;
         };
-        self.clear_submitted_prompt();
-        self.handle_goal_command(arg).await
+        if self.handle_goal_command(arg).await {
+            self.clear_submitted_prompt();
+            return true;
+        }
+        self.replace_prompt_text(&goal_submission_text(arg));
+        false
     }
 
     pub(super) fn clear_submitted_prompt(&mut self) {
@@ -230,4 +234,21 @@ impl InteractiveController {
         text.clone_into(&mut prompt.text);
         prompt.cursor = prompt.text.chars().count();
     }
+}
+
+fn goal_submission_text(arg: &str) -> String {
+    let command = arg.trim();
+    if let Some(objective) = command.strip_prefix("replace ") {
+        return strip_goal_separator(objective).to_owned();
+    }
+    if let Some(objective) = command.strip_prefix("next ") {
+        return strip_goal_separator(objective).to_owned();
+    }
+    strip_goal_separator(command).to_owned()
+}
+
+fn strip_goal_separator(text: &str) -> &str {
+    text.trim()
+        .strip_prefix("--")
+        .map_or(text.trim(), str::trim)
 }

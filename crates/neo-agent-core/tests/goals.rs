@@ -56,6 +56,19 @@ async fn goal_persists_to_disk() {
     let active = store.active().unwrap();
     assert_eq!(active.objective, "persist me");
     assert_eq!(active.completion_criterion, Some("tests pass".into()));
+    assert!(
+        temp.path()
+            .join("agents/main/goals")
+            .join(format!("{}.json", active.id))
+            .is_file()
+    );
+    assert!(
+        !temp
+            .path()
+            .join("goals")
+            .join(format!("{}.json", active.id))
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -68,6 +81,7 @@ async fn goal_start_creates_supergoal_artifacts() {
     let active = manager.active().unwrap();
     let artifact_dir = active.artifact_dir.as_ref().expect("artifact dir");
     assert!(artifact_dir.ends_with(&active.id));
+    assert!(artifact_dir.starts_with(temp.path().join("agents/main/goals/runs")));
     for relative in [
         "GOAL.md",
         "ROADMAP.md",
@@ -100,6 +114,40 @@ async fn goal_manager_queues_goals() {
 
     assert_eq!(manager.queue().len(), 1);
     assert_eq!(manager.queue()[0].objective, "second");
+    assert!(matches!(manager.queue()[0].status, GoalStatus::Queued));
+
+    let reloaded = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    assert_eq!(reloaded.active().unwrap().objective, "first");
+    assert_eq!(reloaded.queue().len(), 1);
+    assert_eq!(reloaded.queue()[0].objective, "second");
+    assert!(matches!(reloaded.queue()[0].status, GoalStatus::Queued));
+}
+
+#[tokio::test]
+async fn queue_next_starts_immediately_when_no_goal_is_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+
+    manager.queue_next(Goal::new("first queued")).await.unwrap();
+
+    assert_eq!(manager.active().unwrap().objective, "first queued");
+    assert!(manager.queue().is_empty());
+}
+
+#[tokio::test]
+async fn completing_goal_starts_next_queued_goal() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+
+    manager.start(Goal::new("first")).await.unwrap();
+    manager.queue_next(Goal::new("second")).await.unwrap();
+    manager
+        .update_status(GoalStatus::Complete, None)
+        .await
+        .unwrap();
+
+    assert_eq!(manager.active().unwrap().objective, "second");
+    assert!(manager.queue().is_empty());
 }
 
 #[test]

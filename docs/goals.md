@@ -49,20 +49,15 @@ The footer goal badge reflects durable goal state:
 | `/goal resume` | Resume a paused or blocked goal |
 | `/goal cancel` | Remove the current goal |
 | `/goal replace <objective>` | Replace the current goal |
-| `/goal next <objective>` | Queue an upcoming goal |
+| `/goal next <objective>` | Queue an upcoming goal; if no goal is active, start it immediately |
+| `/goal next manage` | Show the queued goals |
 
 A goal stops in one of three ways:
 
 - **complete**: the objective is done; Neo clears the goal and summarizes the work.
 - **paused**: you paused it, or a runtime error/interrupt occurred.
-- **blocked**: Neo needs input, the goal is impossible as stated, or the turn
-  budget was exceeded. The reason is shown in the transcript.
-
-## Turn budget
-
-Goals run with a default maximum of 30 autonomous turns. When the budget is
-exceeded, the goal is marked blocked. This prevents runaway work on vague
-objectives.
+- **blocked**: Neo needs input, the goal is impossible as stated, or an external
+  condition prevents useful progress. The reason is shown in the transcript.
 
 ## Goal tools
 
@@ -74,9 +69,12 @@ objectives.
 
 ## Storage
 
-Goals are stored as JSON files in the session directory under `<session_dir>/goals/`.
+Goals are stored as JSON files under the main agent record directory:
+`<session_dir>/agents/main/goals/`.
 Each structured run also has an artifact directory under
-`<session_dir>/goals/runs/<goal-id>/` containing
+`<session_dir>/agents/main/goals/runs/<goal-id>/` containing
 `GOAL.md`, `ROADMAP.md`, `STATE.md`, `THINKING.md`, `PROTOCOL.md`, and
-`phases/phase-N.md`. Active, paused, and blocked goals persist across sessions.
-Completed goals are removed.
+`phases/phase-N.md`. These files capture the approved objective, roadmap, and
+initial run scaffold; the durable lifecycle state is the goal JSON. Active,
+paused, blocked, and queued goals persist across sessions. Completed goals are
+removed from the active JSON set while their run artifacts remain on disk.
