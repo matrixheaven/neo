@@ -124,3 +124,50 @@ fn ctrl_o_toggle_expands_completed_thinking() {
         "expanded thinking should not show collapse hint: {joined}"
     );
 }
+
+#[test]
+fn consecutive_thinking_events_render_as_one_completed_block() {
+    let mut runtime = TranscriptPane::new(40, 12);
+
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-1".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "first".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-2".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "second".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let frame = plain_frame(&mut runtime, 40, 12);
+    let joined = frame.join("\n");
+    let bullet_count = joined.matches('●').count();
+
+    assert_eq!(bullet_count, 1, "one thinking bullet: {joined}");
+    assert!(
+        joined.contains("first"),
+        "merged thinking keeps first: {joined}"
+    );
+    assert!(
+        joined.contains("second"),
+        "merged thinking keeps second: {joined}"
+    );
+}

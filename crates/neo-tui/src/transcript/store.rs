@@ -146,6 +146,8 @@ pub struct TranscriptStore {
     suppressed_tool_run_ids: Vec<String>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
+    can_coalesce_thinking: bool,
+    separate_next_thinking_delta: bool,
     viewport: TranscriptViewport,
 }
 
@@ -156,6 +158,13 @@ impl TranscriptStore {
     }
 
     pub fn push(&mut self, entry: TranscriptEntry) {
+        if matches!(entry, TranscriptEntry::ThinkingBlock { .. }) {
+            self.active_thinking = None;
+            self.can_coalesce_thinking = false;
+            self.separate_next_thinking_delta = false;
+        } else {
+            self.mark_visible_boundary();
+        }
         self.entries.push(entry);
     }
 
@@ -163,6 +172,7 @@ impl TranscriptStore {
         if self.active_assistant.is_some() {
             return;
         }
+        self.mark_visible_boundary();
         self.entries.push(TranscriptEntry::assistant_message(""));
         self.active_assistant = Some(self.entries.len() - 1);
     }
@@ -185,17 +195,31 @@ impl TranscriptStore {
         if self.active_thinking.is_some() {
             return;
         }
+        if self.resume_previous_visual_thinking() {
+            return;
+        }
         self.entries
             .push(TranscriptEntry::thinking_streaming(String::new()));
         self.active_thinking = Some(self.entries.len() - 1);
+        self.can_coalesce_thinking = false;
+        self.separate_next_thinking_delta = false;
     }
 
     pub fn append_thinking_delta(&mut self, text: &str) {
+        if text.is_empty() && self.active_thinking.is_none() {
+            return;
+        }
         self.start_thinking();
         let Some(index) = self.active_thinking else {
             return;
         };
         if let Some(TranscriptEntry::ThinkingBlock { content, .. }) = self.entries.get_mut(index) {
+            if self.separate_next_thinking_delta && !text.is_empty() {
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                self.separate_next_thinking_delta = false;
+            }
             content.push_str(text);
         }
     }
@@ -205,6 +229,8 @@ impl TranscriptStore {
             && let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
         {
             *phase = ThinkingPhase::Complete;
+            self.can_coalesce_thinking = true;
+            self.separate_next_thinking_delta = false;
         }
     }
 
@@ -274,6 +300,7 @@ impl TranscriptStore {
     }
 
     pub fn insert_approval_after_tool_or_push(&mut self, data: ApprovalPromptData) {
+        self.mark_visible_boundary();
         let insert_at = self
             .entries
             .iter()
@@ -306,6 +333,7 @@ impl TranscriptStore {
     /// Upsert a delegate card by agent ID. If a card for this agent already
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate(&mut self, turn: u32, snapshot: AgentSnapshot) {
+        self.mark_visible_boundary();
         let id = snapshot.id.as_str().to_owned();
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
@@ -361,6 +389,7 @@ impl TranscriptStore {
     /// Upsert a swarm card by swarm ID. If a card for this swarm already
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate_swarm(&mut self, snapshot: SwarmSnapshot) {
+        self.mark_visible_boundary();
         let id = snapshot.swarm_id.clone();
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == id => {
@@ -379,6 +408,7 @@ impl TranscriptStore {
 
     /// Upsert a workflow card by workflow ID.
     pub fn upsert_workflow(&mut self, snapshot: WorkflowSnapshot) {
+        self.mark_visible_boundary();
         let id = snapshot.id.0.clone();
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::Workflow { component } if component.id() == id => Some(component),
@@ -398,6 +428,8 @@ impl TranscriptStore {
     }
 
     pub fn entries_mut(&mut self) -> &mut [TranscriptEntry] {
+        self.can_coalesce_thinking = false;
+        self.separate_next_thinking_delta = false;
         &mut self.entries
     }
 
@@ -414,6 +446,8 @@ impl TranscriptStore {
         if index >= self.entries.len() {
             return None;
         }
+        self.can_coalesce_thinking = false;
+        self.separate_next_thinking_delta = false;
         let entry = self.entries.remove(index);
         Some(entry)
     }
@@ -500,6 +534,33 @@ impl TranscriptStore {
             .iter()
             .flat_map(|entry| entry.render(width, theme))
             .collect()
+    }
+
+    fn resume_previous_visual_thinking(&mut self) -> bool {
+        if !self.can_coalesce_thinking {
+            return false;
+        }
+        let Some(index) = self.entries.len().checked_sub(1) else {
+            return false;
+        };
+        let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index) else {
+            return false;
+        };
+        if *phase != ThinkingPhase::Complete {
+            return false;
+        }
+
+        *phase = ThinkingPhase::Streaming;
+        self.active_thinking = Some(index);
+        self.can_coalesce_thinking = false;
+        self.separate_next_thinking_delta = true;
+        true
+    }
+
+    fn mark_visible_boundary(&mut self) {
+        self.finish_thinking();
+        self.can_coalesce_thinking = false;
+        self.separate_next_thinking_delta = false;
     }
 }
 

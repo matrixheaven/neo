@@ -2,6 +2,17 @@ use neo_tui::primitive::strip_ansi;
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::transcript::{TranscriptEntry, TranscriptStore};
 
+fn thinking_contents(store: &TranscriptStore) -> Vec<&str> {
+    store
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn plain_rows(store: &TranscriptStore) -> Vec<String> {
     store
         .render_rows(80, &TuiTheme::default())
@@ -88,4 +99,61 @@ fn thinking_finishes_in_place_without_creating_a_second_entry() {
     assert_eq!(store.entries().len(), 1);
     assert!(rows.iter().any(|row| row.contains("● alpha")));
     assert!(rows.iter().any(|row| row.contains("1 more lines")));
+}
+
+#[test]
+fn adjacent_completed_thinking_blocks_coalesce_visually() {
+    let mut store = TranscriptStore::new();
+
+    store.start_thinking();
+    store.append_thinking_delta("first");
+    store.finish_thinking();
+    store.start_thinking();
+    store.append_thinking_delta("second");
+    store.finish_thinking();
+
+    assert_eq!(thinking_contents(&store), vec!["first\nsecond"]);
+    assert_eq!(store.entries().len(), 1);
+}
+
+#[test]
+fn empty_thinking_delta_does_not_create_an_entry() {
+    let mut store = TranscriptStore::new();
+
+    store.append_thinking_delta("");
+
+    assert!(store.entries().is_empty());
+}
+
+#[test]
+fn assistant_text_blocks_thinking_coalescing() {
+    let mut store = TranscriptStore::new();
+
+    store.start_thinking();
+    store.append_thinking_delta("first");
+    store.finish_thinking();
+    store.append_assistant_delta("visible answer");
+    store.finish_assistant();
+    store.start_thinking();
+    store.append_thinking_delta("second");
+    store.finish_thinking();
+
+    assert_eq!(thinking_contents(&store), vec!["first", "second"]);
+    assert_eq!(store.entries().len(), 3);
+}
+
+#[test]
+fn tool_runs_block_thinking_coalescing() {
+    let mut store = TranscriptStore::new();
+
+    store.start_thinking();
+    store.append_thinking_delta("first");
+    store.finish_thinking();
+    store.push_tool_run("tool-1", "Bash", Some(r#"{"command":"pwd"}"#.to_owned()));
+    store.start_thinking();
+    store.append_thinking_delta("second");
+    store.finish_thinking();
+
+    assert_eq!(thinking_contents(&store), vec!["first", "second"]);
+    assert_eq!(store.entries().len(), 3);
 }
