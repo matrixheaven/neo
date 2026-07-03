@@ -660,13 +660,24 @@ fn default_tool_context(
     };
     ToolContext::new(workspace_root)
         .map(|context| {
-            context
+            let context = context
                 .with_access(ToolAccess::none())
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
                 .with_multi_agent(multi_agent)
-                .with_child_runtime(config.clone(), model, registry, turn)
+                .with_child_runtime(config.clone(), model, registry, turn);
+            if let Some(session_directory) = &config.session_directory {
+                context.with_agent_session_context(
+                    session_directory.clone(),
+                    config
+                        .agent_id
+                        .as_deref()
+                        .unwrap_or(crate::session::MAIN_AGENT_ID),
+                )
+            } else {
+                context
+            }
         })
         .map(|context| {
             // The active plan file lives under the NEO_HOME sessions bucket

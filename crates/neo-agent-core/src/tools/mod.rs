@@ -136,6 +136,8 @@ pub enum ToolError {
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    pub agent_id: Option<String>,
+    pub session_directory: Option<PathBuf>,
     pub access: ToolAccess,
     allowed_external_write_paths: BTreeSet<PathBuf>,
     pub bash_timeout: Duration,
@@ -166,6 +168,8 @@ impl std::fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolContext")
             .field("cwd", &self.cwd)
+            .field("agent_id", &self.agent_id)
+            .field("session_directory", &self.session_directory)
             .field("access", &self.access)
             .field(
                 "allowed_external_write_paths",
@@ -192,6 +196,8 @@ impl ToolContext {
         let cwd = workspace_root.as_ref().canonicalize()?;
         Ok(Self {
             cwd,
+            agent_id: None,
+            session_directory: None,
             access: ToolAccess::none(),
             allowed_external_write_paths: BTreeSet::new(),
             bash_timeout: DEFAULT_BASH_TIMEOUT,
@@ -247,7 +253,29 @@ impl ToolContext {
 
     #[must_use]
     pub fn with_background_tasks(mut self, background_tasks: BackgroundTaskManager) -> Self {
-        self.background_tasks = background_tasks;
+        self.background_tasks = self
+            .agent_session_tasks_dir()
+            .map_or(background_tasks.clone(), |tasks_dir| {
+                background_tasks.with_persistence_dir(tasks_dir)
+            });
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_session_context(
+        mut self,
+        session_directory: impl Into<PathBuf>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        let session_directory = session_directory.into();
+        let agent_id = agent_id.into();
+        let tasks_dir = crate::session::agent_tasks_dir(&session_directory, &agent_id);
+        self.background_tasks = self
+            .background_tasks
+            .clone()
+            .with_persistence_dir(tasks_dir);
+        self.session_directory = Some(session_directory);
+        self.agent_id = Some(agent_id);
         self
     }
 
@@ -377,6 +405,13 @@ impl ToolContext {
     fn is_allowed_external_write_path(&self, path: &Path) -> bool {
         self.allowed_external_write_paths
             .contains(&normalize_path(path))
+    }
+
+    fn agent_session_tasks_dir(&self) -> Option<PathBuf> {
+        Some(crate::session::agent_tasks_dir(
+            self.session_directory.as_deref()?,
+            self.agent_id.as_deref()?,
+        ))
     }
 }
 
@@ -636,4 +671,38 @@ fn cap_output(content: &str, max_bytes: usize) -> (String, bool) {
         capped.push(character);
     }
     (format!("{capped}\ntruncated: true"), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tool_context_agent_session_context_persists_main_task_output() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let session = tempfile::tempdir().expect("session");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_agent_session_context(session.path(), crate::session::MAIN_AGENT_ID);
+
+        ctx.background_tasks
+            .persist_task_output_for_test("bash-12345678", "hello\n")
+            .await
+            .expect("persist output");
+
+        assert_eq!(
+            tokio::fs::read_to_string(
+                session
+                    .path()
+                    .join("agents")
+                    .join("main")
+                    .join("tasks")
+                    .join("bash-12345678")
+                    .join("output.log")
+            )
+            .await
+            .expect("read output"),
+            "hello\n"
+        );
+    }
 }

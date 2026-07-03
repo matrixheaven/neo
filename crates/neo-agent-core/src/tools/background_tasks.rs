@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,7 +10,7 @@ use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
@@ -138,6 +139,7 @@ struct BackgroundTaskRecord {
 #[derive(Clone, Default)]
 pub struct BackgroundTaskManager {
     inner: Arc<Mutex<HashMap<String, BackgroundTaskRecord>>>,
+    persistence_dir: Option<Arc<PathBuf>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskManager {
@@ -154,13 +156,35 @@ impl BackgroundTaskManager {
         Self::default()
     }
 
+    #[must_use]
+    pub fn with_persistence_dir(mut self, path: PathBuf) -> Self {
+        self.persistence_dir = Some(Arc::new(path));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn next_bash_task_id(&self) -> String {
+        format!("bash-{}", Uuid::new_v4())
+    }
+
     pub async fn start_bash(
         &self,
         description: String,
         command: ManagedBackgroundCommand,
         max_output_bytes: usize,
     ) -> Result<ToolResult, ToolError> {
-        let task_id = format!("bash-{}", Uuid::new_v4());
+        let task_id = self.next_bash_task_id();
+        self.start_bash_with_task_id(task_id, description, command, max_output_bytes)
+            .await
+    }
+
+    pub(crate) async fn start_bash_with_task_id(
+        &self,
+        task_id: String,
+        description: String,
+        command: ManagedBackgroundCommand,
+        max_output_bytes: usize,
+    ) -> Result<ToolResult, ToolError> {
         let description_trimmed = description.trim().to_owned();
         self.inner.lock().await.insert(
             task_id.clone(),
@@ -202,6 +226,36 @@ impl BackgroundTaskManager {
             "outcome": "backgrounded",
             "max_output_bytes": max_output_bytes,
         })))
+    }
+
+    pub(crate) async fn append_persistent_output(
+        &self,
+        task_id: &str,
+        chunk: &str,
+    ) -> Result<(), ToolError> {
+        let Some(root) = &self.persistence_dir else {
+            return Ok(());
+        };
+        let output = root.join(task_id).join("output.log");
+        if let Some(parent) = output.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output)
+            .await?;
+        file.write_all(chunk.as_bytes()).await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn persist_task_output_for_test(
+        &self,
+        task_id: &str,
+        chunk: &str,
+    ) -> Result<(), ToolError> {
+        self.append_persistent_output(task_id, chunk).await
     }
 
     pub async fn start_question(&self, task_id: String, description: String) -> ToolResult {
@@ -399,7 +453,18 @@ impl BackgroundTaskManager {
         _max_output_bytes: usize,
         detach_timeout: Duration,
     ) -> Result<String, ToolError> {
-        let task_id = format!("bash-{}", Uuid::new_v4());
+        let task_id = self.next_bash_task_id();
+        self.start_bash_foreground_with_task_id(task_id, description, command, detach_timeout)
+            .await
+    }
+
+    pub(crate) async fn start_bash_foreground_with_task_id(
+        &self,
+        task_id: String,
+        description: String,
+        command: ManagedBackgroundCommand,
+        detach_timeout: Duration,
+    ) -> Result<String, ToolError> {
         self.inner.lock().await.insert(
             task_id.clone(),
             BackgroundTaskRecord {
@@ -1602,6 +1667,25 @@ mod tests {
             .and_then(|details| details["task_id"].as_str())
             .expect("task id detail")
             .to_owned()
+    }
+
+    #[tokio::test]
+    async fn background_task_manager_persists_output_under_agent_tasks_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = temp.path().join("agents").join("main").join("tasks");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks_dir.clone());
+
+        manager
+            .persist_task_output_for_test("bash-12345678", "hello\n")
+            .await
+            .expect("persist output");
+
+        assert_eq!(
+            tokio::fs::read_to_string(tasks_dir.join("bash-12345678").join("output.log"))
+                .await
+                .expect("read output"),
+            "hello\n"
+        );
     }
 
     #[tokio::test]

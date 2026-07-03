@@ -1138,6 +1138,7 @@ impl MultiAgentRuntime {
                     prompt,
                     Vec::new(),
                     SteerInputHandle::new(),
+                    snapshot.id.as_str().to_owned(),
                     child_wire_path,
                     |_| {},
                 )
@@ -1175,6 +1176,7 @@ impl MultiAgentRuntime {
             prompt,
             prior_messages,
             live_steer.handle(),
+            agent_id.as_str().to_owned(),
             child_wire_path,
             |event| {
                 if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
@@ -1216,6 +1218,7 @@ impl MultiAgentRuntime {
                     prompt,
                     Vec::new(),
                     SteerInputHandle::new(),
+                    snapshot.id.as_str().to_owned(),
                     child_wire_path,
                     |_| {},
                 )
@@ -1258,6 +1261,7 @@ impl MultiAgentRuntime {
             prompt,
             prior_messages,
             live_steer.handle(),
+            agent_id.as_str().to_owned(),
             child_wire_path,
             |event| {
                 if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
@@ -1532,10 +1536,11 @@ async fn run_agent_snapshot(
     prompt: String,
     prior_messages: Vec<AgentMessage>,
     steer_input: SteerInputHandle,
+    agent_id: String,
     child_wire_path: Option<PathBuf>,
     mut on_event: impl FnMut(&AgentEvent) + Send,
 ) -> Result<(Vec<AgentEvent>, Vec<AgentMessage>), String> {
-    let child_config = child_config(deps.config, deps.role);
+    let child_config = child_config(deps.config, deps.role).with_agent_id(agent_id);
     let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
     let parent_cancel_token = deps.cancel_token.clone();
     let cancel_token = CancellationToken::new();

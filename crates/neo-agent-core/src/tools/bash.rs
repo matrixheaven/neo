@@ -362,6 +362,7 @@ pub async fn execute_shell_command(
         stdout_truncated.clone(),
         request.stream_update.clone(),
         request.max_output_bytes,
+        None,
     );
     let stderr_task = spawn_streaming_output_reader(
         process.child.stderr.take().expect("stderr was piped"),
@@ -369,6 +370,7 @@ pub async fn execute_shell_command(
         stderr_truncated.clone(),
         request.stream_update.clone(),
         request.max_output_bytes,
+        None,
     );
 
     tokio::select! {
@@ -426,17 +428,19 @@ async fn execute_manager_owned_shell_command(
         .background_tasks
         .clone()
         .expect("checked background task manager");
+    let task_id = manager.next_bash_task_id();
     let command = spawn_managed_background_command_at_with_stream(
         &request.command,
         &request.cwd,
         request.stream_update.clone(),
         request.max_output_bytes,
+        Some((manager.clone(), task_id.clone())),
     )?;
-    let task_id = manager
-        .start_bash_foreground(
+    manager
+        .start_bash_foreground_with_task_id(
+            task_id.clone(),
             request.command.clone(),
             command,
-            request.max_output_bytes,
             request.background_timeout,
         )
         .await?;
@@ -680,11 +684,17 @@ async fn start_background_command(
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
-    let command =
-        spawn_managed_background_command_at_with_stream(command, &cwd, None, max_output_bytes)?;
+    let task_id = ctx.background_tasks.next_bash_task_id();
+    let command = spawn_managed_background_command_at_with_stream(
+        command,
+        &cwd,
+        None,
+        max_output_bytes,
+        Some((ctx.background_tasks.clone(), task_id.clone())),
+    )?;
 
     ctx.background_tasks
-        .start_bash(description, command, max_output_bytes)
+        .start_bash_with_task_id(task_id, description, command, max_output_bytes)
         .await
 }
 
@@ -693,6 +703,7 @@ fn spawn_managed_background_command_at_with_stream(
     cwd: &std::path::Path,
     callback: Option<ToolUpdateCallback>,
     stream_max_bytes: usize,
+    persistent_output: Option<(BackgroundTaskManager, String)>,
 ) -> Result<ManagedBackgroundCommand, ToolError> {
     let process = spawn_bash_process_at(command, cwd)?;
     let process = Arc::new(Mutex::new(process));
@@ -712,6 +723,7 @@ fn spawn_managed_background_command_at_with_stream(
         stdout_truncated.clone(),
         callback.clone(),
         stream_max_bytes,
+        persistent_output.clone(),
     );
     let stderr_task = spawn_streaming_output_reader(
         locked_process
@@ -723,6 +735,7 @@ fn spawn_managed_background_command_at_with_stream(
         stderr_truncated.clone(),
         callback,
         stream_max_bytes,
+        persistent_output,
     );
     drop(locked_process);
 
@@ -762,6 +775,7 @@ fn spawn_streaming_output_reader<R>(
     truncated: Arc<Mutex<bool>>,
     callback: Option<ToolUpdateCallback>,
     stream_max_bytes: usize,
+    persistent_output: Option<(BackgroundTaskManager, String)>,
 ) -> JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -774,6 +788,15 @@ where
                 Ok(0) | Err(_) => break,
                 Ok(bytes_read) => {
                     let chunk = &local[..bytes_read];
+                    if let Some((manager, task_id)) = &persistent_output {
+                        let output_chunk = String::from_utf8_lossy(chunk);
+                        if let Err(err) = manager
+                            .append_persistent_output(task_id, output_chunk.as_ref())
+                            .await
+                        {
+                            eprintln!("failed to persist background task output: {err}");
+                        }
+                    }
                     {
                         let mut buffer = buffer.lock().await;
                         if buffer.len() < stream_max_bytes {
@@ -804,6 +827,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolAccess;
     use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
@@ -812,7 +836,7 @@ mod tests {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let truncated = Arc::new(Mutex::new(false));
         let handle =
-            spawn_streaming_output_reader(reader, buffer.clone(), truncated.clone(), None, 4);
+            spawn_streaming_output_reader(reader, buffer.clone(), truncated.clone(), None, 4, None);
 
         writer
             .write_all(b"keep-secret-leak-tail")
@@ -823,5 +847,86 @@ mod tests {
 
         assert_eq!(&*buffer.lock().await, b"keep");
         assert!(*truncated.lock().await);
+    }
+
+    #[tokio::test]
+    async fn streaming_output_reader_persists_output_to_task_log() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = temp.path().join("agents").join("main").join("tasks");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks_dir.clone());
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let truncated = Arc::new(Mutex::new(false));
+        let task_id = "bash-12345678".to_owned();
+        let handle = spawn_streaming_output_reader(
+            reader,
+            buffer,
+            truncated,
+            None,
+            64,
+            Some((manager, task_id.clone())),
+        );
+
+        writer.write_all(b"hello\n").await.expect("write output");
+        drop(writer);
+        handle.await.expect("reader task");
+
+        assert_eq!(
+            tokio::fs::read_to_string(tasks_dir.join(task_id).join("output.log"))
+                .await
+                .expect("read output"),
+            "hello\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_persists_background_output_under_agent_task_log() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let session = tempfile::tempdir().expect("session");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_access(ToolAccess::all())
+            .with_agent_session_context(session.path(), "agent-test");
+
+        let result = BashTool
+            .execute(
+                &ctx,
+                json!({
+                    "command": "printf 'persisted-output\\n'",
+                    "run_in_background": true,
+                    "description": "persist output",
+                }),
+            )
+            .await
+            .expect("execute bash");
+        let task_id = result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("task_id"))
+            .and_then(serde_json::Value::as_str)
+            .expect("task id");
+        let output_log = session
+            .path()
+            .join("agents")
+            .join("agent-test")
+            .join("tasks")
+            .join(task_id)
+            .join("output.log");
+
+        let mut output = None;
+        for _ in 0..50 {
+            match tokio::fs::read_to_string(&output_log).await {
+                Ok(content) => {
+                    output = Some(content);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("read output log: {error}"),
+            }
+        }
+
+        assert_eq!(output.as_deref(), Some("persisted-output\n"));
     }
 }

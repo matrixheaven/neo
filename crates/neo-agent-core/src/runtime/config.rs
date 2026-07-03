@@ -143,6 +143,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub session_directory: Option<PathBuf>,
+    /// Runtime agent id for agent-scoped session artifacts.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub agent_id: Option<String>,
     /// Shared todo list state. Used by `TodoTool` read mode and kept in sync
     /// with replayed/runtime `TodoUpdated` events.
     #[serde(skip)]
@@ -198,6 +202,7 @@ impl AgentConfig {
             prefix_approval_rules: Arc::new(Mutex::new(ApprovalRuleStore::default())),
             home_dir: None,
             session_directory: None,
+            agent_id: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
@@ -353,6 +358,13 @@ impl AgentConfig {
             .clone()
             .with_session_directory(session_directory.clone());
         self.session_directory = Some(session_directory);
+        self
+    }
+
+    /// Set the runtime agent id used for agent-scoped session artifacts.
+    #[must_use]
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = Some(agent_id.into());
         self
     }
 
