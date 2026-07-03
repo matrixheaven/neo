@@ -444,8 +444,18 @@ async fn runtime_for_config(
         agent_config = agent_config.with_goal_mode_authoring(true);
     }
     if let Some(feedback) = plan_review_feedback {
-        agent_config.plan_review_feedback =
-            Arc::new(std::sync::Mutex::new(feedback.into_iter().collect()));
+        // Merge into the existing map rather than replacing the entire Arc.
+        // The async approval handler may have already inserted Revise feedback
+        // for the current turn into this map via the side-channel. Replacing
+        // the Arc here would discard that entry, causing permission.rs to
+        // find an empty map and return "approval denied" instead of the
+        // user's revision note.
+        let mut map = agent_config
+            .plan_review_feedback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.clear();
+        map.extend(feedback);
     }
     let mut tools = runtime::tool_registry_for_config(
         config,
@@ -775,7 +785,7 @@ mod tests {
     use super::session_mgmt::{
         create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
-    use super::{PromptApprovalRequest, run_prompt_with_runtime};
+    use super::{PromptApprovalRequest, run_prompt_with_runtime, runtime_for_config};
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
@@ -1302,6 +1312,7 @@ mod tests {
             arguments: serde_json::json!({"path": "approved.txt"}),
             session_scope: None,
             prefix_rule: None,
+            suggestions: Vec::new(),
         }));
         let PromptApprovalRequest {
             id,
@@ -1319,6 +1330,94 @@ mod tests {
         assert_eq!(
             decision.await.expect("approval task joins"),
             PermissionApprovalDecision::AllowOnce
+        );
+    }
+
+    #[tokio::test]
+    async fn async_approval_handler_stores_plan_revision_feedback_in_current_config_map() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "test-provider".to_owned();
+        config.default_model = "test-model".to_owned();
+        config.providers.insert(
+            "test-provider".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponse),
+                base_url: Some("https://example.test/v1".to_owned()),
+                api_key: Some("test-key".to_owned()),
+                api_key_env: None,
+            },
+        );
+        config.models.insert(
+            "test-model".to_owned(),
+            ModelConfig {
+                provider: "test-provider".to_owned(),
+                model: "test-model".to_owned(),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                ..ModelConfig::default()
+            },
+        );
+        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = runtime_for_config(
+            &config,
+            None,
+            Some(approval_tx),
+            None,
+            Some(BTreeMap::new()),
+            None,
+            false,
+            neo_agent_core::SteerInputHandle::new(),
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .await
+        .expect("runtime");
+        let current_feedback = Arc::clone(&runtime.config().plan_review_feedback);
+        let handler = runtime
+            .config()
+            .async_approval_handler
+            .clone()
+            .expect("async approval handler");
+
+        let decision = tokio::spawn(handler(ApprovalRequest {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: PermissionOperation::PlanTransition,
+            subject: "Exit plan mode".to_owned(),
+            arguments: serde_json::json!({"plan_summary": "Ready"}),
+            session_scope: None,
+            prefix_rule: None,
+            suggestions: Vec::new(),
+        }));
+        let PromptApprovalRequest {
+            id,
+            decision_tx,
+            feedback_tx,
+            selected_label_tx: _,
+            session_option_label: _,
+            prefix_option_label: _,
+        } = approval_rx.recv().await.expect("approval waiter");
+
+        assert_eq!(id, "tool-1");
+        feedback_tx
+            .expect("feedback channel")
+            .send(Some("tighten the implementation scope".to_owned()))
+            .expect("send feedback");
+        decision_tx
+            .send(PermissionApprovalDecision::Reject)
+            .expect("send decision");
+
+        assert_eq!(
+            decision.await.expect("approval task joins"),
+            PermissionApprovalDecision::Reject
+        );
+        assert_eq!(
+            current_feedback
+                .lock()
+                .expect("feedback lock")
+                .get("tool-1")
+                .map(String::as_str),
+            Some("tighten the implementation scope")
         );
     }
 
