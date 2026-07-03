@@ -8,7 +8,7 @@ use crate::transcript::{
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
 use neo_agent_core::multi_agent::{
-    AgentLifecycleState, AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot,
+    AgentLifecycleState, AgentSnapshot, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::workflow::WorkflowSnapshot;
 
@@ -571,23 +571,23 @@ fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {
 
 /// Merge an incoming delegate snapshot with the current one, respecting
 /// terminal precedence. A stale `Completed` snapshot arriving after a
-/// `Cancelled` snapshot must not regress the card.
+/// `Cancelled` snapshot must not regress the card — Cancelled always
+/// wins over Completed for the same run, regardless of timestamp.
 fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> AgentSnapshot {
     // Different agents — just take the incoming.
     if current.id != incoming.id {
         return incoming;
     }
+    // Cancelled always beats a late Completed for the same run.
+    if current.state == AgentLifecycleState::Cancelled
+        && incoming.state == AgentLifecycleState::Completed
+    {
+        return current.clone();
+    }
     // Both terminal: prefer the earlier one (it happened first).
     if current.state.is_terminal()
         && incoming.state.is_terminal()
         && incoming.updated_at_ms < current.updated_at_ms
-    {
-        return current.clone();
-    }
-    // Cancelled beats a late Completed with equal-or-later timestamp.
-    if current.state == AgentLifecycleState::Cancelled
-        && incoming.state == AgentLifecycleState::Completed
-        && incoming.updated_at_ms <= current.updated_at_ms
     {
         return current.clone();
     }
@@ -627,9 +627,9 @@ fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> Swa
         description: incoming.description,
         role: current.role,
         mode: incoming.mode,
-        state: incoming.state,
+        state: SwarmAggregate::from_states(children.iter().map(|child| child.agent.state)).status(),
         max_concurrency: incoming.max_concurrency.max(current.max_concurrency).max(1),
-        aggregate: incoming.aggregate,
+        aggregate: SwarmAggregate::from_states(children.iter().map(|child| child.agent.state)),
         children,
     }
 }
@@ -638,6 +638,12 @@ fn merge_swarm_child(
     current: &SwarmChildSnapshot,
     incoming: SwarmChildSnapshot,
 ) -> SwarmChildSnapshot {
+    // Cancelled always beats a late Completed for the same child.
+    if current.agent.state == AgentLifecycleState::Cancelled
+        && incoming.agent.state == AgentLifecycleState::Completed
+    {
+        return current.clone();
+    }
     if child_progress_rank(incoming.agent.state) < child_progress_rank(current.agent.state) {
         return current.clone();
     }

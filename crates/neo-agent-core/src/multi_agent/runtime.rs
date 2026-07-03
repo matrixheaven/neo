@@ -112,6 +112,7 @@ fn default_context() -> DelegateContext {
 struct MultiAgentState {
     names: DisplayNamePool,
     next_created_index: u64,
+    next_cancel_generation: u64,
     agent_order: BTreeMap<String, u64>,
     swarm_order: BTreeMap<String, u64>,
     agents: BTreeMap<String, AgentSnapshot>,
@@ -120,7 +121,7 @@ struct MultiAgentState {
     /// Live cancellation tokens for actively running child agents. Registered
     /// when a child run starts, removed when it finishes. Cancelling a token
     /// here stops the child's model stream immediately.
-    agent_cancel_tokens: BTreeMap<String, CancellationToken>,
+    agent_cancel_tokens: BTreeMap<String, LiveAgentCancel>,
 }
 
 impl MultiAgentState {
@@ -142,6 +143,12 @@ impl MultiAgentState {
             let index = self.next_created_index();
             self.swarm_order.insert(swarm_id.to_owned(), index);
         }
+    }
+
+    fn next_cancel_generation(&mut self) -> u64 {
+        let generation = self.next_cancel_generation;
+        self.next_cancel_generation = self.next_cancel_generation.saturating_add(1);
+        generation
     }
 }
 
@@ -515,7 +522,10 @@ impl MultiAgentRuntime {
     pub fn cancel_agent_by_id(&self, id: &str) -> Option<AgentSnapshot> {
         let (snapshot, token) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let token = state.agent_cancel_tokens.get(id).cloned();
+            let token = state
+                .agent_cancel_tokens
+                .get(id)
+                .map(|entry| entry.token.clone());
             let snapshot = state.agents.get_mut(id)?;
             if snapshot.state.is_terminal() {
                 return None;
@@ -546,6 +556,7 @@ impl MultiAgentRuntime {
         let (snapshot, tokens) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
             let mut snapshot = state.swarms.get(swarm_id)?.clone();
+            sync_swarm_children_from_agents(&state, &mut snapshot);
             let mut changed = false;
             // Collect the child agent IDs that need cancelling.
             let cancelled_ids: Vec<String> = snapshot
@@ -572,10 +583,18 @@ impl MultiAgentRuntime {
             // Collect tokens before mutating agents to avoid borrow conflicts.
             let tokens = cancelled_ids
                 .iter()
-                .filter_map(|id| state.agent_cancel_tokens.get(id).cloned())
+                .filter_map(|id| {
+                    state
+                        .agent_cancel_tokens
+                        .get(id)
+                        .map(|entry| entry.token.clone())
+                })
                 .collect::<Vec<_>>();
             for agent_id in &cancelled_ids {
                 if let Some(agent) = state.agents.get_mut(agent_id) {
+                    if agent.state.is_terminal() {
+                        continue;
+                    }
                     let now = now_ms();
                     agent.state = AgentLifecycleState::Cancelled;
                     agent.terminal_at_ms.get_or_insert(now);
@@ -600,6 +619,7 @@ impl MultiAgentRuntime {
             if !changed {
                 return None;
             }
+            refresh_swarm(&mut snapshot);
             state.register_swarm_order(swarm_id);
             state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
             (snapshot, tokens)
@@ -862,25 +882,27 @@ impl MultiAgentRuntime {
     pub fn cancel_swarm(&self, swarm_id: &str) -> Result<super::SwarmSnapshot, String> {
         let (swarm_snapshot, tokens) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let swarm = state
+            let mut snapshot = state
                 .swarms
-                .get_mut(swarm_id)
+                .get(swarm_id)
+                .cloned()
                 .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?;
-            if swarm.state.is_terminal() {
+            sync_swarm_children_from_agents(&state, &mut snapshot);
+            if snapshot.state.is_terminal() {
                 return Err(format!(
                     "swarm already {}; terminal swarm state is immutable",
-                    swarm.state.as_str()
+                    snapshot.state.as_str()
                 ));
             }
             // Collect the child agent ids that need cancelling before borrowing
             // state.agents separately.
-            let cancelled_ids: Vec<String> = swarm
+            let cancelled_ids: Vec<String> = snapshot
                 .children
                 .iter()
                 .filter(|child| !child.agent.state.is_terminal())
                 .map(|child| child.agent.id.as_str().to_owned())
                 .collect();
-            for child in &mut swarm.children {
+            for child in &mut snapshot.children {
                 if !child.agent.state.is_terminal() {
                     let now = now_ms();
                     child.agent.state = AgentLifecycleState::Cancelled;
@@ -897,9 +919,12 @@ impl MultiAgentRuntime {
             for agent_id in &cancelled_ids {
                 // Collect token before mutable borrow of agents.
                 if let Some(token) = state.agent_cancel_tokens.get(agent_id) {
-                    tokens.push(token.clone());
+                    tokens.push(token.token.clone());
                 }
                 if let Some(agent) = state.agents.get_mut(agent_id) {
+                    if agent.state.is_terminal() {
+                        continue;
+                    }
                     let now = now_ms();
                     agent.state = AgentLifecycleState::Cancelled;
                     agent.terminal_at_ms.get_or_insert(now);
@@ -911,9 +936,10 @@ impl MultiAgentRuntime {
                     });
                 }
             }
-            let swarm = state.swarms.get_mut(swarm_id).expect("swarm exists");
-            refresh_swarm(swarm);
-            (swarm.clone(), tokens)
+            sync_swarm_children_from_agents(&state, &mut snapshot);
+            refresh_swarm(&mut snapshot);
+            state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
+            (snapshot, tokens)
         };
         for token in tokens {
             token.cancel();
@@ -967,6 +993,18 @@ fn refresh_swarm(snapshot: &mut super::SwarmSnapshot) {
     snapshot.aggregate =
         SwarmAggregate::from_states(snapshot.children.iter().map(|child| child.agent.state));
     snapshot.state = snapshot.aggregate.status();
+}
+
+/// Sync swarm children from the canonical `state.agents` map. The stored
+/// swarm snapshot can be stale if a child completed or failed after the
+/// snapshot was last updated, so before using the swarm for cancellation
+/// decisions we refresh each child's agent from the authoritative source.
+fn sync_swarm_children_from_agents(state: &MultiAgentState, snapshot: &mut super::SwarmSnapshot) {
+    for child in &mut snapshot.children {
+        if let Some(agent) = state.agents.get(child.agent.id.as_str()) {
+            child.agent = agent.clone();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1546,6 +1584,18 @@ impl MultiAgentRuntime {
         if parent_token.is_cancelled() {
             token.cancel();
         }
+        let generation = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let generation = state.next_cancel_generation();
+            state.agent_cancel_tokens.insert(
+                agent_id.to_owned(),
+                LiveAgentCancel {
+                    token: token.clone(),
+                    generation,
+                },
+            );
+            generation
+        };
         let bridge_child = token.clone();
         let bridge_parent = parent_token.clone();
         tokio::spawn(async move {
@@ -1554,14 +1604,10 @@ impl MultiAgentRuntime {
                 () = bridge_child.cancelled() => {}
             }
         });
-        self.state
-            .lock()
-            .expect("multi-agent state poisoned")
-            .agent_cancel_tokens
-            .insert(agent_id.to_owned(), token.clone());
         LiveCancelRegistration {
             runtime: self.clone(),
             agent_id: agent_id.to_owned(),
+            generation,
             token,
         }
     }
@@ -1634,6 +1680,7 @@ impl Drop for LiveSteerRegistration {
 struct LiveCancelRegistration {
     runtime: MultiAgentRuntime,
     agent_id: String,
+    generation: u64,
     token: CancellationToken,
 }
 
@@ -1645,13 +1692,25 @@ impl LiveCancelRegistration {
 
 impl Drop for LiveCancelRegistration {
     fn drop(&mut self) {
-        self.runtime
+        let mut state = self
+            .runtime
             .state
             .lock()
-            .expect("multi-agent state poisoned")
+            .expect("multi-agent state poisoned");
+        if state
             .agent_cancel_tokens
-            .remove(&self.agent_id);
+            .get(&self.agent_id)
+            .is_some_and(|entry| entry.generation == self.generation)
+        {
+            state.agent_cancel_tokens.remove(&self.agent_id);
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+struct LiveAgentCancel {
+    token: CancellationToken,
+    generation: u64,
 }
 
 async fn run_agent_snapshot(
@@ -2278,3 +2337,40 @@ pub fn apply_swarm_template(template: &str, item: &str, description: &str) -> St
 const _: fn() = || {
     let _ = Instant::now();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn live_cancel_guard_does_not_remove_replaced_token() {
+        let runtime = MultiAgentRuntime::new();
+        let parent = CancellationToken::new();
+        let first = runtime.register_live_cancel("agent_test", &parent);
+        let second = runtime.register_live_cancel("agent_test", &parent);
+
+        drop(first);
+
+        assert!(
+            runtime
+                .state
+                .lock()
+                .expect("multi-agent state poisoned")
+                .agent_cancel_tokens
+                .contains_key("agent_test"),
+            "dropping an old live-cancel guard must not remove a newer run token"
+        );
+
+        drop(second);
+
+        assert!(
+            !runtime
+                .state
+                .lock()
+                .expect("multi-agent state poisoned")
+                .agent_cancel_tokens
+                .contains_key("agent_test"),
+            "dropping the active live-cancel guard should unregister its token"
+        );
+    }
+}

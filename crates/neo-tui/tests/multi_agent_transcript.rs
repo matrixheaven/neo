@@ -2596,11 +2596,11 @@ fn delegate_card_does_not_regress_cancelled_to_done() {
         }),
     };
 
-    // Stale completed snapshot arriving later with the same timestamp.
+    // Stale completed snapshot arriving later with a newer timestamp.
     let stale_completed = AgentSnapshot {
         state: AgentLifecycleState::Completed,
-        updated_at_ms: 2_000,
-        terminal_at_ms: Some(2_000),
+        updated_at_ms: 3_000,
+        terminal_at_ms: Some(3_000),
         terminal_reason: terminal_reason_for_state(AgentLifecycleState::Completed),
         outcome: Some(AgentTerminalOutcome {
             summary: "All done.".to_owned(),
@@ -2636,5 +2636,65 @@ fn delegate_card_does_not_regress_cancelled_to_done() {
     assert!(
         !text.contains(" · done · "),
         "stale 'done' must not regress cancelled card: {text}"
+    );
+}
+
+#[test]
+fn swarm_card_does_not_regress_cancelled_child_to_done() {
+    let mut cancelled = swarm_with_child_states(vec![AgentLifecycleState::Cancelled]);
+    cancelled.swarm_id = "swarm-regress-cancel".to_owned();
+    cancelled.state = AgentLifecycleState::Cancelled;
+    cancelled.children[0].agent.updated_at_ms = 2_000;
+    cancelled.children[0].agent.terminal_at_ms = Some(2_000);
+    cancelled.children[0].agent.outcome = Some(AgentTerminalOutcome {
+        summary: "Cancelled by user.".to_owned(),
+        is_error: true,
+    });
+    cancelled.aggregate =
+        SwarmAggregate::from_states(cancelled.children.iter().map(|child| child.agent.state));
+
+    let mut stale_completed = cancelled.clone();
+    stale_completed.state = AgentLifecycleState::Completed;
+    stale_completed.children[0].agent.state = AgentLifecycleState::Completed;
+    stale_completed.children[0].agent.updated_at_ms = 3_000;
+    stale_completed.children[0].agent.terminal_at_ms = Some(3_000);
+    stale_completed.children[0].agent.terminal_reason =
+        terminal_reason_for_state(AgentLifecycleState::Completed);
+    stale_completed.children[0].agent.outcome = Some(AgentTerminalOutcome {
+        summary: "All done.".to_owned(),
+        is_error: false,
+    });
+    stale_completed.aggregate = SwarmAggregate::from_states(
+        stale_completed
+            .children
+            .iter()
+            .map(|child| child.agent.state),
+    );
+
+    let mut pane = TranscriptPane::new(120, 20);
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 1,
+        swarm: cancelled,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmFinished {
+        turn: 1,
+        swarm: stale_completed,
+    });
+
+    let _ = pane.render_frame(120, 20);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("cancelled"),
+        "expected cancelled child in rendered output: {text}"
+    );
+    assert!(
+        !text.contains("1 done"),
+        "stale completed swarm must not replace cancelled child: {text}"
     );
 }

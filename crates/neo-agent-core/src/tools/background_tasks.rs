@@ -1380,6 +1380,37 @@ impl Tool for TaskStopTool {
                     }
                 }
             }
+            // For delegate IDs, cancel the live token via the runtime FIRST,
+            // then finalize the background record from the canonical snapshot.
+            // This ensures the child model stream genuinely stops before the
+            // background record is marked terminal.
+            if !input.task_id.starts_with("swarm_") {
+                // Check whether this is a delegate background task before
+                // attempting runtime cancellation.
+                let is_delegate = ctx
+                    .background_tasks
+                    .snapshot(&input.task_id)
+                    .await
+                    .is_ok_and(|snap| snap.kind == BackgroundTaskKind::Delegate);
+                if is_delegate {
+                    if let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id) {
+                        ctx.background_tasks
+                            .finish_delegate(&input.task_id, snapshot)
+                            .await;
+                        return ctx
+                            .background_tasks
+                            .output(
+                                &input.task_id,
+                                false,
+                                Duration::from_secs(0),
+                                max_output_bytes,
+                            )
+                            .await;
+                    }
+                    // Agent already terminal; fall through to stop() for the
+                    // already-terminal error message.
+                }
+            }
             let result = ctx
                 .background_tasks
                 .stop(
@@ -1388,15 +1419,6 @@ impl Tool for TaskStopTool {
                     max_output_bytes,
                 )
                 .await?;
-            // For agents, stop already finalizes the record with a cancelled snapshot;
-            // cancel_agent_by_id only updates runtime state if it is still running.
-            if !input.task_id.starts_with("swarm_")
-                && let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id)
-            {
-                ctx.background_tasks
-                    .cancel_delegate(&input.task_id, snapshot)
-                    .await;
-            }
             Ok(result)
         })
     }
@@ -1495,6 +1517,13 @@ pub fn task_list_result(tasks: &[BackgroundTaskSnapshot], active_only: bool) -> 
 pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usize) -> ToolResult {
     let mut content = format_snapshot_header(snapshot);
     let mut details = snapshot_details(snapshot);
+    if let Some(delegate) = &snapshot.delegate {
+        if let Some(outcome) = &delegate.outcome {
+            content.push_str(&format!("\nsummary: {}", outcome.summary));
+        }
+        details["agent_id"] = json!(delegate.id.as_str());
+        details["state"] = json!(delegate.state);
+    }
     if let Some(output) = &snapshot.output {
         let (stdout_capped, stdout_truncated) = cap_plain_output(&output.stdout, max_output_bytes);
         let (stderr_capped, stderr_truncated) = cap_plain_output(&output.stderr, max_output_bytes);

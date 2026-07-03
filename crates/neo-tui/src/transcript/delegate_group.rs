@@ -276,7 +276,8 @@ fn fallback_activity(agent: &AgentSnapshot) -> String {
 
 /// Merge an incoming delegate snapshot with the current one, respecting
 /// terminal precedence so a stale `Completed` cannot regress a prior
-/// `Cancelled`.
+/// `Cancelled` — Cancelled always wins over Completed regardless of
+/// timestamp.
 fn merge_group_delegate_snapshot(
     current: &AgentSnapshot,
     incoming: AgentSnapshot,
@@ -284,15 +285,14 @@ fn merge_group_delegate_snapshot(
     if current.id != incoming.id {
         return incoming;
     }
-    if current.state.is_terminal()
-        && incoming.state.is_terminal()
-        && incoming.updated_at_ms < current.updated_at_ms
+    if current.state == AgentLifecycleState::Cancelled
+        && incoming.state == AgentLifecycleState::Completed
     {
         return current.clone();
     }
-    if current.state == AgentLifecycleState::Cancelled
-        && incoming.state == AgentLifecycleState::Completed
-        && incoming.updated_at_ms <= current.updated_at_ms
+    if current.state.is_terminal()
+        && incoming.state.is_terminal()
+        && incoming.updated_at_ms < current.updated_at_ms
     {
         return current.clone();
     }

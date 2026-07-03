@@ -1528,6 +1528,71 @@ async fn interrupt_delegate_stops_background_child_stream() {
 }
 
 #[tokio::test]
+async fn task_stop_stops_background_delegate_stream_before_finalizing_record() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let ctx = blocking_child_ctx();
+
+    let started = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "slow task-stop child",
+                "mode": "background"
+            }),
+        )
+        .await
+        .expect("background delegate should start");
+    let agent_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("agent_id in details")
+        .to_owned();
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let stopped = registry
+        .run("TaskStop", &ctx, serde_json::json!({ "task_id": agent_id }))
+        .await
+        .expect("task stop should succeed");
+
+    assert!(
+        stopped.content.contains("status: cancelled"),
+        "{}",
+        stopped.content
+    );
+    assert!(
+        stopped.content.contains("summary: Cancelled by user."),
+        "{}",
+        stopped.content
+    );
+    let details = stopped.details.as_ref().expect("details");
+    assert_eq!(details["agent_id"], agent_id);
+    assert_eq!(details["status"], "cancelled");
+
+    let waited = registry
+        .run(
+            "WaitDelegate",
+            &ctx,
+            serde_json::json!({ "id": agent_id, "timeout_ms": 5000 }),
+        )
+        .await
+        .expect("wait should return result");
+    assert!(
+        waited.content.contains("status: cancelled"),
+        "{}",
+        waited.content
+    );
+    assert!(
+        !waited.content.contains("should not arrive"),
+        "{}",
+        waited.content
+    );
+}
+
+#[tokio::test]
 async fn interrupt_delegate_stops_running_swarm_children() {
     let registry = ToolRegistry::with_builtin_tools();
     let ctx = blocking_child_ctx();

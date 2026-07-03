@@ -2695,3 +2695,74 @@ async fn cancel_agent_stops_active_child_stream() {
             .any(|entry| matches!(&entry.kind, AgentActivityKind::Text { text, .. } if text.contains("should not arrive")))
     );
 }
+
+#[test]
+fn cancel_swarm_preserves_completed_canonical_child_when_swarm_snapshot_is_stale() {
+    use neo_agent_core::multi_agent::{SwarmChildSnapshot, SwarmSnapshot};
+
+    let runtime = MultiAgentRuntime::new();
+    let swarm_id = runtime.new_swarm_id();
+    let first = runtime.start_delegate(
+        "already finished",
+        Some("finished"),
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
+        AgentPathKind::SwarmChild(&swarm_id),
+    );
+    let second = runtime.start_delegate(
+        "still running",
+        Some("running"),
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
+        AgentPathKind::SwarmChild(&swarm_id),
+    );
+    let stale_swarm = SwarmSnapshot {
+        swarm_id: swarm_id.clone(),
+        description: "stale swarm".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: AgentLifecycleState::Running,
+        max_concurrency: 2,
+        aggregate: SwarmAggregate::from_states([
+            AgentLifecycleState::Running,
+            AgentLifecycleState::Running,
+        ]),
+        children: vec![
+            SwarmChildSnapshot {
+                item_index: 0,
+                item: "first".to_owned(),
+                agent: first.clone(),
+            },
+            SwarmChildSnapshot {
+                item_index: 1,
+                item: "second".to_owned(),
+                agent: second.clone(),
+            },
+        ],
+    };
+    runtime.register_swarm(stale_swarm);
+    let _ = runtime.complete_delegate_for_test(&first.id, "finished before interrupt");
+
+    let cancelled = runtime
+        .cancel_swarm(&swarm_id)
+        .expect("stale running swarm should cancel unfinished children");
+
+    assert_eq!(
+        runtime
+            .agent_snapshot(first.id.as_str())
+            .expect("first agent")
+            .state,
+        AgentLifecycleState::Completed
+    );
+    assert_eq!(
+        runtime
+            .agent_snapshot(second.id.as_str())
+            .expect("second agent")
+            .state,
+        AgentLifecycleState::Cancelled
+    );
+    assert_eq!(cancelled.aggregate.completed, 1);
+    assert_eq!(cancelled.aggregate.cancelled, 1);
+}
