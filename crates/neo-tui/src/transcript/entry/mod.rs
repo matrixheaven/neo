@@ -561,18 +561,19 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     let body = Style::default().fg(theme.text_primary);
     let muted = Style::default().fg(theme.text_muted);
     let selected = Style::default().fg(theme.status_ok).bold();
-    let is_resolved = data.resolved.is_some();
+    if let Some(resolved) = &data.resolved {
+        return vec![Line::styled(format!("approval: {resolved}"), muted)];
+    }
 
     let line = "\u{2500}".repeat(width.max(1));
     let mut rows = vec![Line::styled(line.clone(), border)];
-    // Once resolved, fold the outcome into the title so the plan box and
-    // details stay visible as a fixed transcript record (matching Kimi Code).
-    let title_text = if let Some(resolved) = &data.resolved {
-        format!("▶ {} · {}", data.title, resolved)
-    } else {
-        format!("▶ {}", data.title)
-    };
-    rows.extend(styled_wrap_with_indent(&title_text, width, 2, 2, title));
+    rows.extend(styled_wrap_with_indent(
+        &format!("▶ {}", data.title),
+        width,
+        2,
+        2,
+        title,
+    ));
     rows.push(Line::raw(""));
     for detail in &data.details {
         rows.extend(styled_wrap_with_indent(detail, width, 2, 4, body));
@@ -587,79 +588,77 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         }
         rows.push(Line::raw(""));
     }
-    if !is_resolved {
-        // Build the option list dynamically. The session-approval (Layer 1) and
-        // prefix-rule (Layer 2) options appear only when their labels are `Some`,
-        // so numeric shortcuts and the visible list track the visible list.
-        let mut options: Vec<String> = vec!["Approve once".to_owned()];
-        if let Some(label) = &data.session_option_label {
-            options.push(label.clone());
-        }
-        if let Some(label) = &data.prefix_option_label {
-            options.push(label.clone());
-        }
-        options.push("Reject".to_owned());
-        options.push("Reject with feedback".to_owned());
-        let revise_index = options.len() - 1;
+    // Build the option list dynamically. The session-approval (Layer 1) and
+    // prefix-rule (Layer 2) options appear only when their labels are `Some`,
+    // so numeric shortcuts and the feedback-input index track the visible list.
+    let mut options: Vec<String> = vec!["Approve once".to_owned()];
+    if let Some(label) = &data.session_option_label {
+        options.push(label.clone());
+    }
+    if let Some(label) = &data.prefix_option_label {
+        options.push(label.clone());
+    }
+    options.push("Reject".to_owned());
+    options.push("Reject with feedback".to_owned());
+    let revise_index = options.len() - 1;
 
-        for (index, label) in options.iter().enumerate() {
-            let prefix = if data.selected == index {
-                "  ▶ "
-            } else {
-                "    "
-            };
-            let style = if data.selected == index {
-                selected
-            } else {
-                body
-            };
-            rows.extend(styled_wrap_with_prefix(
-                &format!("{}. {label}", index + 1),
-                width,
-                prefix,
-                "     ",
-                style,
-            ));
-        }
-        rows.push(Line::raw(""));
-        if data.selected == revise_index {
-            let feedback = if data.feedback_input.is_empty() {
-                "feedback: ▌".to_owned()
-            } else {
-                format!("feedback: {}▌", data.feedback_input)
-            };
-            rows.extend(styled_wrap_with_indent(&feedback, width, 2, 4, selected));
-            rows.push(Line::raw(""));
-        }
-        if data.queued_count > 0 {
-            let suffix = if data.queued_count == 1 {
-                "approval"
-            } else {
-                "approvals"
-            };
-            let queued_label = data.queued_label.trim();
-            let label = if queued_label.is_empty() {
-                suffix.to_owned()
-            } else {
-                format!("{queued_label} {suffix}")
-            };
-            rows.extend(styled_wrap_with_indent(
-                &format!("queued: {} {label} waiting", data.queued_count),
-                width,
-                2,
-                2,
-                muted,
-            ));
-            rows.push(Line::raw(""));
-        }
-        rows.extend(styled_wrap_with_indent(
-            "  ↑/↓ select · number keys choose · ↵ confirm",
+    for (index, label) in options.iter().enumerate() {
+        let prefix = if data.selected == index {
+            "  ▶ "
+        } else {
+            "    "
+        };
+        let style = if data.selected == index {
+            selected
+        } else {
+            body
+        };
+        rows.extend(styled_wrap_with_prefix(
+            &format!("{}. {label}", index + 1),
             width,
-            0,
+            prefix,
+            "     ",
+            style,
+        ));
+    }
+    rows.push(Line::raw(""));
+    if data.selected == revise_index {
+        let feedback = if data.feedback_input.is_empty() {
+            "feedback: ▌".to_owned()
+        } else {
+            format!("feedback: {}▌", data.feedback_input)
+        };
+        rows.extend(styled_wrap_with_indent(&feedback, width, 2, 4, selected));
+        rows.push(Line::raw(""));
+    }
+    if data.queued_count > 0 {
+        let suffix = if data.queued_count == 1 {
+            "approval"
+        } else {
+            "approvals"
+        };
+        let queued_label = data.queued_label.trim();
+        let label = if queued_label.is_empty() {
+            suffix.to_owned()
+        } else {
+            format!("{queued_label} {suffix}")
+        };
+        rows.extend(styled_wrap_with_indent(
+            &format!("queued: {} {label} waiting", data.queued_count),
+            width,
+            2,
             2,
             muted,
         ));
+        rows.push(Line::raw(""));
     }
+    rows.extend(styled_wrap_with_indent(
+        "  ↑/↓ select · number keys choose · ↵ confirm",
+        width,
+        0,
+        2,
+        muted,
+    ));
     rows.push(Line::styled(line, border));
     rows
 }
@@ -983,38 +982,5 @@ amigo",
         assert!(text.contains("852"), "{text}");
         assert!(text.contains("192k"), "{text}");
         assert!(text.contains("24k"), "{text}");
-    }
-
-    #[test]
-    fn resolved_plan_review_keeps_plan_box_and_hides_options() {
-        let data = ApprovalPromptData {
-            id: "plan-review-1".to_owned(),
-            title: "Plan Review".to_owned(),
-            details: vec!["Ready to build with this plan?".to_owned()],
-            queued_label: String::new(),
-            queued_count: 0,
-            selected: 0,
-            feedback_input: String::new(),
-            resolved: Some("Approved".to_owned()),
-            session_option_label: None,
-            prefix_option_label: None,
-            plan_content: Some("# Plan\n- Step 1\n- Step 2".to_owned()),
-            plan_path: Some("/tmp/plan.md".to_owned()),
-        };
-        let entry = TranscriptEntry::ApprovalPrompt(data);
-        let lines = entry
-            .render(80, &TuiTheme::default())
-            .into_iter()
-            .map(|l| l.text().clone())
-            .collect::<Vec<_>>();
-        let text = lines.join("\n");
-        assert!(text.contains("Plan Review · Approved"), "{text}");
-        assert!(text.contains("Step 1"), "{text}");
-        assert!(text.contains("plan: plan.md"), "{text}");
-        assert!(
-            !text.contains("Approve once"),
-            "options should be hidden: {text}"
-        );
-        assert!(!text.contains("Reject"), "options should be hidden: {text}");
     }
 }

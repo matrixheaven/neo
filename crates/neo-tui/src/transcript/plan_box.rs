@@ -1,6 +1,6 @@
 use crate::markdown::render_markdown;
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Line, Span, Style, pad_to_width, truncate_to_width, visible_width};
+use crate::primitive::{Line, Span, Style, truncate_to_width, visible_width};
 
 /// Uniform left margin so the plan box aligns with other tool-card children.
 const LEFT_MARGIN: usize = 2;
@@ -123,8 +123,9 @@ impl PlanBoxComponent {
     }
 
     fn titled_border(indent: &str, title: &str, horz_len: usize, border_style: Style) -> Line {
-        let title_fitted = if visible_width(title) <= horz_len {
-            pad_to_width(title, horz_len)
+        let title_width = visible_width(title);
+        let title_fitted = if title_width <= horz_len {
+            format!("{title}{}", "\u{2500}".repeat(horz_len - title_width))
         } else {
             truncate_to_width(title, horz_len)
         };
@@ -205,6 +206,31 @@ mod tests {
         assert!(
             top.contains('\u{2510}'),
             "top border must end with ┐, got: {top}"
+        );
+    }
+
+    #[test]
+    fn top_border_fills_remaining_width_with_horizontal_rule() {
+        let comp = PlanBoxComponent::new("hello", Some("/tmp/abc.md".to_string()));
+        let lines = comp.render(40, &TuiTheme::default());
+        let top = crate::primitive::strip_ansi(&lines[0].to_ansi());
+        // Title " plan: abc.md " leaves the rest of the top border to be filled with ─.
+        assert!(
+            top.contains("plan: abc.md"),
+            "top border should contain title: {top}"
+        );
+        assert!(
+            top.ends_with('\u{2510}'),
+            "top border should end with ┐: {top}"
+        );
+        assert!(
+            top.contains('\u{2500}'),
+            "top border should use horizontal rule between title and ┐: {top}"
+        );
+        assert_eq!(
+            crate::primitive::visible_width(&top),
+            40,
+            "top border should span full width: {top}"
         );
     }
 
