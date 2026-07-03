@@ -202,9 +202,7 @@ impl InputParser {
 /// Check if a key id represents a plain printable character with no modifiers.
 /// Such keys should produce `InputEvent::Insert(char)` rather than a key event.
 fn is_plain_printable_key_id(key_id: &str) -> bool {
-    !key_id.contains('+')
-        && key_id.chars().count() == 1
-        && key_id.chars().next().is_some_and(|c| !c.is_control())
+    key_id.chars().count() == 1 && key_id.chars().next().is_some_and(|c| !c.is_control())
 }
 
 /// Max time between an ESC and the following Enter for the pair to be treated
@@ -497,6 +495,12 @@ mod tests {
     fn raw_printable_char() {
         let mut parser = InputParser::new();
         assert_eq!(parser.feed_bytes(b"a"), vec![InputEvent::Insert('a')]);
+    }
+
+    #[test]
+    fn raw_plus_produces_insert() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert_eq!(parser.feed_bytes(b"+"), vec![InputEvent::Insert('+')]);
     }
 
     #[test]
