@@ -6,7 +6,12 @@ use crate::skills::SkillStore;
 pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
     ToolSpec {
         name: "Skill".to_owned(),
-        description: "Invoke an available skill by name with arguments. Use this when the user's request matches a skill's description or whenToUse.".to_owned(),
+        description: "Invoke an available skill by name with arguments. \
+            BLOCKING REQUIREMENT: when a skill from the available skills listing matches \
+            the user's request or current task, you MUST call this tool instead of \
+            attempting the work with free-form text. Do not re-invoke a skill whose \
+            instructions are already present in the conversation."
+            .to_owned(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

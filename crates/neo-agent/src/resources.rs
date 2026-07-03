@@ -18,7 +18,9 @@ use crate::config::expand_user_path_with_home;
 use crate::trust::find_context_files_in_dir;
 
 use anyhow::Context;
-use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
+use neo_agent_core::skills::{
+    LoadedSkill, SkillStore, builtin::builtin_skills, discovery, discovery::SkillSource,
+};
 
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
 const APPEND_SYSTEM_PROMPT_FILE: &str = "APPEND_SYSTEM.md";
@@ -289,27 +291,42 @@ fn format_available_skills(skill_store: &SkillStore) -> Option<String> {
         return None;
     }
     let mut prompt = String::from("<available_skills>\n");
-    for skill in skills {
-        write_available_skill(&mut prompt, skill);
+    prompt.push_str(
+        "DISREGARD any earlier skill listings. Current available skills:\n\n\
+         Skills are reusable capabilities. When a skill matches your current task, \
+         invoke it with the Skill tool instead of doing the work manually.\n",
+    );
+
+    // Group skills by source in priority order (User > Extra > Builtin).
+    let groups: [(SkillSource, &str); 3] = [
+        (SkillSource::User, "User"),
+        (SkillSource::Extra, "Extra"),
+        (SkillSource::Builtin, "Built-in"),
+    ];
+    for (source, label) in &groups {
+        let group_skills: Vec<&&LoadedSkill> =
+            skills.iter().filter(|s| s.source == *source).collect();
+        if group_skills.is_empty() {
+            continue;
+        }
+        prompt.push_str("\n### ");
+        prompt.push_str(label);
+        prompt.push('\n');
+        for skill in group_skills {
+            write_available_skill(&mut prompt, skill);
+        }
     }
+
     prompt.push_str("</available_skills>");
     Some(prompt)
 }
 
 fn write_available_skill(prompt: &mut String, skill: &LoadedSkill) {
-    prompt.push_str("<skill name=\"");
-    prompt.push_str(&skill.name);
-    prompt.push_str("\" description=\"");
-    prompt.push_str(&xml_escape(&skill.manifest.description));
-    prompt.push('"');
+    let _ = writeln!(prompt, "- {}: {}", skill.name, skill.manifest.description);
     if let Some(when) = &skill.manifest.when_to_use {
-        prompt.push_str(" whenToUse=\"");
-        prompt.push_str(&xml_escape(when));
-        prompt.push('"');
+        let _ = writeln!(prompt, "  When to use: {when}");
     }
-    prompt.push_str(">\n");
     write_skill_arguments(prompt, skill);
-    prompt.push_str("</skill>\n");
 }
 
 fn write_skill_arguments(prompt: &mut String, skill: &LoadedSkill) {
@@ -479,5 +496,81 @@ mod tests {
             ),
             PathBuf::from("/home/alice/.agents/skills")
         );
+    }
+
+    #[test]
+    fn format_available_skills_includes_disregard_header_and_natural_language_format() {
+        use neo_agent_core::skills::{SkillManifest, SkillType};
+        use std::fs;
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // User skill
+        let user_skill_dir = temp.path().join("skills");
+        let skill_dir = user_skill_dir.join("brainstorming");
+        fs::create_dir_all(&skill_dir).expect("dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\n\
+             name: brainstorming\n\
+             description: Use before creative work\n\
+             type: prompt\n\
+             whenToUse: When starting creative work\n\
+             ---\n\
+             Body.\n",
+        )
+        .expect("write skill");
+
+        // Builtin skill
+        let builtin_skill = LoadedSkill {
+            name: "using-superpowers".to_owned(),
+            root: temp.path().join("superpowers"),
+            manifest: SkillManifest {
+                name: "using-superpowers".to_owned(),
+                description: "Use at conversation start".to_owned(),
+                skill_type: SkillType::Prompt,
+                when_to_use: Some("When starting any conversation".to_owned()),
+                disable_model_invocation: false,
+                arguments: Vec::new(),
+                slash_commands: Vec::new(),
+            },
+            body: String::new(),
+            source: SkillSource::Builtin,
+        };
+
+        let store =
+            SkillStore::load(&[user_skill_dir], &[], vec![builtin_skill]).expect("skill store");
+
+        let output = format_available_skills(&store).expect("non-empty skill list");
+
+        // Gap 4: DISREGARD header
+        assert!(
+            output.contains("DISREGARD any earlier skill listings"),
+            "should contain DISREGARD header, got: {output}"
+        );
+        // Gap 2: guiding intro + source grouping
+        assert!(
+            output.contains("Skills are reusable capabilities"),
+            "should contain guiding intro"
+        );
+        assert!(output.contains("### User"), "should contain User group");
+        assert!(
+            output.contains("### Built-in"),
+            "should contain Built-in group"
+        );
+        // Gap 3: natural-language format with When to use
+        assert!(
+            output.contains("- brainstorming: Use before creative work"),
+            "should contain natural-language skill line"
+        );
+        assert!(
+            output.contains("When to use: When starting creative work"),
+            "should contain When to use line"
+        );
+    }
+
+    #[test]
+    fn format_available_skills_returns_none_when_empty() {
+        let store = SkillStore::load(&[], &[], Vec::new()).expect("empty store");
+        assert!(format_available_skills(&store).is_none());
     }
 }
