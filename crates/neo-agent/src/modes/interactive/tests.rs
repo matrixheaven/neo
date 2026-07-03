@@ -4296,7 +4296,7 @@ async fn approval_requests_are_handled_one_at_a_time() {
         controller
             .chrome()
             .approval_selection()
-            .map(|(id, _, _)| id),
+            .map(|(id, _, _, _, _)| id),
         Some("tool-2")
     );
     let snapshot = controller.render_snapshot();

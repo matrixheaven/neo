@@ -581,7 +581,7 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
 }
 
 #[test]
-fn arrow_nav_to_revise_then_enter_does_not_submit_with_empty_feedback() {
+fn arrow_nav_to_revise_waits_for_enter_before_collecting_feedback() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 1,
@@ -600,15 +600,34 @@ fn arrow_nav_to_revise_then_enter_does_not_submit_with_empty_feedback() {
     app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [1] Reject
     app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [2] Revise
     assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
+    assert!(
+        !render_app(100, &app)
+            .iter()
+            .any(|line| line.contains("feedback:")),
+        "selecting Revise should not render feedback input before Enter"
+    );
 
-    // Enter on Revise with empty feedback must NOT submit — the user
-    // should be able to type their revision note first.
+    app.handle_pending_approval_input(InputEvent::Insert('x'));
+    let (_, _, feedback, _, collecting_feedback) =
+        app.approval_selection().expect("approval selection");
+    assert_eq!(
+        feedback, "",
+        "typing before confirming Revise must not start feedback input"
+    );
+    assert!(!collecting_feedback);
+
+    // First Enter on Revise should enter feedback input mode, not submit.
     let result = app.handle_pending_approval_input(InputEvent::Submit);
     assert!(
         result.is_none(),
-        "Enter on Revise with empty feedback should not submit"
+        "first Enter on Revise should enter feedback collection, not submit"
     );
     assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
+    assert!(
+        app.approval_selection()
+            .is_some_and(|(_, _, _, _, collecting)| collecting),
+        "Enter on Revise should activate feedback collection"
+    );
 
     // Type feedback.
     app.handle_pending_approval_input(InputEvent::Insert('f'));
@@ -656,7 +675,13 @@ fn plan_review_with_options_aligns_chrome_and_transcript_revise_index() {
         "Chrome should be on Revise at index 3"
     );
 
-    // Typing must work because the chrome is truly on Revise.
+    assert!(
+        app.handle_pending_approval_input(InputEvent::Submit)
+            .is_none(),
+        "first Enter on Revise should enter feedback collection"
+    );
+
+    // Typing works after the user explicitly enters feedback mode.
     app.handle_pending_approval_input(InputEvent::Insert('f'));
     app.handle_pending_approval_input(InputEvent::Insert('x'));
 

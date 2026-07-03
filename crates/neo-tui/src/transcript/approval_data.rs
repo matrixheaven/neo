@@ -271,10 +271,12 @@ impl TranscriptPane {
         selected: usize,
         feedback_input: &str,
         selected_suggestion: Option<usize>,
+        feedback_active: bool,
     ) {
         if let Some(approval) = self.transcript.approval_mut(id) {
             approval.selected = selected;
             approval.selected_suggestion = selected_suggestion;
+            approval.feedback_active = feedback_active;
             feedback_input.clone_into(&mut approval.feedback_input);
             self.mark_dirty();
         }
@@ -354,6 +356,7 @@ impl TranscriptPane {
             queued_count: 0,
             selected: 0,
             feedback_input: String::new(),
+            feedback_active: false,
             resolved: None,
             session_option_label,
             prefix_option_label,

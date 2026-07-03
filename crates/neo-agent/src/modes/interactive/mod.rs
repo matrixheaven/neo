@@ -1549,7 +1549,7 @@ impl InteractiveController {
     }
 
     fn sync_inline_approval_selection(&mut self) {
-        let Some((id, selected, feedback_input, selected_suggestion)) =
+        let Some((id, selected, feedback_input, selected_suggestion, collecting_feedback)) =
             self.tui.chrome().approval_selection()
         else {
             return;
@@ -1561,6 +1561,7 @@ impl InteractiveController {
             selected,
             &feedback_input,
             selected_suggestion,
+            collecting_feedback,
         );
     }
 

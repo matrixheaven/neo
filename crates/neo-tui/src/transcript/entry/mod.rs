@@ -43,6 +43,8 @@ pub struct ApprovalPromptData {
     pub queued_count: usize,
     pub selected: usize,
     pub feedback_input: String,
+    #[serde(default)]
+    pub feedback_active: bool,
     pub resolved: Option<String>,
     /// Dynamic label for the reusable session-approval option (Layer 1).
     /// `None` omits the option, keeping numeric shortcuts aligned.
@@ -704,7 +706,7 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         ));
     }
     rows.push(Line::raw(""));
-    if data.selected == revise_index {
+    if data.feedback_active && data.selected == revise_index {
         let feedback = if data.feedback_input.is_empty() {
             "feedback: ▌".to_owned()
         } else {
@@ -1076,6 +1078,7 @@ amigo",
             queued_count: 0,
             selected: 0,
             feedback_input: String::new(),
+            feedback_active: false,
             resolved: None,
             session_option_label: None,
             prefix_option_label: None,
@@ -1119,6 +1122,7 @@ amigo",
             // Options: [0] Approve once, [1] Suggestion, [2] Reject, [3] Revise.
             selected: 3,
             feedback_input: "Keep compaction at 85%.".to_owned(),
+            feedback_active: true,
             resolved: None,
             session_option_label: None,
             prefix_option_label: None,
@@ -1139,5 +1143,64 @@ amigo",
             .collect::<Vec<_>>();
         let text = lines.join("\n");
         assert!(text.contains("feedback: Keep compaction at 85%."), "{text}");
+    }
+
+    #[test]
+    fn approval_prompt_hides_feedback_until_input_is_active() {
+        let data = ApprovalPromptData {
+            id: "test-id".to_owned(),
+            title: "Plan Review".to_owned(),
+            details: vec!["Ready?".to_owned()],
+            queued_label: String::new(),
+            queued_count: 0,
+            // Options: [0] Approve once, [1] Reject, [2] Revise.
+            selected: 2,
+            feedback_input: String::new(),
+            feedback_active: false,
+            resolved: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            plan_content: None,
+            plan_path: None,
+            plan_option_labels: Vec::new(),
+            suggestions: Vec::new(),
+            selected_suggestion: None,
+        };
+        let lines = TranscriptEntry::ApprovalPrompt(data)
+            .render(80, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        assert!(!text.contains("feedback:"), "{text}");
+    }
+
+    #[test]
+    fn approval_prompt_shows_feedback_when_input_is_active() {
+        let data = ApprovalPromptData {
+            id: "test-id".to_owned(),
+            title: "Plan Review".to_owned(),
+            details: vec!["Ready?".to_owned()],
+            queued_label: String::new(),
+            queued_count: 0,
+            selected: 2,
+            feedback_input: String::new(),
+            feedback_active: true,
+            resolved: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            plan_content: None,
+            plan_path: None,
+            plan_option_labels: Vec::new(),
+            suggestions: Vec::new(),
+            selected_suggestion: None,
+        };
+        let lines = TranscriptEntry::ApprovalPrompt(data)
+            .render(80, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        assert!(text.contains("feedback: ▌"), "{text}");
     }
 }
