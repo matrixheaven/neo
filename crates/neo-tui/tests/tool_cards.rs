@@ -1,3 +1,4 @@
+use neo_agent_core::{AgentMessage, AgentToolCall, Content, StopReason};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Component, Expandable, Finalization, Line};
 use neo_tui::shell::ToolStatusKind;
@@ -709,6 +710,74 @@ fn exit_plan_mode_header_shows_rejected_on_failure() {
         !header.contains("Approved"),
         "header should not show 'Approved' on failure: {header:?}"
     );
+}
+
+#[test]
+fn replay_exit_plan_mode_restores_plan_box_from_plan_file() {
+    let temp = std::env::temp_dir().join(format!(
+        "neo-plan-replay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let plan_dir = temp.join("agents").join("main").join("plans");
+    std::fs::create_dir_all(&plan_dir).expect("create plan dir");
+    let plan_path = plan_dir.join("plan-1.md");
+    std::fs::write(&plan_path, "# Replay plan\n\nShip the thing.").expect("write plan");
+    let plan_path_text = plan_path.display().to_string();
+
+    let mut transcript = TranscriptPane::new(100, 24);
+    transcript.replay_message(&AgentMessage::Assistant {
+        content: Vec::new(),
+        tool_calls: vec![AgentToolCall {
+            id: "write-1".into(),
+            name: "Write".into(),
+            raw_arguments: serde_json::json!({
+                "path": plan_path_text,
+                "content": "# Replay plan\n\nShip the thing.",
+            })
+            .to_string()
+            .into(),
+        }],
+        stop_reason: StopReason::ToolUse,
+    });
+    transcript.replay_message(&AgentMessage::ToolResult {
+        tool_call_id: "write-1".into(),
+        tool_name: "Write".into(),
+        content: vec![Content::text("Wrote plan")],
+        is_error: false,
+    });
+    transcript.replay_message(&AgentMessage::Assistant {
+        content: Vec::new(),
+        tool_calls: vec![AgentToolCall {
+            id: "exit-plan-1".into(),
+            name: "ExitPlanMode".into(),
+            raw_arguments: serde_json::json!({"plan_summary": "Ready"})
+                .to_string()
+                .into(),
+        }],
+        stop_reason: StopReason::ToolUse,
+    });
+    transcript.replay_message(&AgentMessage::ToolResult {
+        tool_call_id: "exit-plan-1".into(),
+        tool_name: "ExitPlanMode".into(),
+        content: vec![Content::text("Selected approach: Execute")],
+        is_error: false,
+    });
+
+    let frame = transcript
+        .render_frame(100, 24)
+        .expect("frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(frame.contains("Current plan"), "{frame}");
+    assert!(frame.contains("plan: plan-1.md"), "{frame}");
+    assert!(frame.contains("Replay plan"), "{frame}");
+    let _ = std::fs::remove_dir_all(temp);
 }
 
 #[test]

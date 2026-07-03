@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
@@ -78,6 +78,7 @@ pub struct TranscriptPane {
     delegate_absorption_targets: BTreeMap<(u32, AbsorbedToolKind), BTreeSet<String>>,
     pub(super) queued_approvals: VecDeque<ApprovalPromptData>,
     pub(super) completed_tool_result_ids: Vec<String>,
+    replay_plan_snapshot: Option<ReplayPlanSnapshot>,
     next_image_id: u64,
     activity_frame: usize,
     workspace_root: Option<PathBuf>,
@@ -108,6 +109,7 @@ impl TranscriptPane {
             delegate_absorption_targets: BTreeMap::new(),
             queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
+            replay_plan_snapshot: None,
             next_image_id: 0,
             activity_frame: 0,
             workspace_root: None,
@@ -297,6 +299,7 @@ impl TranscriptPane {
                         ));
                         continue;
                     }
+                    self.remember_replay_plan_snapshot(tool_call);
                     self.apply_agent_event(&AgentEvent::ToolExecutionStarted {
                         turn: 0,
                         id: tool_call.id.to_string(),
@@ -316,6 +319,7 @@ impl TranscriptPane {
                     return;
                 }
                 let text = content_display_text(content);
+                let details = self.replay_tool_result_details(tool_name.as_ref());
                 self.apply_agent_event(&AgentEvent::ToolExecutionFinished {
                     turn: 0,
                     id: tool_call_id.to_string(),
@@ -323,7 +327,7 @@ impl TranscriptPane {
                     result: neo_agent_core::ToolResult {
                         content: text,
                         is_error: *is_error,
-                        details: None,
+                        details,
                         terminate: false,
                     },
                 });
@@ -1030,6 +1034,67 @@ impl TranscriptPane {
         let mut ordered = std::mem::take(tool_run);
         super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayPlanSnapshot {
+    path: String,
+    content: Option<String>,
+}
+
+impl TranscriptPane {
+    fn remember_replay_plan_snapshot(&mut self, tool_call: &neo_agent_core::AgentToolCall) {
+        if !matches!(tool_call.name.as_ref(), "Write" | "Edit") {
+            return;
+        }
+        let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments)
+        else {
+            return;
+        };
+        let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        if !looks_like_plan_file_path(path) {
+            return;
+        }
+        let content = arguments
+            .get("content")
+            .or_else(|| arguments.get("new"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        self.replay_plan_snapshot = Some(ReplayPlanSnapshot {
+            path: path.to_owned(),
+            content,
+        });
+    }
+
+    fn replay_tool_result_details(&self, tool_name: &str) -> Option<serde_json::Value> {
+        if tool_name != "ExitPlanMode" {
+            return None;
+        }
+        let snapshot = self.replay_plan_snapshot.as_ref()?;
+        let content = std::fs::read_to_string(&snapshot.path)
+            .ok()
+            .or_else(|| snapshot.content.clone())?;
+        Some(serde_json::json!({
+            "plan_content": content,
+            "plan_path": snapshot.path,
+        }))
+    }
+}
+
+fn looks_like_plan_file_path(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return false;
+    }
+    let segments = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    segments
+        .windows(3)
+        .any(|window| window == ["agents", "main", "plans"])
 }
 
 fn current_time_ms() -> u64 {
