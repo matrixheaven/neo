@@ -348,7 +348,8 @@ impl TranscriptStore {
             TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
             _ => None,
         }) {
-            entry.update(snapshot);
+            let merged = merge_delegate_snapshot(entry.snapshot(), snapshot);
+            entry.update(merged);
             return;
         }
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
@@ -566,6 +567,31 @@ impl TranscriptStore {
 
 fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {
     snapshot.path.is_root_child()
+}
+
+/// Merge an incoming delegate snapshot with the current one, respecting
+/// terminal precedence. A stale `Completed` snapshot arriving after a
+/// `Cancelled` snapshot must not regress the card.
+fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> AgentSnapshot {
+    // Different agents — just take the incoming.
+    if current.id != incoming.id {
+        return incoming;
+    }
+    // Both terminal: prefer the earlier one (it happened first).
+    if current.state.is_terminal()
+        && incoming.state.is_terminal()
+        && incoming.updated_at_ms < current.updated_at_ms
+    {
+        return current.clone();
+    }
+    // Cancelled beats a late Completed with equal-or-later timestamp.
+    if current.state == AgentLifecycleState::Cancelled
+        && incoming.state == AgentLifecycleState::Completed
+        && incoming.updated_at_ms <= current.updated_at_ms
+    {
+        return current.clone();
+    }
+    incoming
 }
 
 fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> SwarmSnapshot {

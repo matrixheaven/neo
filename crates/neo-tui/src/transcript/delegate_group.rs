@@ -39,7 +39,7 @@ impl DelegateGroupComponent {
 
     pub fn upsert(&mut self, snapshot: AgentSnapshot) {
         if let Some(existing) = self.agents.iter_mut().find(|agent| agent.id == snapshot.id) {
-            *existing = snapshot;
+            *existing = merge_group_delegate_snapshot(existing, snapshot);
         } else {
             self.agents.push(snapshot);
         }
@@ -272,4 +272,29 @@ fn fallback_activity(agent: &AgentSnapshot) -> String {
         AgentLifecycleState::Cancelled => "Cancelled".to_owned(),
         AgentLifecycleState::TimedOut => "Timed out".to_owned(),
     }
+}
+
+/// Merge an incoming delegate snapshot with the current one, respecting
+/// terminal precedence so a stale `Completed` cannot regress a prior
+/// `Cancelled`.
+fn merge_group_delegate_snapshot(
+    current: &AgentSnapshot,
+    incoming: AgentSnapshot,
+) -> AgentSnapshot {
+    if current.id != incoming.id {
+        return incoming;
+    }
+    if current.state.is_terminal()
+        && incoming.state.is_terminal()
+        && incoming.updated_at_ms < current.updated_at_ms
+    {
+        return current.clone();
+    }
+    if current.state == AgentLifecycleState::Cancelled
+        && incoming.state == AgentLifecycleState::Completed
+        && incoming.updated_at_ms <= current.updated_at_ms
+    {
+        return current.clone();
+    }
+    incoming
 }

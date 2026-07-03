@@ -2637,3 +2637,61 @@ async fn summary_context_does_not_leak_role_setup_boilerplate() {
         result.content
     );
 }
+
+#[tokio::test]
+async fn cancel_agent_stops_active_child_stream() {
+    use neo_agent_core::multi_agent::{ChildRuntimeDeps, DelegateContext};
+
+    let runtime = MultiAgentRuntime::new();
+    let model = Arc::new(DelayedTurnModel::new(vec![vec![
+        DelayedStep::Event(AiStreamEvent::MessageStart {
+            id: "child".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::ThinkingStart {
+            id: "thinking".to_owned(),
+        }),
+        DelayedStep::Delay(std::time::Duration::from_secs(30)),
+        DelayedStep::Event(AiStreamEvent::ThinkingDelta {
+            text: "should not arrive".to_owned(),
+        }),
+    ]]));
+    let deps = ChildRuntimeDeps::new(
+        AgentConfig::for_model(neo_agent_core::harness::fake_model()),
+        model,
+        Arc::new(ToolRegistry::new()),
+    );
+    let snapshot = runtime.start_delegate(
+        "slow child",
+        None,
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        DelegateContext::None,
+        AgentPathKind::Root,
+    );
+    let agent_id = snapshot.id.clone();
+    let run = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .run_started_child_turn(deps, snapshot, DelegateContext::None, |_| {})
+                .await
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let cancelled = runtime.cancel_agent(&agent_id).expect("agent cancels");
+    assert_eq!(cancelled.state, AgentLifecycleState::Cancelled);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+        .await
+        .expect("child run should stop after interrupt")
+        .expect("join should succeed");
+    assert_eq!(output.snapshot.state, AgentLifecycleState::Cancelled);
+    assert!(
+        !output
+            .snapshot
+            .activity
+            .iter()
+            .any(|entry| matches!(&entry.kind, AgentActivityKind::Text { text, .. } if text.contains("should not arrive")))
+    );
+}

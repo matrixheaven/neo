@@ -2554,3 +2554,87 @@ fn expanded_swarm_child_uses_delegate_activity_rules() {
         .expect("final row");
     assert!(body_index < final_index, "{text}");
 }
+
+#[test]
+fn delegate_card_does_not_regress_cancelled_to_done() {
+    let name = AgentDisplayName::new("Echo");
+    let id = AgentId::from_suffix_for_test("regress-cancel");
+
+    // First snapshot: cancelled at timestamp 2000.
+    let cancelled = AgentSnapshot {
+        id: id.clone(),
+        display_name: name.clone(),
+        path: AgentPath::root_child(&name),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+        state: AgentLifecycleState::Cancelled,
+        task: "regression test".to_owned(),
+        task_title: "regression test".to_owned(),
+        created_at_ms: 1_000,
+        updated_at_ms: 2_000,
+        started_at_ms: Some(1_000),
+        terminal_at_ms: Some(2_000),
+        detached_from_foreground: false,
+        terminal_reason: terminal_reason_for_state(AgentLifecycleState::Cancelled),
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 0,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: Duration::from_secs(1),
+        latest_text: None,
+        activity: Vec::new(),
+        prior_messages: Vec::new(),
+        outcome: Some(AgentTerminalOutcome {
+            summary: "Cancelled by user.".to_owned(),
+            is_error: true,
+        }),
+    };
+
+    // Stale completed snapshot arriving later with the same timestamp.
+    let stale_completed = AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        updated_at_ms: 2_000,
+        terminal_at_ms: Some(2_000),
+        terminal_reason: terminal_reason_for_state(AgentLifecycleState::Completed),
+        outcome: Some(AgentTerminalOutcome {
+            summary: "All done.".to_owned(),
+            is_error: false,
+        }),
+        ..cancelled.clone()
+    };
+
+    let mut pane = TranscriptPane::new(120, 20);
+    // Apply the cancelled snapshot first.
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 1,
+        agent: cancelled,
+    });
+    // Then apply the stale completed snapshot.
+    pane.apply_agent_event(AgentEvent::DelegateFinished {
+        turn: 1,
+        agent: stale_completed,
+    });
+
+    let _ = pane.render_frame(120, 20);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("cancelled"),
+        "expected 'cancelled' in rendered output: {text}"
+    );
+    assert!(
+        !text.contains(" · done · "),
+        "stale 'done' must not regress cancelled card: {text}"
+    );
+}

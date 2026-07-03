@@ -446,6 +446,43 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Finish a background delegate using the snapshot's actual lifecycle
+    /// state to derive the status. This prevents a cancelled child run from
+    /// being recorded as `Completed` when cancellation happened through the
+    /// runtime before the background record was finalized.
+    pub async fn finish_delegate(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::AgentSnapshot,
+    ) {
+        let status = status_from_agent_state(snapshot.state);
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
+        {
+            record.state = BackgroundTaskState::DelegateFinished { status, snapshot };
+        }
+    }
+
+    /// Finish a background delegate swarm using the snapshot's actual
+    /// lifecycle state to derive the status.
+    pub async fn finish_delegate_swarm(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    ) {
+        let status = status_from_agent_state(snapshot.state);
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(
+                record.state,
+                BackgroundTaskState::DelegateSwarmRunning { .. }
+            )
+        {
+            record.state = BackgroundTaskState::DelegateSwarmFinished { status, snapshot };
+        }
+    }
+
     pub async fn start_bash_foreground(
         &self,
         description: String,

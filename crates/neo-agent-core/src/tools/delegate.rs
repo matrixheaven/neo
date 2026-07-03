@@ -138,7 +138,7 @@ impl Tool for DelegateTool {
                         });
                     }
                     background_tasks
-                        .complete_delegate(&task_id_for_worker, output.snapshot)
+                        .finish_delegate(&task_id_for_worker, output.snapshot)
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
@@ -319,7 +319,7 @@ impl Tool for DelegateSwarmTool {
                     .await;
                     runtime.register_swarm(final_snapshot.clone());
                     background_tasks
-                        .complete_delegate_swarm(&task_id_for_worker, final_snapshot)
+                        .finish_delegate_swarm(&task_id_for_worker, final_snapshot)
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
@@ -414,6 +414,17 @@ async fn run_swarm_children(
             async move {
                 let item_index = child.item_index;
                 let item = child.item.clone();
+                // Skip queued children that were cancelled by cancel_swarm
+                // before they were polled.
+                if let Some(current) = runtime.agent_snapshot(child.agent.id.as_str())
+                    && current.state.is_terminal()
+                {
+                    return SwarmChildSnapshot {
+                        item_index,
+                        item,
+                        agent: current,
+                    };
+                }
                 let output = runtime
                     .run_started_swarm_child_turn(
                         deps,
@@ -509,6 +520,14 @@ async fn run_swarm_children(
         }
     }
 
+    // Prefer the runtime's terminal swarm snapshot if the swarm was
+    // cancelled via InterruptDelegate. This prevents the worker's
+    // locally-tracked progress from regressing a cancelled swarm.
+    if let Some(current) = runtime.swarm_snapshot(&initial_snapshot.swarm_id)
+        && current.state == crate::multi_agent::AgentLifecycleState::Cancelled
+    {
+        return current;
+    }
     swarm_snapshot_from_progress(&initial_snapshot, &ordered_children, initial_snapshot.mode)
 }
 

@@ -117,6 +117,10 @@ struct MultiAgentState {
     agents: BTreeMap<String, AgentSnapshot>,
     swarms: BTreeMap<String, super::SwarmSnapshot>,
     steer_handles: BTreeMap<String, SteerInputHandle>,
+    /// Live cancellation tokens for actively running child agents. Registered
+    /// when a child run starts, removed when it finishes. Cancelling a token
+    /// here stops the child's model stream immediately.
+    agent_cancel_tokens: BTreeMap<String, CancellationToken>,
 }
 
 impl MultiAgentState {
@@ -266,6 +270,12 @@ impl MultiAgentRuntime {
     pub fn mark_delegate_running(&self, id: &AgentId) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
+        // Never revive a terminal snapshot back to Running. This prevents a
+        // queued swarm child that was cancelled by cancel_swarm from being
+        // started again when its turn comes up in the scheduler.
+        if snapshot.state.is_terminal() {
+            return Some(snapshot.clone());
+        }
         let now = now_ms();
         snapshot.state = AgentLifecycleState::Running;
         snapshot.started_at_ms.get_or_insert(now);
@@ -489,39 +499,42 @@ impl MultiAgentRuntime {
     /// Mark a running agent as cancelled.
     ///
     /// Returns `None` and leaves the state unchanged if the agent is already
-    /// terminal.
+    /// terminal. Also cancels the agent's live cancellation token so any
+    /// active model stream stops immediately.
     #[must_use]
     pub fn cancel_agent(&self, id: &AgentId) -> Option<AgentSnapshot> {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let snapshot = state.agents.get_mut(id.as_str())?;
-        if snapshot.state.is_terminal() {
-            return None;
-        }
-        let now = now_ms();
-        snapshot.state = AgentLifecycleState::Cancelled;
-        snapshot.terminal_at_ms.get_or_insert(now);
-        snapshot.updated_at_ms = now;
-        snapshot.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-        Some(snapshot.clone())
+        self.cancel_agent_by_id(id.as_str())
     }
 
     /// Mark a running agent as cancelled by its string ID.
     ///
     /// Returns `None` and leaves the state unchanged if the agent is already
-    /// terminal.
+    /// terminal. Also cancels the agent's live cancellation token so any
+    /// active model stream stops immediately.
     #[must_use]
     pub fn cancel_agent_by_id(&self, id: &str) -> Option<AgentSnapshot> {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let snapshot = state.agents.get_mut(id)?;
-        if snapshot.state.is_terminal() {
-            return None;
+        let (snapshot, token) = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let token = state.agent_cancel_tokens.get(id).cloned();
+            let snapshot = state.agents.get_mut(id)?;
+            if snapshot.state.is_terminal() {
+                return None;
+            }
+            let now = now_ms();
+            snapshot.state = AgentLifecycleState::Cancelled;
+            snapshot.terminal_at_ms.get_or_insert(now);
+            snapshot.updated_at_ms = now;
+            snapshot.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
+            snapshot.outcome = Some(AgentTerminalOutcome {
+                summary: "Cancelled by user.".to_owned(),
+                is_error: true,
+            });
+            (snapshot.clone(), token)
+        };
+        if let Some(token) = token {
+            token.cancel();
         }
-        let now = now_ms();
-        snapshot.state = AgentLifecycleState::Cancelled;
-        snapshot.terminal_at_ms.get_or_insert(now);
-        snapshot.updated_at_ms = now;
-        snapshot.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-        Some(snapshot.clone())
+        Some(snapshot)
     }
 
     /// Mark every non-terminal child in a swarm as cancelled.
@@ -530,32 +543,70 @@ impl MultiAgentRuntime {
     /// exist or all of its children are already terminal.
     #[must_use]
     pub fn cancel_swarm_by_id(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let mut snapshot = state.swarms.get(swarm_id)?.clone();
-        let mut changed = false;
-        for child in &mut snapshot.children {
-            if child.agent.state.is_terminal() {
-                continue;
+        let (snapshot, tokens) = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let mut snapshot = state.swarms.get(swarm_id)?.clone();
+            let mut changed = false;
+            // Collect the child agent IDs that need cancelling.
+            let cancelled_ids: Vec<String> = snapshot
+                .children
+                .iter()
+                .filter(|child| !child.agent.state.is_terminal())
+                .map(|child| child.agent.id.as_str().to_owned())
+                .collect();
+            for child in &mut snapshot.children {
+                if child.agent.state.is_terminal() {
+                    continue;
+                }
+                let now = now_ms();
+                child.agent.state = AgentLifecycleState::Cancelled;
+                child.agent.terminal_at_ms.get_or_insert(now);
+                child.agent.updated_at_ms = now;
+                child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
+                child.agent.outcome = Some(AgentTerminalOutcome {
+                    summary: "Cancelled by user.".to_owned(),
+                    is_error: true,
+                });
+                changed = true;
             }
-            let now = now_ms();
-            child.agent.state = AgentLifecycleState::Cancelled;
-            child.agent.terminal_at_ms.get_or_insert(now);
-            child.agent.updated_at_ms = now;
-            child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-            if let Some(agent) = state.agents.get_mut(child.agent.id.as_str()) {
-                agent.state = AgentLifecycleState::Cancelled;
-                agent.terminal_at_ms.get_or_insert(now);
-                agent.updated_at_ms = now;
-                agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-                child.agent = agent.clone();
+            // Collect tokens before mutating agents to avoid borrow conflicts.
+            let tokens = cancelled_ids
+                .iter()
+                .filter_map(|id| state.agent_cancel_tokens.get(id).cloned())
+                .collect::<Vec<_>>();
+            for agent_id in &cancelled_ids {
+                if let Some(agent) = state.agents.get_mut(agent_id) {
+                    let now = now_ms();
+                    agent.state = AgentLifecycleState::Cancelled;
+                    agent.terminal_at_ms.get_or_insert(now);
+                    agent.updated_at_ms = now;
+                    agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
+                    agent.outcome = Some(AgentTerminalOutcome {
+                        summary: "Cancelled by user.".to_owned(),
+                        is_error: true,
+                    });
+                }
+                // Sync the swarm child snapshot with the runtime agent.
+                if let Some(agent) = state.agents.get(agent_id) {
+                    if let Some(child) = snapshot
+                        .children
+                        .iter_mut()
+                        .find(|c| c.agent.id.as_str() == agent_id)
+                    {
+                        child.agent = agent.clone();
+                    }
+                }
             }
-            changed = true;
+            if !changed {
+                return None;
+            }
+            state.register_swarm_order(swarm_id);
+            state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
+            (snapshot, tokens)
+        };
+        for token in tokens {
+            token.cancel();
         }
-        if !changed {
-            return None;
-        }
-        state.register_swarm_order(swarm_id);
-        state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
         Some(snapshot)
     }
 
@@ -809,54 +860,65 @@ impl MultiAgentRuntime {
     /// Returns the refreshed snapshot, or an error message if the swarm is
     /// unknown or already terminal.
     pub fn cancel_swarm(&self, swarm_id: &str) -> Result<super::SwarmSnapshot, String> {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let swarm = state
-            .swarms
-            .get_mut(swarm_id)
-            .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?;
-        if swarm.state.is_terminal() {
-            return Err(format!(
-                "swarm already {}; terminal swarm state is immutable",
-                swarm.state.as_str()
-            ));
-        }
-        // Collect the child agent ids that need cancelling before borrowing
-        // state.agents separately.
-        let cancelled_ids: Vec<String> = swarm
-            .children
-            .iter()
-            .filter(|child| !child.agent.state.is_terminal())
-            .map(|child| child.agent.id.as_str().to_owned())
-            .collect();
-        for child in &mut swarm.children {
-            if !child.agent.state.is_terminal() {
-                let now = now_ms();
-                child.agent.state = AgentLifecycleState::Cancelled;
-                child.agent.terminal_at_ms.get_or_insert(now);
-                child.agent.updated_at_ms = now;
-                child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-                child.agent.outcome = Some(AgentTerminalOutcome {
-                    summary: "Cancelled by user.".to_owned(),
-                    is_error: true,
-                });
+        let (swarm_snapshot, tokens) = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let swarm = state
+                .swarms
+                .get_mut(swarm_id)
+                .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?;
+            if swarm.state.is_terminal() {
+                return Err(format!(
+                    "swarm already {}; terminal swarm state is immutable",
+                    swarm.state.as_str()
+                ));
             }
-        }
-        for agent_id in &cancelled_ids {
-            if let Some(agent) = state.agents.get_mut(agent_id) {
-                let now = now_ms();
-                agent.state = AgentLifecycleState::Cancelled;
-                agent.terminal_at_ms.get_or_insert(now);
-                agent.updated_at_ms = now;
-                agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
-                agent.outcome = Some(AgentTerminalOutcome {
-                    summary: "Cancelled by user.".to_owned(),
-                    is_error: true,
-                });
+            // Collect the child agent ids that need cancelling before borrowing
+            // state.agents separately.
+            let cancelled_ids: Vec<String> = swarm
+                .children
+                .iter()
+                .filter(|child| !child.agent.state.is_terminal())
+                .map(|child| child.agent.id.as_str().to_owned())
+                .collect();
+            for child in &mut swarm.children {
+                if !child.agent.state.is_terminal() {
+                    let now = now_ms();
+                    child.agent.state = AgentLifecycleState::Cancelled;
+                    child.agent.terminal_at_ms.get_or_insert(now);
+                    child.agent.updated_at_ms = now;
+                    child.agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
+                    child.agent.outcome = Some(AgentTerminalOutcome {
+                        summary: "Cancelled by user.".to_owned(),
+                        is_error: true,
+                    });
+                }
             }
+            let mut tokens = Vec::new();
+            for agent_id in &cancelled_ids {
+                // Collect token before mutable borrow of agents.
+                if let Some(token) = state.agent_cancel_tokens.get(agent_id) {
+                    tokens.push(token.clone());
+                }
+                if let Some(agent) = state.agents.get_mut(agent_id) {
+                    let now = now_ms();
+                    agent.state = AgentLifecycleState::Cancelled;
+                    agent.terminal_at_ms.get_or_insert(now);
+                    agent.updated_at_ms = now;
+                    agent.terminal_reason = Some(AgentTerminalReason::CancelledByUser);
+                    agent.outcome = Some(AgentTerminalOutcome {
+                        summary: "Cancelled by user.".to_owned(),
+                        is_error: true,
+                    });
+                }
+            }
+            let swarm = state.swarms.get_mut(swarm_id).expect("swarm exists");
+            refresh_swarm(swarm);
+            (swarm.clone(), tokens)
+        };
+        for token in tokens {
+            token.cancel();
         }
-        let swarm = state.swarms.get_mut(swarm_id).expect("swarm exists");
-        refresh_swarm(swarm);
-        Ok(swarm.clone())
+        Ok(swarm_snapshot)
     }
 
     /// Broadcast a live message to all running children in a swarm.
@@ -1128,25 +1190,9 @@ impl MultiAgentRuntime {
             request.context,
             AgentPathKind::Root,
         );
-        let started_at = Instant::now();
-        let prompt = child_prompt(&request.task, request.context, request.actual_role());
-        let child_wire_path = self.child_wire_path(snapshot.id.as_str());
-        let run = match self.register_persistent_agent(&snapshot, None, None).await {
-            Ok(()) => {
-                run_agent_snapshot(
-                    deps,
-                    prompt,
-                    Vec::new(),
-                    SteerInputHandle::new(),
-                    snapshot.id.as_str().to_owned(),
-                    child_wire_path,
-                    |_| {},
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
-        Ok(self.finish_child_run(snapshot, started_at, run))
+        Ok(self
+            .run_started_child_turn(deps, snapshot, request.context, |_| {})
+            .await)
     }
 
     pub async fn run_started_child_turn<F>(
@@ -1162,6 +1208,15 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
+        // Short-circuit if the child was already cancelled before this turn
+        // started (e.g. queued swarm child cancelled by cancel_swarm).
+        if snapshot.state.is_terminal() {
+            return ChildRunOutput {
+                snapshot,
+                events: Vec::new(),
+                messages: Vec::new(),
+            };
+        }
         if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
             return self.finish_child_run(snapshot, started_at, Err(error));
         }
@@ -1169,6 +1224,8 @@ impl MultiAgentRuntime {
         let prior_messages = self.replay_child_prior_messages(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
+        let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
+        let deps = deps.with_cancel_token(live_cancel.token());
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
         let run = run_agent_snapshot(
@@ -1185,6 +1242,7 @@ impl MultiAgentRuntime {
             },
         )
         .await;
+        drop(live_cancel);
         self.finish_child_run(snapshot, started_at, run)
     }
 
@@ -1205,28 +1263,16 @@ impl MultiAgentRuntime {
             DelegateContext::None,
             AgentPathKind::SwarmChild(swarm_id),
         );
-        let started_at = Instant::now();
-        let prompt = child_prompt(&task, DelegateContext::None, request.role);
-        let child_wire_path = self.child_wire_path(snapshot.id.as_str());
-        let run = match self
-            .register_persistent_agent(&snapshot, Some(swarm_id), Some(item))
-            .await
-        {
-            Ok(()) => {
-                run_agent_snapshot(
-                    deps,
-                    prompt,
-                    Vec::new(),
-                    SteerInputHandle::new(),
-                    snapshot.id.as_str().to_owned(),
-                    child_wire_path,
-                    |_| {},
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
-        Ok(self.finish_child_run(snapshot, started_at, run))
+        Ok(self
+            .run_started_swarm_child_turn(
+                deps,
+                snapshot,
+                swarm_id,
+                item,
+                DelegateContext::None,
+                |_| {},
+            )
+            .await)
     }
 
     pub async fn run_started_swarm_child_turn<F>(
@@ -1244,6 +1290,15 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
+        // Short-circuit if the child was already cancelled before this turn
+        // started (e.g. queued swarm child cancelled by cancel_swarm).
+        if snapshot.state.is_terminal() {
+            return ChildRunOutput {
+                snapshot,
+                events: Vec::new(),
+                messages: Vec::new(),
+            };
+        }
         if let Err(error) = self
             .register_persistent_agent(&snapshot, Some(swarm_id), Some(swarm_item))
             .await
@@ -1254,6 +1309,8 @@ impl MultiAgentRuntime {
         let prior_messages = self.replay_child_prior_messages(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
+        let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
+        let deps = deps.with_cancel_token(live_cancel.token());
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
         let run = run_agent_snapshot(
@@ -1270,6 +1327,7 @@ impl MultiAgentRuntime {
             },
         )
         .await;
+        drop(live_cancel);
         self.finish_child_run(snapshot, started_at, run)
     }
 
@@ -1283,6 +1341,12 @@ impl MultiAgentRuntime {
     ) -> Option<AgentSnapshot> {
         let mut locked = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = locked.agents.get_mut(id.as_str())?;
+        // Ignore late buffered events after the agent has reached a terminal
+        // state (e.g. cancelled by InterruptDelegate). This prevents a
+        // cancelled child from looking active again.
+        if snapshot.state.is_terminal() {
+            return None;
+        }
         snapshot.elapsed = started_at.elapsed();
         snapshot.updated_at_ms = now_ms();
         let mut changed = false;
@@ -1469,6 +1533,39 @@ impl MultiAgentRuntime {
         }
     }
 
+    /// Register a live cancellation token for a child agent, linked to the
+    /// parent turn's cancel token. When the parent token fires, the child
+    /// token is cancelled too. Returns a guard whose Drop unregisters the
+    /// token.
+    fn register_live_cancel(
+        &self,
+        agent_id: &str,
+        parent_token: &CancellationToken,
+    ) -> LiveCancelRegistration {
+        let token = CancellationToken::new();
+        if parent_token.is_cancelled() {
+            token.cancel();
+        }
+        let bridge_child = token.clone();
+        let bridge_parent = parent_token.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = bridge_parent.cancelled() => bridge_child.cancel(),
+                () = bridge_child.cancelled() => {}
+            }
+        });
+        self.state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .agent_cancel_tokens
+            .insert(agent_id.to_owned(), token.clone());
+        LiveCancelRegistration {
+            runtime: self.clone(),
+            agent_id: agent_id.to_owned(),
+            token,
+        }
+    }
+
     fn child_wire_path(&self, agent_id: &str) -> Option<PathBuf> {
         self.session_directory
             .as_ref()
@@ -1527,6 +1624,32 @@ impl Drop for LiveSteerRegistration {
             .lock()
             .expect("multi-agent state poisoned")
             .steer_handles
+            .remove(&self.agent_id);
+    }
+}
+
+/// Guard that unregister a live cancellation token when the child run
+/// finishes. The token is cloned into `ChildRuntimeDeps` so the child
+/// stream observes cancellation immediately.
+struct LiveCancelRegistration {
+    runtime: MultiAgentRuntime,
+    agent_id: String,
+    token: CancellationToken,
+}
+
+impl LiveCancelRegistration {
+    fn token(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for LiveCancelRegistration {
+    fn drop(&mut self) {
+        self.runtime
+            .state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .agent_cancel_tokens
             .remove(&self.agent_id);
     }
 }
