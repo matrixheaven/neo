@@ -42,6 +42,7 @@ fn user_shell_finish_updates_existing_shell_run() {
         turn: 1,
         id: "shell-1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: "me\n".to_owned(),
         stderr: String::new(),
         truncated: false,

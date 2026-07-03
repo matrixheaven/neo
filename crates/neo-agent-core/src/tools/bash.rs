@@ -2,7 +2,10 @@
 // they are the resolved Windows-vs-Unix pair after path translation.
 #![allow(clippy::similar_names)]
 
-use std::{fmt::Write, path::PathBuf, process::Stdio, sync::Arc, sync::LazyLock, time::Duration};
+use std::{path::PathBuf, process::Stdio, sync::Arc, sync::LazyLock, time::Duration};
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -88,7 +91,7 @@ const DESCRIPTION: &str = r#"Execute a `bash` command. Use this for shell semant
 The dedicated tools render in the per-tool permission UI and keep raw stdout out of the conversation; that is why they are worth reaching for whenever one fits.
 
 **Output:**
-The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the output will end with a `Command failed with exit code: N` line stating the non-zero exit code.
+The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the output will end with a line describing the failure: either `Command failed with exit code: N` for a non-zero exit, or `Command terminated by signal N (NAME) — hint` on Unix when the process was killed by a signal (e.g. SIGPIPE from a closed pipe).
 
 If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. Background commands are not subject to the foreground `timeout`. You will be automatically notified when the task completes. Use `TaskOutput` with this task_id for a non-blocking status/output snapshot, and only set `block=true` when you explicitly want to wait for completion. Use `TaskStop` only if the task must be cancelled.
 
@@ -134,10 +137,22 @@ pub struct ShellExecutionRequest {
     pub background_tasks: Option<BackgroundTaskManager>,
 }
 
+/// Platform-aware termination info: `exit_code` from `ExitStatus::code()`,
+/// plus `signal` on Unix (from `ExitStatus::signal()`). On Windows `signal` is
+/// always `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellTermination {
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
 pub struct ShellExecutionResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    /// Unix signal number when the process was killed by a signal (`None` on
+    /// Windows or for normal exits).
+    pub signal: Option<i32>,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
     pub truncated: bool,
@@ -210,14 +225,12 @@ const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 fn shell_command_result(result: &ShellExecutionResult) -> ToolResult {
     let truncated = result.truncated || result.stdout_truncated || result.stderr_truncated;
     let mut content = format!("{}{}", result.stdout, result.stderr);
-    if result.exit_code != Some(0) {
-        let exit_label = result
-            .exit_code
-            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    if result.exit_code != Some(0) && matches!(result.outcome, ShellCommandOutcome::Completed) {
+        let failure_msg = super::format_shell_failure(result.exit_code, result.signal);
         if !content.ends_with('\n') && !content.is_empty() {
             content.push('\n');
         }
-        let _ = write!(content, "Command failed with exit code: {exit_label}.");
+        content.push_str(&failure_msg);
     }
     if truncated {
         if !content.ends_with('\n') && !content.is_empty() {
@@ -237,6 +250,7 @@ fn shell_execution_details(result: &ShellExecutionResult) -> serde_json::Value {
     let truncated = result.truncated || result.stdout_truncated || result.stderr_truncated;
     let mut details = json!({
         "exit_code": result.exit_code,
+        "signal": result.signal,
         "stdout": result.stdout,
         "stderr": result.stderr,
         "stdout_truncated": result.stdout_truncated,
@@ -377,7 +391,13 @@ pub async fn execute_shell_command(
         status = process.child.wait() => {
             let status = status?;
             let output = finish_shell_process(
-                status.code(),
+                ShellTermination {
+                    exit_code: status.code(),
+                    #[cfg(unix)]
+                    signal: status.signal(),
+                    #[cfg(not(unix))]
+                    signal: None,
+                },
                 stdout,
                 stderr,
                 stdout_truncated,
@@ -393,11 +413,11 @@ pub async fn execute_shell_command(
             ))
         }
         () = tokio::time::sleep(request.foreground_timeout) => {
-            let exit_code = kill_child(&mut process).await;
+            let termination = kill_child(&mut process).await;
             (drain_reader)(stdout_task).await;
             (drain_reader)(stderr_task).await;
             let output =
-                output_from_bounded_buffers(exit_code, stdout, stderr, stdout_truncated, stderr_truncated).await;
+                output_from_bounded_buffers(termination, stdout, stderr, stdout_truncated, stderr_truncated).await;
             Ok(shell_result_from_output(
                 output,
                 ShellCommandOutcome::TimedOut,
@@ -406,11 +426,11 @@ pub async fn execute_shell_command(
             ))
         }
         () = request.cancel_token.cancelled() => {
-            let exit_code = kill_child(&mut process).await;
+            let termination = kill_child(&mut process).await;
             (drain_reader)(stdout_task).await;
             (drain_reader)(stderr_task).await;
             let output =
-                output_from_bounded_buffers(exit_code, stdout, stderr, stdout_truncated, stderr_truncated).await;
+                output_from_bounded_buffers(termination, stdout, stderr, stdout_truncated, stderr_truncated).await;
             Ok(shell_result_from_output(
                 output,
                 ShellCommandOutcome::Cancelled,
@@ -506,6 +526,7 @@ async fn execute_manager_owned_shell_command(
 fn empty_command_output() -> CommandOutput {
     CommandOutput {
         exit_code: None,
+        signal: None,
         stdout: String::new(),
         stderr: String::new(),
         stdout_truncated: false,
@@ -524,6 +545,7 @@ fn shell_result_from_output(
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code,
+            signal: output.signal,
             stdout_truncated: output.stdout_truncated,
             stderr_truncated: output.stderr_truncated,
             truncated: output.stdout_truncated || output.stderr_truncated,
@@ -544,6 +566,7 @@ fn cap_shell_result_output(
         stdout,
         stderr,
         exit_code: result.exit_code,
+        signal: result.signal,
         stdout_truncated: result.stdout_truncated || stdout_truncated,
         stderr_truncated: result.stderr_truncated || stderr_truncated,
         truncated: result.truncated || stdout_truncated || stderr_truncated,
@@ -605,7 +628,7 @@ fn spawn_bash_process_at(
 }
 
 async fn finish_shell_process(
-    exit_code: Option<i32>,
+    termination: ShellTermination,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stdout_truncated: Arc<Mutex<bool>>,
@@ -616,7 +639,7 @@ async fn finish_shell_process(
     drain_reader(stdout_task).await;
     drain_reader(stderr_task).await;
     output_from_bounded_buffers(
-        exit_code,
+        termination,
         stdout,
         stderr,
         stdout_truncated,
@@ -626,13 +649,14 @@ async fn finish_shell_process(
 }
 
 async fn output_from_bounded_buffers(
-    exit_code: Option<i32>,
+    termination: ShellTermination,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stdout_truncated: Arc<Mutex<bool>>,
     stderr_truncated: Arc<Mutex<bool>>,
 ) -> CommandOutput {
-    let mut output = output_from_buffers(exit_code, stdout, stderr).await;
+    let mut output = output_from_buffers(termination.exit_code, stdout, stderr).await;
+    output.signal = termination.signal;
     output.stdout_truncated = *stdout_truncated.lock().await;
     output.stderr_truncated = *stderr_truncated.lock().await;
     output
@@ -654,7 +678,7 @@ fn child_process_group(child: &Child) -> Option<Pid> {
         .and_then(Pid::from_raw)
 }
 
-async fn kill_child(process: &mut ManagedChild) -> Option<i32> {
+async fn kill_child(process: &mut ManagedChild) -> ShellTermination {
     kill_process_group_if_available(process);
     let _ = process.child.start_kill();
     process
@@ -662,7 +686,17 @@ async fn kill_child(process: &mut ManagedChild) -> Option<i32> {
         .wait()
         .await
         .ok()
-        .and_then(|status| status.code())
+        .map(|status| ShellTermination {
+            exit_code: status.code(),
+            #[cfg(unix)]
+            signal: status.signal(),
+            #[cfg(not(unix))]
+            signal: None,
+        })
+        .unwrap_or(ShellTermination {
+            exit_code: None,
+            signal: None,
+        })
 }
 
 fn kill_process_group_if_available(process: &ManagedChild) {
@@ -752,10 +786,15 @@ fn spawn_managed_background_command_at_with_stream(
             let process = Arc::clone(&try_wait_process);
             Box::pin(async move {
                 let mut process = process.lock().await;
-                process
-                    .child
-                    .try_wait()
-                    .map(|status| status.and_then(|s| s.code()))
+                process.child.try_wait().map(|status| {
+                    status.map(|s| ShellTermination {
+                        exit_code: s.code(),
+                        #[cfg(unix)]
+                        signal: s.signal(),
+                        #[cfg(not(unix))]
+                        signal: None,
+                    })
+                })
             })
         }),
         cleanup: Arc::new(move || {

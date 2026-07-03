@@ -49,6 +49,46 @@ use crate::AgentEvent;
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Format a shell failure message from `exit_code` and optional Unix `signal`.
+///
+/// Produces a precise, actionable line for tool results so the model does not
+/// misdiagnose signal deaths (e.g. `SIGPIPE` from a closed pipe) as OOM or
+/// timeout. On Windows `signal` is always `None`, so no Unix-specific wording
+/// leaks across platforms.
+#[must_use]
+pub fn format_shell_failure(exit_code: Option<i32>, signal: Option<i32>) -> String {
+    if let Some(code) = exit_code {
+        return format!("Command failed with exit code: {code}.");
+    }
+    if let Some(sig) = signal {
+        let (name, hint) = signal_name_and_hint(sig);
+        return format!("Command terminated by signal {sig} ({name}){hint}.");
+    }
+    "Command terminated before returning an exit code.".to_owned()
+}
+
+/// Returns `(signal_name, human_readable_hint)` for common Unix signals.
+///
+/// Signal numbers 1–15 are identical on Linux and macOS; this function is only
+/// called on Unix (callers guard with `#[cfg(unix)]` or pass `None` on Windows).
+fn signal_name_and_hint(signal: i32) -> (&'static str, &'static str) {
+    match signal {
+        1 => ("SIGHUP", ""),
+        2 => ("SIGINT", " — interrupted by user"),
+        9 => (
+            "SIGKILL",
+            " — possibly killed by the OOM killer or manually",
+        ),
+        11 => ("SIGSEGV", " — process crashed (segmentation fault)"),
+        13 => (
+            "SIGPIPE",
+            " — likely because a downstream command in a pipe exited early (e.g. grep found a match)",
+        ),
+        15 => ("SIGTERM", " — timed out or killed gracefully"),
+        _ => ("unknown signal", ""),
+    }
+}
+
 pub use mcp::{
     HttpConfig, HttpOAuthConfig, McpClient, McpError, McpResourceContent, McpResourceDefinition,
     McpResourceRead, McpToolDefinition, McpToolResponse, StdioConfig, build_authorization_manager,
@@ -70,7 +110,7 @@ pub use background_tasks::{
     task_list_result,
 };
 pub use bash::{
-    ShellExecutionRequest, ShellExecutionResult, execute_model_bash_for_runtime,
+    ShellExecutionRequest, ShellExecutionResult, ShellTermination, execute_model_bash_for_runtime,
     execute_shell_command,
 };
 mod workflow;
@@ -703,6 +743,49 @@ mod tests {
             .await
             .expect("read output"),
             "hello\n"
+        );
+    }
+
+    #[test]
+    fn format_shell_failure_nonzero_exit_code() {
+        assert_eq!(
+            format_shell_failure(Some(1), None),
+            "Command failed with exit code: 1."
+        );
+        assert_eq!(
+            format_shell_failure(Some(127), None),
+            "Command failed with exit code: 127."
+        );
+    }
+
+    #[test]
+    fn format_shell_failure_sigpipe_includes_hint() {
+        let msg = format_shell_failure(None, Some(13));
+        assert!(msg.contains("signal 13"), "{msg}");
+        assert!(msg.contains("SIGPIPE"), "{msg}");
+        assert!(msg.contains("pipe exited early"), "{msg}");
+    }
+
+    #[test]
+    fn format_shell_failure_sigkill_includes_hint() {
+        let msg = format_shell_failure(None, Some(9));
+        assert!(msg.contains("signal 9"), "{msg}");
+        assert!(msg.contains("SIGKILL"), "{msg}");
+        assert!(msg.contains("OOM"), "{msg}");
+    }
+
+    #[test]
+    fn format_shell_failure_unknown_signal() {
+        let msg = format_shell_failure(None, Some(99));
+        assert!(msg.contains("signal 99"), "{msg}");
+        assert!(msg.contains("unknown signal"), "{msg}");
+    }
+
+    #[test]
+    fn format_shell_failure_no_code_no_signal() {
+        assert_eq!(
+            format_shell_failure(None, None),
+            "Command terminated before returning an exit code."
         );
     }
 }

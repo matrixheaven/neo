@@ -254,6 +254,7 @@ impl TranscriptPane {
             AgentEvent::ShellCommandFinished {
                 id,
                 exit_code,
+                signal,
                 stdout,
                 stderr,
                 truncated,
@@ -266,6 +267,7 @@ impl TranscriptPane {
                         self.finish_shell_command(
                             id.clone(),
                             *exit_code,
+                            *signal,
                             stdout,
                             stderr,
                             *truncated,
@@ -276,6 +278,7 @@ impl TranscriptPane {
                         self.finish_user_shell_command(
                             id,
                             *exit_code,
+                            *signal,
                             stdout,
                             stderr,
                             *truncated,
@@ -611,16 +614,18 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_shell_command(
         &mut self,
         id: String,
         exit_code: Option<i32>,
+        signal: Option<i32>,
         stdout: &str,
         stderr: &str,
         truncated: bool,
         outcome: &ShellCommandOutcome,
     ) {
-        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated, outcome);
+        let detail = shell_finished_detail(exit_code, signal, stdout, stderr, truncated, outcome);
         self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
         if let Some(tool) = self.transcript.tool_mut(&id) {
             let is_error = exit_code != Some(0)
@@ -634,20 +639,22 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_user_shell_command(
         &mut self,
         id: &str,
         exit_code: Option<i32>,
+        signal: Option<i32>,
         stdout: &str,
         stderr: &str,
         truncated: bool,
         outcome: ShellCommandOutcome,
     ) {
         if let Some(shell_run) = self.transcript.shell_run_mut(id) {
-            shell_run.finish(stdout, stderr, exit_code, outcome, truncated);
+            shell_run.finish(stdout, stderr, exit_code, signal, outcome, truncated);
         } else {
             self.transcript.push_shell_run(ShellRunComponent::finished(
-                id, "", stdout, stderr, exit_code, outcome, truncated,
+                id, "", stdout, stderr, exit_code, signal, outcome, truncated,
             ));
         }
         self.mark_dirty();
@@ -670,15 +677,16 @@ impl TranscriptPane {
 
 fn shell_finished_detail(
     exit_code: Option<i32>,
+    signal: Option<i32>,
     stdout: &str,
     stderr: &str,
     truncated: bool,
     outcome: &ShellCommandOutcome,
 ) -> String {
     let mut detail = String::new();
-    for line in
-        super::shell_run::finished_plain_lines(stdout, stderr, exit_code, outcome, truncated)
-    {
+    for line in super::shell_run::finished_plain_lines(
+        stdout, stderr, exit_code, signal, outcome, truncated,
+    ) {
         if !detail.ends_with('\n') && !detail.is_empty() {
             detail.push('\n');
         }

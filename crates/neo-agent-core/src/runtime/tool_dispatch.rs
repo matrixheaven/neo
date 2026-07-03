@@ -80,13 +80,13 @@ fn prepare_tool_calls_for_execution<'a>(
         .iter()
         .map(|tool_call| {
             let prepared = prepare_tool_arguments(tool_call, tool_specs);
-            if let Ok(ref parsed) = prepared {
-                if let Some(warning) = &parsed.warning {
-                    eprintln!(
-                        "[warn] tool call '{}' arguments repaired: {}",
-                        parsed.name, warning
-                    );
-                }
+            if let Ok(ref parsed) = prepared
+                && let Some(warning) = &parsed.warning
+            {
+                eprintln!(
+                    "[warn] tool call '{}' arguments repaired: {}",
+                    parsed.name, warning
+                );
             }
             (tool_call, prepared)
         })
@@ -108,55 +108,25 @@ pub(super) async fn execute_tool_calls(
     let tool_specs = registry.specs();
     let prepared = prepare_tool_calls_for_execution(tool_calls, &tool_specs);
 
-    let results = if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
-        execute_tool_calls_sequential(
-            config,
-            Arc::clone(&model),
-            Arc::clone(&registry),
-            skills,
-            turn,
-            &prepared,
-            emitter,
-            cancel_token,
-            process_supervisor,
-        )
-        .await
-    } else if prepared.iter().any(|(tool_call, parsed)| {
-        let prep = match parsed {
-            Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
-            Err(_) => return false, // invalid args bypass scheduling — handled inline
-        };
-        scheduling_class_for_preparation(
-            config,
-            tool_call,
-            &prep,
-            parsed_prepared_arguments(parsed),
-        ) == ToolSchedulingClass::BlockingDialog
-    }) {
-        execute_tool_calls_sequential(
-            config,
-            Arc::clone(&model),
-            Arc::clone(&registry),
-            skills,
-            turn,
-            &prepared,
-            emitter,
-            cancel_token,
-            process_supervisor,
-        )
-        .await
-    } else if prepared.iter().any(|(tool_call, parsed)| {
-        let prep = match parsed {
-            Ok(prepared) => permission_preparation_for_mode(config, tool_call, &prepared.arguments),
-            Err(_) => return false,
-        };
-        scheduling_class_for_preparation(
-            config,
-            tool_call,
-            &prep,
-            parsed_prepared_arguments(parsed),
-        ) == ToolSchedulingClass::Exclusive
-    }) {
+    let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
+        || prepared.iter().any(|(tool_call, parsed)| {
+            let prep = match parsed {
+                Ok(prepared) => {
+                    permission_preparation_for_mode(config, tool_call, &prepared.arguments)
+                }
+                Err(_) => return false, // invalid args bypass scheduling — handled inline
+            };
+            let scheduling = scheduling_class_for_preparation(
+                config,
+                tool_call,
+                &prep,
+                parsed_prepared_arguments(parsed),
+            );
+            scheduling == ToolSchedulingClass::BlockingDialog
+                || scheduling == ToolSchedulingClass::Exclusive
+        });
+
+    let results = if needs_sequential {
         execute_tool_calls_sequential(
             config,
             Arc::clone(&model),

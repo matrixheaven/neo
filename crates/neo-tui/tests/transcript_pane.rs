@@ -1053,6 +1053,7 @@ fn transcript_does_not_render_duplicate_bash_queued_and_used_for_same_id() {
         turn: 1,
         id: "bash-1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: "hi\n".to_owned(),
         stderr: String::new(),
         truncated: false,

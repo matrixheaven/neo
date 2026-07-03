@@ -5746,6 +5746,7 @@ async fn auto_mode_approves_bash_without_approval() {
         turn: 1,
         id: "tool_1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: "auto-ok".to_owned(),
         stderr: String::new(),
         truncated: false,

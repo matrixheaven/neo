@@ -174,6 +174,8 @@ pub enum AgentEvent {
         turn: u32,
         id: String,
         exit_code: Option<i32>,
+        /// Unix signal number when the process was killed by a signal.
+        signal: Option<i32>,
         stdout: String,
         stderr: String,
         truncated: bool,

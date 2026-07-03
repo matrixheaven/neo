@@ -134,73 +134,6 @@ pub(super) fn expand_slash_skill(
     Ok((expanded, invocation.raw_arguments))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inline_skill_directive_parser_handles_single_skill() {
-        let parsed = parse_inline_skill_directives("/skill:foo hello").expect("skill directive");
-
-        assert_eq!(parsed.names(), ["foo"]);
-        assert_eq!(parsed.body, "hello");
-        assert_eq!(parsed.invocations[0].name, "foo");
-        assert_eq!(parsed.invocations[0].args, "hello");
-    }
-
-    #[test]
-    fn inline_skill_directive_parser_keeps_prefix_text() {
-        let parsed =
-            parse_inline_skill_directives("foo bar /skill:foo hello").expect("skill directive");
-
-        assert_eq!(parsed.names(), ["foo"]);
-        assert_eq!(parsed.body, "foo bar hello");
-        assert_eq!(parsed.invocations[0].args, "hello");
-    }
-
-    #[test]
-    fn inline_skill_directive_parser_aggregates_multiple_skills() {
-        let input = "\
-foo
-bar
-/skill:skill_one test test test
-bonjour
-hello
-/skill:skill_two test test test test
-hola
-amigo";
-
-        let parsed = parse_inline_skill_directives(input).expect("skill directives");
-
-        assert_eq!(parsed.names(), ["skill_one", "skill_two"]);
-        assert_eq!(
-            parsed.body,
-            "\
-foo
-bar
-test test test
-bonjour
-hello
-test test test test
-hola
-amigo"
-        );
-        assert_eq!(parsed.invocations[0].args, "test test test");
-        assert_eq!(parsed.invocations[1].args, "test test test test");
-    }
-
-    #[test]
-    fn inline_skill_directive_parser_requires_prompt_start_or_whitespace_prefix() {
-        assert!(parse_inline_skill_directives("abc/skill:foo test").is_none());
-
-        let parsed = parse_inline_skill_directives("abc /skill:foo test").expect("skill directive");
-
-        assert_eq!(parsed.names(), ["foo"]);
-        assert_eq!(parsed.body, "abc test");
-        assert_eq!(parsed.invocations[0].args, "test");
-    }
-}
-
 pub(super) const fn prompt_edit_for_action(
     action: KeybindingAction,
 ) -> Option<PromptEdit<'static>> {
@@ -638,5 +571,72 @@ impl InteractiveController {
         if let Err(error) = (self.clipboard_writer)(copied) {
             self.push_status(format!("Clipboard copy failed: {error}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_skill_directive_parser_handles_single_skill() {
+        let parsed = parse_inline_skill_directives("/skill:foo hello").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "hello");
+        assert_eq!(parsed.invocations[0].name, "foo");
+        assert_eq!(parsed.invocations[0].args, "hello");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_keeps_prefix_text() {
+        let parsed =
+            parse_inline_skill_directives("foo bar /skill:foo hello").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "foo bar hello");
+        assert_eq!(parsed.invocations[0].args, "hello");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_aggregates_multiple_skills() {
+        let input = "\
+foo
+bar
+/skill:skill_one test test test
+bonjour
+hello
+/skill:skill_two test test test test
+hola
+amigo";
+
+        let parsed = parse_inline_skill_directives(input).expect("skill directives");
+
+        assert_eq!(parsed.names(), ["skill_one", "skill_two"]);
+        assert_eq!(
+            parsed.body,
+            "\
+foo
+bar
+test test test
+bonjour
+hello
+test test test test
+hola
+amigo"
+        );
+        assert_eq!(parsed.invocations[0].args, "test test test");
+        assert_eq!(parsed.invocations[1].args, "test test test test");
+    }
+
+    #[test]
+    fn inline_skill_directive_parser_requires_prompt_start_or_whitespace_prefix() {
+        assert!(parse_inline_skill_directives("abc/skill:foo test").is_none());
+
+        let parsed = parse_inline_skill_directives("abc /skill:foo test").expect("skill directive");
+
+        assert_eq!(parsed.names(), ["foo"]);
+        assert_eq!(parsed.body, "abc test");
+        assert_eq!(parsed.invocations[0].args, "test");
     }
 }

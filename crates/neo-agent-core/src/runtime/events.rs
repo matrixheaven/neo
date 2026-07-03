@@ -258,46 +258,6 @@ pub(super) fn emit_shell_started(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use tokio::sync::mpsc;
-
-    use super::*;
-
-    #[test]
-    fn complete_goal_result_with_next_goal_emits_finished_then_started() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut emitter = EventEmitter::new(tx, AgentContext::new());
-        let result = ToolResult::ok("complete").with_details(json!({
-            "kind": "goal",
-            "event": "updated",
-            "objective": "First goal",
-            "status": "complete",
-            "next_objective": "Second goal"
-        }));
-
-        emit_goal_event_from_result(7, "UpdateGoalStatus", &result, &mut emitter);
-
-        assert_eq!(
-            rx.try_recv().expect("finished").expect("event"),
-            AgentEvent::GoalFinished {
-                turn: 7,
-                objective: "First goal".to_owned(),
-                outcome: "complete".to_owned(),
-            }
-        );
-        assert_eq!(
-            rx.try_recv().expect("started").expect("event"),
-            AgentEvent::GoalStarted {
-                turn: 7,
-                objective: "Second goal".to_owned(),
-            }
-        );
-        assert!(rx.try_recv().is_err());
-    }
-}
-
 pub(super) fn emit_shell_finished(
     turn: u32,
     tool_call: &AgentToolCall,
@@ -324,6 +284,10 @@ pub(super) fn emit_shell_finished(
         .get("exit_code")
         .and_then(serde_json::Value::as_i64)
         .and_then(|code| i32::try_from(code).ok());
+    let signal = details
+        .get("signal")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|sig| i32::try_from(sig).ok());
     let truncated = details
         .get("truncated")
         .and_then(serde_json::Value::as_bool)
@@ -333,6 +297,7 @@ pub(super) fn emit_shell_finished(
         turn,
         id: tool_call.id.clone(),
         exit_code,
+        signal,
         stdout,
         stderr,
         truncated,
@@ -480,4 +445,44 @@ pub(super) fn make_tool_update_callback(
             },
         });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[test]
+    fn complete_goal_result_with_next_goal_emits_finished_then_started() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+        let result = ToolResult::ok("complete").with_details(json!({
+            "kind": "goal",
+            "event": "updated",
+            "objective": "First goal",
+            "status": "complete",
+            "next_objective": "Second goal"
+        }));
+
+        emit_goal_event_from_result(7, "UpdateGoalStatus", &result, &mut emitter);
+
+        assert_eq!(
+            rx.try_recv().expect("finished").expect("event"),
+            AgentEvent::GoalFinished {
+                turn: 7,
+                objective: "First goal".to_owned(),
+                outcome: "complete".to_owned(),
+            }
+        );
+        assert_eq!(
+            rx.try_recv().expect("started").expect("event"),
+            AgentEvent::GoalStarted {
+                turn: 7,
+                objective: "Second goal".to_owned(),
+            }
+        );
+        assert!(rx.try_recv().is_err());
+    }
 }

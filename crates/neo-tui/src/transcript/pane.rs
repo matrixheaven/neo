@@ -348,6 +348,7 @@ impl TranscriptPane {
                     stdout.clone(),
                     stderr.clone(),
                     *exit_code,
+                    None,
                     outcome.clone(),
                     *truncated,
                 )));

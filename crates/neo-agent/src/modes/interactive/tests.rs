@@ -350,6 +350,7 @@ fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
         turn: 1,
         id: "shell-1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: String::new(),
         stderr: String::new(),
         truncated: false,

@@ -74,6 +74,7 @@ fn shell_events_include_origin_and_outcome() {
         turn: 1,
         id: "shell-1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: "me\n".to_owned(),
         stderr: String::new(),
         truncated: false,

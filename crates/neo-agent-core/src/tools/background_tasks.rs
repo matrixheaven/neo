@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::{io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
+use super::bash::ShellTermination;
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::QuestionEventData;
 
@@ -69,6 +70,9 @@ impl BackgroundTaskStatus {
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
     pub exit_code: Option<i32>,
+    /// Unix signal number when the process was killed by a signal (`None` on
+    /// Windows or for normal exits).
+    pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
     pub stdout_truncated: bool,
@@ -82,8 +86,10 @@ pub struct ManagedBackgroundCommand {
     pub stderr_truncated: Arc<Mutex<bool>>,
     pub stdout_task: JoinHandle<()>,
     pub stderr_task: JoinHandle<()>,
-    pub try_wait: Arc<dyn Fn() -> BoxFuture<'static, std::io::Result<Option<i32>>> + Send + Sync>,
-    pub cleanup: Arc<dyn Fn() -> BoxFuture<'static, Option<i32>> + Send + Sync>,
+    pub try_wait: Arc<
+        dyn Fn() -> BoxFuture<'static, std::io::Result<Option<ShellTermination>>> + Send + Sync,
+    >,
+    pub cleanup: Arc<dyn Fn() -> BoxFuture<'static, ShellTermination> + Send + Sync>,
     pub drain: Arc<dyn Fn(JoinHandle<()>) -> BoxFuture<'static, ()> + Send + Sync>,
 }
 
@@ -762,11 +768,11 @@ impl BackgroundTaskManager {
                 description,
                 command,
             } => {
-                let exit_code = (command.cleanup)().await;
+                let termination = (command.cleanup)().await;
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
                 let output = output_from_command_buffers(
-                    exit_code,
+                    termination,
                     command.stdout,
                     command.stderr,
                     command.stdout_truncated,
@@ -856,7 +862,7 @@ impl BackgroundTaskManager {
                 started_at: Instant,
                 description: String,
                 command: ManagedBackgroundCommand,
-                exit_code: Option<i32>,
+                termination: ShellTermination,
             },
         }
 
@@ -972,7 +978,7 @@ impl BackgroundTaskManager {
                     }
                 }
                 BackgroundTaskState::BashRunning(command) => match (command.try_wait)().await {
-                    Ok(Some(status)) => {
+                    Ok(Some(termination)) => {
                         let record = tasks.remove(task_id).expect("record still exists");
                         let BackgroundTaskState::BashRunning(command) = record.state else {
                             unreachable!();
@@ -981,7 +987,7 @@ impl BackgroundTaskManager {
                             started_at: record.started_at,
                             description: record.description,
                             command,
-                            exit_code: Some(status),
+                            termination,
                         }
                     }
                     Ok(None) | Err(_) => SnapshotAction::Running {
@@ -1017,7 +1023,10 @@ impl BackgroundTaskManager {
                     description,
                     elapsed: started_at.elapsed(),
                     output: Some(output_from_locked_buffers(
-                        None,
+                        ShellTermination {
+                            exit_code: None,
+                            signal: None,
+                        },
                         &stdout,
                         &stderr,
                         stdout_truncated,
@@ -1033,11 +1042,11 @@ impl BackgroundTaskManager {
                 description,
                 command,
             } => {
-                let exit_code = (command.cleanup)().await;
+                let termination = (command.cleanup)().await;
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
                 let output = output_from_command_buffers(
-                    exit_code,
+                    termination,
                     command.stdout,
                     command.stderr,
                     command.stdout_truncated,
@@ -1075,12 +1084,12 @@ impl BackgroundTaskManager {
                 started_at,
                 description,
                 command,
-                exit_code,
+                termination,
             } => {
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
                 let output = output_from_command_buffers(
-                    exit_code,
+                    termination,
                     command.stdout,
                     command.stderr,
                     command.stdout_truncated,
@@ -1392,24 +1401,23 @@ impl Tool for TaskStopTool {
                     .snapshot(&input.task_id)
                     .await
                     .is_ok_and(|snap| snap.kind == BackgroundTaskKind::Delegate);
-                if is_delegate {
-                    if let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id) {
-                        ctx.background_tasks
-                            .finish_delegate(&input.task_id, snapshot)
-                            .await;
-                        return ctx
-                            .background_tasks
-                            .output(
-                                &input.task_id,
-                                false,
-                                Duration::from_secs(0),
-                                max_output_bytes,
-                            )
-                            .await;
-                    }
-                    // Agent already terminal; fall through to stop() for the
-                    // already-terminal error message.
+                if is_delegate
+                    && let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id)
+                {
+                    ctx.background_tasks
+                        .finish_delegate(&input.task_id, snapshot)
+                        .await;
+                    return ctx
+                        .background_tasks
+                        .output(
+                            &input.task_id,
+                            false,
+                            Duration::from_secs(0),
+                            max_output_bytes,
+                        )
+                        .await;
                 }
+                // Delegate already terminal or non-delegate task: fall through to stop().
             }
             let result = ctx
                 .background_tasks
@@ -1539,13 +1547,11 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         }
         if output.exit_code != Some(0) && !matches!(snapshot.status, BackgroundTaskStatus::Running)
         {
-            let exit_label = output
-                .exit_code
-                .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+            let failure_msg = crate::tools::format_shell_failure(output.exit_code, output.signal);
             if !content.ends_with('\n') && !content.is_empty() {
                 content.push('\n');
             }
-            let _ = write!(content, "Command failed with exit code: {exit_label}.");
+            content.push_str(&failure_msg);
         }
         if truncated {
             if !content.ends_with('\n') && !content.is_empty() {
@@ -1554,6 +1560,7 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
             content.push_str("[output truncated]");
         }
         details["exit_code"] = json!(output.exit_code);
+        details["signal"] = json!(output.signal);
         details["stdout"] = json!(cap_output_details(&output.stdout, max_output_bytes));
         details["stderr"] = json!(cap_output_details(&output.stderr, max_output_bytes));
         details["stdout_truncated"] = json!(output.stdout_truncated || stdout_truncated);
@@ -1610,11 +1617,20 @@ pub async fn output_from_buffers(
 ) -> CommandOutput {
     let stdout = stdout.lock().await;
     let stderr = stderr.lock().await;
-    output_from_locked_buffers(exit_code, &stdout, &stderr, false, false)
+    output_from_locked_buffers(
+        ShellTermination {
+            exit_code,
+            signal: None,
+        },
+        &stdout,
+        &stderr,
+        false,
+        false,
+    )
 }
 
 pub async fn output_from_command_buffers(
-    exit_code: Option<i32>,
+    termination: ShellTermination,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stdout_truncated: Arc<Mutex<bool>>,
@@ -1625,7 +1641,7 @@ pub async fn output_from_command_buffers(
     let stdout = stdout.lock().await;
     let stderr = stderr.lock().await;
     output_from_locked_buffers(
-        exit_code,
+        termination,
         &stdout,
         &stderr,
         stdout_truncated,
@@ -1634,14 +1650,15 @@ pub async fn output_from_command_buffers(
 }
 
 fn output_from_locked_buffers(
-    exit_code: Option<i32>,
+    termination: ShellTermination,
     stdout: &[u8],
     stderr: &[u8],
     stdout_truncated: bool,
     stderr_truncated: bool,
 ) -> CommandOutput {
     CommandOutput {
-        exit_code,
+        exit_code: termination.exit_code,
+        signal: termination.signal,
         stdout: String::from_utf8_lossy(stdout).into_owned(),
         stderr: String::from_utf8_lossy(stderr).into_owned(),
         stdout_truncated,
@@ -1713,11 +1730,26 @@ mod tests {
             stderr_task: tokio::spawn(async {}),
             try_wait: Arc::new(move || {
                 let exit_code = wait_exit_code;
-                Box::pin(async move { Ok(exit_code) })
+                Box::pin(async move {
+                    Ok(exit_code.map(|code| ShellTermination {
+                        exit_code: Some(code),
+                        signal: None,
+                    }))
+                })
             }),
             cleanup: Arc::new(move || {
                 let exit_code = cleanup_exit_code;
-                Box::pin(async move { exit_code })
+                Box::pin(async move {
+                    exit_code
+                        .map(|code| ShellTermination {
+                            exit_code: Some(code),
+                            signal: None,
+                        })
+                        .unwrap_or(ShellTermination {
+                            exit_code: None,
+                            signal: None,
+                        })
+                })
             }),
             drain: Arc::new(|handle| {
                 Box::pin(async move {

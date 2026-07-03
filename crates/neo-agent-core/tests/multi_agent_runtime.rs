@@ -164,7 +164,7 @@ fn replayed_delegate_snapshot_can_be_resumed_after_session_restore() {
     let runtime = MultiAgentRuntime::new();
     let snapshot = runtime.start_foreground_delegate_for_test("audit session paths");
     let agent_id = snapshot.id.as_str().to_owned();
-    let events = vec![AgentEvent::DelegateFinished {
+    let events = [AgentEvent::DelegateFinished {
         turn: 3,
         agent: snapshot,
     }];
@@ -195,7 +195,7 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
     let runtime = MultiAgentRuntime::new();
     let snapshot = runtime.start_foreground_delegate_for_test("resume interrupted audit");
     let agent_id = snapshot.id.as_str().to_owned();
-    let events = vec![AgentEvent::DelegateStarted {
+    let events = [AgentEvent::DelegateStarted {
         turn: 3,
         agent: snapshot,
     }];
@@ -355,7 +355,7 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
     let agent_id = replayed_snapshot.id.as_str().to_owned();
     replayed_snapshot.prior_messages.clear();
     let restored = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
-    let events = vec![AgentEvent::DelegateFinished {
+    let events = [AgentEvent::DelegateFinished {
         turn: 1,
         agent: replayed_snapshot,
     }];
@@ -641,7 +641,7 @@ fn replayed_swarm_marks_running_children_lost_and_refreshes_aggregate() {
     let snapshot = runtime
         .swarm_snapshot(&swarm_id)
         .expect("source swarm snapshot");
-    let events = vec![AgentEvent::DelegateSwarmStarted {
+    let events = [AgentEvent::DelegateSwarmStarted {
         turn: 4,
         swarm: snapshot,
     }];

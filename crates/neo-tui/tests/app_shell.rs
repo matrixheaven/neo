@@ -1011,6 +1011,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         turn: 1,
         id: "shell-1".to_owned(),
         exit_code: Some(0),
+        signal: None,
         stdout: "ok".to_owned(),
         stderr: String::new(),
         truncated: false,

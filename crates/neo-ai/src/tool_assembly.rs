@@ -154,30 +154,29 @@ fn update_slot(slot: &mut ToolCallSlot, chunk: ToolCallChunk) -> Vec<ToolCallAss
     if slot.name.is_none() {
         slot.name = chunk.name;
     }
-    if !slot.started {
-        if let (Some(id), Some(name)) = (slot.stable_id.clone(), slot.name.clone()) {
-            slot.started = true;
-            out.push(ToolCallAssemblyEvent::Start {
-                id: id.clone(),
-                name,
+    if !slot.started
+        && let (Some(id), Some(name)) = (slot.stable_id.clone(), slot.name.clone())
+    {
+        slot.started = true;
+        out.push(ToolCallAssemblyEvent::Start {
+            id: id.clone(),
+            name,
+        });
+        if !slot.raw_arguments.is_empty() {
+            out.push(ToolCallAssemblyEvent::ArgsDelta {
+                id,
+                json_fragment: slot.raw_arguments.clone(),
             });
-            if !slot.raw_arguments.is_empty() {
-                out.push(ToolCallAssemblyEvent::ArgsDelta {
-                    id,
-                    json_fragment: slot.raw_arguments.clone(),
-                });
-            }
         }
     }
-    if let Some(fragment) = chunk.arguments_fragment {
-        if let Some(delta) = merge_argument_fragment(&mut slot.raw_arguments, &fragment) {
-            if slot.started {
-                out.push(ToolCallAssemblyEvent::ArgsDelta {
-                    id: slot.stable_id.clone().expect("started tool call has an id"),
-                    json_fragment: delta,
-                });
-            }
-        }
+    if let Some(fragment) = chunk.arguments_fragment
+        && let Some(delta) = merge_argument_fragment(&mut slot.raw_arguments, &fragment)
+        && slot.started
+    {
+        out.push(ToolCallAssemblyEvent::ArgsDelta {
+            id: slot.stable_id.clone().expect("started tool call has an id"),
+            json_fragment: delta,
+        });
     }
     out
 }

@@ -606,14 +606,13 @@ impl MultiAgentRuntime {
                     });
                 }
                 // Sync the swarm child snapshot with the runtime agent.
-                if let Some(agent) = state.agents.get(agent_id) {
-                    if let Some(child) = snapshot
+                if let Some(agent) = state.agents.get(agent_id)
+                    && let Some(child) = snapshot
                         .children
                         .iter_mut()
                         .find(|c| c.agent.id.as_str() == agent_id)
-                    {
-                        child.agent = agent.clone();
-                    }
+                {
+                    child.agent = agent.clone();
                 }
             }
             if !changed {
@@ -1772,13 +1771,13 @@ async fn run_agent_snapshot(
                 return Err(err.to_string());
             }
         };
-        if let Some(child_writer) = writer.as_mut() {
-            if let Err(err) = child_writer.append_event(&event).await {
-                cancel_token.cancel();
-                drain_child_stream(&mut stream).await;
-                let _ = flush_child_writer(&mut writer).await;
-                return Err(err.to_string());
-            }
+        if let Some(child_writer) = writer.as_mut()
+            && let Err(err) = child_writer.append_event(&event).await
+        {
+            cancel_token.cancel();
+            drain_child_stream(&mut stream).await;
+            let _ = flush_child_writer(&mut writer).await;
+            return Err(err.to_string());
         }
         on_event(&event);
         events.push(event);

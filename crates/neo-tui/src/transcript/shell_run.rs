@@ -1,4 +1,5 @@
 use neo_agent_core::ShellCommandOutcome;
+use neo_agent_core::tools::format_shell_failure;
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
@@ -15,6 +16,8 @@ pub enum ShellRunState {
         stdout: String,
         stderr: String,
         exit_code: Option<i32>,
+        /// Unix signal number (`None` on Windows or for normal exits).
+        signal: Option<i32>,
         outcome: ShellCommandOutcome,
         truncated: bool,
     },
@@ -44,12 +47,14 @@ impl ShellRunComponent {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn finished(
         id: impl Into<String>,
         command: impl Into<String>,
         stdout: impl Into<String>,
         stderr: impl Into<String>,
         exit_code: Option<i32>,
+        signal: Option<i32>,
         outcome: ShellCommandOutcome,
         truncated: bool,
     ) -> Self {
@@ -60,6 +65,7 @@ impl ShellRunComponent {
                 stdout: stdout.into(),
                 stderr: stderr.into(),
                 exit_code,
+                signal,
                 outcome,
                 truncated,
             },
@@ -93,6 +99,7 @@ impl ShellRunComponent {
         stdout: impl Into<String>,
         stderr: impl Into<String>,
         exit_code: Option<i32>,
+        signal: Option<i32>,
         outcome: ShellCommandOutcome,
         truncated: bool,
     ) {
@@ -100,6 +107,7 @@ impl ShellRunComponent {
             stdout: stdout.into(),
             stderr: stderr.into(),
             exit_code,
+            signal,
             outcome,
             truncated,
         };
@@ -136,6 +144,7 @@ impl ShellRunComponent {
                 stdout,
                 stderr,
                 exit_code,
+                signal,
                 outcome,
                 truncated,
             } => {
@@ -143,6 +152,7 @@ impl ShellRunComponent {
                     stdout,
                     stderr,
                     *exit_code,
+                    *signal,
                     outcome,
                     *truncated,
                     width,
@@ -170,10 +180,13 @@ impl ShellRunComponent {
                 stdout,
                 stderr,
                 exit_code,
+                signal,
                 outcome,
                 truncated,
             } => {
-                for line in finished_plain_lines(stdout, stderr, *exit_code, outcome, *truncated) {
+                for line in
+                    finished_plain_lines(stdout, stderr, *exit_code, *signal, outcome, *truncated)
+                {
                     text.push('\n');
                     text.push_str(&line);
                 }
@@ -202,6 +215,7 @@ fn render_finished_output(
     stdout: &str,
     stderr: &str,
     exit_code: Option<i32>,
+    signal: Option<i32>,
     outcome: &ShellCommandOutcome,
     truncated: bool,
     width: usize,
@@ -214,7 +228,7 @@ fn render_finished_output(
     } else {
         error_style
     };
-    let lines = finished_plain_lines(stdout, stderr, exit_code, outcome, truncated);
+    let lines = finished_plain_lines(stdout, stderr, exit_code, signal, outcome, truncated);
     if lines.is_empty() {
         return Vec::new();
     }
@@ -238,6 +252,7 @@ pub(crate) fn finished_plain_lines(
     stdout: &str,
     stderr: &str,
     exit_code: Option<i32>,
+    signal: Option<i32>,
     outcome: &ShellCommandOutcome,
     truncated: bool,
 ) -> Vec<String> {
@@ -254,9 +269,7 @@ pub(crate) fn finished_plain_lines(
         }
         ShellCommandOutcome::Completed => {
             if exit_code != Some(0) {
-                let exit_label =
-                    exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
-                lines.push(format!("Command failed with exit code: {exit_label}."));
+                lines.push(format_shell_failure(exit_code, signal));
             }
         }
     }
