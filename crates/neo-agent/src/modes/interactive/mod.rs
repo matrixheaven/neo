@@ -306,7 +306,7 @@ pub(crate) struct InteractiveController {
     #[cfg(test)]
     btw_client: Option<Arc<dyn neo_ai::ModelClient>>,
     pending_approvals: BTreeMap<String, PendingApprovalResponse>,
-    resolved_approvals: BTreeMap<String, PermissionApprovalDecision>,
+    resolved_approvals: BTreeMap<String, (PermissionApprovalDecision, Option<String>)>,
     /// Pending `AskUser` question response channels, keyed by question id.
     pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
     pending_question_prompts: BTreeMap<String, Vec<neo_agent_core::QuestionEventData>>,
@@ -1561,9 +1561,9 @@ impl InteractiveController {
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
-        if let Some(decision) = self.resolved_approvals.remove(&approval.id) {
+        if let Some((decision, feedback)) = self.resolved_approvals.remove(&approval.id) {
             if let Some(tx) = approval.feedback_tx {
-                let _ = tx.send(None);
+                let _ = tx.send(feedback);
             }
             if let Some(tx) = approval.selected_label_tx {
                 let _ = tx.send(None);

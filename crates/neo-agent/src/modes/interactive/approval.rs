@@ -151,7 +151,7 @@ impl InteractiveController {
             let _ = pending.decision_tx.send(decision);
         } else {
             self.resolved_approvals
-                .insert(result.request_id.clone(), decision);
+                .insert(result.request_id.clone(), (decision, feedback));
         }
     }
 }
