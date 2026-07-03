@@ -13,8 +13,7 @@ use super::events::{
     EventEmitter, emit_context_window_update, emit_goal_event_from_result, emit_todo_event,
 };
 use super::plan_orchestration::{
-    attach_enter_plan_details, attach_exit_plan_details, emit_plan_tool_event,
-    enter_plan_mode_state,
+    attach_enter_plan_details, emit_plan_tool_event, enter_plan_mode_state,
 };
 use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
@@ -211,10 +210,6 @@ pub(super) async fn run_agent_turn(
             final_stop_reason = StopReason::Cancelled;
             break;
         }
-        // Attach plan details + the selected-option prefix BEFORE appending the
-        // tool results to the context so the next model turn sees the prefix,
-        // and before the side-effect events flip plan mode off.
-        attach_exit_plan_details(&config, &mut tool_results);
         // For EnterPlanMode: create the plan file and inject its path into the
         // tool result so the model knows where to write. Must happen before
         // append_tool_result_messages and before the duplicate enter in
