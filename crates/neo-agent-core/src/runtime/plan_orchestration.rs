@@ -8,7 +8,7 @@ pub(super) fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
     config
         .session_directory
         .as_deref()
-        .map(|dir| dir.join("plans"))
+        .map(crate::session::main_agent_plans_dir)
 }
 
 pub(super) fn attach_exit_plan_details(
@@ -165,4 +165,31 @@ pub(super) fn exit_plan_mode_has_reviewable_plan(config: &AgentConfig) -> bool {
         .ok()
         .flatten()
         .is_some_and(|data| !data.content.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+
+    use super::*;
+
+    fn test_config() -> AgentConfig {
+        AgentConfig::for_model(ModelSpec {
+            provider: ProviderId("test".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::Local,
+            capabilities: ModelCapabilities::chat(),
+        })
+    }
+
+    #[test]
+    fn plan_mode_plans_dir_lives_under_main_agent_record_dir() {
+        let session_dir = std::path::PathBuf::from("/tmp/session_123");
+        let config = test_config().with_session_directory(session_dir.clone());
+
+        assert_eq!(
+            plan_mode_plans_dir(&config),
+            Some(session_dir.join("agents").join("main").join("plans"))
+        );
+    }
 }

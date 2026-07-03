@@ -23,9 +23,9 @@ pub mod workspace;
 pub use agent_state::{SessionAgentKind, SessionAgentRecord, SessionState, SessionStateStore};
 pub use index::{SessionIndex, SessionIndexEntry, SessionIndexError};
 pub use layout::{
-    AGENTS_DIR, MAIN_AGENT_ID, SESSION_STATE_FILE, TASKS_DIR, WIRE_FILE, agent_record_dir,
-    agent_tasks_dir, agent_wire_path, agents_dir, main_agent_wire_path, relative_agent_record_dir,
-    session_state_path,
+    AGENTS_DIR, MAIN_AGENT_ID, PLANS_DIR, SESSION_STATE_FILE, TASKS_DIR, WIRE_FILE,
+    agent_plans_dir, agent_record_dir, agent_tasks_dir, agent_wire_path, agents_dir,
+    main_agent_plans_dir, main_agent_wire_path, relative_agent_record_dir, session_state_path,
 };
 pub use workspace::{
     encode_workdir_key, normalize_workdir, slugify_basename, workspace_sessions_dir,

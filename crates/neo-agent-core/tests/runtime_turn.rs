@@ -6,7 +6,7 @@ use neo_agent_core::{
     SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, StopReason, TodoEventData, Tool,
     ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
-    session::{JsonlSessionWriter, workspace_sessions_dir},
+    session::{JsonlSessionWriter, main_agent_plans_dir, workspace_sessions_dir},
     skills::SkillStore,
 };
 use neo_ai::{
@@ -4770,8 +4770,10 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -4853,8 +4855,10 @@ async fn exit_plan_mode_continues_loop_after_approval() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -4945,8 +4949,10 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -5146,8 +5152,10 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
 
     let harness = FakeHarness::from_turns([
         vec![
@@ -5299,8 +5307,10 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -5381,8 +5391,10 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -5451,8 +5463,10 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -5524,8 +5538,10 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
@@ -5599,8 +5615,10 @@ fn setup_active_plan(
         .path()
         .canonicalize()
         .expect("canonical workspace");
-    let plans_dir =
-        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
     let mut pm = config.plan_mode.write().expect("plan mode lock");

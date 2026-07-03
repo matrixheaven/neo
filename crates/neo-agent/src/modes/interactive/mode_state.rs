@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use neo_agent_core::{PermissionMode, goal::GoalManager};
+use neo_agent_core::{PermissionMode, goal::GoalManager, session::main_agent_plans_dir};
 use neo_tui::shell::{DevelopmentMode, GoalModeStatus};
 
 use super::InteractiveController;
@@ -86,7 +86,7 @@ impl InteractiveController {
     }
 
     fn plan_mode_plans_dir(&self) -> Option<PathBuf> {
-        Some(self.active_session_directory()?.join("plans"))
+        Some(main_agent_plans_dir(&self.active_session_directory()?))
     }
 
     pub(super) fn cycle_development_mode(&mut self) {
