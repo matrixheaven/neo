@@ -10719,3 +10719,65 @@ async fn shift_enter_inserts_newline_while_btw_panel_open() {
 
     assert_eq!(controller.chrome().prompt().text, "line1\nline2");
 }
+
+#[tokio::test]
+async fn slash_fork_forks_current_session_and_enters_child() {
+    let mut controller = InteractiveController::new_with_event_driver_and_forker(
+        "neo",
+        SESSION_A,
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| async move {
+            Ok(vec![AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            }])
+        },
+        PickerCatalogs {
+            session_items: Vec::new(),
+            session_error: None,
+            model_items: Vec::new(),
+        },
+        |_session_id| async move {
+            panic!("fork should not use the load_session callback");
+            #[allow(unreachable_code)]
+            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+        },
+        |parent_id| async move {
+            assert_eq!(parent_id, SESSION_A);
+            Ok(ForkedSessionTranscript::new(
+                SESSION_CHILD,
+                LoadedSessionTranscript::new(
+                    SESSION_CHILD,
+                    [
+                        format!("fork from session {SESSION_A}"),
+                        format!("switch to fork session {SESSION_CHILD}"),
+                    ],
+                    [AgentMessage::user_text("hello")],
+                ),
+            ))
+        },
+    );
+    controller.active_session_id = Some(SESSION_A.to_owned());
+
+    let consumed = controller.handle_slash_command("/fork").await;
+    assert!(consumed, "/fork should be consumed as a slash command");
+
+    assert_eq!(
+        controller.active_session_id(),
+        Some(SESSION_CHILD),
+        "active session switched to fork child"
+    );
+    assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
+    assert!(
+        transcript_has_status(&controller, &format!("fork from session {SESSION_A}")),
+        "transcript shows fork-from notice"
+    );
+    assert!(
+        transcript_has_status(
+            &controller,
+            &format!("switch to fork session {SESSION_CHILD}")
+        ),
+        "transcript shows switch-to notice"
+    );
+}
