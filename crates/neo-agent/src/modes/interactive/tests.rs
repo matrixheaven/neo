@@ -5843,6 +5843,24 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
         ),
     );
 
+    // Seed parent metadata so we can verify it is inherited by the fork.
+    SessionMetadataStore::new(&bucket_dir)
+        .record_activity(
+            SESSION_A,
+            Some("/fake/workspace".to_owned()),
+            Some("what is neo?".to_owned()),
+            "1000.000000000Z".to_owned(),
+        )
+        .expect("record parent activity");
+    SessionMetadataStore::new(&bucket_dir)
+        .record_title(
+            SESSION_A,
+            "Intro to neo".to_owned(),
+            Some("test-model".to_owned()),
+            "1000.000000000Z".to_owned(),
+        )
+        .expect("record parent title");
+
     let forked = fork_session_transcript(SESSION_A.to_owned(), &config)
         .await
         .expect("fork session");
@@ -5872,6 +5890,29 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
         .find(|session| session.id == forked.session_id)
         .expect("child listed");
     assert_eq!(child.parent_id.as_deref(), Some(SESSION_A));
+    // Fork inherits parent title with [fork] prefix.
+    assert_eq!(
+        child.title.as_deref(),
+        Some("[fork] Intro to neo"),
+        "child title should be [fork]-prefixed parent title"
+    );
+    // Fork inherits parent workspace and last_user_prompt.
+    assert_eq!(
+        child.workspace.as_deref(),
+        Some("/fake/workspace"),
+        "child inherits parent workspace"
+    );
+    assert_eq!(
+        child.last_user_prompt.as_deref(),
+        Some("what is neo?"),
+        "child inherits parent last_user_prompt"
+    );
+    // Fork updated_at is set (not empty / not epoch zero).
+    let child_ts = child.updated_at.as_deref().unwrap_or("");
+    assert!(
+        !child_ts.is_empty() && child_ts != "0" && child_ts != "0.000000000Z",
+        "child updated_at should be a real timestamp, got: {child_ts}"
+    );
 }
 
 #[tokio::test]
