@@ -2091,7 +2091,8 @@ async fn fork_session_transcript(
         .with_context(|| format!("failed to create local fork for session {parent_id}"))?;
     let child_id = session.id;
     let mut loaded = load_session_transcript(child_id.clone(), config).await?;
-    loaded.notices.insert(0, format!("forked from {parent_id}"));
+    loaded.notices.insert(0, format!("fork from session {parent_id}"));
+    loaded.notices.insert(1, format!("switch to fork session {child_id}"));
     Ok(ForkedSessionTranscript::new(child_id, loaded))
 }
 

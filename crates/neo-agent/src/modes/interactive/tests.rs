@@ -5847,7 +5847,11 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
     assert_eq!(forked.transcript.label, forked.session_id);
     assert_eq!(
         forked.transcript.notices.first().map(String::as_str),
-        Some(format!("forked from {SESSION_A}").as_str())
+        Some(format!("fork from session {SESSION_A}").as_str())
+    );
+    assert_eq!(
+        forked.transcript.notices.get(1).map(String::as_str),
+        Some(format!("switch to fork session {}", forked.session_id).as_str())
     );
     assert_eq!(forked.transcript.messages.len(), 2);
     assert!(
