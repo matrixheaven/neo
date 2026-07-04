@@ -1545,13 +1545,17 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
         },
         AiStreamEvent::ToolCallArgsDelta {
             id: "tool_swarm".to_owned(),
-            json_fragment: r#"{"description":"inspect modules","items":["api","tui","runtime"],"prompt_template":"Check {{item}}","max_concurrency":2}"#.to_owned(),
+            json_fragment: r#"{"description":"inspect modules","items":[{"title":"api","value":"api"},{"title":"tui","value":"tui"},{"title":"runtime","value":"runtime"}],"prompt_template":"Check {{item}}","max_concurrency":2}"#.to_owned(),
         },
         AiStreamEvent::ToolCallEnd {
             id: "tool_swarm".to_owned(),
             raw_arguments: json!({
                 "description": "inspect modules",
-                "items": ["api", "tui", "runtime"],
+                "items": [
+                    {"title": "api", "value": "api"},
+                    {"title": "tui", "value": "tui"},
+                    {"title": "runtime", "value": "runtime"}
+                ],
                 "prompt_template": "Check {{item}}",
                 "max_concurrency": 2
             }).to_string(),
@@ -1711,7 +1715,10 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
                 id: "tool_swarm".to_owned(),
                 raw_arguments: json!({
                     "description": "canonical title",
-                    "items": ["alpha", "beta"],
+                    "items": [
+                        {"title": "alpha", "value": "alpha"},
+                        {"title": "beta", "value": "beta"}
+                    ],
                     "prompt_template": "Review {{item}} for {{description}}",
                     "max_concurrency": 2
                 })
@@ -1826,7 +1833,7 @@ async fn delegate_tools_reject_empty_tasks_bad_context_and_zero_concurrency() {
             &ctx,
             json!({
                 "description": "bad concurrency",
-                "items": ["a"],
+                "items": [{"title": "a", "value": "a"}],
                 "prompt_template": "{{item}}",
                 "max_concurrency": 0
             }),
@@ -1841,7 +1848,7 @@ async fn delegate_tools_reject_empty_tasks_bad_context_and_zero_concurrency() {
             &ctx,
             json!({
                 "description": "legacy placeholder",
-                "items": ["a"],
+                "items": [{"title": "a", "value": "a"}],
                 "prompt_template": "Review {task}"
             }),
         )
@@ -2266,7 +2273,10 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
             &ctx,
             serde_json::json!({
                 "description": "shape check",
-                "items": ["a", "b"],
+                "items": [
+                    {"title": "a", "value": "a"},
+                    {"title": "b", "value": "b"}
+                ],
                 "prompt_template": "Inspect {{item}}",
                 "mode": "foreground"
             }),
@@ -2483,7 +2493,10 @@ async fn runtime_keeps_swarm_entity_after_foreground_completion() {
             &ctx,
             serde_json::json!({
                 "description": "count files",
-                "items": ["a", "b"],
+                "items": [
+                    {"title": "a", "value": "a"},
+                    {"title": "b", "value": "b"}
+                ],
                 "prompt_template": "Inspect {{item}} for {{description}}",
                 "mode": "foreground"
             }),
@@ -2524,7 +2537,7 @@ async fn delegate_swarm_rejects_unknown_template_placeholder() {
             &ctx,
             serde_json::json!({
                 "description": "audit",
-                "items": ["one"],
+                "items": [{"title": "one", "value": "one"}],
                 "prompt_template": "Audit {{task}} and {{item}}"
             }),
         )
@@ -2550,7 +2563,10 @@ async fn delegate_swarm_rejects_duplicate_expanded_prompts() {
             &ctx,
             serde_json::json!({
                 "description": "audit",
-                "items": ["same", "same"],
+                "items": [
+                    {"title": "same", "value": "same"},
+                    {"title": "same", "value": "same"}
+                ],
                 "prompt_template": "Audit {{item}}"
             }),
         )

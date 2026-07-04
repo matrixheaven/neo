@@ -1200,7 +1200,7 @@ impl Tool for BlockingProbeTool {
 
     fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            self.started.notify_waiters();
+            self.started.notify_one();
             let release = self
                 .release
                 .lock()

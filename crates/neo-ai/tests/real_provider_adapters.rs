@@ -1869,10 +1869,13 @@ async fn anthropic_messages_client_can_disable_thinking_replay() {
         .unwrap();
 
     let sent = server.requests().pop().unwrap();
-    assert_eq!(
-        sent.body["messages"][1]["content"],
-        json!([{ "type": "text", "text": "visible answer" }])
-    );
+    let content = sent.body["messages"][1]["content"].as_array().unwrap();
+    // Thinking blocks must be stripped; only the text block remains. The
+    // cache-control injector may add a `cache_control` key to the text block,
+    // so we assert on the meaningful fields rather than exact equality.
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "visible answer");
 }
 
 #[tokio::test]

@@ -302,7 +302,7 @@ async fn run_workflow_swarm_has_failures_reflects_child_failure() {
                 "script": r#"
                     local swarm = neo.swarm({
                         description = "audit modules",
-                        items = {"alpha", "beta"},
+                        items = {{title="alpha",value="alpha"},{title="beta",value="beta"}},
                         prompt_template = "Audit {{item}}",
                         max_concurrency = 2
                     })
@@ -433,7 +433,7 @@ async fn workflow_swarm_handle_exposes_items_and_serializes() {
                 "script": r#"
                     local s = neo.swarm({
                         description = "audit",
-                        items = { "core", "tui" },
+                        items = { {title="core",value="core"}, {title="tui",value="tui"} },
                         prompt_template = "Audit {{item}}",
                         mode = "foreground"
                     })

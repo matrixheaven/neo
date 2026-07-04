@@ -348,8 +348,12 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
 
     let sessions = session_files(temp.path());
     assert_eq!(sessions.len(), 1);
+    // Layout: sessions/<bucket>/<session_id>/agents/main/wire.jsonl
+    // so the session id is three parents above the wire file.
     let session_id = sessions[0]
         .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
         .and_then(std::path::Path::file_name)
         .and_then(std::ffi::OsStr::to_str)
         .expect("session id");
