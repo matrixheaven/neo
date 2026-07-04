@@ -137,6 +137,10 @@ pub struct SwarmEstimatorConfig {
     /// Catch-up animation window (ms) — member is considered to have pending
     /// catch-up for this long after its last activity.
     pub catchup_time_ms: u64,
+    /// If a running member has no fresh activity for this long, freeze its
+    /// time-credit at the stale boundary so wall-clock time cannot create fake
+    /// progress while the child is waiting on an external bottleneck.
+    pub stale_activity_after_ms: u64,
 }
 
 impl Default for SwarmEstimatorConfig {
@@ -150,6 +154,7 @@ impl Default for SwarmEstimatorConfig {
             workload_spread_factor: 1.5,
             initial_tool_credit_floor: 0.12,
             catchup_time_ms: 1_500,
+            stale_activity_after_ms: 45_000,
         }
     }
 }
@@ -212,19 +217,33 @@ impl SwarmProgressEstimator {
         self.ensure_member(member_id, now_ms);
         if let Some(member) = self.members.get_mut(member_id) {
             member.started_at_ms.get_or_insert(now_ms);
-            member.last_activity_ms = Some(now_ms);
+            member.last_activity_ms = Some(member.last_activity_ms.unwrap_or(now_ms).max(now_ms));
+        }
+    }
+
+    pub fn note_activity(&mut self, member_id: &str, activity_ms: u64) {
+        self.ensure_member(member_id, activity_ms);
+        if let Some(member) = self.members.get_mut(member_id) {
+            member.last_activity_ms = Some(
+                member
+                    .last_activity_ms
+                    .unwrap_or(activity_ms)
+                    .max(activity_ms),
+            );
         }
     }
 
     pub fn record_tool_call(&mut self, member_id: &str, tool_call_id: &str, now_ms: u64) {
-        self.mark_started(member_id, now_ms);
-        if let Some(member) = self.members.get_mut(member_id)
-            && member.tool_call_ids.insert(tool_call_id.to_owned())
-        {
-            member.last_activity_ms = Some(now_ms);
-            member.display_ticks = member
-                .display_ticks
-                .max(self.config.initial_tool_credit_floor);
+        self.ensure_member(member_id, now_ms);
+        if let Some(member) = self.members.get_mut(member_id) {
+            member.started_at_ms.get_or_insert(now_ms);
+            if member.tool_call_ids.insert(tool_call_id.to_owned()) {
+                member.last_activity_ms =
+                    Some(member.last_activity_ms.unwrap_or(now_ms).max(now_ms));
+                member.display_ticks = member
+                    .display_ticks
+                    .max(self.config.initial_tool_credit_floor);
+            }
         }
     }
 
@@ -336,7 +355,13 @@ impl SwarmProgressEstimator {
         let Some(started_at) = member.started_at_ms else {
             return (0.0, 0.0);
         };
-        let elapsed_ms = now_ms.saturating_sub(started_at) as f32;
+        let effective_now_ms = member
+            .last_activity_ms
+            .map(|last_activity_ms| {
+                now_ms.min(last_activity_ms.saturating_add(self.config.stale_activity_after_ms))
+            })
+            .unwrap_or(now_ms);
+        let elapsed_ms = effective_now_ms.saturating_sub(started_at) as f32;
         let (prior_median_ms, shape) = self.prior_duration();
         // Log-normal CDF: smooth S-curve from 0 → 1.  No hard stall at any
         // fixed threshold; growth decelerates naturally.

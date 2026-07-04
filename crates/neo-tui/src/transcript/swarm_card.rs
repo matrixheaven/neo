@@ -1,6 +1,6 @@
 use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, AgentSnapshot, AgentToolActivityPhase,
-    SwarmEstimatorPhase, SwarmProgressEstimator, SwarmSnapshot,
+    SwarmEstimatorConfig, SwarmEstimatorPhase, SwarmProgressEstimator, SwarmSnapshot,
 };
 
 use crate::primitive::theme::TuiTheme;
@@ -104,6 +104,17 @@ impl SwarmCardComponent {
             .iter()
             .filter(|child| matches!(child.agent.state, AgentLifecycleState::Queued))
             .count();
+        let all_terminal = self
+            .snapshot
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal());
+        let waiting = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| child_is_waiting(&child.agent, self.now_ms))
+            .count();
 
         lines.push(
             Line::from_spans(vec![
@@ -147,6 +158,7 @@ impl SwarmCardComponent {
         for (index, (child, progress)) in children.into_iter().enumerate() {
             let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
             let elapsed = display_elapsed(&child.agent, self.now_ms);
+            let waiting = child_is_waiting(&child.agent, self.now_ms);
             let branch = if index == last_child_index {
                 "└─"
             } else {
@@ -173,7 +185,7 @@ impl SwarmCardComponent {
                             child.agent.tool_count,
                             format_elapsed(elapsed.as_secs()),
                             child_token_stats(&child.agent),
-                            child_activity_summary(&child.agent, &child.item),
+                            child_activity_summary(&child.agent, &child.item, waiting),
                         ),
                         primary,
                     ),
@@ -209,6 +221,28 @@ impl SwarmCardComponent {
                         Style::default().fg(theme.status_warn),
                     ),
                     Span::styled("━".repeat(10), Style::default().fg(theme.status_warn)),
+                ])
+                .truncate_to_width(width),
+            );
+        } else if all_terminal {
+            lines.push(
+                Line::from_spans(vec![
+                    Span::styled(
+                        format!("✓ Done... {:.0}% ", progress * 100.0),
+                        Style::default().fg(theme.status_ok),
+                    ),
+                    progress_meter(progress, theme),
+                ])
+                .truncate_to_width(width),
+            );
+        } else if running > 0 && waiting == running {
+            lines.push(
+                Line::from_spans(vec![
+                    Span::styled(
+                        format!("● Waiting... {:.0}% ", progress * 100.0),
+                        Style::default().fg(theme.status_warn),
+                    ),
+                    progress_meter(progress, theme),
                 ])
                 .truncate_to_width(width),
             );
@@ -307,6 +341,8 @@ impl SwarmCardComponent {
                 self.estimator
                     .mark_started(id, child.agent.started_at_ms.unwrap_or(now_ms));
             }
+            self.estimator
+                .note_activity(id, child_activity_time_ms(&child.agent));
             if child.agent.state != AgentLifecycleState::Queued {
                 for tool_id in child_tool_ids(&child.agent) {
                     self.estimator.record_tool_call(id, tool_id, now_ms);
@@ -352,6 +388,14 @@ impl SwarmCardComponent {
     #[must_use]
     pub fn weighted_progress(&self) -> f32 {
         if self.cached_child_progress.is_empty() {
+            return 1.0;
+        }
+        if self
+            .snapshot
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal())
+        {
             return 1.0;
         }
         let mut weighted_sum = 0.0_f32;
@@ -443,7 +487,7 @@ fn child_token_stats(agent: &AgentSnapshot) -> String {
     parts.join(" · ")
 }
 
-fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str) -> String {
+fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: bool) -> String {
     if agent.state == AgentLifecycleState::Queued {
         if !agent.task_title.is_empty() {
             return compact_chars(&one_line(&agent.task_title), 96);
@@ -466,7 +510,11 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str) -> String 
             AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
         })
     {
-        return compact_chars(&format_tool_summary("Using", name, summary), 96);
+        let verb = if waiting { "waiting on" } else { "Using" };
+        return compact_chars(&format_tool_summary(verb, name, summary), 96);
+    }
+    if waiting {
+        return "waiting for activity".to_owned();
     }
     if let Some((name, summary)) = agent
         .activity
@@ -536,6 +584,22 @@ fn child_tool_ids(agent: &AgentSnapshot) -> impl Iterator<Item = &str> {
         AgentActivityKind::Tool { id, .. } => Some(id.as_str()),
         AgentActivityKind::Text { .. } => None,
     })
+}
+
+fn child_is_waiting(agent: &AgentSnapshot, now_ms: Option<u64>) -> bool {
+    if agent.state != AgentLifecycleState::Running {
+        return false;
+    }
+    let now_ms = now_ms.unwrap_or_else(|| child_activity_time_ms(agent));
+    now_ms.saturating_sub(child_activity_time_ms(agent))
+        > SwarmEstimatorConfig::default().stale_activity_after_ms
+}
+
+fn child_activity_time_ms(agent: &AgentSnapshot) -> u64 {
+    agent
+        .updated_at_ms
+        .max(agent.created_at_ms)
+        .max(agent.started_at_ms.unwrap_or(0))
 }
 
 fn estimator_phase(state: AgentLifecycleState) -> SwarmEstimatorPhase {

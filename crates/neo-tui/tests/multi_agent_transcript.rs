@@ -1965,6 +1965,24 @@ fn swarm_card_renders_progress_percent() {
 }
 
 #[test]
+fn swarm_card_renders_full_progress_when_all_children_are_done() {
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Completed,
+    ]);
+    let text =
+        plain(SwarmCardComponent::new(snapshot).render_with_theme(160, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("DelegateSwarm · done"), "{text}");
+    assert!(text.contains("100%"), "{text}");
+    assert!(text.contains("Done... 100%"), "{text}");
+    assert!(!text.contains("Working"), "{text}");
+}
+
+#[test]
 fn swarm_card_renders_child_cache_usage_when_reported() {
     use neo_agent_core::multi_agent::{AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot};
 
@@ -2031,6 +2049,57 @@ fn swarm_card_renders_suspended_rate_limit() {
     let text = rows.join("\n");
 
     assert!(text.contains("Suspended"), "{text}");
+}
+
+#[test]
+fn swarm_card_freezes_stale_running_child_progress_and_marks_waiting() {
+    let mut child = running_delegate();
+    child.tool_count = 0;
+    child.token_count = 0;
+    child.cache_read_token_count = 0;
+    child.cache_write_token_count = 0;
+    child.created_at_ms = 1;
+    child.updated_at_ms = 1;
+    child.started_at_ms = Some(1);
+    child.elapsed = Duration::from_secs(0);
+    child.latest_text = None;
+    child.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "icm-recall".to_owned(),
+            name: "Bash".to_owned(),
+            summary: Some("icm recall-context \"concurrency thread safety\" --limit 5".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+        },
+    }];
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "concurrency review".to_owned(),
+        agent: child,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
+    let snapshot = SwarmSnapshot {
+        swarm_id: "swarm-stale".to_owned(),
+        description: "Stale child test".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: 1,
+        aggregate,
+        children,
+    };
+    let mut card = SwarmCardComponent::new(snapshot);
+    let initial = card.weighted_progress();
+
+    card.on_render_tick(10 * 60 * 1_000);
+    let stale = card.weighted_progress();
+    let text = plain(card.render_with_theme(160, &TuiTheme::default())).join("\n");
+
+    assert!(
+        stale <= initial + 0.02,
+        "initial={initial} stale={stale}\n{text}"
+    );
+    assert!(text.contains("waiting"), "{text}");
 }
 
 fn completed_delegate() -> AgentSnapshot {
