@@ -280,6 +280,7 @@ mod tests {
             elapsed: Duration::from_secs(65),
             output: Some(CommandOutput {
                 exit_code: Some(0),
+                signal: None,
                 stdout: "ok\nnext".to_owned(),
                 stderr: "warn".to_owned(),
                 stdout_truncated: true,

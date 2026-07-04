@@ -212,9 +212,10 @@ impl SwarmAggregate {
                 AgentLifecycleState::Running => aggregate.running += 1,
                 AgentLifecycleState::Completed => aggregate.completed += 1,
                 AgentLifecycleState::Failed => aggregate.failed += 1,
-                AgentLifecycleState::Cancelled => aggregate.cancelled += 1,
+                AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => {
+                    aggregate.cancelled += 1;
+                }
                 AgentLifecycleState::TimedOut => aggregate.timed_out += 1,
-                AgentLifecycleState::Interrupted => aggregate.cancelled += 1,
             }
         }
         aggregate

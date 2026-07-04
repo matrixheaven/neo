@@ -1,6 +1,7 @@
 //! Terminal bell and desktop notification for task completion.
 
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
@@ -89,7 +90,7 @@ fn desktop_notification_command(
     {
         let mut script = format!("display notification {body:?} with title {title:?}");
         if let Some(subtitle) = subtitle.filter(|value| !value.is_empty()) {
-            script.push_str(&format!(" subtitle {subtitle:?}"));
+            let _ = write!(script, " subtitle {subtitle:?}");
         }
         return Some(NotificationCommand {
             program: "osascript",

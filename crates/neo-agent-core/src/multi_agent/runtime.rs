@@ -1621,8 +1621,10 @@ impl MultiAgentRuntime {
         };
         crate::session::JsonlSessionReader::replay_context(wire_path)
             .await
-            .map(|context| context.messages().to_vec())
-            .unwrap_or_else(|_| snapshot.prior_messages.clone())
+            .map_or_else(
+                |_| snapshot.prior_messages.clone(),
+                |context| context.messages().to_vec(),
+            )
     }
 
     async fn register_persistent_agent(

@@ -1040,13 +1040,14 @@ impl InteractiveController {
         mut suspend: impl FnMut() -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
-        render(&mut self.tui)?;
         // Cap render frequency to ~30 FPS (33ms). During streaming, multiple
         // TextDelta events arrive within one 50ms poll cycle; without a cap,
         // the loop renders on every iteration even when the previous render
         // was only milliseconds ago. The cap is a floor, not a ceiling —
         // user input (keyboard, resize) always renders immediately.
         const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+
+        render(&mut self.tui)?;
         let mut last_render = Instant::now();
         loop {
             match events.poll_input_event(Duration::from_millis(50))? {

@@ -355,12 +355,9 @@ impl SwarmProgressEstimator {
         let Some(started_at) = member.started_at_ms else {
             return (0.0, 0.0);
         };
-        let effective_now_ms = member
-            .last_activity_ms
-            .map(|last_activity_ms| {
-                now_ms.min(last_activity_ms.saturating_add(self.config.stale_activity_after_ms))
-            })
-            .unwrap_or(now_ms);
+        let effective_now_ms = member.last_activity_ms.map_or(now_ms, |last_activity_ms| {
+            now_ms.min(last_activity_ms.saturating_add(self.config.stale_activity_after_ms))
+        });
         let elapsed_ms = effective_now_ms.saturating_sub(started_at) as f32;
         let (prior_median_ms, shape) = self.prior_duration();
         // Log-normal CDF: smooth S-curve from 0 → 1.  No hard stall at any

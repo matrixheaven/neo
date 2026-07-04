@@ -106,17 +106,14 @@ impl From<AgentToolCall> for ToolCall {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageOrigin {
+    #[default]
     User,
-    Injection { variant: Arc<str> },
-}
-
-impl Default for MessageOrigin {
-    fn default() -> Self {
-        Self::User
-    }
+    Injection {
+        variant: Arc<str>,
+    },
 }
 
 impl MessageOrigin {
@@ -692,7 +689,7 @@ fn to_content_part(content: &Content) -> ContentPart {
             redacted,
         } => ContentPart::Thinking {
             text: text.to_string(),
-            signature: signature.as_ref().map(|s| s.to_string()),
+            signature: signature.as_ref().map(std::string::ToString::to_string),
             redacted: *redacted,
         },
         Content::Image { mime_type, data } => match data {

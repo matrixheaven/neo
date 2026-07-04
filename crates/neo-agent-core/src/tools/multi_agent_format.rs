@@ -92,7 +92,7 @@ pub(crate) fn agent_details(
     }
     if matches!(
         agent.terminal_reason,
-        Some(AgentTerminalReason::Lost) | Some(AgentTerminalReason::ProcessExited)
+        Some(AgentTerminalReason::Lost | AgentTerminalReason::ProcessExited)
     ) {
         value["resume_hint"] = json!(format!(
             "Delegate(resume=\"{}\", task=\"continue\")",

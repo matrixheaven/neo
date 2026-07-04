@@ -457,30 +457,49 @@ fn sse_payloads(body: &str) -> impl Iterator<Item = String> + '_ {
 
 struct ParseState {
     events: Vec<AiStreamEvent>,
-    started: bool,
-    reasoning_started: bool,
+    lifecycle: StreamLifecycle,
     tool_calls: StreamingToolCallAssembler,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
-    saw_finish_reason: bool,
-    provider_reported_tool_calls: bool,
+    finish_signal: FinishSignal,
     completed_tool_calls: usize,
+}
+
+#[derive(Default)]
+struct StreamLifecycle {
+    started: bool,
+    reasoning_started: bool,
     finished: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum FinishSignal {
+    #[default]
+    Missing,
+    Final,
+    ToolCalls,
+}
+
+impl FinishSignal {
+    const fn was_seen(self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+
+    const fn reported_tool_calls(self) -> bool {
+        matches!(self, Self::ToolCalls)
+    }
 }
 
 impl Default for ParseState {
     fn default() -> Self {
         Self {
             events: Vec::new(),
-            started: false,
-            reasoning_started: false,
+            lifecycle: StreamLifecycle::default(),
             tool_calls: StreamingToolCallAssembler::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
-            saw_finish_reason: false,
-            provider_reported_tool_calls: false,
+            finish_signal: FinishSignal::Missing,
             completed_tool_calls: 0,
-            finished: false,
         }
     }
 }
@@ -502,7 +521,6 @@ impl ParseState {
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.apply_finish_reason(reason);
-            self.saw_finish_reason = true;
         }
         if let Some(delta) = choice.get("delta") {
             self.ingest_delta(delta);
@@ -512,11 +530,20 @@ impl ParseState {
     fn apply_finish_reason(&mut self, reason: &str) {
         match reason {
             "tool_calls" | "function_call" => {
-                self.provider_reported_tool_calls = true;
+                self.finish_signal = FinishSignal::ToolCalls;
             }
-            "length" => self.last_stop_reason = StopReason::MaxTokens,
-            "content_filter" => self.last_stop_reason = StopReason::Error,
-            _ => self.last_stop_reason = StopReason::EndTurn,
+            "length" => {
+                self.finish_signal = FinishSignal::Final;
+                self.last_stop_reason = StopReason::MaxTokens;
+            }
+            "content_filter" => {
+                self.finish_signal = FinishSignal::Final;
+                self.last_stop_reason = StopReason::Error;
+            }
+            _ => {
+                self.finish_signal = FinishSignal::Final;
+                self.last_stop_reason = StopReason::EndTurn;
+            }
         }
     }
 
@@ -525,15 +552,15 @@ impl ParseState {
     }
 
     const fn is_finished(&self) -> bool {
-        self.finished
+        self.lifecycle.finished
     }
 
     const fn saw_finish_reason(&self) -> bool {
-        self.saw_finish_reason
+        self.finish_signal.was_seen()
     }
 
     fn ensure_started(&mut self, value: &Value) {
-        if self.started {
+        if self.lifecycle.started {
             return;
         }
         let id = value
@@ -542,18 +569,18 @@ impl ParseState {
             .unwrap_or("message")
             .to_owned();
         self.events.push(AiStreamEvent::MessageStart { id });
-        self.started = true;
+        self.lifecycle.started = true;
     }
 
     fn ingest_delta(&mut self, delta: &Value) {
         if let Some(reasoning) = reasoning_delta(delta)
             && !reasoning.is_empty()
         {
-            if !self.reasoning_started {
+            if !self.lifecycle.reasoning_started {
                 self.events.push(AiStreamEvent::ThinkingStart {
                     id: "reasoning".to_owned(),
                 });
-                self.reasoning_started = true;
+                self.lifecycle.reasoning_started = true;
             }
             self.events.push(AiStreamEvent::ThinkingDelta {
                 text: reasoning.to_owned(),
@@ -598,7 +625,7 @@ impl ParseState {
             Ok(events) => self.push_tool_events(events),
             Err(err) => {
                 self.last_stop_reason = StopReason::Error;
-                self.saw_finish_reason = true;
+                self.finish_signal = FinishSignal::Final;
                 self.events.push(AiStreamEvent::Error {
                     message: err.to_string(),
                 });
@@ -623,10 +650,10 @@ impl ParseState {
     }
 
     fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {
-        if self.finished {
+        if self.lifecycle.finished {
             return Ok(Vec::new());
         }
-        self.finished = true;
+        self.lifecycle.finished = true;
 
         let tool_events = self
             .tool_calls
@@ -634,7 +661,7 @@ impl ParseState {
             .map_err(|err| ProviderError::Stream(err.to_string()))?;
         self.push_tool_events(tool_events);
 
-        if self.provider_reported_tool_calls {
+        if self.finish_signal.reported_tool_calls() {
             if self.completed_tool_calls == 0 {
                 self.last_stop_reason = StopReason::Error;
                 self.events.push(AiStreamEvent::Error {
@@ -644,14 +671,14 @@ impl ParseState {
                 self.last_stop_reason = StopReason::ToolUse;
             }
         }
-        if self.reasoning_started {
+        if self.lifecycle.reasoning_started {
             self.events.push(AiStreamEvent::ThinkingEnd {
                 signature: None,
                 redacted: false,
             });
         }
 
-        if self.started {
+        if self.lifecycle.started {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
                 usage: self.usage.clone(),

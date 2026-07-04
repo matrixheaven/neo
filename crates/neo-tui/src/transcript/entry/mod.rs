@@ -599,6 +599,7 @@ pub(super) fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let border = Style::default().fg(theme.status_warn);
     let title = Style::default().fg(theme.status_warn).bold();

@@ -467,7 +467,7 @@ async fn execute_manager_owned_shell_command(
         .background_tasks
         .clone()
         .expect("checked background task manager");
-    let task_id = manager.next_bash_task_id();
+    let task_id = BackgroundTaskManager::next_bash_task_id();
     let command = spawn_managed_background_command_at_with_stream(
         &request.command,
         &request.cwd,
@@ -700,22 +700,19 @@ fn child_process_group(child: &Child) -> Option<Pid> {
 async fn kill_child(process: &mut ManagedChild) -> ShellTermination {
     kill_process_group_if_available(process);
     let _ = process.child.start_kill();
-    process
-        .child
-        .wait()
-        .await
-        .ok()
-        .map(|status| ShellTermination {
+    process.child.wait().await.ok().map_or(
+        ShellTermination {
+            exit_code: None,
+            signal: None,
+        },
+        |status| ShellTermination {
             exit_code: status.code(),
             #[cfg(unix)]
             signal: status.signal(),
             #[cfg(not(unix))]
             signal: None,
-        })
-        .unwrap_or(ShellTermination {
-            exit_code: None,
-            signal: None,
-        })
+        },
+    )
 }
 
 fn kill_process_group_if_available(process: &ManagedChild) {
@@ -737,7 +734,7 @@ async fn start_background_command(
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
-    let task_id = ctx.background_tasks.next_bash_task_id();
+    let task_id = BackgroundTaskManager::next_bash_task_id();
     let command = spawn_managed_background_command_at_with_stream(
         command,
         &cwd,

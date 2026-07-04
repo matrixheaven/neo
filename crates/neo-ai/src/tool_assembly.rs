@@ -117,7 +117,7 @@ impl StreamingToolCallAssembler {
                 name,
             });
         }
-        slot.raw_arguments = raw_arguments.clone();
+        slot.raw_arguments.clone_from(&raw_arguments);
         if !slot.finished {
             slot.finished = true;
             out.push(ToolCallAssemblyEvent::End {

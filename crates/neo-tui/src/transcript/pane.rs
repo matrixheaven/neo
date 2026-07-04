@@ -791,7 +791,7 @@ impl TranscriptPane {
         &mut self,
         turn: u32,
         status: ToolStatusKind,
-        result: String,
+        result: &str,
     ) {
         let ids = self
             .tool_call_metadata
@@ -808,7 +808,7 @@ impl TranscriptPane {
                 tool.status(),
                 ToolStatusKind::Pending | ToolStatusKind::Running
             ) {
-                tool.set_terminal_status(status, Some(result.clone()));
+                tool.set_terminal_status(status, Some(result.to_owned()));
                 changed = true;
             }
         }
@@ -1003,8 +1003,13 @@ impl TranscriptPane {
         }
         let mut tool_run: Vec<ToolCallComponent> = Vec::new();
 
-        for index in start_index..entry_count {
-            entry_row_starts[index] = rows.len();
+        for (index, row_start) in entry_row_starts
+            .iter_mut()
+            .enumerate()
+            .take(entry_count)
+            .skip(start_index)
+        {
+            *row_start = rows.len();
             // Extract whether this is a ToolRun (and its id) in a short-lived
             // borrow scope so we can freely call &mut self methods afterward.
             let tool_run_id: Option<String> = match self.transcript.entries().get(index) {

@@ -278,7 +278,7 @@ fn append_permission_mode_reminder(config: &AgentConfig, emitter: &mut EventEmit
                 ),
             });
         }
-        (PermissionMode::Auto, true) => {}
+        (PermissionMode::Auto, true) | (_, false) => {}
         (_, true) => {
             emitter.emit(AgentEvent::MessageAppended {
                 message: AgentMessage::system_reminder_with_origin(
@@ -287,7 +287,6 @@ fn append_permission_mode_reminder(config: &AgentConfig, emitter: &mut EventEmit
                 ),
             });
         }
-        (_, false) => {}
     }
 }
 

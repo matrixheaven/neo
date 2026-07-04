@@ -57,8 +57,8 @@ pub struct AgentContext {
     pub(super) micro_compaction_cutoff: usize,
 }
 
-fn is_zero(v: &usize) -> bool {
-    *v == 0
+fn is_zero<T: Default + PartialEq>(v: &T) -> bool {
+    v == &T::default()
 }
 
 impl AgentContext {

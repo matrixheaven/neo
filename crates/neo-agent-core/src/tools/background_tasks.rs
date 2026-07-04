@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -170,7 +170,7 @@ impl BackgroundTaskManager {
     }
 
     #[must_use]
-    pub(crate) fn next_bash_task_id(&self) -> String {
+    pub(crate) fn next_bash_task_id() -> String {
         format!("bash-{}", Uuid::new_v4())
     }
 
@@ -180,7 +180,7 @@ impl BackgroundTaskManager {
         command: ManagedBackgroundCommand,
         max_output_bytes: usize,
     ) -> Result<ToolResult, ToolError> {
-        let task_id = self.next_bash_task_id();
+        let task_id = Self::next_bash_task_id();
         self.start_bash_with_task_id(task_id, description, command, max_output_bytes)
             .await
     }
@@ -251,7 +251,7 @@ impl BackgroundTaskManager {
 
     async fn persistent_output_file(
         &self,
-        root: &PathBuf,
+        root: &Path,
         task_id: &str,
     ) -> Result<Arc<Mutex<File>>, ToolError> {
         if let Some(file) = self.persistent_outputs.lock().await.get(task_id).cloned() {
@@ -542,7 +542,7 @@ impl BackgroundTaskManager {
         _max_output_bytes: usize,
         detach_timeout: Duration,
     ) -> Result<String, ToolError> {
-        let task_id = self.next_bash_task_id();
+        let task_id = Self::next_bash_task_id();
         self.start_bash_foreground_with_task_id(task_id, description, command, detach_timeout)
             .await
     }
@@ -1577,7 +1577,8 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
     let mut details = snapshot_details(snapshot);
     if let Some(delegate) = &snapshot.delegate {
         if let Some(outcome) = &delegate.outcome {
-            content.push_str(&format!("\nsummary: {}", outcome.summary));
+            content.push_str("\nsummary: ");
+            content.push_str(&outcome.summary);
         }
         details["agent_id"] = json!(delegate.id.as_str());
         details["state"] = json!(delegate.state);

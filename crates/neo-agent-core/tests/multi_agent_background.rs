@@ -1404,13 +1404,7 @@ async fn message_delegate_broadcasts_to_running_swarm_children() {
     // Message may fail if children already completed (FakeHarness completes instantly).
     // The test just verifies the swarm routing works without crashing.
     // If delivered, check format; if error, verify it has structured skipped details.
-    if !message.is_error {
-        assert!(
-            message.content.contains("delivered:"),
-            "{}",
-            message.content
-        );
-    } else {
+    if message.is_error {
         assert!(
             message.content.contains("no running children"),
             "{}",
@@ -1422,10 +1416,14 @@ async fn message_delegate_broadcasts_to_running_swarm_children() {
             "skipped must be an array: {details}"
         );
         assert!(
-            details["delivered"]
-                .as_array()
-                .is_some_and(|d| d.is_empty()),
+            details["delivered"].as_array().is_some_and(Vec::is_empty),
             "delivered must be empty: {details}"
+        );
+    } else {
+        assert!(
+            message.content.contains("delivered:"),
+            "{}",
+            message.content
         );
     }
 }
@@ -1494,9 +1492,7 @@ async fn message_delegate_swarm_all_completed_returns_structured_skipped() {
         "all skipped children should show completed state: {skipped:?}"
     );
     assert!(
-        details["delivered"]
-            .as_array()
-            .is_some_and(|d| d.is_empty()),
+        details["delivered"].as_array().is_some_and(Vec::is_empty),
         "delivered must be empty"
     );
 }
@@ -1507,7 +1503,7 @@ async fn message_delegate_swarm_all_completed_returns_structured_skipped() {
 
 /// A child model that emits `MessageStart` then blocks for a long time. Every
 /// call to `stream_chat` returns the same blocking stream, so it works for
-/// both single Delegate and multi-child DelegateSwarm tests. The stream is
+/// both single Delegate and multi-child `DelegateSwarm` tests. The stream is
 /// cancelled when the consumer drops it (via `CancellationToken`).
 struct BlockingChildModel;
 

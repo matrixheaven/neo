@@ -313,7 +313,7 @@ async fn execute_tool_calls_sequential(
     Ok(results)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_tool_calls_parallel(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,

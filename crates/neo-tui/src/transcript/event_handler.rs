@@ -53,23 +53,15 @@ impl TranscriptPane {
                 turn,
                 stop_reason: neo_agent_core::StopReason::Error,
                 ..
-            } => {
-                self.mark_unfinished_tools_for_turn(
-                    *turn,
-                    ToolStatusKind::Failed,
-                    "Turn ended before this tool executed".to_owned(),
-                );
-                self.finish_active_text_blocks();
-                true
             }
-            AgentEvent::TurnFinished {
+            | AgentEvent::TurnFinished {
                 turn,
                 stop_reason: neo_agent_core::StopReason::Error,
             } => {
                 self.mark_unfinished_tools_for_turn(
                     *turn,
                     ToolStatusKind::Failed,
-                    "Turn ended before this tool executed".to_owned(),
+                    "Turn ended before this tool executed",
                 );
                 self.finish_active_text_blocks();
                 true
@@ -81,7 +73,7 @@ impl TranscriptPane {
                 self.mark_unfinished_tools_for_turn(
                     *turn,
                     ToolStatusKind::Cancelled,
-                    "Turn cancelled before this tool executed".to_owned(),
+                    "Turn cancelled before this tool executed",
                 );
                 self.finish_active_text_blocks();
                 true
@@ -166,7 +158,7 @@ impl TranscriptPane {
                 true
             }
             AgentEvent::ToolCallFinished { turn, tool_call } => {
-                self.finish_tool_call(*turn, tool_call.clone());
+                self.finish_tool_call(*turn, tool_call);
                 true
             }
             AgentEvent::ToolExecutionStarted {
@@ -308,11 +300,8 @@ impl TranscriptPane {
                 retry_after,
             } => {
                 use crate::transcript::entry::StatusSeverity;
-                self.mark_unfinished_tools_for_turn(
-                    *turn,
-                    ToolStatusKind::Failed,
-                    format!("Turn ended before this tool executed: {message}"),
-                );
+                let result = format!("Turn ended before this tool executed: {message}");
+                self.mark_unfinished_tools_for_turn(*turn, ToolStatusKind::Failed, &result);
 
                 let severity = match code.as_deref() {
                     Some(
@@ -485,7 +474,7 @@ impl TranscriptPane {
         }
     }
 
-    fn finish_tool_call(&mut self, turn: u32, tool_call: AgentToolCall) {
+    fn finish_tool_call(&mut self, turn: u32, tool_call: &AgentToolCall) {
         let arguments = tool_call.raw_arguments.to_string();
         self.streaming_tool_args
             .insert(tool_call.id.to_string(), arguments.clone());

@@ -503,10 +503,7 @@ impl IncrementalSse {
             })];
         }
 
-        self.parser.finish_events().map_or_else(
-            |err| vec![Err(err.into_ai_error())],
-            |events| events.into_iter().map(Ok).collect(),
-        )
+        self.parser.finish_events().into_iter().map(Ok).collect()
     }
 }
 
@@ -703,9 +700,9 @@ impl ParseState {
             .or(self.usage.clone());
     }
 
-    fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {
+    fn finish_events(&mut self) -> Vec<AiStreamEvent> {
         if self.finished {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.finished = true;
 
@@ -731,7 +728,7 @@ impl ParseState {
             });
         }
 
-        Ok(self.drain_events())
+        self.drain_events()
     }
 
     fn start_thinking_block(&mut self, index: u64) {

@@ -293,10 +293,10 @@ fn session_id_from_jsonl_path(
 
 fn path_is_inside_session_bucket(path: &Path, bucket_dir: &Path) -> bool {
     match path.canonicalize() {
-        Ok(canonical_path) => bucket_dir
-            .canonicalize()
-            .map(|canonical_bucket| canonical_path.starts_with(canonical_bucket))
-            .unwrap_or_else(|_| path.starts_with(bucket_dir)),
+        Ok(canonical_path) => bucket_dir.canonicalize().map_or_else(
+            |_| path.starts_with(bucket_dir),
+            |canonical_bucket| canonical_path.starts_with(canonical_bucket),
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.starts_with(bucket_dir),
         Err(_) => false,
     }

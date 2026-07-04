@@ -426,10 +426,7 @@ impl MatchLineNumbers {
 }
 
 fn count_newlines(text: &str) -> usize {
-    text.as_bytes()
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
+    text.matches('\n').count()
 }
 
 fn collapse_match_text(text: &str) -> String {

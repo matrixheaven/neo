@@ -60,10 +60,13 @@ fn theme_set() -> &'static syntect::highlighting::ThemeSet {
 /// Global cache for syntax-highlighted code blocks, keyed by (hash, lang).
 /// Avoids re-running syntect regex tokenization on identical code across
 /// renders. Bounded to 256 entries to cap memory.
-static HIGHLIGHT_CACHE: OnceLock<Mutex<HashMap<(u64, String), Vec<String>>>> = OnceLock::new();
+type HighlightCacheKey = (u64, String);
+type HighlightCache = HashMap<HighlightCacheKey, Vec<String>>;
+
+static HIGHLIGHT_CACHE: OnceLock<Mutex<HighlightCache>> = OnceLock::new();
 const HIGHLIGHT_CACHE_CAP: usize = 256;
 
-fn highlight_cache() -> &'static Mutex<HashMap<(u64, String), Vec<String>>> {
+fn highlight_cache() -> &'static Mutex<HighlightCache> {
     HIGHLIGHT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -653,10 +656,10 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span>> {
 fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     // Check the global highlight cache first.
     let key = (quick_hash(code), lang.to_owned());
-    if let Ok(cache) = highlight_cache().lock() {
-        if let Some(cached) = cache.get(&key) {
-            return cached.clone();
-        }
+    if let Ok(cache) = highlight_cache().lock()
+        && let Some(cached) = cache.get(&key)
+    {
+        return cached.clone();
     }
 
     let result = highlight_code_uncached(code, lang, theme);

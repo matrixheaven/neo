@@ -3591,6 +3591,7 @@ async fn event_loop_confirms_approval_choice_to_running_turn() {
                 arguments: serde_json::json!({"path": "approved.txt"}),
                 session_scope: None,
                 prefix_rule: None,
+                suggestions: Vec::new(),
             });
             let (decision_tx, decision_rx) = oneshot::channel();
             channels
@@ -3810,6 +3811,7 @@ async fn approval_number_shortcut_confirms_session_approval() {
             detail: "approved.txt".to_owned(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     controller.pending_approvals.insert(
@@ -3868,6 +3870,7 @@ async fn prefix_approval_choice_dispatches_prefix_decision() {
             prefix: vec!["cargo".to_owned(), "test".to_owned()],
             label: "cargo test".to_owned(),
         }),
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     controller.pending_approvals.insert(
@@ -4137,6 +4140,7 @@ async fn approval_uses_selection_priority_for_real_keys() {
             detail: "approved.txt".to_owned(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     controller
@@ -4183,6 +4187,7 @@ async fn approval_revise_collects_feedback_without_editing_prompt() {
         arguments: serde_json::json!({"path": "denied.txt"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     controller
@@ -4248,6 +4253,7 @@ async fn approval_cancel_rejects_pending_approval() {
         arguments: serde_json::json!({"path": "denied.txt"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     controller
@@ -4291,6 +4297,7 @@ async fn approval_requests_are_handled_one_at_a_time() {
             detail: test_workspace_root().display().to_string(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     controller.apply_turn_event(AgentEvent::ApprovalRequested {
         turn: 1,
@@ -4300,6 +4307,7 @@ async fn approval_requests_are_handled_one_at_a_time() {
         arguments: serde_json::json!({"command": "printf two"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (first_tx, first_rx) = oneshot::channel();
     let (second_tx, _second_rx) = oneshot::channel();
@@ -4355,6 +4363,7 @@ async fn approval_transcript_only_shows_active_request() {
             detail: test_workspace_root().display().to_string(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     controller.apply_turn_event(AgentEvent::ApprovalRequested {
         turn: 1,
@@ -4364,6 +4373,7 @@ async fn approval_transcript_only_shows_active_request() {
         arguments: serde_json::json!({"command": "printf two"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
 
     let snapshot = controller.render_snapshot();
@@ -4397,6 +4407,7 @@ async fn approval_cancel_advances_next_visible_request() {
             detail: test_workspace_root().display().to_string(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     controller.apply_turn_event(AgentEvent::ApprovalRequested {
         turn: 1,
@@ -4406,6 +4417,7 @@ async fn approval_cancel_advances_next_visible_request() {
         arguments: serde_json::json!({"command": "printf two"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (first_tx, first_rx) = oneshot::channel();
     let (second_tx, _second_rx) = oneshot::channel();
@@ -4448,6 +4460,7 @@ async fn approval_interrupt_rejects_all_pending_approvals() {
         arguments: serde_json::json!({"command": "printf one"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     controller.apply_turn_event(AgentEvent::ApprovalRequested {
         turn: 1,
@@ -4457,6 +4470,7 @@ async fn approval_interrupt_rejects_all_pending_approvals() {
         arguments: serde_json::json!({"command": "printf two"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (first_tx, first_rx) = oneshot::channel();
     let (second_tx, second_rx) = oneshot::channel();
@@ -4501,6 +4515,7 @@ async fn approval_interrupt_preserves_rejection_for_late_channel_registration() 
         arguments: serde_json::json!({"command": "printf one"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
 
     controller
@@ -4883,6 +4898,7 @@ fn replay_session_into_transcript_keeps_delegate_card_in_event_order() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_tool() {
     let mut transcript = TranscriptPane::new(120, 20);
     let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
@@ -6368,6 +6384,7 @@ async fn revise_exit_plan_mode_feedback_is_forwarded_with_current_approval() {
         arguments: serde_json::json!({}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, decision_rx) = oneshot::channel();
     let (feedback_tx, feedback_rx) = oneshot::channel();
@@ -6431,6 +6448,7 @@ async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
             detail: test_workspace_root().display().to_string(),
         }),
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (first_tx, first_rx) = oneshot::channel();
     controller.pending_approvals.insert(
@@ -6469,6 +6487,7 @@ async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
         arguments: serde_json::json!({"path": "later.txt"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (second_tx, mut second_rx) = oneshot::channel();
     controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
@@ -7892,6 +7911,7 @@ async fn approval_up_down_does_not_recall_prompt_history() {
         arguments: serde_json::json!({"path": "approved.txt"}),
         session_scope: None,
         prefix_rule: None,
+        suggestions: Vec::new(),
     });
     let (decision_tx, _decision_rx) = oneshot::channel();
     controller
@@ -8829,6 +8849,7 @@ fn completed_shell_result(
         stdout: stdout.into(),
         stderr: String::new(),
         exit_code: Some(0),
+        signal: None,
         stdout_truncated: false,
         stderr_truncated: false,
         truncated: false,

@@ -162,7 +162,7 @@ impl ModelTurnState {
             turn,
             signature: match self.content.get(index) {
                 Some(Content::Thinking { signature, .. }) => {
-                    signature.as_ref().map(|s| s.to_string())
+                    signature.as_ref().map(std::string::ToString::to_string)
                 }
                 _ => None,
             },
