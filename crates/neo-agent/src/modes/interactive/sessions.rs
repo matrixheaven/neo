@@ -81,7 +81,9 @@ impl InteractiveController {
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id);
+        self.active_session_id = Some(forked.session_id.clone());
+        self.push_status(format!("fork from session {}", parent.id));
+        self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
     }
 
@@ -97,7 +99,9 @@ impl InteractiveController {
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id);
+        self.active_session_id = Some(forked.session_id.clone());
+        self.push_status(format!("fork from session {parent_id}"));
+        self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
     }
 

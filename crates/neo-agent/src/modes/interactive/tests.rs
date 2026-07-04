@@ -5505,10 +5505,7 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
                 SESSION_CHILD,
                 LoadedSessionTranscript::new(
                     SESSION_CHILD,
-                    [
-                        format!("fork from session {SESSION_A}"),
-                        format!("switch to fork session {SESSION_CHILD}"),
-                    ],
+                    [],
                     [
                         AgentMessage::user_text("hello"),
                         AgentMessage::assistant(
@@ -5852,13 +5849,9 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
 
     assert!(forked.session_id.starts_with("session_"));
     assert_eq!(forked.transcript.label, forked.session_id);
-    assert_eq!(
-        forked.transcript.notices.first().map(String::as_str),
-        Some(format!("fork from session {SESSION_A}").as_str())
-    );
-    assert_eq!(
-        forked.transcript.notices.get(1).map(String::as_str),
-        Some(format!("switch to fork session {}", forked.session_id).as_str())
+    assert!(
+        forked.transcript.notices.is_empty(),
+        "fork notices are pushed by the controller, not by fork_session_transcript"
     );
     assert_eq!(forked.transcript.messages.len(), 2);
     assert!(
@@ -10749,10 +10742,7 @@ async fn slash_fork_forks_current_session_and_enters_child() {
                 SESSION_CHILD,
                 LoadedSessionTranscript::new(
                     SESSION_CHILD,
-                    [
-                        format!("fork from session {SESSION_A}"),
-                        format!("switch to fork session {SESSION_CHILD}"),
-                    ],
+                    [],
                     [AgentMessage::user_text("hello")],
                 ),
             ))
