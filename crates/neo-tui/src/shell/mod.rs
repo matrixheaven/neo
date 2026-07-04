@@ -113,6 +113,7 @@ impl NeoChromeState {
             self.focused_overlay = self.overlays.last().map(|overlay| overlay.id);
         }
         self.mode = self.overlay_mode();
+        self.pending_input.clear();
         question_ids
     }
 

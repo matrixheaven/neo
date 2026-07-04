@@ -142,6 +142,17 @@ impl PendingInputState {
             && self.queued_follow_ups.is_empty()
             && self.queued_shell_commands.is_empty()
     }
+
+    /// Clear all pending input. Used when the current turn is interrupted and
+    /// any queued input that has not yet been persisted should be discarded.
+    pub fn clear(&mut self) {
+        self.pending_steers.clear();
+        self.queued_follow_ups.clear();
+        self.queued_shell_commands.clear();
+        self.optimistic_steer_acks.clear();
+        self.optimistic_follow_up_acks.clear();
+        self.optimistic_follow_up_drains = 0;
+    }
 }
 
 fn consume_expected_ack(expected: &mut VecDeque<String>, text: &str) -> bool {

@@ -8408,6 +8408,59 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
 }
 
 #[tokio::test]
+async fn steer_preview_is_cleared_when_turn_is_cancelled() {
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        Arc::new(|_request, channels| {
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        }),
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+
+    controller.type_text("first prompt");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("first prompt starts turn");
+
+    controller.type_text("steer this");
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("ctrl+s steers");
+
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["steer this"],
+        "steer should be visible before cancellation"
+    );
+
+    controller
+        .cancel_active_turn()
+        .await
+        .expect("cancel active turn");
+
+    assert!(
+        controller.chrome().pending_input().is_empty(),
+        "pending input should be cleared after the turn is interrupted"
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prompt() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
