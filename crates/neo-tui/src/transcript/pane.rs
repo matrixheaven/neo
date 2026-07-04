@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Expandable, Line};
+use crate::primitive::{Expandable, Line, next_sequence};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -66,6 +66,14 @@ impl AbsorbedToolKind {
 }
 
 #[derive(Debug, Clone)]
+struct TranscriptBodyCache {
+    width: usize,
+    entry_count: usize,
+    rows: Vec<String>,
+    entry_row_starts: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TranscriptPane {
     width: usize,
     height: usize,
@@ -86,6 +94,9 @@ pub struct TranscriptPane {
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
     last_frame: Vec<String>,
+    body_cache: Option<TranscriptBodyCache>,
+    #[cfg(test)]
+    last_reused_prefix_rows: usize,
     /// Theme used to color the live transcript body. Mirrors [`NeoChromeState`]'s
     /// theme; kept here (rather than borrowed) so the runtime can render
     /// without holding a reference to the app. The interactive mode keeps it
@@ -114,6 +125,9 @@ impl TranscriptPane {
             activity_frame: 0,
             workspace_root: None,
             last_frame: Vec::new(),
+            body_cache: None,
+            #[cfg(test)]
+            last_reused_prefix_rows: 0,
             theme: TuiTheme::default(),
             skill_store: None,
         }
@@ -132,6 +146,8 @@ impl TranscriptPane {
             return;
         }
         self.theme = theme;
+        self.body_cache = None;
+        self.transcript.invalidate_render_cache();
         self.mark_dirty();
     }
 
@@ -609,6 +625,9 @@ impl TranscriptPane {
         if self.width == width && self.height == height {
             return;
         }
+        if self.width != width {
+            self.body_cache = None;
+        }
         self.width = width;
         self.height = height;
         self.dirty = true;
@@ -678,10 +697,7 @@ impl TranscriptPane {
     ///
     fn render_body_lines(&mut self, width: usize) -> Vec<String> {
         let content_width = super::chrome_render::frame_content_width(width);
-        self.render_transcript_rows(content_width)
-            .into_iter()
-            .map(|line| line.to_ansi())
-            .collect()
+        self.render_transcript_ansi_rows(content_width)
     }
 
     /// Read-only snapshot of the most recently rendered body frame (ANSI
@@ -972,14 +988,20 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn render_transcript_rows(&mut self, width: usize) -> Vec<Line> {
+    fn render_transcript_ansi_rows(&mut self, width: usize) -> Vec<String> {
         self.transcript.ensure_cache_width(width);
 
-        let mut rows = Vec::new();
-        let mut tool_run: Vec<ToolCallComponent> = Vec::new();
         let entry_count = self.transcript.entries().len();
+        let (mut rows, start_index, mut entry_row_starts, _reused_prefix_rows) =
+            self.cached_render_prefix(width, entry_count);
+        #[cfg(test)]
+        {
+            self.last_reused_prefix_rows = _reused_prefix_rows;
+        }
+        let mut tool_run: Vec<ToolCallComponent> = Vec::new();
 
-        for index in 0..entry_count {
+        for index in start_index..entry_count {
+            entry_row_starts[index] = rows.len();
             // Extract whether this is a ToolRun (and its id) in a short-lived
             // borrow scope so we can freely call &mut self methods afterward.
             let tool_run_id: Option<String> = match self.transcript.entries().get(index) {
@@ -989,30 +1011,88 @@ impl TranscriptPane {
 
             if let Some(id) = tool_run_id {
                 if self.transcript.is_tool_run_suppressed(&id) {
-                    append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+                    append_line_transcript_block(
+                        &mut rows,
+                        self.flush_tool_run(&mut tool_run, width),
+                    );
                 } else if let Some(TranscriptEntry::ToolRun { component }) =
                     self.transcript.entries().get(index)
                 {
                     tool_run.push(component.clone());
                 }
             } else {
-                append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-                let lines = self.transcript.render_entry_cached(
+                append_line_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+                let lines = self.transcript.render_entry_ansi_cached(
                     index,
                     width,
                     &self.theme,
                     self.activity_frame,
                 );
-                append_transcript_block(&mut rows, lines);
+                append_ansi_transcript_block(&mut rows, lines);
             }
         }
-        append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+        append_line_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+        entry_row_starts[entry_count] = rows.len();
 
         let viewport_rows = self.height.saturating_sub(self.live_chrome_height).max(1);
         self.transcript
             .viewport_mut()
             .sync(rows.len(), viewport_rows);
+        self.transcript.clear_dirty_entries();
+        self.body_cache = Some(TranscriptBodyCache {
+            width,
+            entry_count,
+            rows: rows.clone(),
+            entry_row_starts,
+        });
         rows
+    }
+
+    fn cached_render_prefix(
+        &self,
+        width: usize,
+        entry_count: usize,
+    ) -> (Vec<String>, usize, Vec<usize>, usize) {
+        let Some(cache) = &self.body_cache else {
+            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
+        };
+        if cache.width != width
+            || cache.entry_count > entry_count
+            || cache.entry_row_starts.len() != cache.entry_count + 1
+        {
+            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
+        }
+        let dirty_start = self.transcript.first_dirty_entry().unwrap_or(0);
+        let start_index = self.safe_render_start(dirty_start.min(entry_count));
+        let Some(prefix_rows) = cache.entry_row_starts.get(start_index).copied() else {
+            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
+        };
+        let prefix_rows = prefix_rows.min(cache.rows.len());
+        let mut entry_row_starts = vec![0; entry_count + 1];
+        let copied_starts = (start_index + 1).min(cache.entry_row_starts.len());
+        entry_row_starts[..copied_starts].copy_from_slice(&cache.entry_row_starts[..copied_starts]);
+        (
+            cache.rows[..prefix_rows].to_vec(),
+            start_index,
+            entry_row_starts,
+            prefix_rows,
+        )
+    }
+
+    fn safe_render_start(&self, dirty_start: usize) -> usize {
+        let entries = self.transcript.entries();
+        let mut start = dirty_start.min(entries.len());
+        while start > 0 {
+            match entries.get(start - 1) {
+                Some(TranscriptEntry::ToolRun { component })
+                    if !self.transcript.is_tool_run_suppressed(component.id()) =>
+                {
+                    start -= 1;
+                }
+                _ => break,
+            }
+        }
+        start
     }
 
     fn has_streaming_thinking(&self) -> bool {
@@ -1033,6 +1113,11 @@ impl TranscriptPane {
         }
         let mut ordered = std::mem::take(tool_run);
         super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme)
+    }
+
+    #[cfg(test)]
+    fn cached_prefix_rows_reused_for_test(&self) -> usize {
+        self.last_reused_prefix_rows
     }
 }
 
@@ -1106,16 +1191,52 @@ fn current_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn append_transcript_block(rows: &mut Vec<Line>, block: Vec<Line>) {
+fn append_line_transcript_block(rows: &mut Vec<String>, block: Vec<Line>) {
     let first = block.iter().position(|line| !line.is_blank());
     let last = block.iter().rposition(|line| !line.is_blank());
     let (Some(first), Some(last)) = (first, last) else {
         return;
     };
-    if rows.last().is_some_and(|line| !line.is_blank()) {
-        rows.push(Line::raw(""));
+    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
+        rows.push(String::new());
+    }
+    rows.extend(
+        block
+            .into_iter()
+            .skip(first)
+            .take(last - first + 1)
+            .map(|line| line.to_ansi()),
+    );
+}
+
+fn append_ansi_transcript_block(rows: &mut Vec<String>, block: Vec<String>) {
+    let first = block.iter().position(|line| !ansi_line_is_blank(line));
+    let last = block.iter().rposition(|line| !ansi_line_is_blank(line));
+    let (Some(first), Some(last)) = (first, last) else {
+        return;
+    };
+    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
+        rows.push(String::new());
     }
     rows.extend(block.into_iter().skip(first).take(last - first + 1));
+}
+
+fn ansi_line_is_blank(line: &str) -> bool {
+    let mut index = 0;
+    while index < line.len() {
+        if let Some(sequence) = next_sequence(line, index) {
+            index += sequence.len();
+            continue;
+        }
+        let Some(character) = line[index..].chars().next() else {
+            break;
+        };
+        if !character.is_whitespace() {
+            return false;
+        }
+        index += character.len_utf8();
+    }
+    true
 }
 
 fn content_display_text(content: &[Content]) -> String {
@@ -1205,4 +1326,27 @@ fn format_replay_skill_arguments(tool_arguments: &serde_json::Value) -> String {
         })
         .collect();
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_only_render_reuses_cached_body_prefix() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.push_transcript(TranscriptEntry::assistant_message("first"));
+        let first = pane.render_frame(80, 20).expect("first render");
+        assert!(first.iter().any(|line| line.contains("first")));
+
+        pane.push_transcript(TranscriptEntry::assistant_message("second"));
+        let second = pane.render_frame(80, 20).expect("second render");
+
+        assert!(second.iter().any(|line| line.contains("first")));
+        assert!(second.iter().any(|line| line.contains("second")));
+        assert!(
+            pane.cached_prefix_rows_reused_for_test() > 0,
+            "append-only render should reuse stable prefix rows"
+        );
+    }
 }

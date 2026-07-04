@@ -146,6 +146,7 @@ impl Default for TranscriptViewport {
 struct CachedRender {
     width: usize,
     lines: Vec<Line>,
+    ansi_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +161,7 @@ pub struct TranscriptStore {
     /// Per-entry render cache, parallel to `entries`. `None` means the entry
     /// needs re-rendering (new, mutated, or width changed).
     render_cache: Vec<Option<CachedRender>>,
+    first_dirty_entry: Option<usize>,
 }
 
 impl TranscriptStore {
@@ -176,8 +178,10 @@ impl TranscriptStore {
         } else {
             self.mark_visible_boundary();
         }
+        let index = self.entries.len();
         self.entries.push(entry);
         self.render_cache.push(None);
+        self.mark_dirty_from(index);
     }
 
     pub fn start_assistant(&mut self) {
@@ -185,9 +189,11 @@ impl TranscriptStore {
             return;
         }
         self.mark_visible_boundary();
+        let index = self.entries.len();
         self.entries.push(TranscriptEntry::assistant_message(""));
         self.active_assistant = Some(self.entries.len() - 1);
         self.render_cache.push(None);
+        self.mark_dirty_from(index);
     }
 
     pub fn append_assistant_delta(&mut self, text: &str) {
@@ -212,12 +218,14 @@ impl TranscriptStore {
         if self.resume_previous_visual_thinking() {
             return;
         }
+        let index = self.entries.len();
         self.entries
             .push(TranscriptEntry::thinking_streaming(String::new()));
         self.active_thinking = Some(self.entries.len() - 1);
         self.can_coalesce_thinking = false;
         self.separate_next_thinking_delta = false;
         self.render_cache.push(None);
+        self.mark_dirty_from(index);
     }
 
     pub fn append_thinking_delta(&mut self, text: &str) {
@@ -292,12 +300,17 @@ impl TranscriptStore {
             .any(|existing| existing == id)
         {
             self.suppressed_tool_run_ids.push(id.to_owned());
+            self.mark_dirty_from(0);
         }
     }
 
     pub fn unsuppress_tool_run(&mut self, id: &str) {
+        let before = self.suppressed_tool_run_ids.len();
         self.suppressed_tool_run_ids
             .retain(|existing| existing != id);
+        if self.suppressed_tool_run_ids.len() != before {
+            self.mark_dirty_from(0);
+        }
     }
 
     #[must_use]
@@ -343,6 +356,7 @@ impl TranscriptStore {
             self.entries
                 .insert(index, TranscriptEntry::ApprovalPrompt(data));
             self.render_cache.insert(index, None);
+            self.mark_dirty_from(index);
         } else {
             self.push(TranscriptEntry::ApprovalPrompt(data));
         }
@@ -374,6 +388,7 @@ impl TranscriptStore {
             _ => None,
         }) {
             group.upsert(snapshot);
+            self.invalidate_all_cache();
             return;
         }
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
@@ -382,6 +397,7 @@ impl TranscriptStore {
         }) {
             let merged = merge_delegate_snapshot(entry.snapshot(), snapshot);
             entry.update(merged);
+            self.invalidate_all_cache();
             return;
         }
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
@@ -392,6 +408,7 @@ impl TranscriptStore {
         }) && is_root_delegate(&snapshot)
         {
             group.upsert(snapshot);
+            self.invalidate_all_cache();
             return;
         }
         if is_root_delegate(&snapshot)
@@ -417,6 +434,7 @@ impl TranscriptStore {
             if index < self.render_cache.len() {
                 self.render_cache[index] = None;
             }
+            self.mark_dirty_from(index);
             return;
         }
         self.push(TranscriptEntry::Delegate {
@@ -437,6 +455,7 @@ impl TranscriptStore {
         }) {
             let merged = merge_swarm_snapshot(entry.snapshot(), snapshot);
             entry.update(merged);
+            self.invalidate_all_cache();
             return;
         }
         self.push(TranscriptEntry::DelegateSwarm {
@@ -476,6 +495,10 @@ impl TranscriptStore {
         &mut self.entries
     }
 
+    pub(crate) fn invalidate_render_cache(&mut self) {
+        self.invalidate_all_cache();
+    }
+
     pub fn tick_live_entries(&mut self, now_ms: u64) -> bool {
         // Fast path: if no live-capable entries exist, skip the full scan.
         // This avoids an O(n) iteration over all entries every 50ms tick
@@ -492,9 +515,18 @@ impl TranscriptStore {
         if !has_live {
             return false;
         }
-        self.entries
-            .iter_mut()
-            .any(|entry| entry.on_render_tick(now_ms))
+        let mut first_changed = None;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if entry.on_render_tick(now_ms) {
+                first_changed.get_or_insert(index);
+            }
+        }
+        if let Some(index) = first_changed {
+            self.mark_dirty_from(index);
+            true
+        } else {
+            false
+        }
     }
 
     /// Remove the entry at `index`, shifting later entries down. Returns the
@@ -510,6 +542,7 @@ impl TranscriptStore {
         if index < self.render_cache.len() {
             self.render_cache.remove(index);
         }
+        self.mark_dirty_from(index);
         Some(entry)
     }
 
@@ -633,6 +666,7 @@ impl TranscriptStore {
         if index < self.render_cache.len() {
             self.render_cache[index] = None;
         }
+        self.mark_dirty_from(index);
     }
 
     /// Invalidate all cached renders (e.g. on terminal resize).
@@ -640,6 +674,24 @@ impl TranscriptStore {
         for slot in &mut self.render_cache {
             *slot = None;
         }
+        if !self.entries.is_empty() {
+            self.mark_dirty_from(0);
+        }
+    }
+
+    pub(crate) const fn first_dirty_entry(&self) -> Option<usize> {
+        self.first_dirty_entry
+    }
+
+    pub(crate) fn clear_dirty_entries(&mut self) {
+        self.first_dirty_entry = None;
+    }
+
+    fn mark_dirty_from(&mut self, index: usize) {
+        self.first_dirty_entry = Some(
+            self.first_dirty_entry
+                .map_or(index, |current| current.min(index)),
+        );
     }
 
     /// Ensure `render_cache` has the same length as `entries`.
@@ -691,19 +743,69 @@ impl TranscriptStore {
             return cached.lines.clone();
         }
 
-        let lines = match self.entries.get(index) {
-            Some(entry) => entry.render_with_activity_frame(width, theme, activity_frame),
-            None => Vec::new(),
-        };
+        let lines = self.render_entry_lines(index, width, theme, activity_frame);
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
+            let ansi_lines = lines.iter().map(Line::to_ansi).collect();
             *slot = Some(CachedRender {
                 width,
                 lines: lines.clone(),
+                ansi_lines,
             });
         }
 
         lines
+    }
+
+    /// Render a single entry to final ANSI rows, using the same cache as
+    /// [`Self::render_entry_cached`] so transcript body composition can avoid
+    /// cloning cached `Line` spans and re-running `to_ansi()` on every frame.
+    pub fn render_entry_ansi_cached(
+        &mut self,
+        index: usize,
+        width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Vec<String> {
+        self.sync_cache_len();
+
+        let cacheable = self
+            .entries
+            .get(index)
+            .is_some_and(TranscriptEntry::is_render_cacheable);
+
+        if cacheable
+            && let Some(Some(cached)) = self.render_cache.get(index)
+            && cached.width == width
+        {
+            return cached.ansi_lines.clone();
+        }
+
+        let lines = self.render_entry_lines(index, width, theme, activity_frame);
+        let ansi_lines = lines.iter().map(Line::to_ansi).collect::<Vec<_>>();
+
+        if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
+            *slot = Some(CachedRender {
+                width,
+                lines,
+                ansi_lines: ansi_lines.clone(),
+            });
+        }
+
+        ansi_lines
+    }
+
+    fn render_entry_lines(
+        &self,
+        index: usize,
+        width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Vec<Line> {
+        match self.entries.get(index) {
+            Some(entry) => entry.render_with_activity_frame(width, theme, activity_frame),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -797,6 +899,25 @@ fn merge_swarm_child(
         return current.clone();
     }
     incoming
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_entry_ansi_cached_stores_final_ansi_rows() {
+        let mut store = TranscriptStore::new();
+        let theme = TuiTheme::default();
+        store.push(TranscriptEntry::assistant_message("cached answer"));
+
+        let first = store.render_entry_ansi_cached(0, 80, &theme, 0);
+
+        assert!(first.iter().any(|line| line.contains("cached answer")));
+        let cached = store.render_cache[0].as_ref().expect("cached render");
+        assert_eq!(cached.ansi_lines, first);
+        assert_eq!(store.render_entry_ansi_cached(0, 80, &theme, 99), first);
+    }
 }
 
 fn child_progress_rank(state: AgentLifecycleState) -> u8 {

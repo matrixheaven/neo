@@ -180,6 +180,7 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 16);
@@ -242,6 +243,7 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
             arguments: serde_json::json!({ "command": command }),
             session_scope: None,
             prefix_rule: None,
+            suggestions: vec![],
         });
     }
 
@@ -274,6 +276,7 @@ fn transcript_pane_renders_terminal_approval_prompt() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -301,6 +304,7 @@ fn transcript_pane_renders_task_stop_approval_prompt() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -332,6 +336,7 @@ fn transcript_pane_renders_write_approval_prompt() {
         }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -353,6 +358,7 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
             arguments: serde_json::json!({ "command": command }),
             session_scope: None,
             prefix_rule: None,
+            suggestions: vec![],
         });
     }
     transcript_pane.resolve_approval("bash-1", "Approved");
@@ -387,6 +393,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         arguments: serde_json::json!({ "command": "printf 1" }),
         session_scope: None,
         prefix_rule: None,
+        suggestions: vec![],
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 24);
