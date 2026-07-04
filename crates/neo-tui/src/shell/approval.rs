@@ -271,6 +271,11 @@ impl ApprovalRequestModal {
     }
 
     pub fn insert_feedback(&mut self, text: &str) {
+        if !self.is_collecting_feedback()
+            && self.modal.selected_choice() == Some(ApprovalChoice::Revise)
+        {
+            self.begin_feedback_collection();
+        }
         if self.is_collecting_feedback() {
             self.feedback_input.push_str(text);
         }

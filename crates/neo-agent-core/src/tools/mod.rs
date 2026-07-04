@@ -622,17 +622,73 @@ impl ToolRegistry {
 
     /// Return a new registry containing only the tools allowed for the given
     /// subagent role.
+    ///
+    /// Role restrictions only govern the standard builtin toolset; any custom
+    /// tool explicitly registered by the caller (e.g. a test probe) is passed
+    /// through unchanged so subagent integrations can inject their own tools
+    /// without having to extend every role allowlist.
     #[must_use]
     pub fn filtered_for_agent_role(&self, role: crate::multi_agent::AgentRole) -> Self {
         let profile = crate::multi_agent::AgentProfile::for_role(role);
         let mut filtered = Self::default();
         for (name, tool) in &self.tools {
-            if profile.allowed_tools.contains(name.as_str()) {
+            let allowed = profile.allowed_tools.contains(name.as_str());
+            let is_builtin = is_builtin_tool_name(name);
+            if allowed || !is_builtin {
                 filtered.tools.insert(name.clone(), Arc::clone(tool));
             }
         }
         filtered
     }
+}
+
+/// Names of the standard builtin tools registered by
+/// [`ToolRegistry::with_builtin_tools`] and its variants. Used by
+/// [`ToolRegistry::filtered_for_agent_role`] to distinguish builtin tools
+/// (which are subject to per-role allowlisting) from caller-registered custom
+/// tools (which always pass through).
+fn is_builtin_tool_name(name: &str) -> bool {
+    use std::collections::BTreeSet;
+    use std::sync::OnceLock;
+    static NAMES: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        [
+            "Read",
+            "List",
+            "Grep",
+            "Find",
+            "Glob",
+            "TodoList",
+            "Write",
+            "Edit",
+            "Bash",
+            "TaskList",
+            "TaskOutput",
+            "TaskStop",
+            "Terminal",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "Delegate",
+            "DelegateSwarm",
+            "ListDelegates",
+            "WaitDelegate",
+            "InterruptDelegate",
+            "MessageDelegate",
+            "RunWorkflow",
+            "StartGoal",
+            "ExitGoalMode",
+            "UpdateGoalStatus",
+            "GetGoalStatus",
+            "AskUserQuestion",
+            "ListSkills",
+            "CreateSkill",
+            "MoveSkill",
+            "SummarizeSessions",
+        ]
+        .into_iter()
+        .collect()
+    });
+    names.contains(name)
 }
 
 fn parse_input<T>(tool: &str, input: serde_json::Value) -> Result<T, ToolError>

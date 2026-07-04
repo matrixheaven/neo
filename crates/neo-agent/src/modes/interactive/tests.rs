@@ -8906,13 +8906,15 @@ async fn shell_mode_paste_bang_command_enters_and_strips_prefix() {
 
 #[tokio::test]
 async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
     let model_turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_turns = Arc::clone(&model_turns);
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        temp.path().to_path_buf(),
         move |_request| {
             let observed_turns = Arc::clone(&observed_turns);
             async move {
@@ -8921,6 +8923,7 @@ async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
             }
         },
     );
+    controller.local_config = Some(test_config(temp.path(), sessions_dir));
     let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let observed_commands = Arc::clone(&commands);
     controller.set_shell_driver(Arc::new(move |request| {
@@ -9193,13 +9196,16 @@ async fn shell_mode_commands_do_not_enter_prompt_history() {
 
 #[tokio::test]
 async fn shell_mode_ctrl_b_detaches_running_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        temp.path().to_path_buf(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
+    controller.local_config = Some(test_config(temp.path(), sessions_dir));
 
     controller.type_text("!sleep 5");
     controller
@@ -9764,13 +9770,16 @@ async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
 
 #[tokio::test]
 async fn shell_mode_esc_cancels_running_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        temp.path().to_path_buf(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
+    controller.local_config = Some(test_config(temp.path(), sessions_dir));
 
     controller.type_text("!sleep 5");
     controller
@@ -10283,7 +10292,23 @@ async fn slash_btw_inherits_main_context_with_single_sidecar_projection() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.local_config = Some(btw_test_config(&project_dir));
-    controller.active_session_id = Some("session-current".into());
+    controller.active_session_id = Some("session_00000000-0000-0000-0000-000000000001".into());
+    // Persist the message to the session JSONL so /btw can inherit it.
+    // In production, turn execution writes messages to disk; simulate that here.
+    {
+        let config = controller.local_config.as_ref().expect("config");
+        let wire_path = crate::modes::sessions::session_path(
+            "session_00000000-0000-0000-0000-000000000001",
+            config,
+        )
+        .expect("session path");
+        fs::create_dir_all(wire_path.parent().expect("wire parent")).expect("mkdir wire parent");
+        let event = AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("main context in memory"),
+        };
+        let line = serde_json::to_string(&event).expect("serialize event");
+        fs::write(&wire_path, format!("{line}\n")).expect("write wire");
+    }
     controller.apply_turn_event(AgentEvent::MessageAppended {
         message: AgentMessage::user_text("main context in memory"),
     });

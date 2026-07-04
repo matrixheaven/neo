@@ -511,6 +511,23 @@ fn complete_json_value_end(raw: &str, start: usize) -> Option<usize> {
     None
 }
 
+/// Drop a trailing assistant message that issued `tool_calls` whose results
+/// never arrived. Unlike `sanitize_tool_exchange_messages` (which synthesizes
+/// missing results), this *removes* the incomplete turn so replay/projection
+/// don't feed the model a turn that was never completed.
+#[must_use]
+pub fn trim_trailing_incomplete_tool_turn(
+    messages: &[AgentMessage],
+) -> std::borrow::Cow<'_, [AgentMessage]> {
+    if let Some(last) = messages.last()
+        && let AgentMessage::Assistant { tool_calls, .. } = last
+        && !tool_calls.is_empty()
+    {
+        return std::borrow::Cow::Owned(messages[..messages.len() - 1].to_vec());
+    }
+    std::borrow::Cow::Borrowed(messages)
+}
+
 /// Validate and repair tool-call/tool-result exchanges.
 ///
 /// Every `Assistant` message with non-empty `tool_calls` must be immediately

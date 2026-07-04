@@ -5,7 +5,10 @@
 //! telling the model to answer with text only and provides a deny-all hook
 //! that can be installed as a `BeforeToolCallHook`.
 
-use crate::{AgentMessage, AgentToolCall, ToolResult, sanitize_tool_exchange_messages};
+use crate::{
+    AgentMessage, AgentToolCall, ToolResult, sanitize_tool_exchange_messages,
+    trim_trailing_incomplete_tool_turn,
+};
 
 /// System reminder appended to sidecar projections.
 ///
@@ -27,7 +30,8 @@ pub const SIDE_QUESTION_SYSTEM_REMINDER: &str = "This is a side-channel conversa
 /// slice is never mutated.
 #[must_use]
 pub fn sidecar_projected_messages(parent: &[AgentMessage]) -> Vec<AgentMessage> {
-    let mut messages = sanitize_tool_exchange_messages(parent).into_owned();
+    let trimmed = trim_trailing_incomplete_tool_turn(parent).into_owned();
+    let mut messages = sanitize_tool_exchange_messages(&trimmed).into_owned();
     messages.push(AgentMessage::system_text(SIDE_QUESTION_SYSTEM_REMINDER));
     messages
 }

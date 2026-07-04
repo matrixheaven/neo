@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{estimate_message_tokens, estimate_messages_tokens};
 use crate::{
     AgentEvent, AgentMessage, CompactionSummary, QueueKind, TodoEventData,
-    sanitize_tool_exchange_messages,
+    sanitize_tool_exchange_messages, trim_trailing_incomplete_tool_turn,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -184,7 +184,9 @@ impl AgentContext {
         for event in events {
             context.apply_replay_event(event);
         }
-        context.messages = sanitize_tool_exchange_messages(&context.messages).into_owned();
+        context.messages =
+            sanitize_tool_exchange_messages(&trim_trailing_incomplete_tool_turn(&context.messages))
+                .into_owned();
         // sanitize may have dropped orphaned tool exchanges; recompute.
         context.estimated_tokens = estimate_messages_tokens(&context.messages);
         context
