@@ -516,6 +516,21 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: b
     if waiting {
         return "waiting for activity".to_owned();
     }
+    // For terminal agents, prefer the final summary/assistant text over the
+    // last tool activity — otherwise a completed child always shows "Used X"
+    // and its final answer is never surfaced in the collapsed card.
+    if agent.state.is_terminal() {
+        if let Some(outcome) = &agent.outcome
+            && !outcome.summary.trim().is_empty()
+        {
+            return compact_chars(&one_line(&outcome.summary), 96);
+        }
+        if let Some(text) = &agent.latest_text
+            && !text.trim().is_empty()
+        {
+            return compact_chars(&one_line(text), 96);
+        }
+    }
     if let Some((name, summary)) = agent
         .activity
         .iter()
