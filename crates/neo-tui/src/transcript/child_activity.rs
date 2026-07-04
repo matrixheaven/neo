@@ -122,7 +122,7 @@ pub fn child_activity_view(
         latest_body.filter(|text| {
             final_text
                 .as_ref()
-                .is_none_or(|final_text| !same_child_final_body(text, final_text))
+                .is_none_or(|final_text| !body_is_redundant_with_final(text, final_text))
         })
     } else {
         latest_body
@@ -259,8 +259,12 @@ pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn same_child_final_body(body: &str, final_text: &str) -> bool {
-    comparable_child_text(body) == comparable_child_text(final_text)
+/// Returns true when the streaming body line would duplicate the start of the
+/// final summary, so only the final (`└`) line needs to be shown.
+fn body_is_redundant_with_final(body: &str, final_text: &str) -> bool {
+    let body_norm = comparable_child_text(body);
+    let final_norm = comparable_child_text(final_text);
+    body_norm == final_norm || final_norm.starts_with(&body_norm)
 }
 
 fn comparable_child_text(text: &str) -> String {

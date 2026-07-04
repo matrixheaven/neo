@@ -978,6 +978,34 @@ fn delegate_card_suppresses_normalized_duplicate_final_body() {
 }
 
 #[test]
+fn delegate_card_suppresses_body_when_final_starts_with_it() {
+    let body = "I have enough to report. Let me also confirm the path.";
+    let summary = "I have enough to report. Let me also confirm the path. Then I will finalize.";
+    let snapshot = AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        terminal_at_ms: Some(31_000),
+        terminal_reason: Some(AgentTerminalReason::Completed),
+        activity: Vec::new(),
+        latest_text: Some(body.to_owned()),
+        outcome: Some(AgentTerminalOutcome {
+            summary: summary.to_owned(),
+            is_error: false,
+        }),
+        ..option_b_running_delegate()
+    };
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(
+        !text.contains("│ I have enough"),
+        "body preview must be suppressed when final starts with it: {text}"
+    );
+    assert!(text.contains("└ I have enough"), "{text}");
+}
+
+#[test]
 fn delegate_card_trims_activity_to_recent_kimi_style_window() {
     let mut snapshot = running_delegate();
     snapshot.activity = (0..8)
