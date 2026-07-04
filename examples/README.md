@@ -1,15 +1,9 @@
 # Neo Examples
 
-Examples in this directory are small reference artifacts for the documented Neo interfaces.
+配置文件模板，可直接复制到 `~/.neo/` 使用。
 
-The Rust examples are declared in [rust/Cargo.toml](rust/Cargo.toml). The
-docs/examples parity gate checks that every `rust/*.rs` file is declared there
-and compiles as a Cargo example target.
+## 配置
 
-- [config/minimal.toml](config/minimal.toml) shows a deterministic development fixture, not production provider guidance.
-- [config/mcp-server.toml](config/mcp-server.toml) shows an MCP stdio server entry.
-- [tools/read-file-schema.json](tools/read-file-schema.json) shows a compact model-facing tool schema.
-- [rust/provider_registry.rs](rust/provider_registry.rs) shows the provider registry and request options.
-- [rust/tool_schema.rs](rust/tool_schema.rs) shows Rust-driven tool schema generation.
-- [rust/runtime_turn.rs](rust/runtime_turn.rs) shows the fake harness runtime event flow.
-- [rust/session_replay.rs](rust/session_replay.rs) shows JSONL session replay.
+- [config/providers-models.toml](config/providers-models.toml) — 完整的 provider/model 配置示例（OpenAI / Anthropic / Google / 本地 LLM）。
+- [config/mcp-server.toml](config/mcp-server.toml) — MCP server 配置示例（stdio + HTTP）。
+- [config/magenta-dark.json](config/magenta-dark.json) — 自定义主题示例。

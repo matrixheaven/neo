@@ -1,0 +1,168 @@
+# 配置文件
+
+Neo 使用**单一配置文件** `~/.neo/config.toml`（TOML 格式）管理所有全局设置、provider、model、运行时参数和 MCP 服务器。所有 workspace 共享同一份配置——Neo 不再读取项目级配置文件。
+
+## 配置文件位置
+
+| 位置 | 说明 |
+| --- | --- |
+| `$NEO_HOME/config.toml` | 当设置了 `NEO_HOME` 环境变量时优先使用 |
+| `~/.neo/config.toml` | 默认路径（推荐） |
+| `--config <path>` | CLI 参数，临时覆盖路径（见 `neo --help`） |
+
+> 没有 `.neo/config.toml` 也能启动——所有字段都有默认值。首次运行 `neo` 时，按需创建即可。
+
+## 顶层字段总览
+
+`config.toml` 的顶层字段来自 `FileConfig`：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `default_model` | string | `"gpt-4.1"` | 默认模型别名；可填 `[models.<alias>]` 的别名，或直接的 `<provider>/<model>` |
+| `default_provider` | string | `"openai"` | 默认 provider id，当 `default_model` 不含 `/` 时用于拼接显示标签 |
+| `api_key_env` | string | — | 全局 API key 环境变量名（provider 自身的 `api_key_env` 会覆盖此值） |
+| `permission_mode` | `"ask"` \| `"auto"` \| `"yolo"` | `"ask"` | 默认权限模式，详见 [权限模式](permissions.md) |
+| `sessions_dir` | path | `~/.neo/sessions` | 会话存储根目录，支持 `~` 展开 |
+| `model_scope` | string[] | `[]`（即全部） | 限制可用的 model glob 列表，例如 `["openai/gpt-*", "claude-sonnet-4:high"]` |
+| `skill_path` | string \| string[] | `[]` | 额外的技能目录；可写成单字符串或字符串数组 |
+| `extra_skill_dirs` | string[] | `[]` | 额外技能目录（与 `skill_path` 等价，列表写法） |
+| `prompt_templates` | string[] | `[]` | 自定义 prompt 模板目录列表 |
+| `providers` | table | — | `[providers.<id>]` 表，详见 [Provider 配置](providers.md) |
+| `models` | table | — | `[models.<alias>]` 表 |
+| `runtime` | table | — | `[runtime]` 推理参数 |
+| `tui` | table | — | `[tui]` 终端 UI 设置 |
+| `mcp` | table | — | MCP 服务器配置 |
+
+```toml
+# config.toml 顶层示例
+default_model = "openai/gpt-4.1"
+default_provider = "openai"
+permission_mode = "ask"
+sessions_dir = "~/.neo/sessions"
+```
+
+## `[providers.<id>]` 表
+
+每个 provider 用一个 `[providers.<id>]` 子表声明。`<id>` 由你命名，会被 `default_provider` 和每个 model 的 `provider` 字段引用。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `type` | `openai` \| `openai_response` \| `anthropic` \| `google` | `openai` | Provider 协议类型，决定走哪条 wire 客户端 |
+| `base_url` | string | — | API 基址，如 `https://api.openai.com/v1` |
+| `api_key` | string | — | 内联 API key（明文存于配置文件中） |
+| `api_key_env` | string | — | 承载 API key 的环境变量名，如 `OPENAI_API_KEY` |
+
+> `api_key_env` 与 `api_key` 可同时存在；运行时优先读取环境变量，取不到才回落到内联值。具体策略见 [Provider 配置](providers.md#环境变量优先级)。
+
+## `[models.<alias>]` 表
+
+每个 model 用 `[models."<alias>"]` 声明。别名通常约定为 `<provider>/<model-name>`，但并不强制。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string | **必填** | 引用的 provider id（必须已存在） |
+| `model` | string | **必填** | 实际发给 API 的模型 id，如 `gpt-4.1`、`claude-sonnet-4-5-20250514` |
+| `max_context_tokens` | u32 | — | 上下文窗口大小（token 数） |
+| `max_output_tokens` | u32 | — | 单次最大输出 token；未设时使用模型自带值 |
+| `capabilities` | string[] | `[]` | 能力标签：`streaming` / `tools` / `images` / `reasoning` |
+| `display_name` | string | — | 在 picker 中展示的友好名称 |
+
+```toml
+[models."openai/gpt-4.1"]
+provider = "openai"
+model = "gpt-4.1"
+max_context_tokens = 1047576
+capabilities = ["streaming", "tools", "images", "reasoning"]
+display_name = "GPT-4.1"
+```
+
+`capabilities` 标签与协议无关，仅用于 UI 提示和能力路由；缺省时 Neo 按模型默认能力推断。
+
+## `[runtime]` 表
+
+控制推理请求参数：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `temperature` | f64 | — | 采样温度，必须为有限且非负的数 |
+| `max_tokens` | u32 | — | 最大输出 token，必须 > 0 |
+| `reasoning_effort` | `minimal`\|`low`\|`medium`\|`high`\|`xhigh` | — | 推理深度（仅对支持 reasoning 的模型生效） |
+| `replay_reasoning` | bool | `true` | 回放历史时是否包含 reasoning 片段 |
+| `steering_queue_mode` | `all`\|`one_at_a_time` | `all` | Steering 消息队列模式 |
+| `follow_up_queue_mode` | `all`\|`one_at_a_time` | `all` | Follow-up 消息队列模式 |
+| `tool_execution_mode` | `sequential`\|`parallel` | `parallel` | 同一轮内多个 tool call 的执行方式 |
+
+```toml
+[runtime]
+temperature = 0.2
+max_tokens = 4096
+reasoning_effort = "medium"
+```
+
+### `[runtime.compaction]` 子表
+
+上下文压缩策略，所有子字段都可选；缺省时 `enabled` 默认为 `true`：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | 是否开启自动压缩 |
+| `max_estimated_tokens` | usize | `32000` | 压缩后目标 token 上限 |
+| `keep_recent_messages` | usize | `20` | 压缩时保留的最近消息数 |
+| `trigger_ratio` | f64 | `0.85` | 触发压缩的上下文占比阈值 |
+| `reserved_context_tokens` | usize | `50000` | 预留的尾部 token 余量 |
+| `max_recent_messages` | usize | `4` | 自动压缩保留的极近消息数 |
+| `micro_enabled` | bool | `true` | 是否启用 micro compaction（旧 tool-result 截断） |
+| `micro_keep_recent` | usize | `20` | micro compaction 豁免的最近消息数 |
+| `max_rounds` | usize | `5` | 单次压缩最大轮数 |
+| `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
+
+## `[tui]` 表
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `image_protocol` | `auto`\|`kitty`\|`iterm2`\|`sixel`\|`none` | `auto` | 图片渲染协议偏好 |
+| `fetch_remote_images` | bool | `false` | 是否自动抓取远程图片 URL |
+| `keybindings` | map<string, string[]> | `{}` | 自定义键位绑定（action → 按键列表） |
+| `completion_notification` | `none`\|`bell`\|`system`\|`all` | `bell` | 任务完成通知方式 |
+| `question_notification` | `none`\|`bell`\|`system`\|`all` | `none` | `AskUserQuestion` 触发通知方式 |
+
+## `[defaults]` 表
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `mode` | string | `"interactive"` | 默认启动模式（`interactive` / `run` 等） |
+
+## 关于项目级配置
+
+Neo **不再支持**项目级的 `.neo/config.toml` 或 `local.toml`。所有 provider、model、设置、技能、prompt、主题都统一放在 `~/.neo/` 下，跨 workspace 共享。如果你希望按项目区分模型或权限模式，可以：
+
+- 在 shell 启动脚本里 `export NEO_HOME=/path/to/project-neo`，让每个项目指向不同的 neo home；
+- 或用 `neo --config /path/to/custom.toml` 显式指定配置文件。
+
+## 完整示例
+
+仓库 `examples/config/` 目录提供了可直接复制的模板：
+
+- [`examples/config/providers-models.toml`](../../../examples/config/providers-models.toml) — 覆盖 OpenAI、Anthropic、Google、OpenRouter、Ollama 全部 provider/model 写法
+- [`examples/config/mcp-server.toml`](../../../examples/config/mcp-server.toml) — MCP 服务器配置参考
+
+```toml
+# ~/.neo/config.toml —— 最小可用配置
+default_model = "openai/gpt-4.1"
+
+[providers.openai]
+type = "openai_response"
+api_key_env = "OPENAI_API_KEY"
+
+[models."openai/gpt-4.1"]
+provider = "openai"
+model = "gpt-4.1"
+max_context_tokens = 1047576
+capabilities = ["streaming", "tools", "images", "reasoning"]
+```
+
+## 下一步
+
+- [Provider 配置](providers.md) — 四种 provider 类型与自定义端点的完整写法
+- [权限模式](permissions.md) — Ask / Auto / Yolo 模式与审批粒度
+- [数据存储位置](data-locations.md) — `~/.neo/` 目录结构与清理指南

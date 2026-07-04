@@ -1558,19 +1558,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "neo-rust-examples"
-version = "0.0.0"
-dependencies = [
- "futures",
- "neo-agent-core",
- "neo-ai",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "neo-tui"
 version = "0.1.0"
 dependencies = [
