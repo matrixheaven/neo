@@ -259,6 +259,77 @@ fn write_tool_card_renders_finalized_diff_from_details() {
 }
 
 #[test]
+fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "tool-1".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: None,
+        details: None,
+        status: ToolStatusKind::Pending,
+        exit_code: None,
+    });
+
+    card.update_call(Some(
+        r#"{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"#.to_owned(),
+    ));
+
+    let rows = plain(card.render(100));
+
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("Queued Write (/workspace/sample_service.go)")),
+        "header should show the path, not raw JSON: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|line| line.contains(" 1 // sample_service.go")),
+        "streaming preview should render content with line numbers: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|line| line.contains(" 5 import (")),
+        "escaped newlines should become preview lines while streaming: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|line| line.contains(r#""content":"#)),
+        "streaming Write card must not leak raw JSON arguments: {rows:?}"
+    );
+}
+
+#[test]
+fn streaming_write_tool_card_highlights_content_before_path_arrives() {
+    let theme = TuiTheme::default();
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "tool-1".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: None,
+        details: None,
+        status: ToolStatusKind::Pending,
+        exit_code: None,
+    });
+
+    card.update_call(Some(
+        r#"{"content":"package service\n\nfunc main() {\n\tfmt.Println(\"ok\")\n}\n"#.to_owned(),
+    ));
+
+    let rows = card.render_with_theme(100, &theme);
+    let package_line = rows
+        .iter()
+        .find(|line| line.text().contains(" 1 package service"))
+        .expect("streaming preview should include package line");
+
+    assert!(
+        package_line
+            .spans()
+            .iter()
+            .skip(1)
+            .any(|span| span.style().fg != Some(theme.text_primary)),
+        "streaming Write preview should syntax-highlight before path arrives: {package_line:?}"
+    );
+}
+
+#[test]
 fn bash_running_card_shows_live_output_tail() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
@@ -253,11 +254,16 @@ fn render_write_preview(
     let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
     let mut rows = vec![palette.weak_line(format!("  {path} · {total} lines"))];
 
+    let highlight_path = highlight_path_for_write_preview(path, content);
     let highlighted = palette
         .theme
-        .map(|theme| highlight_code_lines(content, path, theme))
+        .and_then(|theme| {
+            highlight_path
+                .as_deref()
+                .map(|path| highlight_code_lines(content, path, theme))
+        })
         .unwrap_or_default();
-    let use_highlight = !highlighted.is_empty() && lang_from_path(path).is_some();
+    let use_highlight = !highlighted.is_empty() && highlight_path.is_some();
 
     for (index, line) in lines.iter().take(limit).enumerate() {
         let line_num = format!("  {:>4} ", index + 1);
@@ -280,6 +286,56 @@ fn render_write_preview(
         )));
     }
     rows
+}
+
+fn highlight_path_for_write_preview<'a>(path: &'a str, content: &str) -> Option<Cow<'a, str>> {
+    if lang_from_path(path).is_some() {
+        return Some(Cow::Borrowed(path));
+    }
+    infer_live_content_path(content).map(Cow::Borrowed)
+}
+
+fn infer_live_content_path(content: &str) -> Option<&'static str> {
+    let mut saw_jsonish = false;
+    for line in content.lines().take(20).map(str::trim_start) {
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("package ") || line.starts_with("func ") {
+            return Some("live.go");
+        }
+        if line.starts_with("use ")
+            || line.starts_with("pub ")
+            || line.starts_with("impl ")
+            || line.starts_with("fn ")
+        {
+            return Some("live.rs");
+        }
+        if line.starts_with("import ")
+            || line.starts_with("from ")
+            || line.starts_with("def ")
+            || line.starts_with("class ")
+        {
+            return Some("live.py");
+        }
+        if line.starts_with("const ")
+            || line.starts_with("let ")
+            || line.starts_with("function ")
+            || line.starts_with("export ")
+        {
+            return Some("live.ts");
+        }
+        if line.starts_with('{') || line.starts_with('[') {
+            saw_jsonish = true;
+        }
+        if line.starts_with("[package]") || line.contains(" = ") {
+            return Some("live.toml");
+        }
+        if line.contains(": ") && !line.ends_with('{') {
+            return Some("live.yaml");
+        }
+    }
+    saw_jsonish.then_some("live.json")
 }
 
 fn render_edit_body(
@@ -478,6 +534,12 @@ fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
         // Valid JSON but no recognized key — return None so the header
         // omits the `(...)` suffix entirely (e.g. EnterPlanMode with `{}`).
         return None;
+    }
+    for key in ["path", "command", "pattern", "query", "url", "description"] {
+        if let Some(text) = extract_partial_string_field(arguments, key) {
+            let is_path = key == "path";
+            return Some((one_line(&text), is_path));
+        }
     }
     if let Some(path) = arguments
         .strip_prefix(r#"{"path":"#)

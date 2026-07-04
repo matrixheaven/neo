@@ -23,9 +23,10 @@ pub fn extract_partial_string_field(partial_json: &str, field: &str) -> Option<S
 
     let mut value = String::new();
     let mut escaped = false;
-    for ch in chars {
+    let mut chars = chars.peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
-            value.push(ch);
+            push_json_escape(&mut value, ch, &mut chars);
             escaped = false;
             continue;
         }
@@ -37,6 +38,52 @@ pub fn extract_partial_string_field(partial_json: &str, field: &str) -> Option<S
     }
     // String not closed yet: return what we have so far.
     Some(value)
+}
+
+fn push_json_escape(
+    value: &mut String,
+    escaped: char,
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+) {
+    match escaped {
+        '"' => value.push('"'),
+        '\\' => value.push('\\'),
+        '/' => value.push('/'),
+        'b' => value.push('\u{0008}'),
+        'f' => value.push('\u{000c}'),
+        'n' => value.push('\n'),
+        'r' => value.push('\r'),
+        't' => value.push('\t'),
+        'u' => push_unicode_escape(value, chars),
+        other => value.push(other),
+    }
+}
+
+fn push_unicode_escape(
+    value: &mut String,
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+) {
+    let mut hex = String::new();
+    for _ in 0..4 {
+        let Some(ch) = chars.next() else {
+            value.push_str("\\u");
+            value.push_str(&hex);
+            return;
+        };
+        if !ch.is_ascii_hexdigit() {
+            value.push_str("\\u");
+            value.push_str(&hex);
+            value.push(ch);
+            return;
+        }
+        hex.push(ch);
+    }
+    let Some(codepoint) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) else {
+        value.push_str("\\u");
+        value.push_str(&hex);
+        return;
+    };
+    value.push(codepoint);
 }
 
 #[cfg(test)]
@@ -67,6 +114,15 @@ mod tests {
         assert_eq!(
             extract_partial_string_field(partial, "content"),
             Some(r#"say "hi""#.to_owned())
+        );
+    }
+
+    #[test]
+    fn decodes_common_json_string_escapes() {
+        let partial = r#"{"content":"line 1\n\tline 2\\tail"}"#;
+        assert_eq!(
+            extract_partial_string_field(partial, "content"),
+            Some("line 1\n\tline 2\\tail".to_owned())
         );
     }
 }
