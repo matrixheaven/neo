@@ -164,6 +164,7 @@ struct TerminalSession {
     writer: Box<dyn Write + Send>,
     output: Arc<StdMutex<Vec<u8>>>,
     read_offset: usize,
+    read_lock: Arc<Mutex<()>>,
     reader_thread: Option<ThreadJoinHandle<()>>,
     cols: u16,
     rows: u16,
@@ -250,6 +251,7 @@ async fn start_terminal(
             writer,
             output,
             read_offset: 0,
+            read_lock: Arc::new(Mutex::new(())),
             reader_thread: Some(reader_thread),
             cols,
             rows,
@@ -345,23 +347,48 @@ async fn read_terminal(
     handle: &str,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
+    let read_lock = {
+        let terminals = TERMINALS.lock().await;
+        Arc::clone(
+            &terminals
+                .get(handle)
+                .ok_or_else(|| unknown_terminal(tool, handle))?
+                .read_lock,
+        )
+    };
+    let _read_guard = read_lock.lock().await;
+
+    let (initial_status, output_buffer, initial_read_offset) = {
+        let mut terminals = TERMINALS.lock().await;
+        let session = terminals
+            .get_mut(handle)
+            .ok_or_else(|| unknown_terminal(tool, handle))?;
+        let status = session.child.try_wait().map_err(ToolError::Io)?;
+        session
+            .stream_callback
+            .lock()
+            .expect("stream callback lock poisoned")
+            .clone_from(&ctx.tool_update);
+        *session
+            .stream_max_bytes
+            .lock()
+            .expect("stream max lock poisoned") = max_output_bytes;
+        (status, Arc::clone(&session.output), session.read_offset)
+    };
+
+    if initial_status.is_none() {
+        wait_for_output_quiet_period(output_buffer, initial_read_offset).await;
+    }
+
     let mut terminals = TERMINALS.lock().await;
     let session = terminals
         .get_mut(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
-    let status = session.child.try_wait().map_err(ToolError::Io)?;
-    session
-        .stream_callback
-        .lock()
-        .expect("stream callback lock poisoned")
-        .clone_from(&ctx.tool_update);
-    *session
-        .stream_max_bytes
-        .lock()
-        .expect("stream max lock poisoned") = max_output_bytes;
-    if status.is_none() {
-        wait_for_output_quiet_period(Arc::clone(&session.output), session.read_offset).await;
-    }
+    let status = session
+        .child
+        .try_wait()
+        .map_err(ToolError::Io)?
+        .or(initial_status);
     let read_offset_before = session.read_offset;
     let (output, read_offset_after, total_output_bytes, unread_bytes_after) = {
         let output = session

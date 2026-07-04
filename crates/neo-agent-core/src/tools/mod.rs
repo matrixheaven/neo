@@ -515,6 +515,7 @@ pub trait Tool: Send + Sync {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
+    spec_cache: Mutex<Option<Vec<ToolSpec>>>,
 }
 
 impl ToolRegistry {
@@ -585,6 +586,7 @@ impl ToolRegistry {
         T: Tool + 'static,
     {
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
+        self.invalidate_specs();
     }
 
     pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
@@ -596,7 +598,14 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec()).collect()
+        let mut cache = self.spec_cache.lock().expect("tool spec cache poisoned");
+        cache
+            .get_or_insert_with(|| self.tools.values().map(|tool| tool.spec()).collect())
+            .clone()
+    }
+
+    fn invalidate_specs(&self) {
+        *self.spec_cache.lock().expect("tool spec cache poisoned") = None;
     }
 
     pub async fn run(
@@ -716,6 +725,10 @@ fn cap_output(content: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[tokio::test]
     async fn tool_context_agent_session_context_persists_main_task_output() {
@@ -787,5 +800,57 @@ mod tests {
             format_shell_failure(None, None),
             "Command terminated before returning an exit code."
         );
+    }
+
+    struct CountingTool {
+        name: &'static str,
+        schema_calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "count schema calls"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            self.schema_calls.fetch_add(1, Ordering::SeqCst);
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _ctx: &'a ToolContext,
+            _input: serde_json::Value,
+        ) -> ToolFuture<'a> {
+            Box::pin(async { Ok(ToolResult::ok("ok")) })
+        }
+    }
+
+    #[test]
+    fn specs_are_cached_until_registry_mutates() {
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(CountingTool {
+            name: "First",
+            schema_calls: Arc::clone(&first_calls),
+        });
+
+        assert_eq!(registry.specs().len(), 1);
+        assert_eq!(registry.specs().len(), 1);
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+
+        registry.register(CountingTool {
+            name: "Second",
+            schema_calls: Arc::clone(&second_calls),
+        });
+
+        assert_eq!(registry.specs().len(), 2);
+        assert_eq!(first_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
     }
 }

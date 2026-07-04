@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
+use tokio::{fs::File, io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
 use super::bash::ShellTermination;
@@ -146,6 +146,7 @@ struct BackgroundTaskRecord {
 pub struct BackgroundTaskManager {
     inner: Arc<Mutex<HashMap<String, BackgroundTaskRecord>>>,
     persistence_dir: Option<Arc<PathBuf>>,
+    persistent_outputs: Arc<Mutex<HashMap<String, Arc<Mutex<File>>>>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskManager {
@@ -242,17 +243,52 @@ impl BackgroundTaskManager {
         let Some(root) = &self.persistence_dir else {
             return Ok(());
         };
+        let file = self.persistent_output_file(root, task_id).await?;
+        let mut file = file.lock().await;
+        file.write_all(chunk.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn persistent_output_file(
+        &self,
+        root: &PathBuf,
+        task_id: &str,
+    ) -> Result<Arc<Mutex<File>>, ToolError> {
+        if let Some(file) = self.persistent_outputs.lock().await.get(task_id).cloned() {
+            return Ok(file);
+        }
+
         let output = root.join(task_id).join("output.log");
         if let Some(parent) = output.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(output)
-            .await?;
-        file.write_all(chunk.as_bytes()).await?;
+        let opened = Arc::new(Mutex::new(
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(output)
+                .await?,
+        ));
+        let mut outputs = self.persistent_outputs.lock().await;
+        Ok(Arc::clone(
+            outputs
+                .entry(task_id.to_owned())
+                .or_insert_with(|| Arc::clone(&opened)),
+        ))
+    }
+
+    async fn finish_persistent_output(&self, task_id: &str) -> Result<(), ToolError> {
+        let Some(file) = self.persistent_outputs.lock().await.remove(task_id) else {
+            return Ok(());
+        };
+        file.lock().await.flush().await?;
         Ok(())
+    }
+
+    async fn close_persistent_output(&self, task_id: &str) {
+        if let Err(err) = self.finish_persistent_output(task_id).await {
+            eprintln!("failed to close background task output: {err}");
+        }
     }
 
     #[cfg(test)]
@@ -262,6 +298,16 @@ impl BackgroundTaskManager {
         chunk: &str,
     ) -> Result<(), ToolError> {
         self.append_persistent_output(task_id, chunk).await
+    }
+
+    #[cfg(test)]
+    pub async fn finish_task_output_for_test(&self, task_id: &str) -> Result<(), ToolError> {
+        self.finish_persistent_output(task_id).await
+    }
+
+    #[cfg(test)]
+    pub async fn persistent_output_count_for_test(&self) -> usize {
+        self.persistent_outputs.lock().await.len()
     }
 
     pub async fn start_question(&self, task_id: String, description: String) -> ToolResult {
@@ -771,6 +817,7 @@ impl BackgroundTaskManager {
                 let termination = (command.cleanup)().await;
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
+                self.close_persistent_output(task_id).await;
                 let output = output_from_command_buffers(
                     termination,
                     command.stdout,
@@ -1045,6 +1092,7 @@ impl BackgroundTaskManager {
                 let termination = (command.cleanup)().await;
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
+                self.close_persistent_output(task_id).await;
                 let output = output_from_command_buffers(
                     termination,
                     command.stdout,
@@ -1088,6 +1136,7 @@ impl BackgroundTaskManager {
             } => {
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
+                self.close_persistent_output(task_id).await;
                 let output = output_from_command_buffers(
                     termination,
                     command.stdout,
@@ -1784,6 +1833,35 @@ mod tests {
                 .await
                 .expect("read output"),
             "hello\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_task_manager_keeps_persistent_output_open_until_finished() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = temp.path().join("agents").join("main").join("tasks");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks_dir.clone());
+
+        manager
+            .persist_task_output_for_test("bash-12345678", "hello")
+            .await
+            .expect("persist first output");
+        manager
+            .persist_task_output_for_test("bash-12345678", " world\n")
+            .await
+            .expect("persist second output");
+
+        assert_eq!(manager.persistent_output_count_for_test().await, 1);
+        manager
+            .finish_task_output_for_test("bash-12345678")
+            .await
+            .expect("finish output");
+        assert_eq!(manager.persistent_output_count_for_test().await, 0);
+        assert_eq!(
+            tokio::fs::read_to_string(tasks_dir.join("bash-12345678").join("output.log"))
+                .await
+                .expect("read output"),
+            "hello world\n"
         );
     }
 

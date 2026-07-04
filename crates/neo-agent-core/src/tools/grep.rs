@@ -344,8 +344,9 @@ fn collect_matches(
         }
         OutputMode::Content => {
             if input.multiline {
+                let mut line_numbers = MatchLineNumbers::new();
                 for m in regex.find_iter(content) {
-                    let line_no = content[..m.start()].matches('\n').count() + 1;
+                    let line_no = line_numbers.line_number_at(content, m.start());
                     let text = collapse_match_text(&content[m.start()..m.end()]);
                     records.push(MatchRecord::ContentLine {
                         file: display.clone(),
@@ -397,6 +398,38 @@ fn collect_matches(
             }
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct MatchLineNumbers {
+    last_offset: usize,
+    line_no: usize,
+}
+
+impl MatchLineNumbers {
+    fn new() -> Self {
+        Self {
+            last_offset: 0,
+            line_no: 1,
+        }
+    }
+
+    fn line_number_at(&mut self, content: &str, offset: usize) -> usize {
+        if offset < self.last_offset {
+            self.last_offset = 0;
+            self.line_no = 1;
+        }
+        self.line_no += count_newlines(&content[self.last_offset..offset]);
+        self.last_offset = offset;
+        self.line_no
+    }
+}
+
+fn count_newlines(text: &str) -> usize {
+    text.as_bytes()
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
 }
 
 fn collapse_match_text(text: &str) -> String {
@@ -790,6 +823,39 @@ mod tests {
         .await;
         assert!(result.content.contains("foo.rs:fn main() {}"));
         assert!(!result.content.contains("foo.rs:1:fn main() {}"));
+    }
+
+    #[tokio::test]
+    async fn multiline_content_reports_line_numbers_for_multiple_matches() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            workspace.path().join("multi.txt"),
+            "alpha\nfirst match\nbeta\ngamma\nsecond match\n",
+        )
+        .expect("write multi.txt");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let result = run_grep(
+            &ctx,
+            "match",
+            json!({ "output_mode": "content", "multiline": true }),
+        )
+        .await;
+
+        assert!(result.content.contains("multi.txt:2:match"));
+        assert!(result.content.contains("multi.txt:5:match"));
+    }
+
+    #[test]
+    fn match_line_numbers_advance_from_previous_match_offset() {
+        let content = "one\ntwo\nthree\nfour\n";
+        let mut line_numbers = MatchLineNumbers::new();
+
+        assert_eq!(line_numbers.line_number_at(content, 0), 1);
+        assert_eq!(line_numbers.line_number_at(content, 8), 3);
+        assert_eq!(line_numbers.line_number_at(content, 14), 4);
     }
 
     #[tokio::test]

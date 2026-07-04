@@ -166,6 +166,82 @@ async fn terminal_read_waits_for_prompt_after_initial_output_burst() {
         .expect("terminal stop should succeed");
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_read_quiet_period_does_not_block_other_terminal_operations() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = std::sync::Arc::new(ToolRegistry::with_builtin_tools());
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor.clone());
+
+    let slow = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": "sleep 1" }),
+        )
+        .await
+        .expect("slow terminal start should succeed");
+    let slow_handle = slow.details.as_ref().expect("slow details")["handle"]
+        .as_str()
+        .expect("slow handle")
+        .to_owned();
+    let second = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": "printf second-terminal; sleep 1" }),
+        )
+        .await
+        .expect("second terminal start should succeed");
+    let second_handle = second.details.as_ref().expect("second details")["handle"]
+        .as_str()
+        .expect("second handle")
+        .to_owned();
+
+    let read_registry = std::sync::Arc::clone(&registry);
+    let read_context = context.clone();
+    let read_handle = slow_handle.clone();
+    let read_task = tokio::spawn(async move {
+        read_registry
+            .run(
+                "Terminal",
+                &read_context,
+                json!({ "mode": "read", "handle": read_handle }),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": second_handle }),
+        ),
+    )
+    .await
+    .expect("stop on another terminal should not wait for quiet-period polling")
+    .expect("second terminal stop should succeed");
+
+    read_task
+        .await
+        .expect("read task join")
+        .expect("read succeeds");
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": slow_handle }),
+        )
+        .await
+        .expect("slow terminal stop should succeed");
+}
+
 #[tokio::test]
 async fn terminal_write_then_read_observes_interactive_shell_output() {
     let workspace = tempfile::tempdir().expect("workspace");

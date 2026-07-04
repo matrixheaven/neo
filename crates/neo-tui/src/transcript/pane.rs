@@ -1107,17 +1107,12 @@ fn current_time_ms() -> u64 {
 }
 
 fn append_transcript_block(rows: &mut Vec<Line>, block: Vec<Line>) {
-    let first = block.iter().position(|line| !line.text().trim().is_empty());
-    let last = block
-        .iter()
-        .rposition(|line| !line.text().trim().is_empty());
+    let first = block.iter().position(|line| !line.is_blank());
+    let last = block.iter().rposition(|line| !line.is_blank());
     let (Some(first), Some(last)) = (first, last) else {
         return;
     };
-    if rows
-        .last()
-        .is_some_and(|line| !line.text().trim().is_empty())
-    {
+    if rows.last().is_some_and(|line| !line.is_blank()) {
         rows.push(Line::raw(""));
     }
     rows.extend(block.into_iter().skip(first).take(last - first + 1));

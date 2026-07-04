@@ -46,6 +46,19 @@ fn line_truncate_preserves_visible_width_contract() {
 }
 
 #[test]
+fn line_is_blank_ignores_styles_and_ansi_sequences() {
+    assert!(Line::raw(" \t\n").is_blank());
+    assert!(
+        Line::from_spans(vec![
+            Span::styled(" ", Style::default().fg(Color::Green)),
+            Span::raw("\x1b[31m\t\x1b[0m"),
+        ])
+        .is_blank()
+    );
+    assert!(!Line::raw("\x1b[31mvisible\x1b[0m").is_blank());
+}
+
+#[test]
 fn component_defaults_to_live_and_ignored_input() {
     let mut component = StaticComponent {
         rows: vec![Line::raw("ready")],

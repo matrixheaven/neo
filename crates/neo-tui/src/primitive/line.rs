@@ -1,4 +1,4 @@
-use crate::primitive::ansi_escape::{paint, strip_ansi};
+use crate::primitive::ansi_escape::{next_sequence, paint, strip_ansi};
 use crate::primitive::style::Style;
 use crate::primitive::text_layout::{clip_plain_to_width, visible_width};
 
@@ -109,6 +109,13 @@ impl Line {
     }
 
     #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.spans
+            .iter()
+            .all(|span| visible_text_is_blank(span.text()))
+    }
+
+    #[must_use]
     pub fn visible_width(&self) -> usize {
         self.spans.iter().map(Span::visible_width).sum()
     }
@@ -148,4 +155,22 @@ impl Line {
         out.push(Span::raw("…".to_owned()));
         Self { spans: out }
     }
+}
+
+fn visible_text_is_blank(text: &str) -> bool {
+    let mut index = 0;
+    while index < text.len() {
+        if let Some(sequence) = next_sequence(text, index) {
+            index += sequence.len();
+            continue;
+        }
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+        if !character.is_whitespace() {
+            return false;
+        }
+        index += character.len_utf8();
+    }
+    true
 }
