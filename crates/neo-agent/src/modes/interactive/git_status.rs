@@ -167,11 +167,12 @@ fn parse_git_branch_header(header: &str) -> GitBranchHeader {
         .split_once(" [")
         .map_or((header, ""), |(branch, sync)| (branch, sync));
     let unborn = branch_part.starts_with("No commits yet on ");
-    let branch = branch_part
+    let stripped = branch_part
         .strip_prefix("No commits yet on ")
-        .unwrap_or(branch_part)
+        .unwrap_or(branch_part);
+    let branch = stripped
         .split_once("...")
-        .map_or(branch_part, |(branch, _)| branch)
+        .map_or(stripped, |(b, _)| b)
         .trim()
         .to_owned();
     let ahead = parse_git_sync_count(sync_part, "ahead ");

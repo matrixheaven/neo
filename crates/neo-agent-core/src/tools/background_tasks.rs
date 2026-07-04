@@ -873,6 +873,30 @@ impl BackgroundTaskManager {
             .is_some_and(|record| record.detached)
     }
 
+    /// Read-only inspection of a task's kind that does NOT poll the
+    /// underlying process (unlike [`Self::snapshot`], which calls
+    /// `try_wait` on running bash commands and can transition them to a
+    /// terminal state as a side effect).
+    #[must_use]
+    pub async fn task_kind(&self, task_id: &str) -> Option<BackgroundTaskKind> {
+        let tasks = self.inner.lock().await;
+        let record = tasks.get(task_id)?;
+        Some(match &record.state {
+            BackgroundTaskState::BashRunning(_) | BackgroundTaskState::BashFinished { .. } => {
+                BackgroundTaskKind::Bash
+            }
+            BackgroundTaskState::QuestionWaiting | BackgroundTaskState::QuestionFinished { .. } => {
+                BackgroundTaskKind::Question
+            }
+            BackgroundTaskState::DelegateRunning { .. }
+            | BackgroundTaskState::DelegateFinished { .. } => BackgroundTaskKind::Delegate,
+            BackgroundTaskState::DelegateSwarmRunning { .. }
+            | BackgroundTaskState::DelegateSwarmFinished { .. } => {
+                BackgroundTaskKind::DelegateSwarm
+            }
+        })
+    }
+
     pub async fn foreground_bash_task_id(&self) -> Option<String> {
         self.inner
             .lock()
@@ -1444,12 +1468,15 @@ impl Tool for TaskStopTool {
             // background record is marked terminal.
             if !input.task_id.starts_with("swarm_") {
                 // Check whether this is a delegate background task before
-                // attempting runtime cancellation.
+                // attempting runtime cancellation. Use the read-only
+                // `task_kind` inspector rather than `snapshot`, which would
+                // poll `try_wait` on a running bash task and could finalize
+                // it before `stop()` runs.
                 let is_delegate = ctx
                     .background_tasks
-                    .snapshot(&input.task_id)
+                    .task_kind(&input.task_id)
                     .await
-                    .is_ok_and(|snap| snap.kind == BackgroundTaskKind::Delegate);
+                    .is_some_and(|kind| kind == BackgroundTaskKind::Delegate);
                 if is_delegate
                     && let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id)
                 {
