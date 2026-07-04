@@ -168,13 +168,14 @@ pub fn render_child_tool_row(
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("  {}", one_line(value)))
         .unwrap_or_default();
+    let muted = Style::default().fg(theme.text_muted);
     let mut lines = vec![
         Line::from_spans(vec![
-            Span::raw(indent.to_owned()),
+            Span::styled(indent.to_owned(), muted),
             Span::styled(marker, marker_style),
             Span::raw(format!(" {verb} ")),
             Span::styled(row.name.to_owned(), Style::default().fg(theme.brand)),
-            Span::styled(suffix, Style::default().fg(theme.text_muted)),
+            Span::styled(suffix, muted),
         ])
         .truncate_to_width(width),
     ];
@@ -190,24 +191,25 @@ pub fn render_child_thinking(
     indent: &str,
     theme: &TuiTheme,
 ) -> Vec<Line> {
+    let muted = Style::default().fg(theme.text_muted);
     let mut lines = vec![
-        Line::styled(
-            format!("{indent}◌ thinking"),
-            Style::default().fg(theme.text_muted),
-        )
+        Line::from_spans(vec![
+            Span::styled(indent.to_owned(), muted),
+            Span::styled("◌ thinking".to_owned(), muted),
+        ])
         .truncate_to_width(width),
     ];
     lines.extend(
         tail_non_empty_lines(text, THINKING_PREVIEW_LINES)
             .into_iter()
             .map(|line| {
-                Line::styled(
-                    format!(
-                        "{indent}  {}",
-                        compact_chars(&one_line(&line), FINAL_TEXT_CHARS)
+                Line::from_spans(vec![
+                    Span::styled(indent.to_owned(), muted),
+                    Span::styled(
+                        format!("  {}", compact_chars(&one_line(&line), FINAL_TEXT_CHARS)),
+                        muted,
                     ),
-                    Style::default().fg(theme.text_muted),
-                )
+                ])
                 .truncate_to_width(width)
             }),
     );
@@ -216,11 +218,14 @@ pub fn render_child_thinking(
 
 pub fn render_child_body(text: &str, width: usize, indent: &str, theme: &TuiTheme) -> Option<Line> {
     let compact = compact_chars(&one_line(text), FINAL_TEXT_CHARS);
+    let muted = Style::default().fg(theme.text_muted);
+    let primary = Style::default().fg(theme.text_primary);
     (!compact.is_empty()).then(|| {
-        Line::styled(
-            format!("{indent}│ {compact}"),
-            Style::default().fg(theme.text_primary),
-        )
+        Line::from_spans(vec![
+            Span::styled(indent.to_owned(), muted),
+            Span::styled("│ ".to_owned(), muted),
+            Span::styled(compact, primary),
+        ])
         .truncate_to_width(width)
     })
 }
@@ -232,18 +237,20 @@ pub fn render_child_final(
     indent: &str,
     theme: &TuiTheme,
 ) -> Line {
+    let muted = Style::default().fg(theme.text_muted);
     let color = if is_error {
         theme.status_error
     } else {
         theme.text_primary
     };
-    Line::styled(
-        format!(
-            "{indent}└ {}",
-            compact_chars(&one_line(text), FINAL_TEXT_CHARS)
+    Line::from_spans(vec![
+        Span::styled(indent.to_owned(), muted),
+        Span::styled("└ ".to_owned(), muted),
+        Span::styled(
+            compact_chars(&one_line(text), FINAL_TEXT_CHARS),
+            Style::default().fg(color),
         ),
-        Style::default().fg(color),
-    )
+    ])
     .truncate_to_width(width)
 }
 
@@ -399,6 +406,7 @@ fn render_output_preview(
     theme: &TuiTheme,
 ) -> Vec<Line> {
     let preview_indent = format!("{indent}    ");
+    let muted = Style::default().fg(theme.text_muted);
     tail_non_empty_lines(&output.text, TOOL_OUTPUT_PREVIEW_LINES)
         .into_iter()
         .map(|line| {
@@ -407,10 +415,10 @@ fn render_output_preview(
             } else {
                 theme.text_muted
             };
-            Line::styled(
-                format!("{preview_indent}{line}"),
-                Style::default().fg(color),
-            )
+            Line::from_spans(vec![
+                Span::styled(preview_indent.clone(), muted),
+                Span::styled(line, Style::default().fg(color)),
+            ])
             .truncate_to_width(width)
         })
         .collect()

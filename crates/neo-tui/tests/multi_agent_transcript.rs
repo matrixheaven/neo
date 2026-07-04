@@ -393,6 +393,66 @@ fn delegate_group_styles_header_names_muted_tree_and_role_badges() {
 }
 
 #[test]
+fn delegate_group_child_rows_keep_left_border_muted() {
+    let theme = TuiTheme::default();
+    let mut nova = option_b_running_delegate();
+    nova.state = AgentLifecycleState::Completed;
+    nova.terminal_at_ms = Some(31_000);
+    nova.terminal_reason = Some(AgentTerminalReason::Completed);
+    nova.outcome = Some(AgentTerminalOutcome {
+        summary: "All edits applied.".to_owned(),
+        is_error: false,
+    });
+    let vega = option_b_delegate(
+        "vega",
+        "Vega",
+        AgentRole::Explorer,
+        AgentLifecycleState::Queued,
+        "queued task",
+    );
+
+    // Nova is not the last agent, so its child rows use a │ continuation.
+    let group = DelegateGroupComponent::new(1, vec![nova, vega]);
+    let lines = group.render_with_theme(160, &theme);
+
+    let used_line = lines
+        .iter()
+        .find(|line| line.text().contains("Used Read"))
+        .expect("used tool row");
+    let spans = used_line.spans();
+    assert_eq!(spans[0].text(), "  │      ");
+    assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+
+    let thinking_line = lines
+        .iter()
+        .find(|line| line.text().contains("◌ thinking"))
+        .expect("thinking row");
+    let spans = thinking_line.spans();
+    assert_eq!(spans[0].text(), "  │      ");
+    assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+
+    let body_line = lines
+        .iter()
+        .find(|line| line.text().contains("I found"))
+        .expect("body row");
+    let spans = body_line.spans();
+    assert_eq!(spans[0].text(), "  │      ");
+    assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+    assert_eq!(spans[1].text(), "│ ");
+    assert_eq!(spans[1].style().fg, Some(theme.text_muted));
+
+    let final_line = lines
+        .iter()
+        .find(|line| line.text().contains("└ All edits"))
+        .expect("final row");
+    let spans = final_line.spans();
+    assert_eq!(spans[0].text(), "  │      ");
+    assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+    assert_eq!(spans[1].text(), "└ ");
+    assert_eq!(spans[1].style().fg, Some(theme.text_muted));
+}
+
+#[test]
 fn option_b_collapsed_swarm_shows_names_badges_and_bayes_progress() {
     let mut iris = option_b_delegate(
         "iris",
