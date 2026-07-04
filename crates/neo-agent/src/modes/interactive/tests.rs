@@ -4207,6 +4207,12 @@ async fn approval_revise_collects_feedback_without_editing_prompt() {
         Some(ApprovalChoice::Revise)
     );
 
+    // First Enter enters feedback collection mode.
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+        .await
+        .expect("enter begins feedback collection");
+
     controller
         .handle_input_event(InputEvent::Insert('n'))
         .await
@@ -6406,6 +6412,11 @@ async fn revise_exit_plan_mode_feedback_is_forwarded_with_current_approval() {
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
         .await
         .expect("move to revise");
+    // First confirm enters feedback collection mode.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("begin feedback collection");
     controller
         .handle_input_event(InputEvent::Insert('r'))
         .await
