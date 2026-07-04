@@ -1,7 +1,7 @@
 use neo_ai::ToolSpec;
 
 use crate::ToolResult;
-use crate::skills::SkillStore;
+use crate::skills::SkillStoreHandle;
 
 pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
     ToolSpec {
@@ -30,7 +30,7 @@ pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
 }
 
 pub(super) fn execute_invoke_skill(
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     arguments: &serde_json::Value,
 ) -> ToolResult {
     let Some(skills) = skills else {
@@ -43,7 +43,7 @@ pub(super) fn execute_invoke_skill(
     let Some(skill) = skills.get(&request.skill_name) else {
         return ToolResult::error(format!("skill `{}` is not available", request.skill_name));
     };
-    if skill_is_manual_only(skill) {
+    if skill_is_manual_only(&skill) {
         return ToolResult::error(format!(
             "skill `{}` is type `flow` and can only be invoked manually via /skill:{}",
             request.skill_name, request.skill_name
@@ -52,7 +52,7 @@ pub(super) fn execute_invoke_skill(
 
     let invocation = request.into_invocation();
 
-    match crate::skills::expand_skill_body(skill, &invocation) {
+    match crate::skills::expand_skill_body(&skill, &invocation) {
         Ok(body) => ToolResult::ok(body),
         Err(err) => ToolResult::error(format!(
             "failed to expand skill `{}`: {err}",
@@ -130,7 +130,7 @@ fn skill_is_manual_only(skill: &crate::skills::LoadedSkill) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillType};
+    use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillStore, SkillType};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -159,8 +159,10 @@ arguments:
         arguments
     }
 
-    fn skill_store(root: &std::path::Path) -> SkillStore {
-        SkillStore::load(&[], &[root.to_path_buf()], Vec::new()).expect("skill store")
+    fn skill_store(root: &std::path::Path) -> SkillStoreHandle {
+        SkillStoreHandle::new(
+            SkillStore::load(&[], &[root.to_path_buf()], Vec::new()).expect("skill store"),
+        )
     }
 
     #[test]

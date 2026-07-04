@@ -18,7 +18,7 @@ use super::permission::{
 use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
 use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
 use super::tool_arguments::prepare_tool_arguments;
-use crate::skills::SkillStore;
+use crate::skills::SkillStoreHandle;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
     AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ToolAccess, ToolContext,
@@ -98,7 +98,7 @@ pub(super) async fn execute_tool_calls(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -229,7 +229,7 @@ async fn execute_tool_calls_sequential(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     turn: u32,
     prepared: &[(
         &AgentToolCall,
@@ -318,7 +318,7 @@ async fn execute_tool_calls_parallel(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     turn: u32,
     prepared: &[(
         &AgentToolCall,
@@ -525,7 +525,7 @@ async fn after_tool_result(
 async fn prepare_and_run_tool(
     config: &AgentConfig,
     registry: &ToolRegistry,
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     tool_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
@@ -578,7 +578,7 @@ async fn prepare_and_run_tool(
 }
 
 async fn run_tool_with_cancel(
-    skills: Option<&SkillStore>,
+    skills: Option<&SkillStoreHandle>,
     registry: &ToolRegistry,
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,

@@ -35,6 +35,7 @@ use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
     ListSkillsTool, McpConnectionManager, MoveSkillTool, PendingQuestion,
     PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool, mode::PlanMode,
+    skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -432,6 +433,7 @@ async fn runtime_for_config(
         &config.extra_skill_dirs,
         &config.skill_path,
     )?;
+    let skill_store_handle = SkillStoreHandle::new(skill_store.clone());
     let mut agent_config = runtime::agent_config_for_app(model, config, approval_tx, &skill_store)?;
     if let Some(session_directory) = &session_directory {
         agent_config = agent_config.with_session_directory(session_directory.clone());
@@ -470,11 +472,21 @@ async fn runtime_for_config(
         config.extra_skill_dirs.iter().map(PathBuf::from).collect();
     tools.register(ListSkillsTool::new(neo_home(), extra_skill_paths));
     if let Some(home) = neo_home() {
-        tools.register(MoveSkillTool::new(home.clone()));
-        tools.register(CreateSkillTool::new(home.clone()));
+        let skill_store_reload = skill_store_reloader(config);
+        let move_reload = Arc::clone(&skill_store_reload);
+        tools.register(
+            MoveSkillTool::new(home.clone())
+                .with_skill_store_reload(skill_store_handle.clone(), move || move_reload()),
+        );
+        let create_reload = Arc::clone(&skill_store_reload);
+        tools.register(
+            CreateSkillTool::new(home.clone())
+                .with_skill_store_reload(skill_store_handle.clone(), move || create_reload()),
+        );
         tools.register(SummarizeSessionsTool::new(home));
     }
-    let mut runtime = AgentRuntime::with_tools_and_skills(agent_config, client, tools, skill_store);
+    let mut runtime =
+        AgentRuntime::with_tools_and_skill_handle(agent_config, client, tools, skill_store_handle);
     runtime = runtime.with_steer_input(steer_input);
     if let Some(session_dir) = session_directory {
         let goal_manager = Arc::new(GoalManager::load(session_dir).await?);
@@ -486,6 +498,18 @@ async fn runtime_for_config(
         runtime = runtime.with_goal_manager(&goal_manager);
     }
     Ok(runtime)
+}
+
+fn skill_store_reloader(
+    config: &AppConfig,
+) -> Arc<dyn Fn() -> Result<neo_agent_core::skills::SkillStore, String> + Send + Sync> {
+    let neo_home = neo_home();
+    let extra_skill_dirs = config.extra_skill_dirs.clone();
+    let skill_path = config.skill_path.clone();
+    Arc::new(move || {
+        resources::load_skill_store(neo_home.as_deref(), &extra_skill_dirs, &skill_path)
+            .map_err(|err| err.to_string())
+    })
 }
 
 #[cfg(test)]

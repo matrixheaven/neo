@@ -1,13 +1,17 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::skills::{SkillSource, SkillStore, SkillStoreHandle, discovery};
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
+
+type SkillStoreReloader = Arc<dyn Fn() -> Result<SkillStore, String> + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListSkillsArgs {
@@ -116,30 +120,41 @@ impl Tool for ListSkillsTool {
         let extra_dirs = self.extra_dirs.clone();
         Box::pin(async move {
             let args = args?;
-            let mut tiers: Vec<(&'static str, Vec<(String, PathBuf)>)> = Vec::new();
+            let mut user_dirs = Vec::new();
             if let Some(home) = neo_home {
-                let user_skills = discover_skills_in(&home.join("skills")).await?;
-                if !user_skills.is_empty() {
-                    tiers.push(("user", user_skills));
-                }
-                if args.include_builtin {
-                    let builtin_skills = discover_builtin_skills(&home).await?;
-                    if !builtin_skills.is_empty() {
-                        tiers.push(("builtin", builtin_skills));
-                    }
-                }
+                user_dirs.extend(discovery::user_skill_dirs(&home));
             }
-            for dir in extra_dirs {
-                let extra_skills = discover_skills_in(&dir).await?;
-                if !extra_skills.is_empty() {
-                    tiers.push(("extra", extra_skills));
+            let builtin = if args.include_builtin {
+                crate::skills::builtin::builtin_skills().map_err(|err| ToolError::InvalidInput {
+                    tool: "ListSkills".to_owned(),
+                    message: err.to_string(),
+                })?
+            } else {
+                Vec::new()
+            };
+            let store = SkillStore::load(&user_dirs, &extra_dirs, builtin).map_err(|err| {
+                ToolError::InvalidInput {
+                    tool: "ListSkills".to_owned(),
+                    message: err.to_string(),
                 }
-            }
+            })?;
             let mut lines = Vec::new();
-            for (tier, skills) in tiers {
+            for (source, tier) in [
+                (SkillSource::User, "user"),
+                (SkillSource::Extra, "extra"),
+                (SkillSource::Builtin, "builtin"),
+            ] {
+                let mut skills = store
+                    .iter()
+                    .filter(|skill| skill.source == source)
+                    .collect::<Vec<_>>();
+                if skills.is_empty() {
+                    continue;
+                }
+                skills.sort_by(|left, right| left.name.cmp(&right.name));
                 lines.push(format!("[{tier}]"));
-                for (name, path) in skills {
-                    lines.push(format!("  {name}: {}", path.display()));
+                for skill in skills {
+                    lines.push(format!("  {}: {}", skill.name, skill.root.display()));
                 }
             }
             Ok(ToolResult::ok(lines.join("\n")))
@@ -149,6 +164,8 @@ impl Tool for ListSkillsTool {
 
 pub struct CreateSkillTool {
     user_home: PathBuf,
+    skill_store: Option<SkillStoreHandle>,
+    reload: Option<SkillStoreReloader>,
 }
 
 impl CreateSkillTool {
@@ -156,7 +173,20 @@ impl CreateSkillTool {
     pub fn new(user_home: impl Into<PathBuf>) -> Self {
         Self {
             user_home: user_home.into(),
+            skill_store: None,
+            reload: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_skill_store_reload(
+        mut self,
+        skill_store: SkillStoreHandle,
+        reload: impl Fn() -> Result<SkillStore, String> + Send + Sync + 'static,
+    ) -> Self {
+        self.skill_store = Some(skill_store);
+        self.reload = Some(Arc::new(reload));
+        self
     }
 }
 
@@ -216,6 +246,8 @@ impl Tool for CreateSkillTool {
             }
         });
         let user_home = self.user_home.clone();
+        let skill_store = self.skill_store.clone();
+        let reload = self.reload.clone();
         Box::pin(async move {
             let args = args?;
             let skill_type = if args.skill_type.is_empty() {
@@ -266,9 +298,12 @@ impl Tool for CreateSkillTool {
             }
 
             fs::write(&path, content).await.map_err(ToolError::Io)?;
+            let reload_message =
+                reload_shared_skill_store("CreateSkill", skill_store.as_ref(), reload.as_ref())?;
             Ok(ToolResult::ok(format!(
-                "Created skill at {}",
-                path.display()
+                "Created skill at {}{}",
+                path.display(),
+                reload_message
             )))
         })
     }
@@ -276,6 +311,8 @@ impl Tool for CreateSkillTool {
 
 pub struct MoveSkillTool {
     backup_home: PathBuf,
+    skill_store: Option<SkillStoreHandle>,
+    reload: Option<SkillStoreReloader>,
 }
 
 impl MoveSkillTool {
@@ -283,7 +320,20 @@ impl MoveSkillTool {
     pub fn new(backup_home: impl Into<PathBuf>) -> Self {
         Self {
             backup_home: backup_home.into(),
+            skill_store: None,
+            reload: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_skill_store_reload(
+        mut self,
+        skill_store: SkillStoreHandle,
+        reload: impl Fn() -> Result<SkillStore, String> + Send + Sync + 'static,
+    ) -> Self {
+        self.skill_store = Some(skill_store);
+        self.reload = Some(Arc::new(reload));
+        self
     }
 }
 
@@ -329,6 +379,8 @@ impl Tool for MoveSkillTool {
                 message: err.to_string(),
             });
         let backup_home = self.backup_home.clone();
+        let skill_store = self.skill_store.clone();
+        let reload = self.reload.clone();
         Box::pin(async move {
             let args = args?;
             let source = PathBuf::from(&args.source);
@@ -352,6 +404,13 @@ impl Tool for MoveSkillTool {
                     message: "source has no directory name".to_owned(),
                 })?);
 
+            if destination.exists() {
+                return Ok(ToolResult::error(format!(
+                    "destination already exists: {}",
+                    destination.display()
+                )));
+            }
+
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -359,93 +418,67 @@ impl Tool for MoveSkillTool {
             let backup_dir = backup_home
                 .join("backups")
                 .join("skills")
-                .join(format!("{timestamp}"))
-                .join(source.parent().unwrap_or(Path::new("")));
+                .join(format!("{timestamp}"));
             fs::create_dir_all(&backup_dir)
                 .await
                 .map_err(ToolError::Io)?;
             let backup_target = backup_dir.join(source.file_name().unwrap());
+            if paths_refer_to_same_location(&source, &backup_target).await? {
+                return Ok(ToolResult::error(format!(
+                    "backup target resolves to source path: {}",
+                    backup_target.display()
+                )));
+            }
             copy_dir(&source, &backup_target)
                 .await
                 .map_err(ToolError::Io)?;
 
-            if destination.exists() {
-                return Ok(ToolResult::error(format!(
-                    "destination already exists: {}",
-                    destination.display()
-                )));
-            }
             fs::rename(&source, &destination)
                 .await
                 .map_err(ToolError::Io)?;
+            let reload_message =
+                reload_shared_skill_store("MoveSkill", skill_store.as_ref(), reload.as_ref())?;
 
             Ok(ToolResult::ok(format!(
-                "Moved {} -> {}\nBackup: {}",
+                "Moved {} -> {}\nBackup: {}{}",
                 source.display(),
                 destination.display(),
-                backup_target.display()
+                backup_target.display(),
+                reload_message
             )))
         })
     }
 }
 
-async fn discover_skills_in(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
-    let mut result = Vec::new();
-    if !dir.exists() {
-        return Ok(result);
-    }
-    let mut entries = fs::read_dir(dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_skills(&path, dir, &mut result).await?;
-        }
-    }
-    Ok(result)
+fn reload_shared_skill_store(
+    tool: &str,
+    skill_store: Option<&SkillStoreHandle>,
+    reload: Option<&SkillStoreReloader>,
+) -> Result<String, ToolError> {
+    let (Some(skill_store), Some(reload)) = (skill_store, reload) else {
+        return Ok(String::new());
+    };
+    let store = reload().map_err(|message| ToolError::InvalidInput {
+        tool: tool.to_owned(),
+        message: format!("failed to reload skill store: {message}"),
+    })?;
+    let count = store.len();
+    skill_store.replace(store);
+    Ok(format!(
+        "\nSkill store reloaded ({count} skills available)."
+    ))
 }
 
-async fn discover_builtin_skills(neo_home: &Path) -> io::Result<Vec<(String, PathBuf)>> {
-    let extracted = discover_skills_in(&neo_home.join("skills").join(".builtin")).await?;
-    if !extracted.is_empty() {
-        return Ok(extracted);
+async fn paths_refer_to_same_location(left: &Path, right: &Path) -> io::Result<bool> {
+    if left == right {
+        return Ok(true);
     }
-
-    let skills = crate::skills::builtin::builtin_skills()
-        .map_err(|err| io::Error::other(err.to_string()))?;
-    Ok(skills
-        .into_iter()
-        .map(|name| {
-            (
-                name.name.clone(),
-                PathBuf::from(format!("<builtin>/{}/SKILL.md", name.name)),
-            )
-        })
-        .collect())
-}
-
-async fn collect_skills(
-    path: &Path,
-    root: &Path,
-    result: &mut Vec<(String, PathBuf)>,
-) -> io::Result<()> {
-    if path.join("SKILL.md").exists() {
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        let name = relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .filter(|component| component != "skills")
-            .collect::<Vec<_>>()
-            .join("/");
-        result.push((name, path.to_path_buf()));
+    let left = fs::canonicalize(left).await?;
+    match fs::canonicalize(right).await {
+        Ok(right) => Ok(left == right),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
     }
-    let mut entries = fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let child = entry.path();
-        if child.is_dir() {
-            Box::pin(collect_skills(&child, root, result)).await?;
-        }
-    }
-    Ok(())
 }
 
 async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
@@ -467,6 +500,7 @@ async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::ToolContext;
+    use crate::skills::{SkillStore, SkillStoreHandle};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
@@ -507,6 +541,35 @@ mod tests {
         assert!(result.content.contains("[builtin]"));
         assert!(result.content.contains("self-evo"));
         assert!(result.content.contains("sub-skill"));
+    }
+
+    #[tokio::test]
+    async fn list_skills_reports_invocation_names_for_nested_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp
+            .path()
+            .join("skills")
+            .join("superpowers")
+            .join("skills")
+            .join("test-skill");
+        fs::create_dir_all(&skill_dir).await.expect("mkdir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: nested\ntype: prompt\n---\n\nbody",
+        )
+        .await
+        .expect("write");
+
+        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("test-skill:"));
+        assert!(
+            !result.content.contains("superpowers/skills/test-skill:"),
+            "ListSkills should show the name accepted by the Skill tool: {}",
+            result.content
+        );
     }
 
     #[tokio::test]
@@ -582,11 +645,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn move_skill_moves_directory() {
+    async fn create_skill_reloads_shared_skill_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let user_skills = temp.path().join("skills");
+        let handle = SkillStoreHandle::new(
+            SkillStore::load(std::slice::from_ref(&user_skills), &[], Vec::new())
+                .expect("initial store"),
+        );
+        let reload_root = user_skills.clone();
+        let tool =
+            CreateSkillTool::new(temp.path()).with_skill_store_reload(handle.clone(), move || {
+                SkillStore::load(std::slice::from_ref(&reload_root), &[], Vec::new())
+                    .map_err(|err| err.to_string())
+            });
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "fresh-skill",
+                    "description": "Freshly available",
+                    "body": "# Fresh\n\nUse me now."
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert!(
+            handle.get("fresh-skill").is_some(),
+            "created skill should be immediately visible through the shared store"
+        );
+        assert!(
+            result.content.contains("Skill store reloaded"),
+            "tool result should tell the model the reload happened: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn move_skill_moves_directory_without_losing_content() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("skills").join("to-move");
         fs::create_dir_all(&source).await.expect("mkdir");
-        fs::write(source.join("SKILL.md"), "skill content")
+        let original =
+            "---\nname: to-move\ndescription: test\ntype: prompt\n---\n\nskill content\n";
+        fs::write(source.join("SKILL.md"), original)
             .await
             .expect("write");
 
@@ -604,7 +708,72 @@ mod tests {
             .expect("execute");
         assert!(!result.is_error);
         assert!(result.content.contains("Moved"));
-        assert!(dest_parent.join("to-move").join("SKILL.md").exists());
+        let moved_path = dest_parent.join("to-move").join("SKILL.md");
+        assert_eq!(
+            fs::read_to_string(&moved_path).await.expect("read moved"),
+            original
+        );
+
+        let backup_line = result
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix("Backup: "))
+            .expect("backup line");
+        let backup_target = PathBuf::from(backup_line);
+        assert!(
+            backup_target.starts_with(temp.path().join("backups").join("skills")),
+            "backup should live under ~/.neo/backups/skills equivalent, got {}",
+            backup_target.display()
+        );
+        assert_eq!(
+            fs::read_to_string(backup_target.join("SKILL.md"))
+                .await
+                .expect("read backup"),
+            original
+        );
+        assert!(!source.exists(), "source directory should have been moved");
+    }
+
+    #[tokio::test]
+    async fn move_skill_rejects_existing_destination_without_side_effects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("skills").join("to-move");
+        fs::create_dir_all(&source).await.expect("mkdir source");
+        fs::write(source.join("SKILL.md"), "original")
+            .await
+            .expect("write source");
+        let dest_parent = temp.path().join("bundles");
+        let destination = dest_parent.join("to-move");
+        fs::create_dir_all(&destination)
+            .await
+            .expect("mkdir destination");
+        fs::write(destination.join("SKILL.md"), "existing")
+            .await
+            .expect("write destination");
+
+        let tool = MoveSkillTool::new(temp.path());
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "source": source.to_str().unwrap(),
+                    "destination_parent": dest_parent.to_str().unwrap()
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.is_error);
+        assert_eq!(
+            fs::read_to_string(source.join("SKILL.md"))
+                .await
+                .expect("read source"),
+            "original"
+        );
+        assert!(
+            !temp.path().join("backups").exists(),
+            "rejected move must not create a backup"
+        );
     }
 
     #[test]

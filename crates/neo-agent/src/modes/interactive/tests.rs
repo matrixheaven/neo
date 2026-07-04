@@ -1731,6 +1731,45 @@ async fn slash_completion_includes_btw_command() {
 }
 
 #[tokio::test]
+async fn slash_completion_refreshes_skills_from_disk() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let extra_skills = temp.path().join("extra-skills");
+    fs::create_dir_all(&extra_skills).expect("create extra skills");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.extra_skill_dirs = vec![extra_skills.to_string_lossy().into_owned()];
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(config);
+
+    let skill_dir = extra_skills.join("fresh-skill");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fresh-skill\ndescription: Fresh from disk\ntype: prompt\n---\n\nUse me.",
+    )
+    .expect("write skill");
+
+    for ch in "/skill:f".chars() {
+        controller
+            .handle_input_event(InputEvent::Insert(ch))
+            .await
+            .expect("typing skill prefix updates completion");
+    }
+
+    let rendered = render_overlay_snapshot(controller.chrome(), 100).join("\n");
+    assert!(
+        rendered.contains("/skill:fresh-skill"),
+        "slash completion should include freshly reloaded skill; got:\n{rendered}"
+    );
+}
+
+#[tokio::test]
 async fn event_loop_backspace_deletes_slash_while_completion_is_open() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -10834,11 +10873,7 @@ async fn slash_fork_forks_current_session_and_enters_child() {
             assert_eq!(parent_id, SESSION_A);
             Ok(ForkedSessionTranscript::new(
                 SESSION_CHILD,
-                LoadedSessionTranscript::new(
-                    SESSION_CHILD,
-                    [],
-                    [AgentMessage::user_text("hello")],
-                ),
+                LoadedSessionTranscript::new(SESSION_CHILD, [], [AgentMessage::user_text("hello")]),
             ))
         },
     );

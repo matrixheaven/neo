@@ -20,7 +20,7 @@ use super::queue::*;
 use super::skill_dispatch::*;
 use super::turn_loop::{emit_run_finished, run_agent_turn};
 use crate::goal::GoalManager;
-use crate::skills::SkillStore;
+use crate::skills::{SkillStore, SkillStoreHandle};
 use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistry};
 
 pub type AgentEventStream<'a> = stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>;
@@ -30,7 +30,7 @@ pub struct AgentRuntime {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
     tools: Option<Arc<ToolRegistry>>,
-    skills: Option<Arc<SkillStore>>,
+    skills: Option<SkillStoreHandle>,
     goal_manager: Option<Arc<GoalManager>>,
     steer_input: SteerInputHandle,
 }
@@ -94,10 +94,20 @@ impl AgentRuntime {
 
     #[must_use]
     pub fn with_tools_and_skills(
-        mut config: AgentConfig,
+        config: AgentConfig,
         model: Arc<dyn ModelClient>,
         tools: ToolRegistry,
         skills: SkillStore,
+    ) -> Self {
+        Self::with_tools_and_skill_handle(config, model, tools, SkillStoreHandle::new(skills))
+    }
+
+    #[must_use]
+    pub fn with_tools_and_skill_handle(
+        mut config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: ToolRegistry,
+        skills: SkillStoreHandle,
     ) -> Self {
         let mut tool_specs = tools.specs();
         tool_specs.push(invoke_skill_tool_spec());
@@ -106,7 +116,7 @@ impl AgentRuntime {
             config,
             model,
             tools: Some(Arc::new(tools)),
-            skills: Some(Arc::new(skills)),
+            skills: Some(skills),
             goal_manager: None,
             steer_input: SteerInputHandle::new(),
         }

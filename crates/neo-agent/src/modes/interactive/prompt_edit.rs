@@ -442,6 +442,7 @@ impl InteractiveController {
                 .apply_edit(PromptEdit::Insert("\t"));
             return;
         };
+        self.refresh_skill_store_for_completion();
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
@@ -500,6 +501,7 @@ impl InteractiveController {
             return;
         }
 
+        self.refresh_skill_store_for_completion();
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
@@ -544,6 +546,25 @@ impl InteractiveController {
             .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
         {
             let _ = self.tui.chrome_mut().close_focused_overlay();
+        }
+    }
+
+    pub(super) fn refresh_skill_store_for_completion(&mut self) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        match crate::resources::load_skill_store(
+            crate::config::neo_home().as_deref(),
+            &config.extra_skill_dirs,
+            &config.skill_path,
+        ) {
+            Ok(store) => {
+                self.tui.transcript_mut().set_skill_store(store.clone());
+                self.skill_store = Some(store);
+            }
+            Err(error) => {
+                self.push_status(format!("Skill reload error: {error}"));
+            }
         }
     }
 

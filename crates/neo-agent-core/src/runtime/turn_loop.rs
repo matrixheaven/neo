@@ -23,7 +23,7 @@ use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
 use crate::goal::GoalManager;
-use crate::skills::SkillStore;
+use crate::skills::SkillStoreHandle;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, Content, PermissionMode, PlanModeInjector,
     ProcessSupervisor, StopReason, ToolRegistry, ToolResult,
@@ -117,7 +117,7 @@ pub(super) async fn run_agent_turn(
     model: Arc<dyn ModelClient>,
     config: AgentConfig,
     tools: Option<Arc<ToolRegistry>>,
-    skills: Option<Arc<SkillStore>>,
+    skills: Option<SkillStoreHandle>,
     goal_manager: Option<Arc<GoalManager>>,
     steer_input: SteerInputHandle,
     emitter: &mut EventEmitter,
@@ -198,7 +198,7 @@ pub(super) async fn run_agent_turn(
             &config,
             Arc::clone(&model),
             Arc::clone(registry),
-            skills.as_deref(),
+            skills.as_ref(),
             turn,
             &tool_calls,
             emitter,

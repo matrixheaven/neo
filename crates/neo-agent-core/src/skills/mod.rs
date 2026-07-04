@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -149,11 +150,67 @@ impl SkillStore {
     }
 
     #[must_use]
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+
+    #[must_use]
     pub fn auto_invokable(&self) -> Vec<&LoadedSkill> {
         self.skills
             .values()
             .filter(|skill| skill.manifest.auto_invokable())
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillStoreHandle {
+    inner: Arc<RwLock<SkillStore>>,
+}
+
+impl SkillStoreHandle {
+    #[must_use]
+    pub fn new(store: SkillStore) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(store)),
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> SkillStore {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn replace(&self, store: SkillStore) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = store;
+    }
+
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<LoadedSkill> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned()
+    }
+
+    pub fn with_store<T>(&self, f: impl FnOnce(&SkillStore) -> T) -> T {
+        let store = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&store)
     }
 }
 

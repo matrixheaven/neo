@@ -218,6 +218,7 @@ impl InteractiveController {
         &mut self,
         directives: InlineSkillDirectives,
     ) -> Result<(String, String)> {
+        self.refresh_skill_store_for_completion();
         let skill_store = self
             .skill_store
             .as_ref()
