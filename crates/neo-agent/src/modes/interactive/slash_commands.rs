@@ -54,6 +54,11 @@ impl InteractiveController {
                 }
             }
             "/resume" => self.open_session_picker(),
+            "/fork" => {
+                if let Err(error) = self.fork_current_session().await {
+                    self.push_status(format!("Failed to fork session: {error}"));
+                }
+            }
             "/provider" => self.open_provider_picker(),
             "/help" => self.open_help_panel(),
             "/mcp" => self.open_mcp_manager().await,

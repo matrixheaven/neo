@@ -521,14 +521,31 @@ impl SessionMetadataStore {
         copy_dir_all(&parent_dir, &child_dir).map_err(SessionError::Io)?;
 
         let mut metadata = self.read_metadata()?;
-        metadata.sessions.entry(parent_id.to_owned()).or_default();
+        let parent_stored = metadata
+            .sessions
+            .entry(parent_id.to_owned())
+            .or_default()
+            .clone();
+        let now = current_unix_timestamp();
+        let fork_title = parent_stored
+            .name
+            .clone()
+            .or_else(|| parent_stored.title.clone())
+            .or_else(|| parent_stored.last_user_prompt.clone())
+            .map(|t| format!("[fork] {t}"));
         metadata.sessions.insert(
             child_id.clone(),
             StoredSessionMetadata {
                 name,
-                summary: None,
+                summary: parent_stored.summary.clone(),
+                summary_record: parent_stored.summary_record.clone(),
                 parent_id: Some(parent_id.to_owned()),
-                ..StoredSessionMetadata::default()
+                title: fork_title,
+                title_model: None,
+                title_updated_at: Some(now.clone()),
+                workspace: parent_stored.workspace.clone(),
+                last_user_prompt: parent_stored.last_user_prompt.clone(),
+                updated_at: Some(now),
             },
         );
         self.write_metadata(&metadata)?;

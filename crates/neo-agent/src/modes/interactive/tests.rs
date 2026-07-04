@@ -5505,7 +5505,7 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
                 SESSION_CHILD,
                 LoadedSessionTranscript::new(
                     SESSION_CHILD,
-                    [format!("forked from {SESSION_A}")],
+                    [],
                     [
                         AgentMessage::user_text("hello"),
                         AgentMessage::assistant(
@@ -5532,7 +5532,11 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
     assert!(controller.chrome().focused_overlay().is_none());
     assert!(transcript_has_status(
         &controller,
-        &format!("forked from {SESSION_A}")
+        &format!("fork from session {SESSION_A}")
+    ));
+    assert!(transcript_has_status(
+        &controller,
+        &format!("switch to fork session {SESSION_CHILD}")
     ));
     assert!(transcript_entries(&controller).iter().any(|entry| {
         matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
@@ -5839,15 +5843,33 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
         ),
     );
 
+    // Seed parent metadata so we can verify it is inherited by the fork.
+    SessionMetadataStore::new(&bucket_dir)
+        .record_activity(
+            SESSION_A,
+            Some("/fake/workspace".to_owned()),
+            Some("what is neo?".to_owned()),
+            "1000.000000000Z".to_owned(),
+        )
+        .expect("record parent activity");
+    SessionMetadataStore::new(&bucket_dir)
+        .record_title(
+            SESSION_A,
+            "Intro to neo".to_owned(),
+            Some("test-model".to_owned()),
+            "1000.000000000Z".to_owned(),
+        )
+        .expect("record parent title");
+
     let forked = fork_session_transcript(SESSION_A.to_owned(), &config)
         .await
         .expect("fork session");
 
     assert!(forked.session_id.starts_with("session_"));
     assert_eq!(forked.transcript.label, forked.session_id);
-    assert_eq!(
-        forked.transcript.notices.first().map(String::as_str),
-        Some(format!("forked from {SESSION_A}").as_str())
+    assert!(
+        forked.transcript.notices.is_empty(),
+        "fork notices are pushed by the controller, not by fork_session_transcript"
     );
     assert_eq!(forked.transcript.messages.len(), 2);
     assert!(
@@ -5868,6 +5890,29 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
         .find(|session| session.id == forked.session_id)
         .expect("child listed");
     assert_eq!(child.parent_id.as_deref(), Some(SESSION_A));
+    // Fork inherits parent title with [fork] prefix.
+    assert_eq!(
+        child.title.as_deref(),
+        Some("[fork] Intro to neo"),
+        "child title should be [fork]-prefixed parent title"
+    );
+    // Fork inherits parent workspace and last_user_prompt.
+    assert_eq!(
+        child.workspace.as_deref(),
+        Some("/fake/workspace"),
+        "child inherits parent workspace"
+    );
+    assert_eq!(
+        child.last_user_prompt.as_deref(),
+        Some("what is neo?"),
+        "child inherits parent last_user_prompt"
+    );
+    // Fork updated_at is set (not empty / not epoch zero).
+    let child_ts = child.updated_at.as_deref().unwrap_or("");
+    assert!(
+        !child_ts.is_empty() && child_ts != "0" && child_ts != "0.000000000Z",
+        "child updated_at should be a real timestamp, got: {child_ts}"
+    );
 }
 
 #[tokio::test]
@@ -10707,4 +10752,63 @@ async fn shift_enter_inserts_newline_while_btw_panel_open() {
     controller.type_text("line2");
 
     assert_eq!(controller.chrome().prompt().text, "line1\nline2");
+}
+
+#[tokio::test]
+async fn slash_fork_forks_current_session_and_enters_child() {
+    let mut controller = InteractiveController::new_with_event_driver_and_forker(
+        "neo",
+        SESSION_A,
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| async move {
+            Ok(vec![AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            }])
+        },
+        PickerCatalogs {
+            session_items: Vec::new(),
+            session_error: None,
+            model_items: Vec::new(),
+        },
+        |_session_id| async move {
+            panic!("fork should not use the load_session callback");
+            #[allow(unreachable_code)]
+            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+        },
+        |parent_id| async move {
+            assert_eq!(parent_id, SESSION_A);
+            Ok(ForkedSessionTranscript::new(
+                SESSION_CHILD,
+                LoadedSessionTranscript::new(
+                    SESSION_CHILD,
+                    [],
+                    [AgentMessage::user_text("hello")],
+                ),
+            ))
+        },
+    );
+    controller.active_session_id = Some(SESSION_A.to_owned());
+
+    let consumed = controller.handle_slash_command("/fork").await;
+    assert!(consumed, "/fork should be consumed as a slash command");
+
+    assert_eq!(
+        controller.active_session_id(),
+        Some(SESSION_CHILD),
+        "active session switched to fork child"
+    );
+    assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
+    assert!(
+        transcript_has_status(&controller, &format!("fork from session {SESSION_A}")),
+        "transcript shows fork-from notice"
+    );
+    assert!(
+        transcript_has_status(
+            &controller,
+            &format!("switch to fork session {SESSION_CHILD}")
+        ),
+        "transcript shows switch-to notice"
+    );
 }

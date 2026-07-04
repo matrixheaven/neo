@@ -81,7 +81,9 @@ impl InteractiveController {
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id);
+        self.active_session_id = Some(forked.session_id.clone());
+        self.push_status(format!("fork from session {}", parent.id));
+        self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
     }
 
@@ -93,13 +95,13 @@ impl InteractiveController {
         let forked = (self.fork_session)(parent_id.clone())
             .await
             .with_context(|| format!("failed to fork session {parent_id}"))?;
-        let child_id = forked.session_id.clone();
         self.tui
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id);
-        self.push_status(format!("Forked session {parent_id} to {child_id}"));
+        self.active_session_id = Some(forked.session_id.clone());
+        self.push_status(format!("fork from session {parent_id}"));
+        self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
     }
 
