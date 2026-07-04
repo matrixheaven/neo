@@ -39,13 +39,33 @@ Type `/resume` or press the session-picker shortcut in the interactive UI to ope
 
 ## Forking sessions /fork
 
-Forking copies an existing session's current state into a new independent branch — the original session is left untouched. Great for "try two paths from this point".
+Forking copies an existing session's current state into a new independent branch — the original session is left untouched. Great for "try two paths from this point". After a successful fork you **switch to the new session** automatically.
+
+### Fork the current session inside the TUI (most common)
+
+Once you are in the Neo interactive UI, just type the slash command:
+
+```text
+/fork
+```
+
+This creates a branch off the **currently active session** and immediately switches the context to the new session. This is the most direct way to fork day-to-day.
+
+### One-shot fork from the command line
+
+You can fork any session without entering the TUI (handy in scripts):
 
 ```bash
 neo sessions fork <session-id> --name "experiment-A"
 ```
 
-In the TUI session picker, select the target session and press the fork shortcut.
+### Fork a specific session from the session picker
+
+If you want to fork a session other than the current one, you need to open the session picker first: inside the TUI, type `/resume` or press `Ctrl+R`, highlight the target session in the list with the arrow keys, then press `Ctrl+N` to fork it and switch to the new session.
+
+> Note: The session picker is **not** shown automatically when you run a `neo` CLI command — you must open it manually after entering the TUI.
+
+### Fork metadata
 
 A forked session shows up in the list with a `parent=<id>` marker, and the original session's `children` field records the new session ID.
 
