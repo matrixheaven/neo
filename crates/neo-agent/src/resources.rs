@@ -294,7 +294,11 @@ fn format_available_skills(skill_store: &SkillStore) -> Option<String> {
     prompt.push_str(
         "DISREGARD any earlier skill listings. Current available skills:\n\n\
          Skills are reusable capabilities. When a skill matches your current task, \
-         invoke it with the Skill tool instead of doing the work manually.\n",
+         invoke it with the Skill tool instead of doing the work manually.\n\n\
+         MANDATORY: When the user mentions a task that a skill listed below could \
+         help with, or when the user explicitly asks to use a skill, your FIRST \
+         action must be a Skill tool call for that skill. Do not start any work, \
+         exploration, or planning before invoking the matching skill.\n",
     );
 
     // Group skills by source in priority order (User > Extra > Builtin).
