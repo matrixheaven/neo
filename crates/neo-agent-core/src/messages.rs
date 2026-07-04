@@ -152,6 +152,14 @@ impl AgentMessage {
     }
 
     #[must_use]
+    pub fn system_reminder(text: impl AsRef<str>) -> Self {
+        Self::user_text(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            text.as_ref().trim()
+        ))
+    }
+
+    #[must_use]
     pub fn assistant(
         content: impl Into<Vec<Content>>,
         tool_calls: impl Into<Vec<AgentToolCall>>,
@@ -516,14 +524,17 @@ pub fn sanitize_tool_exchange_messages(
                         break;
                     }
                 }
-                if seen.len() == ids.len() {
-                    out.extend_from_slice(&messages[i..j]);
+                out.push(messages[i].clone());
+                out.extend_from_slice(&messages[i + 1..j]);
+                for tool_call in tool_calls {
+                    if !seen.contains(tool_call.id.as_ref()) {
+                        out.push(missing_tool_result(tool_call));
+                    }
                 }
                 i = j;
             }
             AgentMessage::ToolResult { .. } => {
-                // Orphaned tool result without a valid preceding assistant
-                // exchange; drop it.
+                out.push(orphan_tool_result_reminder(&messages[i]));
                 i += 1;
             }
             _ => {
@@ -533,6 +544,31 @@ pub fn sanitize_tool_exchange_messages(
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+fn missing_tool_result(tool_call: &AgentToolCall) -> AgentMessage {
+    AgentMessage::tool_result(
+        tool_call.id.clone(),
+        tool_call.name.clone(),
+        vec![Content::text(
+            "[Missing tool result repaired by runtime: the original result was not present in session history]",
+        )],
+        true,
+    )
+}
+
+fn orphan_tool_result_reminder(message: &AgentMessage) -> AgentMessage {
+    let AgentMessage::ToolResult {
+        tool_call_id,
+        tool_name,
+        ..
+    } = message
+    else {
+        return AgentMessage::system_reminder("orphaned tool result omitted");
+    };
+    AgentMessage::system_reminder(format!(
+        "orphaned tool result omitted: tool_call_id={tool_call_id}, tool_name={tool_name}"
+    ))
 }
 
 fn shell_command_model_text(
@@ -662,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_orphan_assistant_with_tool_calls() {
+    fn sanitize_fills_missing_tool_result() {
         let messages = vec![
             AgentMessage::user_text("hi"),
             AgentMessage::assistant(
@@ -677,13 +713,15 @@ mod tests {
             AgentMessage::user_text("never mind"),
         ];
         let out = sanitize_tool_exchange_messages(&messages);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 4);
         assert!(matches!(&out[0], AgentMessage::User { .. }));
-        assert!(matches!(&out[1], AgentMessage::User { .. }));
+        assert!(matches!(&out[1], AgentMessage::Assistant { .. }));
+        assert!(matches!(&out[2], AgentMessage::ToolResult { .. }));
+        assert!(matches!(&out[3], AgentMessage::User { .. }));
     }
 
     #[test]
-    fn sanitize_drops_incomplete_exchange_even_with_partial_result() {
+    fn sanitize_fills_incomplete_exchange_even_with_partial_result() {
         let messages = vec![
             AgentMessage::assistant(
                 vec![],
@@ -705,21 +743,26 @@ mod tests {
             AgentMessage::user_text("stop"),
         ];
         let out = sanitize_tool_exchange_messages(&messages);
-        assert_eq!(out.len(), 1);
-        assert!(matches!(&out[0], AgentMessage::User { .. }));
+        assert_eq!(out.len(), 4);
+        assert!(matches!(&out[0], AgentMessage::Assistant { .. }));
+        assert!(matches!(&out[1], AgentMessage::ToolResult { .. }));
+        assert!(matches!(&out[2], AgentMessage::ToolResult { .. }));
+        assert!(matches!(&out[3], AgentMessage::User { .. }));
     }
 
     #[test]
-    fn sanitize_drops_orphan_tool_result() {
+    fn sanitize_converts_orphan_tool_result_to_reminder() {
         let messages = vec![
             AgentMessage::user_text("hi"),
             AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
             AgentMessage::user_text("bye"),
         ];
         let out = sanitize_tool_exchange_messages(&messages);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert!(matches!(&out[0], AgentMessage::User { .. }));
         assert!(matches!(&out[1], AgentMessage::User { .. }));
+        assert!(out[1].text().contains("orphaned tool result"));
+        assert!(matches!(&out[2], AgentMessage::User { .. }));
     }
 
     #[test]
@@ -739,9 +782,11 @@ mod tests {
             AgentMessage::user_text("next"),
         ];
         let out = sanitize_tool_exchange_messages(&messages);
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 4);
         assert!(matches!(&out[0], AgentMessage::Assistant { .. }));
         assert!(matches!(&out[1], AgentMessage::ToolResult { .. }));
         assert!(matches!(&out[2], AgentMessage::User { .. }));
+        assert!(out[2].text().contains("orphaned tool result"));
+        assert!(matches!(&out[3], AgentMessage::User { .. }));
     }
 }

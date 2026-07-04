@@ -19,7 +19,7 @@ use crate::{
     TodoEventData, ToolResult,
 };
 
-pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
+pub type ContextAppendTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
 pub type BeforeToolCallHook = Arc<dyn Fn(&AgentToolCall) -> Option<ToolResult> + Send + Sync>;
 pub type AsyncBeforeToolCallHook = Arc<
     dyn Fn(AgentToolCall, CancellationToken) -> BoxFuture<'static, Option<ToolResult>>
@@ -81,7 +81,7 @@ pub struct AgentConfig {
     pub observed_max_context_tokens: Arc<Mutex<Option<usize>>>,
     #[serde(skip)]
     #[schemars(skip)]
-    pub context_transform: Option<ContextTransform>,
+    pub context_append_transform: Option<ContextAppendTransform>,
     #[serde(skip)]
     #[schemars(skip)]
     pub before_tool_call: Option<BeforeToolCallHook>,
@@ -194,7 +194,7 @@ impl AgentConfig {
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             compaction: None,
             observed_max_context_tokens: Arc::new(Mutex::new(None)),
-            context_transform: None,
+            context_append_transform: None,
             before_tool_call: None,
             async_before_tool_call: None,
             after_tool_call: None,
@@ -281,11 +281,11 @@ impl AgentConfig {
     }
 
     #[must_use]
-    pub fn with_context_transform(
+    pub fn with_context_append_transform(
         mut self,
         transform: impl Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync + 'static,
     ) -> Self {
-        self.context_transform = Some(Arc::new(transform));
+        self.context_append_transform = Some(Arc::new(transform));
         self
     }
 

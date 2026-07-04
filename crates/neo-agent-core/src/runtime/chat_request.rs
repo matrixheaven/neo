@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::image_blobs::resolve_image_blobs;
-use crate::{AgentMessage, PlanModeInjector, sanitize_tool_exchange_messages};
+use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
 pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     let mut messages = Vec::new();
@@ -15,17 +13,10 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
-    if let Some(review_context) = review_mode_message(context) {
-        messages.push(review_context.to_chat_message());
+    let mut context_messages = context.messages.clone();
+    if let Some(transform) = &config.context_append_transform {
+        context_messages.extend(transform(context.messages()));
     }
-    if config.goal_mode_authoring {
-        messages.push(goal_mode_authoring_message().to_chat_message());
-    }
-    let context_messages = if let Some(transform) = &config.context_transform {
-        transform(context.messages())
-    } else {
-        context.messages.clone()
-    };
     // Resolve blob references to inline base64 before sending to the provider.
     let context_messages =
         resolve_image_blobs(context_messages, config.session_directory.as_deref()).await;
@@ -35,11 +26,10 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
         .compaction
         .is_some_and(|settings| settings.micro_enabled)
     {
-        let settings = config.compaction.expect("checked above");
         crate::compaction::micro::apply_micro_compaction(
             &context_messages,
             &crate::compaction::micro::MicroCompactionConfig {
-                keep_recent_messages: settings.micro_keep_recent,
+                cutoff: context.micro_compaction_cutoff(),
                 ..crate::compaction::micro::MicroCompactionConfig::default()
             },
         )
@@ -58,10 +48,6 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
             without_reasoning_content(message.to_chat_message())
         }
     }));
-    let mut injector = PlanModeInjector::new(Arc::clone(&config.plan_mode));
-    if let Some(injected) = injector.inject(context) {
-        messages.push(injected.to_chat_message());
-    }
     ChatRequest {
         model: config.model.clone(),
         messages,
@@ -77,72 +63,18 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     }
 }
 
-fn goal_mode_authoring_message() -> AgentMessage {
-    AgentMessage::system_text(
-        "Goal mode is active. Do not start a durable goal directly with StartGoal. \
-         First draft a structured goal with objective, acceptance criteria, phase plan, risks/assumptions, and validation commands. \
-         Then call ExitGoalMode with the reviewed objective, completion_criterion, and ordered phases so the user can Accept, Reject, or Revise it in a blocking dialog."
-            .to_owned(),
-    )
-}
-
 fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     let workspace_root = config.workspace_root.as_ref()?;
-    let permission_mode = config
-        .live_permission_mode
-        .read()
-        .map_or(config.permission_mode, |guard| *guard);
     Some(AgentMessage::system_text(format!(
         "Runtime Context\n\
          - cwd: {}\n\
-         - permission mode: {}\n\
-         - tool execution mode: {}\n\
          - Read may accept absolute paths when the user asks for them or the task requires them.\n\
          - Write, Edit, Bash, and Terminal are governed by Neo's permission layer; write and shell tools are constrained by workspace permissions.\n\
          - Shell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `cwd` field for a workspace subdirectory.\n\
          - Network access is not a separate Neo prompt guarantee; it depends on the available tools, host environment, and permission decisions.\n\
          - If an approval is denied, treat it as the user's decision and choose a different safe path instead of retrying the same request.",
-        workspace_root.display(),
-        permission_mode.label(),
-        tool_execution_mode_label(config.tool_execution_mode)
+        workspace_root.display()
     )))
-}
-
-fn tool_execution_mode_label(mode: crate::ToolExecutionMode) -> &'static str {
-    match mode {
-        crate::ToolExecutionMode::Sequential => "sequential",
-        crate::ToolExecutionMode::Parallel => "parallel",
-    }
-}
-
-fn review_mode_message(context: &AgentContext) -> Option<AgentMessage> {
-    let latest_user_text = context
-        .messages()
-        .iter()
-        .rev()
-        .find_map(|message| match message {
-            AgentMessage::User { .. } => Some(message.text()),
-            _ => None,
-        })?;
-    if !looks_like_review_request(&latest_user_text) {
-        return None;
-    }
-    Some(AgentMessage::system_text(
-        "Review Mode\n\
-         The latest user request asks for a review. Findings come first, ordered by severity. \
-         Focus on bugs, behavioral regressions, security risks, missing tests, and concrete maintainability issues. \
-         Ground findings in file and line references when possible. Keep summaries and change descriptions secondary."
-            .to_owned(),
-    ))
-}
-
-fn looks_like_review_request(text: &str) -> bool {
-    let normalized = text.to_lowercase();
-    normalized.contains("review")
-        || normalized.contains("code review")
-        || normalized.contains("审查")
-        || normalized.contains("评审")
-        || normalized.contains("代码审查")
 }
 
 fn prompt_cache_key(config: &AgentConfig) -> Option<String> {
@@ -313,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_request_injects_runtime_context_with_permission_and_boundaries() {
+    async fn chat_request_injects_runtime_context_without_live_mode_labels() {
         let temp = tempfile::tempdir().expect("temp workspace");
         let config = AgentConfig::for_model(tool_model())
             .with_system_prompt("Base system")
@@ -326,12 +258,9 @@ mod tests {
         let system_text = system_texts(&request);
 
         assert!(system_text.contains("Runtime Context"), "{system_text}");
+        assert!(!system_text.contains("permission mode:"), "{system_text}");
         assert!(
-            system_text.contains("permission mode: yolo"),
-            "{system_text}"
-        );
-        assert!(
-            system_text.contains("tool execution mode: parallel"),
+            !system_text.contains("tool execution mode:"),
             "{system_text}"
         );
         assert!(
@@ -345,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_request_adds_review_mode_reminder_for_review_requests() {
+    async fn chat_request_does_not_add_review_mode_system_message() {
         let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
         let mut context = AgentContext::new();
         context.append_message(AgentMessage::user_text("Please review this change"));
@@ -353,10 +282,6 @@ mod tests {
         let request = chat_request(&config, &context).await;
         let system_text = system_texts(&request);
 
-        assert!(system_text.contains("Review Mode"), "{system_text}");
-        assert!(
-            system_text.contains("Findings come first, ordered by severity"),
-            "{system_text}"
-        );
+        assert!(!system_text.contains("Review Mode"), "{system_text}");
     }
 }

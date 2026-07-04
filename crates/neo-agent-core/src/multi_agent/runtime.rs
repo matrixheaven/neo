@@ -1814,52 +1814,17 @@ fn child_config(mut config: AgentConfig, role: AgentRole) -> AgentConfig {
         "{base}\n\n<subagent_profile>\n{}\n\nDo not repeat or acknowledge this profile text in your final answer. Return only the requested findings or summary.\n</subagent_profile>",
         profile.prompt_addendum
     ));
-    // Filter model-visible tool specs: remove standard Neo tools not in the
-    // role's allowed set. Keep unknown/custom tools so test probes and
-    // MCP tools are not stripped.
+    // Filter model-visible tool specs to the role's explicit allowlist.
     config.tools = config
         .tools
         .iter()
-        .filter(|spec| {
-            if !is_standard_neo_tool(&spec.name) {
-                return true;
-            }
-            profile.allowed_tools.contains(spec.name.as_str())
-        })
+        .filter(|spec| profile.allowed_tools.contains(spec.name.as_str()))
         .cloned()
         .collect();
     let profile_clone = super::profile::AgentProfile::for_role(role);
     config.with_before_tool_call(move |tool_call| {
         block_forbidden_subagent_tool_call(tool_call, &profile_clone)
     })
-}
-
-fn is_standard_neo_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "Read"
-            | "List"
-            | "Grep"
-            | "Find"
-            | "Glob"
-            | "Bash"
-            | "Write"
-            | "Edit"
-            | "TodoList"
-            | "Terminal"
-            | "TaskList"
-            | "TaskOutput"
-            | "TaskStop"
-            | "EnterPlanMode"
-            | "ExitPlanMode"
-            | "Delegate"
-            | "DelegateSwarm"
-            | "ListDelegates"
-            | "WaitDelegate"
-            | "InterruptDelegate"
-            | "MessageDelegate"
-            | "RunWorkflow"
-    )
 }
 
 fn block_forbidden_subagent_tool_call(

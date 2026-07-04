@@ -216,7 +216,7 @@ impl PlanModeInjector {
         let path = pm
             .plan_file_path()
             .map_or_else(|| "(no plan file)".to_string(), |p| p.display().to_string());
-        Some(AgentMessage::system_text(reminder_text(variant, &path)))
+        Some(AgentMessage::system_reminder(reminder_text(variant, &path)))
     }
 }
 

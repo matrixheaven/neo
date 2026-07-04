@@ -627,40 +627,12 @@ impl ToolRegistry {
         let profile = crate::multi_agent::AgentProfile::for_role(role);
         let mut filtered = Self::default();
         for (name, tool) in &self.tools {
-            if !is_standard_neo_tool_name(name) || profile.allowed_tools.contains(name.as_str()) {
+            if profile.allowed_tools.contains(name.as_str()) {
                 filtered.tools.insert(name.clone(), Arc::clone(tool));
             }
         }
         filtered
     }
-}
-
-fn is_standard_neo_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Read"
-            | "List"
-            | "Grep"
-            | "Find"
-            | "Glob"
-            | "Bash"
-            | "Write"
-            | "Edit"
-            | "TodoList"
-            | "Terminal"
-            | "TaskList"
-            | "TaskOutput"
-            | "TaskStop"
-            | "EnterPlanMode"
-            | "ExitPlanMode"
-            | "Delegate"
-            | "DelegateSwarm"
-            | "ListDelegates"
-            | "WaitDelegate"
-            | "InterruptDelegate"
-            | "MessageDelegate"
-            | "RunWorkflow"
-    )
 }
 
 fn parse_input<T>(tool: &str, input: serde_json::Value) -> Result<T, ToolError>

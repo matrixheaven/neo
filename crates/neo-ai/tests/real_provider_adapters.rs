@@ -1587,6 +1587,51 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_marks_system_tools_and_last_message_for_prompt_cache() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-cache" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.messages = vec![
+        ChatMessage::System {
+            content: vec![ContentPart::Text {
+                text: "stable system".to_owned(),
+            }],
+        },
+        ChatMessage::User {
+            content: vec![ContentPart::Text {
+                text: "hello".to_owned(),
+            }],
+        },
+    ];
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    let cache_control = json!({ "type": "ephemeral", "ttl": "1h" });
+    assert_eq!(
+        sent.body["system"],
+        json!([{ "type": "text", "text": "stable system", "cache_control": cache_control.clone() }])
+    );
+    assert_eq!(
+        sent.body["tools"][0]["cache_control"],
+        cache_control.clone()
+    );
+    assert_eq!(
+        sent.body["messages"][0]["content"][0]["cache_control"],
+        cache_control
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_retries_retryable_http_responses() {
     let server = MockServer::start(vec![
         status_response(529),

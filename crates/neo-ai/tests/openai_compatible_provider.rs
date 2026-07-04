@@ -345,7 +345,7 @@ async fn openai_serializes_assistant_thinking_as_reasoning_content() {
 }
 
 #[tokio::test]
-async fn openai_auto_enables_medium_reasoning_effort_when_replaying_thinking() {
+async fn openai_does_not_infer_reasoning_effort_when_replaying_thinking() {
     let server = MockServer::start(vec![sse_response(&[json!({
         "id": "chatcmpl-reasoning-effort",
         "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
@@ -372,7 +372,7 @@ async fn openai_auto_enables_medium_reasoning_effort_when_replaying_thinking() {
         .unwrap();
 
     let sent = server.requests().pop().unwrap();
-    assert_eq!(sent.body["reasoning_effort"], "medium");
+    assert!(sent.body.get("reasoning_effort").is_none());
 }
 
 #[tokio::test]

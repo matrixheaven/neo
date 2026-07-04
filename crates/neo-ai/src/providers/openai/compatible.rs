@@ -122,8 +122,6 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     }
     if let Some(reasoning_effort) = request.options.reasoning_effort {
         body["reasoning_effort"] = json!(openai_reasoning_effort(reasoning_effort)?);
-    } else if request_replays_reasoning(request) {
-        body["reasoning_effort"] = json!(openai_reasoning_effort(ReasoningEffort::Medium)?);
     }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
@@ -251,15 +249,6 @@ fn reasoning_text(content: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn request_replays_reasoning(request: &ChatRequest) -> bool {
-    request.messages.iter().any(|message| match message {
-        ChatMessage::System { content }
-        | ChatMessage::User { content }
-        | ChatMessage::Assistant { content, .. }
-        | ChatMessage::ToolResult { content, .. } => !reasoning_text(content).is_empty(),
-    })
 }
 
 fn user_content(content: &[ContentPart]) -> Value {

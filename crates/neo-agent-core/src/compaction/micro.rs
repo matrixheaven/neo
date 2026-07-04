@@ -15,8 +15,9 @@ use crate::{AgentMessage, Content};
 /// Configuration for micro compaction.
 #[derive(Debug, Clone)]
 pub struct MicroCompactionConfig {
-    /// Number of recent messages exempt from truncation.
-    pub keep_recent_messages: usize,
+    /// First message index that must remain verbatim. Older eligible tool
+    /// results before this cutoff may be projected as a placeholder.
+    pub cutoff: usize,
     /// Minimum content token estimate before a tool result is eligible for
     /// truncation.
     pub min_content_tokens: usize,
@@ -27,7 +28,7 @@ pub struct MicroCompactionConfig {
 impl Default for MicroCompactionConfig {
     fn default() -> Self {
         Self {
-            keep_recent_messages: 20,
+            cutoff: 0,
             min_content_tokens: 100,
             truncated_marker: "[Old tool result content cleared]",
         }
@@ -36,10 +37,9 @@ impl Default for MicroCompactionConfig {
 
 /// Apply micro compaction to a message slice.
 ///
-/// Returns a new vector where tool results at indices below
-/// `config.keep_recent_messages` and with content larger than
-/// `config.min_content_tokens` have their content replaced by the
-/// truncation marker.
+/// Returns a new vector where tool results at indices below `config.cutoff`
+/// and with content larger than `config.min_content_tokens` have their content
+/// replaced by the truncation marker.
 ///
 /// Messages above the cutoff or below the size threshold are preserved
 /// verbatim.
@@ -48,10 +48,10 @@ pub fn apply_micro_compaction(
     messages: &[AgentMessage],
     config: &MicroCompactionConfig,
 ) -> Vec<AgentMessage> {
-    if messages.len() <= config.keep_recent_messages {
+    if config.cutoff == 0 {
         return messages.to_vec();
     }
-    let cutoff = messages.len() - config.keep_recent_messages;
+    let cutoff = config.cutoff.min(messages.len());
     messages
         .iter()
         .enumerate()
@@ -119,9 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn truncates_old_large_tool_results() {
+    fn truncates_large_tool_results_before_cutoff() {
         let config = MicroCompactionConfig {
-            keep_recent_messages: 1,
+            cutoff: 1,
             ..MicroCompactionConfig::default()
         };
         let messages = vec![
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn preserves_small_tool_results() {
         let config = MicroCompactionConfig {
-            keep_recent_messages: 1,
+            cutoff: 1,
             min_content_tokens: 100,
             ..MicroCompactionConfig::default()
         };
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn preserves_non_tool_messages() {
         let config = MicroCompactionConfig {
-            keep_recent_messages: 1,
+            cutoff: 1,
             ..MicroCompactionConfig::default()
         };
         let messages = vec![

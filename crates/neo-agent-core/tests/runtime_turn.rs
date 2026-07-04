@@ -2399,7 +2399,7 @@ async fn runtime_drains_queued_steering_before_followups() {
 }
 
 #[tokio::test]
-async fn runtime_applies_context_transform_before_model_request() {
+async fn runtime_applies_context_append_transform_before_model_request() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
             id: "msg_1".to_owned(),
@@ -2413,18 +2413,11 @@ async fn runtime_applies_context_transform_before_model_request() {
         },
     ]);
     let runtime = AgentRuntime::new(
-        AgentConfig::for_model(harness.model()).with_context_transform(|messages| {
-            messages
-                .iter()
-                .filter(|message| {
-                    !matches!(
-                        message,
-                        AgentMessage::User { content }
-                            if content.iter().any(|part| part.as_text() == Some("drop"))
-                    )
-                })
-                .cloned()
-                .collect()
+        AgentConfig::for_model(harness.model()).with_context_append_transform(|messages| {
+            vec![AgentMessage::system_reminder(format!(
+                "append-only transform saw {} messages",
+                messages.len()
+            ))]
         }),
         harness.client(),
     );
@@ -2439,12 +2432,26 @@ async fn runtime_applies_context_transform_before_model_request() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert_eq!(harness.requests()[0].messages.len(), 1);
+    assert_eq!(harness.requests()[0].messages.len(), 3);
     assert!(matches!(
         &harness.requests()[0].messages[0],
         neo_ai::ChatMessage::User { content } if matches!(
             content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text == "drop"
+        )
+    ));
+    assert!(matches!(
+        &harness.requests()[0].messages[1],
+        neo_ai::ChatMessage::User { content } if matches!(
+            content.first(),
             Some(neo_ai::ContentPart::Text { text }) if text == "keep"
+        )
+    ));
+    assert!(matches!(
+        &harness.requests()[0].messages[2],
+        neo_ai::ChatMessage::User { content } if matches!(
+            content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text.contains("append-only transform saw")
         )
     ));
     assert_eq!(context.messages()[0], AgentMessage::user_text("drop"));

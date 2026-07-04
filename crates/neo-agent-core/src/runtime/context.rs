@@ -50,6 +50,11 @@ pub struct AgentContext {
     /// repeated O(n) char-walks of the full message history.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(super) estimated_tokens: usize,
+    /// Prefix cutoff used by micro-compaction projections. Messages before
+    /// this index may have old, large tool results replaced in provider
+    /// requests; durable history remains untouched.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) micro_compaction_cutoff: usize,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -76,6 +81,15 @@ impl AgentContext {
     #[must_use]
     pub fn estimated_tokens(&self) -> usize {
         self.estimated_tokens
+    }
+
+    #[must_use]
+    pub fn micro_compaction_cutoff(&self) -> usize {
+        self.micro_compaction_cutoff
+    }
+
+    pub fn apply_micro_compaction_cutoff(&mut self, cutoff: usize) {
+        self.micro_compaction_cutoff = cutoff.min(self.messages.len());
     }
 
     #[must_use]
@@ -127,6 +141,7 @@ impl AgentContext {
         self.messages = kept;
         // Recompute token estimate after compaction rewrites the message list.
         self.estimated_tokens = estimate_messages_tokens(&self.messages);
+        self.apply_micro_compaction_cutoff(1);
         self.compaction_summary = Some(summary);
     }
 
@@ -193,6 +208,9 @@ impl AgentContext {
                 // historical transcript state only. Do not inspect
                 // `stop_reason` here or reintroduce durable cancellation.
                 self.turns = self.turns.max(*turn);
+            }
+            AgentEvent::MicroCompactionApplied { cutoff } => {
+                self.apply_micro_compaction_cutoff(*cutoff);
             }
             _ => return false,
         }

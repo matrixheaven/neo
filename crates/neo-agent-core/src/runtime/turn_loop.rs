@@ -10,6 +10,7 @@ use super::error::AgentRuntimeError;
 use super::events::{
     EventEmitter, emit_context_window_update, emit_goal_event_from_result, emit_todo_event,
 };
+use super::permission::current_permission_mode;
 use super::plan_orchestration::{
     attach_enter_plan_details, emit_plan_tool_event, enter_plan_mode_state,
 };
@@ -24,8 +25,8 @@ use super::tool_dispatch::{
 use crate::goal::GoalManager;
 use crate::skills::SkillStore;
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, Content, ProcessSupervisor, StopReason, ToolRegistry,
-    ToolResult,
+    AgentEvent, AgentMessage, AgentToolCall, Content, PermissionMode, PlanModeInjector,
+    ProcessSupervisor, StopReason, ToolRegistry, ToolResult,
 };
 
 /// Whether an error represents a context overflow that compaction might fix.
@@ -134,6 +135,7 @@ pub(super) async fn run_agent_turn(
         }
 
         maybe_compact(&model, &config, emitter, &cancel_token).await;
+        append_runtime_reminders(&config, emitter);
 
         if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
             final_turn = turn;
@@ -255,6 +257,77 @@ fn next_pending_after_assistant(
     }
 }
 
+fn append_runtime_reminders(config: &AgentConfig, emitter: &mut EventEmitter) {
+    append_permission_mode_reminder(config, emitter);
+    append_plan_mode_reminder(config, emitter);
+    append_goal_mode_authoring_reminder(config, emitter);
+}
+
+const AUTO_MODE_ENTER_REMINDER: &str = "Auto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do not ask the user approval questions while auto mode is active. Make a reasonable decision and continue without asking the user.";
+const AUTO_MODE_EXIT_REMINDER: &str = "Auto permission mode is no longer active. Tool approvals and permission checks are back to the current mode.\n  - Continue normally, but expect approval prompts or denials when a tool requires them.";
+
+fn append_permission_mode_reminder(config: &AgentConfig, emitter: &mut EventEmitter) {
+    let mode = current_permission_mode(config);
+    let auto_reminded = auto_permission_mode_reminded(&emitter.context);
+    match (mode, auto_reminded) {
+        (PermissionMode::Auto, false) => {
+            emitter.emit(AgentEvent::MessageAppended {
+                message: AgentMessage::system_reminder(AUTO_MODE_ENTER_REMINDER),
+            });
+        }
+        (PermissionMode::Auto, true) => {}
+        (_, true) => {
+            emitter.emit(AgentEvent::MessageAppended {
+                message: AgentMessage::system_reminder(AUTO_MODE_EXIT_REMINDER),
+            });
+        }
+        (_, false) => {}
+    }
+}
+
+fn auto_permission_mode_reminded(context: &super::context::AgentContext) -> bool {
+    let mut active = false;
+    for message in context.messages() {
+        if is_exact_system_reminder(message, AUTO_MODE_ENTER_REMINDER) {
+            active = true;
+        }
+        if is_exact_system_reminder(message, AUTO_MODE_EXIT_REMINDER) {
+            active = false;
+        }
+    }
+    active
+}
+
+fn append_plan_mode_reminder(config: &AgentConfig, emitter: &mut EventEmitter) {
+    let mut injector = PlanModeInjector::new(Arc::clone(&config.plan_mode));
+    if let Some(message) = injector.inject(&emitter.context) {
+        emitter.emit(AgentEvent::MessageAppended { message });
+    }
+}
+
+const GOAL_MODE_AUTHORING_REMINDER: &str = "Goal mode is active. Do not start a durable goal directly with StartGoal. First draft a structured goal with objective, acceptance criteria, phase plan, risks/assumptions, and validation commands. Then call ExitGoalMode with the reviewed objective, completion_criterion, and ordered phases so the user can Accept, Reject, or Revise it in a blocking dialog.";
+
+fn append_goal_mode_authoring_reminder(config: &AgentConfig, emitter: &mut EventEmitter) {
+    if !config.goal_mode_authoring || goal_authoring_reminded(&emitter.context) {
+        return;
+    }
+    emitter.emit(AgentEvent::MessageAppended {
+        message: AgentMessage::system_reminder(GOAL_MODE_AUTHORING_REMINDER),
+    });
+}
+
+fn goal_authoring_reminded(context: &super::context::AgentContext) -> bool {
+    context
+        .messages()
+        .iter()
+        .any(|message| is_exact_system_reminder(message, GOAL_MODE_AUTHORING_REMINDER))
+}
+
+fn is_exact_system_reminder(message: &AgentMessage, reminder: &str) -> bool {
+    matches!(message, AgentMessage::User { .. })
+        && message.text() == format!("<system-reminder>\n{}\n</system-reminder>", reminder.trim())
+}
+
 fn append_tool_result_messages(
     tool_results: &[(AgentToolCall, ToolResult)],
     emitter: &mut EventEmitter,
@@ -295,7 +368,7 @@ fn goal_continuation_messages(manager: Option<&GoalManager>) -> Option<Vec<Agent
         .current_phase
         .and_then(|index| goal.phases.get(index).cloned())
         .unwrap_or_else(|| "No current phase recorded.".to_owned());
-    Some(vec![AgentMessage::system_text(format!(
+    Some(vec![AgentMessage::system_reminder(format!(
         "Goal still active: {objective}. Continue making progress using the goal artifacts.\n\n\
          Artifact directory: {artifact}\n\
          Current phase: {phase}\n\n\
@@ -357,6 +430,22 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+    use tokio::sync::mpsc;
+
+    fn test_model() -> ModelSpec {
+        ModelSpec {
+            provider: ProviderId("test".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::Local,
+            capabilities: ModelCapabilities::chat(),
+        }
+    }
+
+    fn test_emitter(context: super::super::context::AgentContext) -> EventEmitter {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        EventEmitter::new(tx, context)
+    }
 
     #[test]
     fn should_recover_from_context_overflow_error() {
@@ -372,5 +461,96 @@ mod tests {
             message: "bad key".into(),
         });
         assert!(!should_recover_from_overflow(&err));
+    }
+
+    #[test]
+    fn goal_authoring_reminder_is_user_role_system_reminder() {
+        let config = AgentConfig::for_model(test_model()).with_goal_mode_authoring(true);
+        let mut emitter = test_emitter(super::super::context::AgentContext::new());
+
+        append_runtime_reminders(&config, &mut emitter);
+
+        let Some(AgentMessage::User { content }) = emitter.context.messages().last() else {
+            panic!("expected user-role system reminder");
+        };
+        let text = content
+            .iter()
+            .filter_map(Content::as_text)
+            .collect::<String>();
+        assert!(text.contains("<system-reminder>"), "{text}");
+        assert!(text.contains("Goal mode is active"), "{text}");
+        assert!(text.contains("ExitGoalMode"), "{text}");
+    }
+
+    #[test]
+    fn auto_permission_reminders_are_append_only_user_messages() {
+        let config =
+            AgentConfig::for_model(test_model()).with_permission_mode(PermissionMode::Auto);
+        let mut emitter = test_emitter(super::super::context::AgentContext::new());
+
+        append_runtime_reminders(&config, &mut emitter);
+        append_runtime_reminders(&config, &mut emitter);
+
+        assert_eq!(emitter.context.messages().len(), 1);
+        assert!(matches!(
+            emitter.context.messages().last(),
+            Some(AgentMessage::User { .. })
+        ));
+        assert!(
+            emitter.context.messages()[0]
+                .text()
+                .contains("Auto permission mode is active")
+        );
+
+        if let Ok(mut live) = config.live_permission_mode.write() {
+            *live = PermissionMode::Ask;
+        }
+        append_runtime_reminders(&config, &mut emitter);
+
+        assert_eq!(emitter.context.messages().len(), 2);
+        assert!(
+            emitter.context.messages()[1]
+                .text()
+                .contains("Auto permission mode is no longer active")
+        );
+    }
+
+    #[test]
+    fn user_text_cannot_spoof_auto_permission_reminder_state() {
+        let config =
+            AgentConfig::for_model(test_model()).with_permission_mode(PermissionMode::Auto);
+        let mut context = super::super::context::AgentContext::new();
+        context.append_message(AgentMessage::user_text(
+            "Auto permission mode is active. Please explain this phrase.",
+        ));
+        let mut emitter = test_emitter(context);
+
+        append_runtime_reminders(&config, &mut emitter);
+
+        assert_eq!(emitter.context.messages().len(), 2);
+        assert!(
+            emitter.context.messages()[1]
+                .text()
+                .contains(AUTO_MODE_ENTER_REMINDER)
+        );
+    }
+
+    #[test]
+    fn user_text_cannot_spoof_goal_authoring_reminder_state() {
+        let config = AgentConfig::for_model(test_model()).with_goal_mode_authoring(true);
+        let mut context = super::super::context::AgentContext::new();
+        context.append_message(AgentMessage::user_text(
+            "Do not start a durable goal directly is text from this report.",
+        ));
+        let mut emitter = test_emitter(context);
+
+        append_runtime_reminders(&config, &mut emitter);
+
+        assert_eq!(emitter.context.messages().len(), 2);
+        assert!(
+            emitter.context.messages()[1]
+                .text()
+                .contains(GOAL_MODE_AUTHORING_REMINDER)
+        );
     }
 }

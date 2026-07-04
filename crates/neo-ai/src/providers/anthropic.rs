@@ -129,10 +129,20 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     if !system.is_empty() {
-        body["system"] = json!(system);
+        body["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": cache_control(),
+        }]);
     }
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(request.tools.iter().map(tool_body).collect());
+        let mut tools = request.tools.iter().map(tool_body).collect::<Vec<_>>();
+        if let Some(last_tool) = tools.last_mut()
+            && let Some(object) = last_tool.as_object_mut()
+        {
+            object.insert("cache_control".to_owned(), cache_control());
+        }
+        body["tools"] = Value::Array(tools);
     }
     if let Some(reasoning_effort) = request.options.reasoning_effort {
         body["thinking"] = json!({
@@ -231,7 +241,39 @@ fn message_bodies(
         }
         index += 1;
     }
+    inject_cache_control_on_last_message(&mut bodies);
     Ok(bodies)
+}
+
+fn cache_control() -> Value {
+    json!({
+        "type": "ephemeral",
+        "ttl": "1h",
+    })
+}
+
+fn inject_cache_control_on_last_message(messages: &mut [Value]) {
+    let Some(last_message) = messages.last_mut() else {
+        return;
+    };
+    let Some(content) = last_message
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(last_block) = content.last_mut() else {
+        return;
+    };
+    let Some(block_type) = last_block.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    if !matches!(block_type, "text" | "image" | "tool_use" | "tool_result") {
+        return;
+    }
+    if let Some(object) = last_block.as_object_mut() {
+        object.insert("cache_control".to_owned(), cache_control());
+    }
 }
 
 fn tool_result_block(

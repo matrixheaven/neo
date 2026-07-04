@@ -76,6 +76,9 @@ impl EventEmitter {
             AgentEvent::CompactionApplied { summary } => {
                 context.apply_compaction(summary.clone());
             }
+            AgentEvent::MicroCompactionApplied { cutoff } => {
+                context.apply_micro_compaction_cutoff(*cutoff);
+            }
             AgentEvent::PlanModeEntered { id, .. } => {
                 context.plan_mode_active = true;
                 context.plan_mode_id = Some(id.clone());

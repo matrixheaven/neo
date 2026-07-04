@@ -200,6 +200,7 @@ impl NeoChromeState {
             AgentEvent::CompactionStarted { .. }
             | AgentEvent::CompactionProgress { .. }
             | AgentEvent::CompactionApplied { .. }
+            | AgentEvent::MicroCompactionApplied { .. }
             | AgentEvent::MessageAppended { .. }
             | AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
