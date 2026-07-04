@@ -5505,7 +5505,10 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
                 SESSION_CHILD,
                 LoadedSessionTranscript::new(
                     SESSION_CHILD,
-                    [format!("forked from {SESSION_A}")],
+                    [
+                        format!("fork from session {SESSION_A}"),
+                        format!("switch to fork session {SESSION_CHILD}"),
+                    ],
                     [
                         AgentMessage::user_text("hello"),
                         AgentMessage::assistant(
@@ -5532,7 +5535,11 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
     assert!(controller.chrome().focused_overlay().is_none());
     assert!(transcript_has_status(
         &controller,
-        &format!("forked from {SESSION_A}")
+        &format!("fork from session {SESSION_A}")
+    ));
+    assert!(transcript_has_status(
+        &controller,
+        &format!("switch to fork session {SESSION_CHILD}")
     ));
     assert!(transcript_entries(&controller).iter().any(|entry| {
         matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
