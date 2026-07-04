@@ -1790,15 +1790,16 @@ mod tests {
             cleanup: Arc::new(move || {
                 let exit_code = cleanup_exit_code;
                 Box::pin(async move {
-                    exit_code
-                        .map(|code| ShellTermination {
-                            exit_code: Some(code),
-                            signal: None,
-                        })
-                        .unwrap_or(ShellTermination {
+                    exit_code.map_or(
+                        ShellTermination {
                             exit_code: None,
                             signal: None,
-                        })
+                        },
+                        |code| ShellTermination {
+                            exit_code: Some(code),
+                            signal: None,
+                        },
+                    )
                 })
             }),
             drain: Arc::new(|handle| {

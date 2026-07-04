@@ -582,6 +582,8 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
 
 #[test]
 fn arrow_nav_to_revise_waits_for_enter_before_collecting_feedback() {
+    use neo_tui::input::{InputEvent, KeybindingAction};
+
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 1,
@@ -593,8 +595,6 @@ fn arrow_nav_to_revise_waits_for_enter_before_collecting_feedback() {
         prefix_rule: None,
         suggestions: vec![],
     });
-
-    use neo_tui::input::{InputEvent, KeybindingAction};
 
     // Options: [0] Approve, [1] Reject, [2] Reject with feedback.
     app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [1] Reject
@@ -644,6 +644,8 @@ fn arrow_nav_to_revise_waits_for_enter_before_collecting_feedback() {
 
 #[test]
 fn plan_review_with_options_aligns_chrome_and_transcript_revise_index() {
+    use neo_tui::input::{InputEvent, KeybindingAction};
+
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 1,
@@ -661,8 +663,6 @@ fn plan_review_with_options_aligns_chrome_and_transcript_revise_index() {
         prefix_rule: None,
         suggestions: vec![],
     });
-
-    use neo_tui::input::{InputEvent, KeybindingAction};
 
     // Chrome has 4 options: [0] A, [1] B, [2] Reject, [3] Revise.
     // Navigate to Revise (index 3).

@@ -225,7 +225,7 @@ mod macos {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::*;
+    use super::{ClipboardError, ClipboardImage, Command, detect_image_mime, is_vision_mime};
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
         let candidates: [(&str, &[&str]); 2] = [
@@ -235,24 +235,39 @@ mod linux {
                 &["-selection", "clipboard", "-t", "image/png", "-o"],
             ),
         ];
+
+        // Track the last real error — if a command exists but fails to execute
+        // (e.g. permission denied), we surface it instead of silently returning
+        // `NoImage`. A `NotFound` is expected: only one of wl-paste/xclip will
+        // be installed depending on the display server (Wayland vs X11).
+        let mut spawn_error: Option<String> = None;
+
         for (cmd, args) in candidates {
-            if let Ok(out) = Command::new(cmd).args(args).output()
-                && out.status.success()
-                && !out.stdout.is_empty()
-            {
-                let mime = detect_image_mime(&out.stdout);
-                match mime {
-                    Some(m) if is_vision_mime(m) => {
-                        return Ok(ClipboardImage {
-                            bytes: out.stdout,
-                            mime_type: m.to_owned(),
-                        });
-                    }
-                    _ => continue,
+            let out = match Command::new(cmd).args(args).output() {
+                Ok(out) => out,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    spawn_error = Some(format!("{cmd}: {e}"));
+                    continue;
                 }
+            };
+
+            if out.status.success()
+                && !out.stdout.is_empty()
+                && let Some(m) = detect_image_mime(&out.stdout)
+                && is_vision_mime(m)
+            {
+                return Ok(ClipboardImage {
+                    bytes: out.stdout,
+                    mime_type: m.to_owned(),
+                });
             }
         }
-        Err(ClipboardError::NoImage)
+
+        match spawn_error {
+            Some(msg) => Err(ClipboardError::ReadFailed(msg)),
+            None => Err(ClipboardError::NoImage),
+        }
     }
 }
 

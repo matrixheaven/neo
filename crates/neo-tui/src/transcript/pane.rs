@@ -998,6 +998,7 @@ impl TranscriptPane {
         let (mut rows, start_index, mut entry_row_starts, _reused_prefix_rows) =
             self.cached_render_prefix(width, entry_count);
         #[cfg(test)]
+        #[allow(clippy::used_underscore_binding)]
         {
             self.last_reused_prefix_rows = _reused_prefix_rows;
         }

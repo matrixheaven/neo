@@ -784,7 +784,7 @@ mod tests {
             self.name
         }
 
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "count schema calls"
         }
 

@@ -901,6 +901,18 @@ fn merge_swarm_child(
     incoming
 }
 
+fn child_progress_rank(state: AgentLifecycleState) -> u8 {
+    match state {
+        AgentLifecycleState::Queued => 0,
+        AgentLifecycleState::Running => 1,
+        AgentLifecycleState::Completed
+        | AgentLifecycleState::Failed
+        | AgentLifecycleState::Cancelled
+        | AgentLifecycleState::TimedOut
+        | AgentLifecycleState::Interrupted => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,17 +929,5 @@ mod tests {
         let cached = store.render_cache[0].as_ref().expect("cached render");
         assert_eq!(cached.ansi_lines, first);
         assert_eq!(store.render_entry_ansi_cached(0, 80, &theme, 99), first);
-    }
-}
-
-fn child_progress_rank(state: AgentLifecycleState) -> u8 {
-    match state {
-        AgentLifecycleState::Queued => 0,
-        AgentLifecycleState::Running => 1,
-        AgentLifecycleState::Completed
-        | AgentLifecycleState::Failed
-        | AgentLifecycleState::Cancelled
-        | AgentLifecycleState::TimedOut
-        | AgentLifecycleState::Interrupted => 2,
     }
 }

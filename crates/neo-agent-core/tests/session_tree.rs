@@ -18,8 +18,8 @@ fn session_metadata_lists_sessions_with_main_agent_wire() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path();
     let session_id = "session_00000000-0000-0000-0000-000000000001";
-    let session_dir = sessions_dir.join(session_id);
-    let wire_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+    let dir = sessions_dir.join(session_id);
+    let wire_path = neo_agent_core::session::main_agent_wire_path(&dir);
     std::fs::create_dir_all(wire_path.parent().expect("wire parent")).expect("mkdir");
     std::fs::write(
         wire_path,
