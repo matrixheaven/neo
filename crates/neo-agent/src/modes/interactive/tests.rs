@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use neo_agent_core::{
@@ -232,6 +233,14 @@ fn git_status_badge_formats_dirty_without_line_counts() {
 }
 
 #[test]
+fn git_status_badge_formats_unborn_branch_as_init() {
+    let badge = parse_git_status_porcelain("## No commits yet on main\n?? new-file.rs\n")
+        .expect("git badge");
+
+    assert_eq!(badge.format(), "main [init]");
+}
+
+#[test]
 fn git_status_badge_counts_untracked_text_file_lines() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(dir.path().join("src")).expect("create source dir");
@@ -268,6 +277,24 @@ fn git_status_badge_is_absent_when_git_program_is_missing() {
     );
 
     assert_eq!(missing, None);
+}
+
+#[test]
+fn git_status_badge_is_absent_when_workspace_has_no_git_dir() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let workspace = parent.path().join("nested-workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    fs::write(workspace.join("untracked.txt"), "new file\n").expect("write untracked file");
+
+    let init_status = Command::new("git")
+        .arg("-C")
+        .arg(parent.path())
+        .args(["init", "--initial-branch=main"])
+        .status()
+        .expect("run git init");
+    assert!(init_status.success(), "git init should succeed");
+
+    assert_eq!(git_status_label_with_program("git", &workspace), None);
 }
 
 #[test]

@@ -11,6 +11,7 @@ use neo_agent_core::AgentEvent;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GitStatusBadge {
     pub(super) branch: String,
+    pub(super) unborn: bool,
     pub(super) dirty: bool,
     pub(super) ahead: u32,
     pub(super) behind: u32,
@@ -21,6 +22,10 @@ pub(super) struct GitStatusBadge {
 
 impl GitStatusBadge {
     pub(super) fn format(&self) -> String {
+        if self.unborn {
+            return format!("{} [init]", self.branch);
+        }
+
         let mut parts = Vec::new();
         let has_line_counts = self.added > 0 || self.deleted > 0;
         if has_line_counts {
@@ -68,6 +73,10 @@ pub(super) fn git_status_label_with_program(
     program: &str,
     workspace_root: &Path,
 ) -> Option<String> {
+    if !workspace_root.join(".git").exists() {
+        return None;
+    }
+
     let status_output = Command::new(program)
         .arg("-C")
         .arg(workspace_root)
@@ -79,7 +88,7 @@ pub(super) fn git_status_label_with_program(
     }
     let status = String::from_utf8_lossy(&status_output.stdout);
     let mut badge = parse_git_status_porcelain(&status)?;
-    if badge.dirty {
+    if badge.dirty && !badge.unborn {
         let numstat_output = Command::new(program)
             .arg("-C")
             .arg(workspace_root)
@@ -114,6 +123,7 @@ pub(super) fn git_status_label_with_program(
 
 pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge> {
     let mut branch = None;
+    let mut unborn = false;
     let mut ahead = 0;
     let mut behind = 0;
     let mut dirty = false;
@@ -121,9 +131,10 @@ pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge>
     for line in stdout.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             let parsed = parse_git_branch_header(header);
-            branch = Some(parsed.0);
-            ahead = parsed.1;
-            behind = parsed.2;
+            branch = Some(parsed.branch);
+            unborn = parsed.unborn;
+            ahead = parsed.ahead;
+            behind = parsed.behind;
         } else if !line.trim().is_empty() {
             dirty = true;
         }
@@ -133,6 +144,7 @@ pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge>
         .filter(|name| !name.is_empty())
         .map(|branch| GitStatusBadge {
             branch,
+            unborn,
             dirty,
             ahead,
             behind,
@@ -142,10 +154,19 @@ pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge>
         })
 }
 
-fn parse_git_branch_header(header: &str) -> (String, u32, u32) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitBranchHeader {
+    branch: String,
+    unborn: bool,
+    ahead: u32,
+    behind: u32,
+}
+
+fn parse_git_branch_header(header: &str) -> GitBranchHeader {
     let (branch_part, sync_part) = header
         .split_once(" [")
         .map_or((header, ""), |(branch, sync)| (branch, sync));
+    let unborn = branch_part.starts_with("No commits yet on ");
     let branch = branch_part
         .strip_prefix("No commits yet on ")
         .unwrap_or(branch_part)
@@ -155,7 +176,12 @@ fn parse_git_branch_header(header: &str) -> (String, u32, u32) {
         .to_owned();
     let ahead = parse_git_sync_count(sync_part, "ahead ");
     let behind = parse_git_sync_count(sync_part, "behind ");
-    (branch, ahead, behind)
+    GitBranchHeader {
+        branch,
+        unborn,
+        ahead,
+        behind,
+    }
 }
 
 fn parse_git_sync_count(sync_part: &str, label: &str) -> u32 {
