@@ -62,6 +62,7 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Resume a local session"),
     ("/new", "Start a fresh local session"),
     ("/clear", "Alias for /new"),
+    ("/fork", "Fork the current session"),
     ("/help", "Show help information"),
     ("/model", "Switch active model"),
     ("/provider", "View configured providers"),
