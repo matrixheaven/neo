@@ -1,18 +1,15 @@
 target
 .neo
-pi
+.references/
 .DS_Store
-claude-code
-codex
-opencode
 .worktrees/
-kimi-code
 kimi-code.worktrees/
 .superpowers
-docs/superpowers/
-docs/audits
 .mimocode
 .codegraph/
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 # Per-machine Cargo overrides (sccache, custom linker). Keep the shared
 # .cargo/config.toml platform-neutral; local tuning goes in
 # .cargo/config.local.toml or the user-global ~/.cargo/config.toml.

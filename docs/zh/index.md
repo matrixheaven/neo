@@ -1,17 +1,25 @@
-# Neo
+---
+layout: home
 
-一个 Rust 原生、纯本地运行的 AI 编程助手。
+hero:
+  name: Neo
+  text: 交互式本地编程 Agent
+  tagline: 在你的终端里运行，理解你的代码库，直接帮你干活。
+  actions:
+    - theme: brand
+      text: 快速开始
+      link: /zh/quickstart
+    - theme: alt
+      text: 查看指南
+      link: /zh/guides/interaction
 
-Neo 以 CLI/TUI 的形式运行在你的本机——没有托管后端、没有账号、没有遥测。自带 API Key，即可对话 OpenAI、Anthropic、Google 或任何 OpenAI 兼容端点；内置读写、编辑、grep、glob、bash、计划模式与目标跟踪等工具，全部由分层权限系统把关。
-
-| | |
-| --- | --- |
-| **本地优先** | 会话、配置、技能、信任决策全部存于 `~/.neo/`，除你显式配置的 API 调用外不外发任何数据 |
-| **多模型供应商** | OpenAI Responses、Anthropic Messages、Google Generative AI、Ollama、vLLM 等 |
-| **可恢复会话** | 每次对话都是一份可恢复、可分叉的本地 JSONL 记录 |
-| **跨平台** | macOS、Linux、Windows |
-
-## 下一步
-
-- [快速开始](quickstart.md) — 五分钟装好并跑通第一个对话
-- [查看指南](guides/interaction.md) — 交互模式、权限、斜杠命令一网打尽
+features:
+  - title: 原生工具调用
+    details: 通过 provider 原生 tool-call 协议直接操作文件、运行命令、搜索代码。
+  - title: 多 Agent 协作
+    details: 内置 Delegate、DelegateSwarm，支持并行子 Agent 处理独立任务。
+  - title: 权限分层
+    details: Ask / Auto / YOLO / Plan 四种模式，细粒度审批控制。
+  - title: 可定制
+    details: MCP 集成、Agent Skills、自定义主题、Hooks，按需扩展。
+---
