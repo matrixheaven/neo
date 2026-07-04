@@ -1397,7 +1397,7 @@ impl InteractiveController {
             &self.image_attachment_store,
         );
         let display_text = content_to_display_text(&content);
-        let message = AgentMessage::User { content };
+        let message = AgentMessage::user_content(content);
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             self.tui
@@ -1453,7 +1453,7 @@ impl InteractiveController {
                 &self.image_attachment_store,
             );
             let display_text = content_to_display_text(&content);
-            let message = AgentMessage::User { content };
+            let message = AgentMessage::user_content(content);
             steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(message));
             self.tui
                 .chrome_mut()
@@ -1520,11 +1520,14 @@ impl InteractiveController {
 
     fn render_appended_user_message_if_needed(&mut self, event: &AgentEvent) {
         let AgentEvent::MessageAppended {
-            message: AgentMessage::User { content },
+            message: AgentMessage::User { content, origin },
         } = event
         else {
             return;
         };
+        if origin.is_injection() {
+            return;
+        }
         let text = content_to_display_text(content);
         if text.trim().is_empty() {
             return;

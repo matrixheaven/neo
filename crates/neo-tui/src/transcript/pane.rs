@@ -284,8 +284,11 @@ impl TranscriptPane {
     }
 
     pub fn replay_message(&mut self, message: &AgentMessage) {
+        if message.is_injection() {
+            return;
+        }
         match message {
-            AgentMessage::User { content } => {
+            AgentMessage::User { content, .. } => {
                 let text = content_display_text(content);
                 if !text.is_empty() {
                     self.replay_user_message(text);

@@ -62,7 +62,7 @@ pub(crate) fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
 pub(crate) fn estimate_message_tokens(message: &AgentMessage) -> usize {
     let role_tokens = estimate_text_tokens(agent_message_role(message));
     let payload_tokens = match message {
-        AgentMessage::System { content } | AgentMessage::User { content } => {
+        AgentMessage::System { content } | AgentMessage::User { content, .. } => {
             estimate_content_tokens(content)
         }
         AgentMessage::ToolResult {

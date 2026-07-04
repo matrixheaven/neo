@@ -348,7 +348,7 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
 
     match message {
         AgentMessage::System { content }
-        | AgentMessage::User { content }
+        | AgentMessage::User { content, .. }
         | AgentMessage::ToolResult { content, .. } => {
             render_content_parts(content, &mut lines);
         }

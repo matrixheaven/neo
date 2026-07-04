@@ -196,7 +196,13 @@ impl PlanModeInjector {
     /// Returns an injected plan-mode reminder message if one is due for this
     /// turn, or `None`.
     pub fn inject(&mut self, context: &AgentContext) -> Option<AgentMessage> {
-        let user_msg = matches!(context.messages().last(), Some(AgentMessage::User { .. }));
+        let user_msg = matches!(
+            context.messages().last(),
+            Some(AgentMessage::User {
+                origin: crate::MessageOrigin::User,
+                ..
+            })
+        );
         let asst_count = u32::try_from(
             context
                 .messages()
@@ -216,7 +222,10 @@ impl PlanModeInjector {
         let path = pm
             .plan_file_path()
             .map_or_else(|| "(no plan file)".to_string(), |p| p.display().to_string());
-        Some(AgentMessage::system_reminder(reminder_text(variant, &path)))
+        Some(AgentMessage::system_reminder_with_origin(
+            reminder_text(variant, &path),
+            "plan_mode",
+        ))
     }
 }
 

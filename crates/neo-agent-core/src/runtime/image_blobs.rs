@@ -13,8 +13,9 @@ pub(super) async fn resolve_image_blobs(
     let mut out = Vec::with_capacity(messages.len());
     for message in messages {
         out.push(match message {
-            AgentMessage::User { content } => AgentMessage::User {
+            AgentMessage::User { content, origin } => AgentMessage::User {
                 content: resolve_content_blobs(content, session_dir).await,
+                origin,
             },
             AgentMessage::Assistant {
                 content,

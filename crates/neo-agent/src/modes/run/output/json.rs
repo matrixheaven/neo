@@ -415,10 +415,18 @@ fn stable_message(message: &AgentMessage) -> Value {
             "role": "system",
             "content": stable_content(content),
         }),
-        AgentMessage::User { content } => json!({
-            "role": "user",
-            "content": stable_content(content),
-        }),
+        AgentMessage::User {
+            content, origin, ..
+        } => {
+            let mut message = json!({
+                "role": "user",
+                "content": stable_content(content),
+            });
+            if !origin.is_user() {
+                message["origin"] = json!(origin);
+            }
+            message
+        }
         AgentMessage::Assistant {
             content,
             tool_calls,

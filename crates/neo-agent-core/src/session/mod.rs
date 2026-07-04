@@ -754,7 +754,7 @@ fn message_role(message: &AgentMessage) -> &'static str {
 fn one_line_message_text(message: &AgentMessage) -> String {
     let content = match message {
         AgentMessage::System { content }
-        | AgentMessage::User { content }
+        | AgentMessage::User { content, .. }
         | AgentMessage::Assistant { content, .. }
         | AgentMessage::ToolResult { content, .. } => content,
         AgentMessage::ShellCommand {

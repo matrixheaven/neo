@@ -107,12 +107,51 @@ impl From<AgentToolCall> for ToolCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageOrigin {
+    User,
+    Injection { variant: Arc<str> },
+}
+
+impl Default for MessageOrigin {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
+impl MessageOrigin {
+    #[must_use]
+    pub fn injection(variant: impl Into<Arc<str>>) -> Self {
+        Self::Injection {
+            variant: variant.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_user(&self) -> bool {
+        matches!(self, Self::User)
+    }
+
+    #[must_use]
+    pub const fn is_injection(&self) -> bool {
+        matches!(self, Self::Injection { .. })
+    }
+
+    #[must_use]
+    pub fn is_injection_variant(&self, expected: &str) -> bool {
+        matches!(self, Self::Injection { variant } if variant.as_ref() == expected)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AgentMessage {
     System {
         content: Vec<Content>,
     },
     User {
         content: Vec<Content>,
+        #[serde(default, skip_serializing_if = "MessageOrigin::is_user")]
+        origin: MessageOrigin,
     },
     Assistant {
         content: Vec<Content>,
@@ -146,17 +185,53 @@ impl AgentMessage {
 
     #[must_use]
     pub fn user_text(text: impl Into<Arc<str>>) -> Self {
+        Self::user_content(vec![Content::text(text)])
+    }
+
+    #[must_use]
+    pub fn user_content(content: impl Into<Vec<Content>>) -> Self {
         Self::User {
-            content: vec![Content::text(text)],
+            content: content.into(),
+            origin: MessageOrigin::User,
         }
     }
 
     #[must_use]
     pub fn system_reminder(text: impl AsRef<str>) -> Self {
-        Self::user_text(format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            text.as_ref().trim()
-        ))
+        Self::system_reminder_with_origin(text, "system_reminder")
+    }
+
+    #[must_use]
+    pub fn system_reminder_with_origin(
+        text: impl AsRef<str>,
+        variant: impl Into<Arc<str>>,
+    ) -> Self {
+        Self::User {
+            content: vec![Content::text(format!(
+                "<system-reminder>\n{}\n</system-reminder>",
+                text.as_ref().trim()
+            ))],
+            origin: MessageOrigin::injection(variant),
+        }
+    }
+
+    #[must_use]
+    pub fn injection_text(text: impl Into<Arc<str>>, variant: impl Into<Arc<str>>) -> Self {
+        Self::User {
+            content: vec![Content::text(text)],
+            origin: MessageOrigin::injection(variant),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_injection(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                origin: MessageOrigin::Injection { .. },
+                ..
+            }
+        )
     }
 
     #[must_use]
@@ -213,7 +288,7 @@ impl AgentMessage {
     pub fn text(&self) -> String {
         let content = match self {
             Self::System { content }
-            | Self::User { content }
+            | Self::User { content, .. }
             | Self::Assistant { content, .. }
             | Self::ToolResult { content, .. } => content,
             Self::ShellCommand {
@@ -242,7 +317,7 @@ impl AgentMessage {
             Self::System { content } => ChatMessage::System {
                 content: content.iter().map(to_content_part).collect(),
             },
-            Self::User { content } => ChatMessage::User {
+            Self::User { content, .. } => ChatMessage::User {
                 content: content.iter().map(to_content_part).collect(),
             },
             Self::Assistant {
@@ -564,11 +639,15 @@ fn orphan_tool_result_reminder(message: &AgentMessage) -> AgentMessage {
         ..
     } = message
     else {
-        return AgentMessage::system_reminder("orphaned tool result omitted");
+        return AgentMessage::system_reminder_with_origin(
+            "orphaned tool result omitted",
+            "tool_result_repair",
+        );
     };
-    AgentMessage::system_reminder(format!(
-        "orphaned tool result omitted: tool_call_id={tool_call_id}, tool_name={tool_name}"
-    ))
+    AgentMessage::system_reminder_with_origin(
+        format!("orphaned tool result omitted: tool_call_id={tool_call_id}, tool_name={tool_name}"),
+        "tool_result_repair",
+    )
 }
 
 fn shell_command_model_text(
@@ -674,6 +753,36 @@ mod tests {
         };
 
         assert_eq!(tool_calls[0].raw_arguments, "{}");
+    }
+
+    #[test]
+    fn user_text_uses_user_origin_and_system_reminder_uses_injection_origin() {
+        let user = AgentMessage::user_text("<system-reminder>\nliteral\n</system-reminder>");
+        let AgentMessage::User {
+            origin: user_origin,
+            ..
+        } = &user
+        else {
+            panic!("expected user message");
+        };
+        assert!(user_origin.is_user());
+        assert!(!user.is_injection());
+        let user_json = serde_json::to_value(&user).expect("serialize user");
+        assert!(user_json["User"].get("origin").is_none());
+
+        let reminder = AgentMessage::system_reminder_with_origin("hidden", "plan_mode");
+        let AgentMessage::User {
+            origin: reminder_origin,
+            ..
+        } = &reminder
+        else {
+            panic!("expected user-role reminder");
+        };
+        assert!(reminder_origin.is_injection_variant("plan_mode"));
+        assert!(reminder.is_injection());
+        let reminder_json = serde_json::to_value(&reminder).expect("serialize reminder");
+        assert_eq!(reminder_json["User"]["origin"]["kind"], "injection");
+        assert_eq!(reminder_json["User"]["origin"]["variant"], "plan_mode");
     }
 
     #[test]

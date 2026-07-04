@@ -5793,7 +5793,7 @@ async fn session_catalog_and_loader_use_real_local_session_store() {
     assert_eq!(loaded.messages.len(), 2);
     assert!(matches!(
         &loaded.messages[0],
-        AgentMessage::User { content } if content[0].as_text() == Some("hello")
+        AgentMessage::User { content, .. } if content[0].as_text() == Some("hello")
     ));
     assert!(matches!(
         &loaded.messages[1],

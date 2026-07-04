@@ -513,7 +513,7 @@ async fn append_user_event(
     content: Vec<Content>,
     writer: &mut SessionEventWriter<'_>,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
-    let user_message = AgentMessage::User { content };
+    let user_message = AgentMessage::user_content(content);
     let user_event = AgentEvent::MessageAppended {
         message: user_message.clone(),
     };
@@ -1497,7 +1497,7 @@ mod tests {
         assert_eq!(messages.len(), 4);
         assert!(matches!(
             &messages[2],
-            AgentMessage::User { content } if content[0].as_text() == Some("continue")
+            AgentMessage::User { content, .. } if content[0].as_text() == Some("continue")
         ));
         assert!(matches!(
             &messages[3],

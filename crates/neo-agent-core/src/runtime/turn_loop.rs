@@ -272,13 +272,19 @@ fn append_permission_mode_reminder(config: &AgentConfig, emitter: &mut EventEmit
     match (mode, auto_reminded) {
         (PermissionMode::Auto, false) => {
             emitter.emit(AgentEvent::MessageAppended {
-                message: AgentMessage::system_reminder(AUTO_MODE_ENTER_REMINDER),
+                message: AgentMessage::system_reminder_with_origin(
+                    AUTO_MODE_ENTER_REMINDER,
+                    "permission_mode_auto_enter",
+                ),
             });
         }
         (PermissionMode::Auto, true) => {}
         (_, true) => {
             emitter.emit(AgentEvent::MessageAppended {
-                message: AgentMessage::system_reminder(AUTO_MODE_EXIT_REMINDER),
+                message: AgentMessage::system_reminder_with_origin(
+                    AUTO_MODE_EXIT_REMINDER,
+                    "permission_mode_auto_exit",
+                ),
             });
         }
         (_, false) => {}
@@ -288,10 +294,10 @@ fn append_permission_mode_reminder(config: &AgentConfig, emitter: &mut EventEmit
 fn auto_permission_mode_reminded(context: &super::context::AgentContext) -> bool {
     let mut active = false;
     for message in context.messages() {
-        if is_exact_system_reminder(message, AUTO_MODE_ENTER_REMINDER) {
+        if is_injection_variant(message, "permission_mode_auto_enter") {
             active = true;
         }
-        if is_exact_system_reminder(message, AUTO_MODE_EXIT_REMINDER) {
+        if is_injection_variant(message, "permission_mode_auto_exit") {
             active = false;
         }
     }
@@ -312,7 +318,10 @@ fn append_goal_mode_authoring_reminder(config: &AgentConfig, emitter: &mut Event
         return;
     }
     emitter.emit(AgentEvent::MessageAppended {
-        message: AgentMessage::system_reminder(GOAL_MODE_AUTHORING_REMINDER),
+        message: AgentMessage::system_reminder_with_origin(
+            GOAL_MODE_AUTHORING_REMINDER,
+            "goal_mode",
+        ),
     });
 }
 
@@ -320,12 +329,17 @@ fn goal_authoring_reminded(context: &super::context::AgentContext) -> bool {
     context
         .messages()
         .iter()
-        .any(|message| is_exact_system_reminder(message, GOAL_MODE_AUTHORING_REMINDER))
+        .any(|message| is_injection_variant(message, "goal_mode"))
 }
 
-fn is_exact_system_reminder(message: &AgentMessage, reminder: &str) -> bool {
-    matches!(message, AgentMessage::User { .. })
-        && message.text() == format!("<system-reminder>\n{}\n</system-reminder>", reminder.trim())
+fn is_injection_variant(message: &AgentMessage, variant: &str) -> bool {
+    matches!(
+        message,
+        AgentMessage::User {
+            origin,
+            ..
+        } if origin.is_injection_variant(variant)
+    )
 }
 
 fn append_tool_result_messages(
@@ -368,13 +382,16 @@ fn goal_continuation_messages(manager: Option<&GoalManager>) -> Option<Vec<Agent
         .current_phase
         .and_then(|index| goal.phases.get(index).cloned())
         .unwrap_or_else(|| "No current phase recorded.".to_owned());
-    Some(vec![AgentMessage::system_reminder(format!(
-        "Goal still active: {objective}. Continue making progress using the goal artifacts.\n\n\
+    Some(vec![AgentMessage::system_reminder_with_origin(
+        format!(
+            "Goal still active: {objective}. Continue making progress using the goal artifacts.\n\n\
          Artifact directory: {artifact}\n\
          Current phase: {phase}\n\n\
          Work phase by phase. On repeated failures, retry once, write a focused fix spec on the second failure, and report blocked with handoff details on the third. Run a final audit before marking complete. \
          Use `UpdateGoalStatus` when the goal is complete or blocked, or `GetGoalStatus` to check current state."
-    ))])
+        ),
+        "goal_continuation",
+    )])
 }
 
 pub(super) async fn emit_run_finished(
@@ -470,9 +487,13 @@ mod tests {
 
         append_runtime_reminders(&config, &mut emitter);
 
-        let Some(AgentMessage::User { content }) = emitter.context.messages().last() else {
+        let Some(AgentMessage::User {
+            content, origin, ..
+        }) = emitter.context.messages().last()
+        else {
             panic!("expected user-role system reminder");
         };
+        assert!(origin.is_injection_variant("goal_mode"));
         let text = content
             .iter()
             .filter_map(Content::as_text)

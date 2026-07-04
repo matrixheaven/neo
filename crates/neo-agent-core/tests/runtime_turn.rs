@@ -616,12 +616,10 @@ async fn runtime_rejects_image_content_when_model_lacks_images_before_request() 
     assert_runtime_rejects_unsupported_capability(
         config,
         &harness,
-        AgentMessage::User {
-            content: vec![Content::Image {
-                mime_type: "image/png".into(),
-                data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".into()),
-            }],
-        },
+        AgentMessage::user_content(vec![Content::Image {
+            mime_type: "image/png".into(),
+            data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".into()),
+        }]),
         "does not support image input",
         "unsupported images should fail before provider request",
     )
@@ -6736,7 +6734,7 @@ async fn runtime_drains_multiple_live_follow_ups_all_by_default() {
         .iter()
         .filter_map(|event| match event {
             AgentEvent::MessageAppended {
-                message: AgentMessage::User { content },
+                message: AgentMessage::User { content, .. },
             } => Some(
                 content
                     .iter()
