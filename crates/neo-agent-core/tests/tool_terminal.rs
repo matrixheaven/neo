@@ -27,8 +27,8 @@ async fn terminal_stop_returns_promptly_for_interactive_shell() {
         .expect("handle")
         .to_owned();
 
-    tokio::time::timeout(
-        std::time::Duration::from_millis(500),
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
         registry.run(
             "Terminal",
             &context,
@@ -40,6 +40,17 @@ async fn terminal_stop_returns_promptly_for_interactive_shell() {
     .expect("terminal stop should succeed");
 
     assert_eq!(supervisor.active_count().await, 0);
+    assert_eq!(
+        stopped
+            .details
+            .as_ref()
+            .expect("stop details")
+            .get("reader_drained")
+            .cloned()
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "reader should drain promptly under normal stop: {stopped:?}"
+    );
 }
 
 #[tokio::test]

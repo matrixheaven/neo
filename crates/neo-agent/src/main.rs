@@ -31,6 +31,8 @@ use crate::{
     config::{AppConfig, ConfigOverrides},
 };
 
+use neo_tui::terminal_image::ImageProtocolPreference;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
@@ -60,6 +62,11 @@ async fn main() -> anyhow::Result<()> {
 fn is_interactive_tui_mode(cli: &Cli) -> bool {
     let is_tty = std::io::stdout().is_terminal();
     if !is_tty {
+        return false;
+    }
+    let capabilities =
+        modes::interactive::detect_terminal_capabilities(ImageProtocolPreference::Auto, is_tty);
+    if !capabilities.can_run_tui() {
         return false;
     }
     match &cli.command {

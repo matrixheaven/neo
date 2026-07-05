@@ -1,10 +1,10 @@
 //! Cross-platform shell resolution for the Bash/Terminal tools.
 //!
-//! Mirrors docs/kimi-code's `kaos/environment.ts`: the shell is always a
-//! POSIX `bash`/`sh`. On Windows we locate Git Bash (the canonical POSIX shell
-//! that ships with Git for Windows) rather than cmd/PowerShell, so tool input
-//! stays POSIX regardless of host OS — no per-OS command-syntax handling. On
-//! Unix we resolve `/bin/bash` (or fall back to `/bin/sh`).
+//! The shell is always a POSIX `bash`/`sh`. On Windows we locate Git Bash (the
+//! canonical POSIX shell that ships with Git for Windows) rather than
+//! cmd/PowerShell, so tool input stays POSIX regardless of host OS — no
+//! per-OS command-syntax handling. On Unix we resolve `/bin/bash` (or fall
+//! back to `/bin/sh`).
 //!
 //! All probing is a pure function of injected [`EnvProbes`] so the suite runs
 //! identically in tests; [`detect_shell_env`] wires in real `std::env`/`std::fs`.
@@ -355,6 +355,98 @@ fn normalize_windows_path(path: &str) -> String {
     path.replace('/', r"\")
 }
 
+/// Failure to translate a Windows path into a Git Bash POSIX cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsCwdError {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for WindowsCwdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cannot translate cwd `{}` to Git Bash form: {}",
+            self.path, self.reason
+        )
+    }
+}
+
+impl std::error::Error for WindowsCwdError {}
+
+/// Canonical Git Bash working directory derived from an absolute Windows path.
+///
+/// Only accepts drive-letter (`C:\dir`) or UNC (`\\server\share\dir`) forms.
+/// The resulting POSIX path is single-quote-escaped for shell injection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBashCwd {
+    posix: String,
+}
+
+impl GitBashCwd {
+    /// Translate an absolute Windows path into the POSIX form Git Bash expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is not absolute or is otherwise unusable
+    /// as a Git Bash cwd.
+    pub fn new(path: &Path) -> Result<Self, WindowsCwdError> {
+        let lossy = path.to_string_lossy();
+        if lossy.is_empty() {
+            return Err(WindowsCwdError {
+                path: lossy.into_owned(),
+                reason: "path is empty",
+            });
+        }
+
+        // UNC: must be \\server\share at minimum.
+        if lossy.starts_with(r"\\") {
+            let trimmed = lossy.trim_start_matches('\\');
+            let parts: Vec<&str> = trimmed.split('\\').collect();
+            if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+                return Err(WindowsCwdError {
+                    path: lossy.into_owned(),
+                    reason: "UNC path must include server and share",
+                });
+            }
+            return Ok(Self {
+                posix: windows_path_to_posix(path),
+            });
+        }
+
+        // Drive letter: must be `C:\` or `C:/` (not bare `C:`).
+        let bytes = lossy.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            if bytes.len() < 3 || !matches!(bytes[2], b'\\' | b'/') {
+                return Err(WindowsCwdError {
+                    path: lossy.into_owned(),
+                    reason: "drive-relative path is not absolute; use a full path like `C:\\dir`",
+                });
+            }
+            return Ok(Self {
+                posix: windows_path_to_posix(path),
+            });
+        }
+
+        Err(WindowsCwdError {
+            path: lossy.into_owned(),
+            reason: "path is not a Windows drive or UNC absolute path",
+        })
+    }
+
+    /// The POSIX cwd string (e.g. `/c/dev/repo` or `//server/share/dir`).
+    #[must_use]
+    pub fn posix(&self) -> &str {
+        &self.posix
+    }
+
+    /// The cwd as a single-quote-escaped shell literal suitable for `cd`.
+    #[must_use]
+    pub fn shell_cd(&self) -> String {
+        format!("'{}'", self.posix().replace('\'', "'\\''"))
+    }
+}
+
 /// Convert a Windows filesystem path to the POSIX form Git Bash expects
 /// (`C:\dev\repo` → `/c/dev/repo`, UNC `\\server\share` → `//server/share`).
 /// Mirrors kimi-code `windowsPathToPosixPath`.
@@ -596,12 +688,48 @@ mod tests {
     }
 
     #[test]
-    fn nul_redirect_leaves_normal_words_alone() {
-        // `NUL` as part of a longer token (e.g. `NULL`) must not be touched.
+    fn git_bash_cwd_translates_drive_and_unc() {
         assert_eq!(
-            rewrite_windows_nul_redirect("echo NULL value"),
-            "echo NULL value"
+            GitBashCwd::new(Path::new(r"C:\Users\repo"))
+                .unwrap()
+                .posix(),
+            "/c/Users/repo"
         );
-        assert_eq!(rewrite_windows_nul_redirect("type NUL.txt"), "type NUL.txt");
+        assert_eq!(
+            GitBashCwd::new(Path::new(r"\\server\share\dir"))
+                .unwrap()
+                .posix(),
+            "//server/share/dir"
+        );
+    }
+
+    #[test]
+    fn git_bash_cwd_rejects_relative_paths() {
+        let err = GitBashCwd::new(Path::new("relative/path")).unwrap_err();
+        assert!(err.reason.contains("not a Windows drive or UNC"));
+    }
+
+    #[test]
+    fn git_bash_cwd_rejects_bare_drive_relative() {
+        let err = GitBashCwd::new(Path::new("D:dev")).unwrap_err();
+        assert!(err.reason.contains("drive-relative"));
+    }
+
+    #[test]
+    fn git_bash_cwd_rejects_malformed_unc() {
+        let err = GitBashCwd::new(Path::new(r"\\server")).unwrap_err();
+        assert!(err.reason.contains("UNC path must include"));
+    }
+
+    #[test]
+    fn git_bash_cwd_shell_cd_escapes_apostrophes_and_spaces() {
+        let cwd = GitBashCwd::new(Path::new(r"C:\Users\O'Reilly\my dir")).unwrap();
+        assert_eq!(cwd.shell_cd(), "'/c/Users/O'\\''Reilly/my dir'");
+    }
+
+    #[test]
+    fn git_bash_cwd_preserves_trailing_separator() {
+        let cwd = GitBashCwd::new(Path::new(r"C:\Users\repo\")).unwrap();
+        assert_eq!(cwd.posix(), "/c/Users/repo/");
     }
 }

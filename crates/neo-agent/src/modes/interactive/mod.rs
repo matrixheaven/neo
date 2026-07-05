@@ -104,8 +104,12 @@ mod questions;
 mod startup;
 pub use startup::{InteractiveOptions, StartupAction};
 
-mod image_capabilities;
-use image_capabilities::terminal_image_capabilities_for_policy;
+mod terminal_capabilities;
+pub use terminal_capabilities::detect_terminal_capabilities;
+#[cfg(test)]
+pub use terminal_capabilities::detect_terminal_capabilities_with_env;
+#[cfg(test)]
+use terminal_capabilities::terminal_image_capabilities_for_policy;
 
 mod turn;
 

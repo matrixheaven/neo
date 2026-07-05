@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, IsTerminal, Read};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -122,7 +122,11 @@ pub(super) struct NeoTerminal {
 
 impl NeoTerminal {
     pub(super) fn enter() -> Result<Self> {
-        let tui = TuiRenderer::enter()?;
+        let capabilities = super::detect_terminal_capabilities(
+            neo_tui::terminal_image::ImageProtocolPreference::Auto,
+            std::io::stdout().is_terminal(),
+        );
+        let tui = TuiRenderer::enter(capabilities)?;
         Ok(Self { tui })
     }
 

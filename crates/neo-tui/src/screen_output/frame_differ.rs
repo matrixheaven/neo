@@ -30,6 +30,7 @@ use crossterm::{
 
 use crate::primitive::visible_width;
 use crate::primitive::{truncate_width, wrap_width};
+use crate::terminal_capabilities::TerminalCapabilities;
 
 use super::debug_log::{check_line_widths, debug_log_enabled, write_debug_log, write_output_log};
 use super::kitty_image::{
@@ -86,6 +87,7 @@ pub struct TuiRenderer {
     /// mark takes the full clear path.
     pub(super) clear_on_shrink: bool,
     pub(super) show_hardware_cursor: bool,
+    pub(super) capabilities: TerminalCapabilities,
 }
 
 #[derive(Clone, Copy)]
@@ -238,35 +240,64 @@ fn push_diff_start(buffer: &mut String, append_start: bool) {
     }
 }
 
-fn write_enter_output(output: &mut dyn Write) -> std::io::Result<()> {
+fn write_enter_output(
+    output: &mut dyn Write,
+    capabilities: TerminalCapabilities,
+) -> std::io::Result<()> {
     let mut output = output;
-    execute!(
-        &mut output,
-        EnableBracketedPaste,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+    if capabilities.ansi.bracketed_paste && capabilities.ansi.kitty_keyboard {
+        execute!(
+            &mut output,
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            )
         )
-    )
+    } else if capabilities.ansi.bracketed_paste {
+        execute!(&mut output, EnableBracketedPaste)
+    } else if capabilities.ansi.kitty_keyboard {
+        execute!(
+            &mut output,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            )
+        )
+    } else {
+        Ok(())
+    }
 }
 
-fn write_leave_terminal_output(output: &mut dyn Write) -> std::io::Result<()> {
+fn write_leave_terminal_output(
+    output: &mut dyn Write,
+    capabilities: TerminalCapabilities,
+) -> std::io::Result<()> {
     let mut output = output;
-    execute!(
-        &mut output,
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste,
-    )
+    if capabilities.ansi.bracketed_paste && capabilities.ansi.kitty_keyboard {
+        execute!(
+            &mut output,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+        )
+    } else if capabilities.ansi.kitty_keyboard {
+        execute!(&mut output, PopKeyboardEnhancementFlags)
+    } else if capabilities.ansi.bracketed_paste {
+        execute!(&mut output, DisableBracketedPaste)
+    } else {
+        Ok(())
+    }
 }
 
 impl TuiRenderer {
     /// Enable raw mode + bracketed paste + keyboard enhancement.
     /// Does NOT enter alternate screen.
-    pub fn enter() -> std::io::Result<Self> {
+    pub fn enter(capabilities: TerminalCapabilities) -> std::io::Result<Self> {
         enable_raw_mode()?;
         let mut output = stdout();
-        write_enter_output(&mut output)?;
+        write_enter_output(&mut output, capabilities)?;
         Ok(Self {
             previous_lines: Vec::new(),
             previous_kitty_image_ids: BTreeSet::new(),
@@ -282,6 +313,7 @@ impl TuiRenderer {
             show_hardware_cursor: hardware_cursor_enabled_from_env_value(
                 env::var("NEO_HARDWARE_CURSOR").ok().as_deref(),
             ),
+            capabilities,
         })
     }
 
@@ -291,7 +323,7 @@ impl TuiRenderer {
         self.write_leave_output(&mut output);
         let _ = output.flush();
 
-        let _ = write_leave_terminal_output(&mut output);
+        let _ = write_leave_terminal_output(&mut output, self.capabilities);
         let _ = disable_raw_mode();
     }
 
@@ -319,7 +351,7 @@ impl TuiRenderer {
     pub fn suspend_resume(&mut self) -> std::io::Result<()> {
         enable_raw_mode()?;
         let mut output = stdout();
-        write_enter_output(&mut output)?;
+        write_enter_output(&mut output, self.capabilities)?;
         // Force full redraw after resume
         self.first_render = true;
         self.previous_lines.clear();
@@ -506,7 +538,9 @@ impl TuiRenderer {
         dimensions: RenderDimensions,
     ) -> Option<DiffRender> {
         let mut buffer = String::with_capacity(4096);
-        buffer.push_str("\x1b[?2026h");
+        if self.capabilities.ansi.synchronized_output {
+            buffer.push_str("\x1b[?2026h");
+        }
         buffer.push_str(&self.delete_changed_kitty_images(change_range.first, change_range.last));
         let move_target_row = change_range.move_target_row();
         viewport.scroll_to_row(&mut buffer, move_target_row, dimensions.height);
@@ -520,7 +554,9 @@ impl TuiRenderer {
         };
         let final_cursor_row =
             self.push_removed_line_clears(&mut buffer, render_end, new_lines.len());
-        buffer.push_str("\x1b[?2026l");
+        if self.capabilities.ansi.synchronized_output {
+            buffer.push_str("\x1b[?2026l");
+        }
 
         Some(DiffRender {
             buffer,

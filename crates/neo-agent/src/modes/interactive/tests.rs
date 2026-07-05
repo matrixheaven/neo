@@ -2126,6 +2126,74 @@ fn explicit_image_protocol_uses_matching_static_terminal_hints() {
     assert!(!capabilities.sixel());
 }
 
+#[test]
+fn terminal_capabilities_dumb_term_disables_ansi_and_images() {
+    let env = |name: &str| match name {
+        "TERM" => Ok("dumb".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+
+    let capabilities =
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, env);
+
+    assert!(!capabilities.ansi.cursor_addressing);
+    assert!(!capabilities.ansi.color);
+    assert!(!capabilities.image.kitty());
+    assert!(!capabilities.can_run_tui());
+}
+
+#[test]
+fn terminal_capabilities_wt_session_disables_images_keeps_ansi() {
+    let env = |name: &str| match name {
+        "TERM" => Ok("xterm-256color".to_owned()),
+        "WT_SESSION" => Ok("00000000-0000-0000-0000-000000000000".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+
+    let capabilities =
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, env);
+
+    assert!(capabilities.ansi.cursor_addressing);
+    assert!(capabilities.ansi.color);
+    assert!(capabilities.can_run_tui());
+    assert!(!capabilities.image.kitty());
+    assert!(!capabilities.image.iterm2());
+    assert!(!capabilities.image.sixel());
+}
+
+#[test]
+fn terminal_capabilities_ci_disables_tui_and_images() {
+    let env = |name: &str| match name {
+        "TERM" => Ok("xterm-256color".to_owned()),
+        "CI" => Ok("true".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+
+    let capabilities =
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, env);
+
+    assert!(!capabilities.ansi.cursor_addressing);
+    assert!(!capabilities.can_run_tui());
+    assert!(!capabilities.image.kitty());
+}
+
+#[test]
+fn terminal_capabilities_no_color_keeps_tui_disables_color_images() {
+    let env = |name: &str| match name {
+        "TERM" => Ok("xterm-256color".to_owned()),
+        "NO_COLOR" => Ok("1".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+
+    let capabilities =
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, env);
+
+    assert!(capabilities.ansi.cursor_addressing);
+    assert!(capabilities.can_run_tui());
+    assert!(!capabilities.ansi.color);
+    assert!(!capabilities.image.kitty());
+}
+
 #[tokio::test]
 async fn event_loop_tabs_through_local_slash_prompt_template_completions() {
     let temp = tempfile::tempdir().expect("tempdir");

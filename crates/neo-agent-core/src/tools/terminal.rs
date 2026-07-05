@@ -30,6 +30,7 @@ use super::{
 const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const TERMINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -165,12 +166,29 @@ struct TerminalSession {
     output: Arc<StdMutex<Vec<u8>>>,
     read_offset: usize,
     read_lock: Arc<Mutex<()>>,
-    reader_thread: Option<ThreadJoinHandle<()>>,
+    reader_thread: Option<ReaderThread>,
     cols: u16,
     rows: u16,
     stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
     stream_max_bytes: Arc<StdMutex<usize>>,
     streamed: Arc<StdMutex<usize>>,
+}
+
+struct ReaderThread {
+    handle: ThreadJoinHandle<()>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl ReaderThread {
+    fn join_with_timeout(self, timeout: Duration) -> Result<(), ThreadJoinHandle<()>> {
+        match self.done.recv_timeout(timeout) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = self.handle.join();
+                Ok(())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(self.handle),
+        }
+    }
 }
 
 fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Result<T, ToolError> {
@@ -207,8 +225,10 @@ async fn start_terminal(
     // unreliable) and `>NUL` rewritten to `>/dev/null`. On Unix the cwd is set
     // directly on the builder.
     let (effective_cwd, effective_cmd) = if shell.is_windows {
-        let posix_path = shell_env::windows_path_to_posix(&ctx.cwd);
-        let quoted_path = format!("'{}'", posix_path.replace('\'', "'\\''"));
+        let cwd = shell_env::GitBashCwd::new(&ctx.cwd).map_err(|err| {
+            ToolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+        })?;
+        let quoted_path = cwd.shell_cd();
         (
             None,
             format!(
@@ -283,8 +303,9 @@ fn spawn_reader_thread(
     stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
     stream_max_bytes: Arc<StdMutex<usize>>,
     streamed: Arc<StdMutex<usize>>,
-) -> ThreadJoinHandle<()> {
-    std::thread::spawn(move || {
+) -> ReaderThread {
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+    let handle = std::thread::spawn(move || {
         let mut local = [0_u8; 8192];
         loop {
             match reader.read(&mut local) {
@@ -316,7 +337,14 @@ fn spawn_reader_thread(
                 }
             }
         }
-    })
+        // Best-effort completion signal; the consumer uses a timeout so a
+        // blocking read (e.g. on Windows ConPTY) won't hang the stop path.
+        let _ = done_tx.send(());
+    });
+    ReaderThread {
+        handle,
+        done: done_rx,
+    }
 }
 
 async fn write_terminal(tool: &str, handle: &str, input: &str) -> Result<ToolResult, ToolError> {
@@ -548,9 +576,15 @@ fn stop_session(
     drop(session.master);
     let _ = session.child.kill();
     let exit_status = session.child.wait().ok();
-    if let Some(reader_thread) = session.reader_thread.take() {
-        let _ = reader_thread.join();
-    }
+
+    let reader_drained = if let Some(reader) = session.reader_thread.take() {
+        reader
+            .join_with_timeout(TERMINAL_READER_DRAIN_TIMEOUT)
+            .is_ok()
+    } else {
+        true
+    };
+
     let output = session
         .output
         .lock()
@@ -570,6 +604,7 @@ fn stop_session(
         "output": output_details,
         "output_truncated": output_truncated,
         "truncated": output_truncated,
+        "reader_drained": reader_drained,
     }))
 }
 

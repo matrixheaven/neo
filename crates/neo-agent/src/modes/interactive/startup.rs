@@ -1,7 +1,7 @@
 //! Extracted: startup workflow — types, apply startup action/options, trust
 //! dialog resolution, and session loading at startup.
 
-use std::{env, time::Duration};
+use std::{io::IsTerminal, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -10,7 +10,7 @@ use crate::trust;
 use neo_tui::terminal_image::ImageRenderPolicy;
 
 use super::InteractiveController;
-use super::{TerminalEvents, startup_notices, terminal_image_capabilities_for_policy};
+use super::{TerminalEvents, detect_terminal_capabilities, startup_notices};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
@@ -142,12 +142,13 @@ impl InteractiveController {
                 config.tui.image_protocol,
                 config.tui.fetch_remote_images,
             ));
+        let capabilities = detect_terminal_capabilities(
+            config.tui.image_protocol,
+            std::io::stdout().is_terminal(),
+        );
         self.tui
             .chrome_mut()
-            .set_image_capabilities(terminal_image_capabilities_for_policy(
-                config.tui.image_protocol,
-                |name| env::var(name),
-            ));
+            .set_image_capabilities(capabilities.image);
         if !options.verbose_startup {
             return;
         }

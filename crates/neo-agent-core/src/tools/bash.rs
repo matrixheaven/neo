@@ -598,8 +598,10 @@ fn spawn_bash_process_at(
     // script. We also rewrite `>NUL` redirects to `>/dev/null`. On Unix the
     // path and command pass through unchanged and `.current_dir` is used.
     let (effective_cwd, effective_cmd) = if shell.is_windows {
-        let posix_path = shell_env::windows_path_to_posix(cwd);
-        let quoted_path = format!("'{}'", posix_path.replace('\'', "'\\''"));
+        let cwd = shell_env::GitBashCwd::new(cwd).map_err(|err| {
+            ToolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+        })?;
+        let quoted_path = cwd.shell_cd();
         (
             None,
             format!(
