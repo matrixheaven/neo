@@ -1,5 +1,7 @@
 # Neo
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A Rust-native, local-only AI coding agent. Neo runs entirely on your machine as a CLI and TUI — no hosted backend, no account, no telemetry. Bring your own API keys and talk to OpenAI, Anthropic, Google, or any OpenAI-compatible endpoint.
 
 ## Features
