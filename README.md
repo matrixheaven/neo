@@ -157,3 +157,7 @@ cargo test --package neo-agent --bin neo -- modes::task_browser::tests::test_nam
 ## License
 
 MIT
+
+## Acknowledgements
+
+The TUI design and parts of the UI/UX inspiration in Neo are borrowed from [Kimi Code](https://github.com/moonshotai/kimi-code). It is a very useful coding agent with a beautiful UI and human-friendly logic.
