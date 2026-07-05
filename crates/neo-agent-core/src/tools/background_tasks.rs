@@ -1032,7 +1032,7 @@ impl BackgroundTaskManager {
                         swarm: Some(snapshot.clone()),
                     })
                 }
-                BackgroundTaskState::BashRunning(command)
+                BackgroundTaskState::BashRunning(_command)
                     if record.detached
                         && record
                             .deadline

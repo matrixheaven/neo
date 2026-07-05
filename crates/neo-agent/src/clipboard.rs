@@ -97,6 +97,7 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Whether the MIME type is one that providers accept for vision (base64).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_vision_mime(mime: &str) -> bool {
     matches!(
         mime,

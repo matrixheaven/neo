@@ -711,9 +711,9 @@ async fn kill_child(process: &mut ManagedChild) -> ShellTermination {
     )
 }
 
-fn kill_process_group_if_available(process: &ManagedChild) {
+fn kill_process_group_if_available(_process: &ManagedChild) {
     #[cfg(unix)]
-    if let Some(process_group) = process.process_group {
+    if let Some(process_group) = _process.process_group {
         let _ = kill_process_group(process_group, Signal::KILL)
             .or_else(|err| if err == Errno::SRCH { Ok(()) } else { Err(err) });
     }
