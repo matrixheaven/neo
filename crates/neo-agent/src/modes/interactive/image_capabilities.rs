@@ -31,8 +31,11 @@ pub(super) fn terminal_image_capabilities_for_policy(
         .with_kitty(
             has_env("KITTY_WINDOW_ID")
                 || has_env("WEZTERM_PANE")
+                || has_env("GHOSTTY_RESOURCES_DIR")
                 || term.contains("kitty")
-                || term_program.contains("wezterm"),
+                || term.contains("ghostty")
+                || term_program.contains("wezterm")
+                || term_program.contains("ghostty"),
         )
         .with_iterm2(term_program.contains("iterm"))
         .with_sixel(term.contains("sixel") || has_env("SIXEL"));

@@ -2006,6 +2006,21 @@ fn auto_image_protocol_uses_positive_runtime_hints_on_local_terminals() {
 }
 
 #[test]
+fn auto_image_protocol_detects_ghostty_as_kitty_graphics() {
+    let env = |name: &str| match name {
+        "TERM" => Ok("xterm-ghostty".to_owned()),
+        "TERM_PROGRAM" => Ok("ghostty".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+
+    let capabilities = terminal_image_capabilities_for_policy(ImageProtocolPreference::Auto, env);
+
+    assert!(capabilities.kitty());
+    assert!(!capabilities.iterm2());
+    assert!(!capabilities.sixel());
+}
+
+#[test]
 fn auto_image_protocol_falls_back_inside_tmux_screen_or_ssh() {
     let tmux_env = |name: &str| match name {
         "TERM" => Ok("xterm-kitty".to_owned()),
