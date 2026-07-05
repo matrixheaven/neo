@@ -27,7 +27,6 @@ fn bash_model_schema_matches_kimi_style_shape() {
         "timeout",
         "run_in_background",
         "description",
-        "disable_timeout",
         "max_output_bytes",
     ] {
         assert!(

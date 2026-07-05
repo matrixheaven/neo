@@ -24,7 +24,7 @@ pub(crate) use matching::scoped_models;
 #[allow(unused_imports)]
 pub(crate) use paths::{
     default_config_path, expand_user_path, expand_user_path_with_home, global_prompts_dir,
-    neo_home, workspace_sessions_dir,
+    neo_home, user_home, workspace_sessions_dir,
 };
 
 // Re-export config types for callers that access them via `crate::config::*`.
@@ -534,5 +534,67 @@ model = "gpt-4.1"
 
         assert!(!config.project_trusted);
         assert_eq!(config.project_trust, ProjectTrustState::NotRequired);
+    }
+
+    #[test]
+    fn neo_home_prefers_neo_home_env() {
+        temp_env::with_var("NEO_HOME", Some("/custom/neo"), || {
+            assert_eq!(super::neo_home(), Some(PathBuf::from("/custom/neo")));
+        });
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn neo_home_uses_home_on_unix() {
+        temp_env::with_vars(
+            [("NEO_HOME", None::<&str>), ("HOME", Some("/home/alice"))],
+            || {
+                assert_eq!(super::neo_home(), Some(PathBuf::from("/home/alice/.neo")));
+                assert_eq!(super::user_home(), Some(PathBuf::from("/home/alice")));
+            },
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn neo_home_uses_userprofile_on_windows() {
+        temp_env::with_vars(
+            [
+                ("NEO_HOME", None::<&str>),
+                ("USERPROFILE", Some(r"C:\Users\Alice")),
+                ("HOME", None::<&str>),
+            ],
+            || {
+                assert_eq!(
+                    super::neo_home(),
+                    Some(PathBuf::from(r"C:\Users\Alice\.neo"))
+                );
+                assert_eq!(super::user_home(), Some(PathBuf::from(r"C:\Users\Alice")));
+            },
+        );
+    }
+
+    #[test]
+    fn default_config_path_is_none_when_home_unresolvable() {
+        temp_env::with_vars(
+            [
+                ("NEO_HOME", None::<&str>),
+                ("HOME", None::<&str>),
+                ("USERPROFILE", None::<&str>),
+            ],
+            || {
+                assert!(super::default_config_path().is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn default_config_path_uses_neo_home() {
+        temp_env::with_var("NEO_HOME", Some("/custom/neo"), || {
+            assert_eq!(
+                super::default_config_path(),
+                Some(PathBuf::from("/custom/neo/config.toml"))
+            );
+        });
     }
 }

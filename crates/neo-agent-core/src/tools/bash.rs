@@ -69,10 +69,6 @@ struct BashInput {
     )]
     description: Option<String>,
     #[schemars(
-        description = "If true, do not apply a timeout to the command. Only applies when run_in_background is true."
-    )]
-    disable_timeout: Option<bool>,
-    #[schemars(
         description = "Maximum number of bytes of combined stdout/stderr to return. Defaults to the runtime output limit when omitted."
     )]
     max_output_bytes: Option<usize>,
@@ -178,7 +174,6 @@ impl Tool for BashTool {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-            let _disable_timeout = input.disable_timeout.unwrap_or(false);
             if input.run_in_background == Some(true) {
                 if input.description.as_deref().unwrap_or("").trim().is_empty() {
                     return Err(ToolError::InvalidInput {
@@ -293,7 +288,6 @@ pub async fn execute_model_bash_for_runtime(
     ctx.ensure_shell_allowed()?;
     let input: BashInput = parse_input("Bash", input)?;
     let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-    let _disable_timeout = input.disable_timeout.unwrap_or(false);
     if input.run_in_background == Some(true) {
         if input.description.as_deref().unwrap_or("").trim().is_empty() {
             return Err(ToolError::InvalidInput {

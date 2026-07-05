@@ -31,7 +31,14 @@ impl AppConfig {
         // `NEO_HOME` points). There is no project-local config anymore —
         // providers/models/settings/skills/prompts/themes all live under the
         // single neo home and are shared across every workspace.
-        let config_path = overrides.config_path.unwrap_or_else(default_config_path);
+        let config_path = overrides
+            .config_path
+            .or_else(default_config_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not resolve Neo home directory: set NEO_HOME, or HOME on Unix / USERPROFILE on Windows"
+                )
+            })?;
         // `project_dir` is the *workspace identity* (used for trust keying,
         // session bucketing, git status, `@file` sandboxing). It is NOT a config
         // location. Default to the current working directory.
@@ -61,15 +68,16 @@ impl AppConfig {
         let system_prompt_file = file_config.system_prompt_file.map(expand_user_path);
         let extra_skill_dirs = file_config.extra_skill_dirs.unwrap_or_default();
         let skill_path = file_config.skill_path;
-        let sessions_dir = file_config.sessions_dir.map_or_else(
-            || {
-                neo_home().map_or_else(
-                    || project_dir.join("sessions"),
-                    |home| home.join("sessions"),
-                )
-            },
-            expand_user_path,
-        );
+        let sessions_dir = match file_config.sessions_dir {
+            Some(path) => expand_user_path(path),
+            None => neo_home()
+                .map(|home| home.join("sessions"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not resolve Neo home directory: sessions_dir defaults to ~/.neo/sessions, but NEO_HOME or the platform home directory (HOME on Unix, USERPROFILE on Windows) is not set"
+                    )
+                })?,
+        };
         let permission_mode = if overrides.yolo {
             PermissionMode::Yolo
         } else if overrides.auto {

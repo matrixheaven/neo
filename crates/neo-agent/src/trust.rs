@@ -105,7 +105,7 @@ pub(crate) struct ProjectTrustStore {
 impl ProjectTrustStore {
     pub(crate) fn from_home() -> anyhow::Result<Self> {
         let home = crate::config::neo_home()
-            .context("NEO_HOME or HOME is required to resolve project trust store")?;
+            .context("NEO_HOME or the platform home directory (HOME on Unix, USERPROFILE on Windows) is required to resolve project trust store")?;
         Ok(Self {
             path: home.join(TRUST_FILE),
         })

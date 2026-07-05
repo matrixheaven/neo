@@ -233,6 +233,27 @@ impl ApprovalRuleStore {
 // Layer 3 — command safety classification
 // ---------------------------------------------------------------------------
 
+/// Extract the platform-independent command stem for safety classification.
+///
+/// Normalizes both `/` and `\` path separators and strips common Windows
+/// executable extensions (`.exe`, `.cmd`, `.bat`, `.com`) so that
+/// `C:\Windows\System32\shutdown.exe` is classified as `shutdown`.
+#[must_use]
+fn command_basename(program: &str) -> String {
+    const EXTS: &[&str] = &[".exe", ".cmd", ".bat", ".com"];
+    let basename = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_lowercase();
+    for ext in EXTS {
+        if let Some(prefix) = basename.strip_suffix(ext) {
+            return prefix.to_owned();
+        }
+    }
+    basename
+}
+
 /// Read-only / safe commands that skip the prompt in trusted mode.
 /// Mirrors Codex `is_known_safe_command`. Kept conservative on purpose.
 #[must_use]
@@ -245,9 +266,10 @@ pub fn is_known_safe_command(command: &[String]) -> bool {
     let Some(program) = command.first().map(String::as_str) else {
         return false;
     };
-    // Resolve the basename so `/usr/bin/ls` is treated as `ls`.
-    let program = program.rsplit('/').next().unwrap_or(program);
-    if !SAFE_PROGRAMS.contains(&program) {
+    // Resolve the basename so `/usr/bin/ls` and `C:\Windows\System32\ls.exe`
+    // are both treated as `ls`.
+    let program = command_basename(program);
+    if !SAFE_PROGRAMS.contains(&program.as_str()) {
         return false;
     }
     // For `git`, only read subcommands are safe. `git push`, `git reset --hard`,
@@ -279,7 +301,7 @@ pub fn is_known_safe_command(command: &[String]) -> bool {
         );
     }
     // `cargo`/`rustc` build/check commands are read-only enough.
-    if matches!(program, "cargo" | "rustc") {
+    if matches!(program.as_str(), "cargo" | "rustc") {
         return matches!(
             command.get(1).map(String::as_str),
             Some(
@@ -309,8 +331,10 @@ pub fn command_might_be_dangerous(command: &[String]) -> bool {
     let Some(program) = command.first().map(String::as_str) else {
         return false;
     };
-    let program = program.rsplit('/').next().unwrap_or(program);
-    if matches!(program, "rm" | "rmdir") {
+    // Resolve the basename so Windows paths like `C:\Windows\System32\shutdown.exe`
+    // are treated as `shutdown`, and strip common executable extensions.
+    let program = command_basename(program);
+    if matches!(program.as_str(), "rm" | "rmdir") {
         // `rm -f` / `rm -rf` / `rm -fr`
         let has_force = command
             .iter()
@@ -319,7 +343,7 @@ pub fn command_might_be_dangerous(command: &[String]) -> bool {
         return has_force;
     }
     if matches!(
-        program,
+        program.as_str(),
         "sudo" | "dd" | "mkfs" | "chmod" | "chown" | "shutdown" | "reboot" | "halt" | "poweroff"
     ) {
         return true;
@@ -458,5 +482,35 @@ mod layer_tests {
             "-o",
             "f"
         ])));
+    }
+
+    #[test]
+    fn safe_classification_normalizes_windows_paths_and_extensions() {
+        assert!(is_known_safe_command(&cmd(&[
+            r"C:\Windows\System32\ls.exe"
+        ])));
+        assert!(is_known_safe_command(&cmd(&["/usr/bin/ls"])));
+        assert!(is_known_safe_command(&cmd(&[
+            r"C:\Program Files\Git\bin\git.exe",
+            "status"
+        ])));
+        assert!(is_known_safe_command(&cmd(&["git.CMD", "status"])));
+        assert!(!is_known_safe_command(&cmd(&[
+            r"C:\Windows\System32\dd.exe"
+        ])));
+    }
+
+    #[test]
+    fn dangerous_classification_normalizes_windows_paths_and_extensions() {
+        assert!(command_might_be_dangerous(&cmd(&[
+            r"C:\Windows\System32\shutdown.exe"
+        ])));
+        assert!(command_might_be_dangerous(&cmd(&["shutdown.CMD"])));
+        assert!(command_might_be_dangerous(&cmd(&[
+            r"C:\Tools\rm.exe",
+            "-rf",
+            "x"
+        ])));
+        assert!(!command_might_be_dangerous(&cmd(&[r"C:\Tools\ls.exe"])));
     }
 }

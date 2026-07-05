@@ -107,47 +107,50 @@ fn is_vision_mime(mime: &str) -> bool {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{ClipboardError, ClipboardImage, detect_image_mime, is_vision_mime};
+    use std::io::Write as _;
     use std::process::Command;
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
         // Read both PNG and TIFF from the pasteboard, then pick whichever has
         // more data. macOS screenshots often put the full-res image in TIFF
         // and only a tiny placeholder in PNG (or vice-versa).
-        let png_bytes = read_pasteboard_type("$.NSPasteboardTypePNG");
-        let tiff_bytes = read_pasteboard_type("$.NSPasteboardTypeTIFF");
+        let png_bytes = read_pasteboard_type("$.NSPasteboardTypePNG")?;
+        let tiff_bytes = read_pasteboard_type("$.NSPasteboardTypeTIFF")?;
 
         tracing::debug!(
-            "clipboard: png={} bytes, tiff={} bytes",
-            png_bytes.as_deref().map_or(0, <[u8]>::len),
-            tiff_bytes.as_deref().map_or(0, <[u8]>::len),
+            "clipboard: png={:?}, tiff={:?}",
+            png_bytes.as_ref().map(Vec::len),
+            tiff_bytes.as_ref().map(Vec::len),
         );
 
-        let bytes = tiff_bytes
-            .as_ref()
-            .map(|t| (t.len(), t, "tiff"))
-            .into_iter()
-            .chain(png_bytes.as_ref().map(|p| (p.len(), p, "png")))
-            .max_by_key(|(len, _, _)| *len)
-            .map(|(_, bytes, _)| bytes);
-
-        let Some(bytes) = bytes else {
-            return Err(ClipboardError::NoImage);
+        let bytes = match (png_bytes, tiff_bytes) {
+            (Some(png), Some(tiff)) => {
+                if png.len() >= tiff.len() {
+                    png
+                } else {
+                    tiff
+                }
+            }
+            (Some(png), None) => png,
+            (None, Some(tiff)) => tiff,
+            (None, None) => return Err(ClipboardError::NoImage),
         };
+
         if bytes.is_empty() {
             return Err(ClipboardError::NoImage);
         }
 
         // Detect the actual format from magic bytes.
-        let mime = detect_image_mime(bytes);
+        let mime = detect_image_mime(&bytes);
 
         match mime {
             Some(m) if is_vision_mime(m) => Ok(ClipboardImage {
-                bytes: bytes.clone(),
+                bytes,
                 mime_type: m.to_owned(),
             }),
             Some("image/tiff") => {
                 // TIFF is not supported by providers — convert to PNG.
-                let png = tiff_to_png(bytes)?;
+                let png = tiff_to_png(&bytes)?;
                 Ok(ClipboardImage {
                     bytes: png,
                     mime_type: "image/png".into(),
@@ -158,60 +161,83 @@ mod macos {
     }
 
     /// Read raw bytes for a given `NSPasteboard` type via JXA.
-    fn read_pasteboard_type(pasteboard_type: &str) -> Option<Vec<u8>> {
+    ///
+    /// Returns `Ok(Some(bytes))` when image data of that type is present,
+    /// `Ok(None)` when the pasteboard simply does not contain that type, and
+    /// `Err` for unexpected failures (e.g. the temporary path is not valid
+    /// UTF-8 or cannot be created).
+    fn read_pasteboard_type(pasteboard_type: &str) -> Result<Option<Vec<u8>>, ClipboardError> {
         let suffix = if pasteboard_type.contains("PNG") {
             "png"
         } else {
             "tiff"
         };
-        let tmp = std::env::temp_dir().join(format!("neo-clip-{suffix}.dat"));
-        let _ = std::fs::remove_file(&tmp);
+        let tmp = tempfile::Builder::new()
+            .suffix(&format!(".{suffix}"))
+            .tempfile_in(std::env::temp_dir())
+            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        let tmp_path = tmp.into_temp_path();
+        let tmp_path_str = tmp_path.to_str().ok_or_else(|| {
+            ClipboardError::ReadFailed("clipboard temporary path is not valid UTF-8".into())
+        })?;
 
         let script = format!(
-            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({pasteboard_type}); var ok = false; if (data && !data.isNil()) {{ ok = data.writeToFileAtomically({:?}, true); }} ok;",
-            tmp.to_str().unwrap_or("")
+            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({pasteboard_type}); var ok = false; if (data && !data.isNil()) {{ ok = data.writeToFileAtomically({tmp_path_str:?}, true); }} ok;"
         );
         let out = Command::new("osascript")
             .args(["-l", "JavaScript", "-e", &script])
             .output()
-            .ok()?;
+            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         tracing::debug!(
             "{pasteboard_type}: exit={} stdout={:?} stderr={:?} file_exists={}",
             out.status,
             stdout.trim(),
             String::from_utf8_lossy(&out.stderr).trim(),
-            tmp.exists(),
+            tmp_path.exists(),
         );
-        if !tmp.exists() {
-            return None;
+        if !tmp_path.exists() {
+            return Ok(None);
         }
-        let bytes = std::fs::read(&tmp).ok()?;
-        let _ = std::fs::remove_file(&tmp);
-        (!bytes.is_empty()).then_some(bytes)
+        let bytes =
+            std::fs::read(&tmp_path).map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+        // `tmp_path` drops here and deletes the temporary file.
     }
 
     /// Convert TIFF bytes to PNG using the built-in macOS `sips` tool.
     fn tiff_to_png(tiff_bytes: &[u8]) -> Result<Vec<u8>, ClipboardError> {
-        let in_path = std::env::temp_dir().join(format!("neo-clip-{}.tiff", std::process::id()));
-        let out_path = std::env::temp_dir().join(format!("neo-clip-{}.png", std::process::id()));
-
-        std::fs::write(&in_path, tiff_bytes)
+        let mut in_tmp = tempfile::Builder::new()
+            .suffix(".tiff")
+            .tempfile_in(std::env::temp_dir())
             .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        in_tmp
+            .write_all(tiff_bytes)
+            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        let in_path = in_tmp.into_temp_path();
+        let in_path_str = in_path.to_str().ok_or_else(|| {
+            ClipboardError::ReadFailed("clipboard temporary path is not valid UTF-8".into())
+        })?;
+
+        let out_tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(std::env::temp_dir())
+            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        let out_path = out_tmp.into_temp_path();
+        let out_path_str = out_path.to_str().ok_or_else(|| {
+            ClipboardError::ReadFailed("clipboard temporary path is not valid UTF-8".into())
+        })?;
 
         let out = Command::new("sips")
             .args(["-s", "format", "png"])
-            .arg(&in_path)
-            .args(["--out", out_path.to_str().unwrap_or("")])
+            .arg(in_path_str)
+            .args(["--out", out_path_str])
             .output();
-
-        let _ = std::fs::remove_file(&in_path);
 
         match out {
             Ok(o) if o.status.success() => {
                 let png = std::fs::read(&out_path)
                     .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-                let _ = std::fs::remove_file(&out_path);
                 Ok(png)
             }
             Ok(o) => Err(ClipboardError::ReadFailed(format!(
@@ -220,6 +246,7 @@ mod macos {
             ))),
             Err(e) => Err(ClipboardError::ReadFailed(e.to_string())),
         }
+        // `in_path` and `out_path` drop here and delete the temporary files.
     }
 }
 
@@ -277,10 +304,17 @@ mod windows {
     use std::process::Command;
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
-        let tmp = std::env::temp_dir().join(format!("neo-clipboard-{}.png", std::process::id()));
+        let tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(std::env::temp_dir())
+            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
+        let tmp_path = tmp.into_temp_path();
+        let tmp_path_str = tmp_path.to_str().ok_or_else(|| {
+            ClipboardError::ReadFailed("clipboard temporary path is not valid UTF-8".into())
+        })?;
+
         let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; $img = [Windows.Forms.Clipboard]::GetImage(); if ($img -eq $null) {{ exit 1 }}; $img.Save({:?}, [System.Drawing.Imaging.ImageFormat]::Png);",
-            tmp.to_str().unwrap_or("")
+            "Add-Type -AssemblyName System.Windows.Forms; $img = [Windows.Forms.Clipboard]::GetImage(); if ($img -eq $null) {{ exit 1 }}; $img.Save({tmp_path_str:?}, [System.Drawing.Imaging.ImageFormat]::Png);"
         );
         let out = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", &script])
@@ -289,12 +323,13 @@ mod windows {
         if !out.status.success() {
             return Err(ClipboardError::NoImage);
         }
-        let bytes = std::fs::read(&tmp).map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        let _ = std::fs::remove_file(&tmp);
+        let bytes =
+            std::fs::read(&tmp_path).map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
         let mime = detect_image_mime(&bytes).unwrap_or("image/png");
         Ok(ClipboardImage {
             bytes,
             mime_type: mime.to_owned(),
         })
+        // `tmp_path` drops here and deletes the temporary file.
     }
 }
