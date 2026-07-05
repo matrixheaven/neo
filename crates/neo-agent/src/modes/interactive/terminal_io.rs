@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io::{ErrorKind, Read};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -32,17 +33,7 @@ impl RawStdinEvents {
         // the thread fails and the thread exits.
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 4096];
-            loop {
-                match std::io::Read::read(&mut stdin, &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
+            read_stdin_chunks(&mut stdin, |chunk| tx.send(chunk.to_vec()).is_ok());
         });
         Self {
             parser: InputParser::with_keybindings(keybindings),
@@ -109,6 +100,22 @@ impl TerminalEvents for RawStdinEvents {
     }
 }
 
+fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> bool) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if !on_chunk(&buf[..n]) {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 pub(super) struct NeoTerminal {
     tui: TuiRenderer,
 }
@@ -161,5 +168,39 @@ impl NeoTerminal {
             eprintln!("Suspend to background is not supported on this platform");
         }
         self.reenter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind, Read, Result as IoResult};
+
+    struct InterruptedThenBytes {
+        reads: usize,
+    }
+
+    impl Read for InterruptedThenBytes {
+        fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+            self.reads += 1;
+            if self.reads == 1 {
+                return Err(Error::from(ErrorKind::Interrupted));
+            }
+            buf[..2].copy_from_slice(b"hi");
+            Ok(2)
+        }
+    }
+
+    #[test]
+    fn stdin_reader_continues_after_interrupted_read() {
+        let mut reader = InterruptedThenBytes { reads: 0 };
+        let mut chunks = Vec::new();
+
+        read_stdin_chunks(&mut reader, |chunk| {
+            chunks.push(chunk.to_vec());
+            false
+        });
+
+        assert_eq!(chunks, vec![b"hi".to_vec()]);
     }
 }
