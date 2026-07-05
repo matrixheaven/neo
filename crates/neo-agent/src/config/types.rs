@@ -160,6 +160,7 @@ pub(crate) struct FileConfig {
     pub(crate) models: Option<BTreeMap<String, ModelConfig>>,
     pub(crate) model_scope: Option<Vec<String>>,
     pub(crate) prompt_templates: Option<Vec<String>>,
+    pub(crate) system_prompt_file: Option<PathBuf>,
     pub(crate) extra_skill_dirs: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub(crate) skill_path: Vec<String>,

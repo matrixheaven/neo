@@ -27,6 +27,7 @@ The top-level fields of `config.toml` come from `FileConfig`:
 | `skill_path` | string \| string[] | `[]` | Extra skill directories; may be written as a single string or an array of strings |
 | `extra_skill_dirs` | string[] | `[]` | Extra skill directories (equivalent to `skill_path`, list form) |
 | `prompt_templates` | string[] | `[]` | List of custom prompt template directories |
+| `system_prompt_file` | path | `~/.neo/SYSTEM.md` when present | Custom system prompt file. Equivalent to `~/.neo/SYSTEM.md`: it replaces Neo's built-in system prompt and supports `~` expansion |
 | `providers` | table | — | `[providers.<id>]` table, see [Provider Configuration](providers.md) |
 | `models` | table | — | `[models.<alias>]` table |
 | `runtime` | table | — | `[runtime]` inference parameters |
@@ -39,7 +40,19 @@ default_model = "openai/gpt-4.1"
 default_provider = "openai"
 permission_mode = "ask"
 sessions_dir = "~/.neo/sessions"
+system_prompt_file = "~/.neo/SYSTEM.md"
 ```
+
+## System Prompt Files
+
+Neo builds the model system message in this order:
+
+1. Base system prompt: `system_prompt_file` when configured, otherwise `~/.neo/SYSTEM.md` when it exists, otherwise Neo's built-in prompt.
+2. `~/.neo/APPEND_SYSTEM.md` when it exists.
+3. Available skill metadata.
+4. Trusted project context files such as `AGENTS.md` / `CLAUDE.md`.
+
+`SYSTEM.md` and `system_prompt_file` replace the built-in base prompt. `APPEND_SYSTEM.md` is the append-only hook for keeping Neo's built-in prompt and adding user instructions after it.
 
 ## `[providers.<id>]` Table
 

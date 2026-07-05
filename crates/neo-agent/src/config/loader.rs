@@ -58,6 +58,7 @@ impl AppConfig {
             .or_else(|| provider_api_key_env(&providers, &default_provider));
         let model_scope = file_config.model_scope.unwrap_or_default();
         let prompt_templates = file_config.prompt_templates.unwrap_or_default();
+        let system_prompt_file = file_config.system_prompt_file.map(expand_user_path);
         let extra_skill_dirs = file_config.extra_skill_dirs.unwrap_or_default();
         let skill_path = file_config.skill_path;
         let sessions_dir = file_config.sessions_dir.map_or_else(
@@ -105,6 +106,7 @@ impl AppConfig {
             theme,
             mcp,
             prompt_templates,
+            system_prompt_file,
             extra_skill_dirs,
             skill_path,
             project_trusted,

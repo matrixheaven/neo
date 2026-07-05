@@ -727,6 +727,7 @@ model = "old"
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            system_prompt_file: None,
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,

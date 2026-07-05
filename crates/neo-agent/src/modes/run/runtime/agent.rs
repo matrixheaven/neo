@@ -47,9 +47,12 @@ pub(crate) fn agent_config_for_app(
         .or(agent_config.model.capabilities.max_output_tokens);
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
-    if let Some(system_prompt) =
-        resources::load_system_prompt(&config.project_dir, config.project_trusted, skill_store)?
-    {
+    if let Some(system_prompt) = resources::load_system_prompt(
+        &config.project_dir,
+        config.project_trusted,
+        config.system_prompt_file.as_deref(),
+        skill_store,
+    )? {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
     if let Some(compaction) = &config.runtime.compaction {

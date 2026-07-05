@@ -91,6 +91,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
+    pub system_prompt_file: Option<PathBuf>,
+    #[serde(skip)]
     pub extra_skill_dirs: Vec<String>,
     #[serde(skip)]
     pub skill_path: Vec<String>,
@@ -257,6 +259,17 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::All);
+    }
+
+    #[test]
+    fn config_loads_system_prompt_file_with_tilde_expansion() {
+        let (_temp, config_path, project_dir) =
+            temp_project_config("system_prompt_file = \"~/neo-system.md\"\n");
+        let home = std::env::var_os("HOME").map(PathBuf::from).expect("home");
+
+        let config = load_config(config_path, project_dir);
+
+        assert_eq!(config.system_prompt_file, Some(home.join("neo-system.md")));
     }
 
     /// Regression: the model display label must never stitch the provider onto

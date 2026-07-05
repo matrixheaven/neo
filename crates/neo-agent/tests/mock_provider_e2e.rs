@@ -777,7 +777,7 @@ fn run_expands_project_prompt_template_before_json_output() {
 }
 
 #[test]
-fn run_text_includes_project_system_prompt_file_before_user_message() {
+fn run_text_replaces_builtin_prompt_with_global_system_prompt_file() {
     let temp = TempDir::new().expect("tempdir");
     write_trust_store(&isolated_home_path(), temp.path(), true);
     std::fs::write(
@@ -797,12 +797,41 @@ fn run_text_includes_project_system_prompt_file_before_user_message() {
     run(command);
 
     let requests = server.requests();
-    assert!(
-        system_input_contents(&requests[0])
-            .iter()
-            .any(|content| content.contains("You are a test assistant.")),
-        "expected system prompt to contain project SYSTEM.md"
+    let system_contents = system_input_contents(&requests[0]).join("\n");
+    assert!(system_contents.contains("You are a test assistant."));
+    assert!(!system_contents.contains("You are Neo"));
+    assert_eq!(user_input_contents(&requests[0]), vec!["hello"]);
+}
+
+#[test]
+fn run_text_replaces_builtin_prompt_with_configured_system_prompt_file() {
+    let temp = TempDir::new().expect("tempdir");
+    write_trust_store(&isolated_home_path(), temp.path(), true);
+    let configured_prompt = temp.path().join("custom-system.md");
+    std::fs::write(&configured_prompt, "Use the configured system prompt.")
+        .expect("write configured system prompt");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-config-sys", "sys")]);
+    write_config(
+        &temp,
+        &format!(
+            "system_prompt_file = {:?}\n{}",
+            configured_prompt,
+            mock_responses_config(&server.url)
+        ),
     );
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["run", "--output", "text", "hello"]);
+
+    run(command);
+
+    let requests = server.requests();
+    let system_contents = system_input_contents(&requests[0]).join("\n");
+    assert!(system_contents.contains("Use the configured system prompt."));
+    assert!(!system_contents.contains("You are Neo"));
     assert_eq!(user_input_contents(&requests[0]), vec!["hello"]);
 }
 

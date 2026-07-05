@@ -16,6 +16,8 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 ```
 ~/.neo/
 ├── config.toml              # 主配置文件（单一来源）
+├── SYSTEM.md                # 可选：替换 Neo 内置系统 prompt
+├── APPEND_SYSTEM.md         # 可选：追加在基础系统 prompt 后的指令
 ├── approval_rules.json      # 持久化前缀审批规则（Layer 2）
 ├── trust.json               # 项目信任决策记录
 ├── sessions/                # 会话根目录
@@ -68,6 +70,8 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 | 路径 | 来源 | 说明 |
 | --- | --- | --- |
 | `~/.neo/config.toml` | 主配置 | 见 [配置文件](config-files.md) |
+| `~/.neo/SYSTEM.md` | 系统 prompt | 可选；替换 Neo 内置基础系统 prompt |
+| `~/.neo/APPEND_SYSTEM.md` | 系统 prompt 追加 | 可选；追加在基础系统 prompt 后 |
 | `~/.neo/approval_rules.json` | 前缀审批规则 | 见 [权限模式](permissions.md#前缀级layer-2) |
 | `~/.neo/trust.json` | 项目信任 | 记录每个 workspace 是否被用户信任（当存在 `AGENTS.md` 等输入时触发） |
 | `~/.neo/prompts/` | 全局 prompt 模板 | `global_prompts_dir()` 返回的目录 |

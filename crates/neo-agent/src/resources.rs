@@ -163,9 +163,13 @@ Communication
 pub(crate) fn load_system_prompt(
     project_dir: &Path,
     project_trusted: bool,
+    system_prompt_file: Option<&Path>,
     skill_store: &SkillStore,
 ) -> anyhow::Result<Option<String>> {
-    let system_prompt = read_first_existing(&system_prompt_candidates(), "system prompt")?;
+    let system_prompt = read_first_existing(
+        &system_prompt_candidates(system_prompt_file),
+        "system prompt",
+    )?;
     let mut append_prompts: Vec<String> =
         read_first_existing(&append_system_prompt_candidates(), "append system prompt")?
             .into_iter()
@@ -375,9 +379,12 @@ fn join_system_prompt_parts(
     system_prompt: Option<String>,
     append_prompts: Vec<String>,
 ) -> Option<String> {
-    let parts = Some(DEFAULT_SYSTEM_PROMPT.to_owned())
+    let base_prompt = system_prompt
+        .map(|prompt| normalize_prompt(&prompt))
+        .filter(|prompt| !prompt.is_empty())
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_owned());
+    let parts = Some(base_prompt)
         .into_iter()
-        .chain(system_prompt)
         .chain(append_prompts)
         .map(|part| normalize_prompt(&part))
         .filter(|part| !part.is_empty())
@@ -397,8 +404,12 @@ fn read_first_existing(paths: &[PathBuf], description: &str) -> anyhow::Result<O
     Ok(None)
 }
 
-fn system_prompt_candidates() -> Vec<PathBuf> {
-    resource_candidates(SYSTEM_PROMPT_FILE)
+fn system_prompt_candidates(configured: Option<&Path>) -> Vec<PathBuf> {
+    configured
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(resource_candidates(SYSTEM_PROMPT_FILE))
+        .collect()
 }
 
 fn append_system_prompt_candidates() -> Vec<PathBuf> {
@@ -424,8 +435,7 @@ mod tests {
         )
         .expect("prompt");
 
-        assert!(prompt.starts_with(DEFAULT_SYSTEM_PROMPT));
-        assert!(prompt.ends_with("base instructions\n\nappend instructions"));
+        assert_eq!(prompt, "base instructions\n\nappend instructions");
     }
 
     #[test]
@@ -452,13 +462,21 @@ mod tests {
     }
 
     #[test]
-    fn join_system_prompt_parts_keeps_user_prompt_after_builtin_prompt() {
+    fn join_system_prompt_parts_replaces_builtin_when_user_prompt_exists() {
         let prompt =
             join_system_prompt_parts(Some("User custom instructions".to_owned()), Vec::new())
-                .expect("builtin and user prompt");
+                .expect("user prompt");
 
-        assert!(prompt.starts_with("You are Neo"));
-        assert!(prompt.contains("\n\nUser custom instructions"));
+        assert_eq!(prompt, "User custom instructions");
+        assert!(!prompt.contains("You are Neo"));
+    }
+
+    #[test]
+    fn system_prompt_candidates_prefers_configured_file_before_default_home_file() {
+        let configured = PathBuf::from("/custom/system.md");
+        let candidates = system_prompt_candidates(Some(&configured));
+
+        assert_eq!(candidates.first(), Some(&configured));
     }
 
     #[test]
