@@ -2,7 +2,7 @@
 
 Neo is a Rust-native, local-only AI coding agent (CLI + TUI). Cargo workspace, edition 2024, min Rust 1.88. Vendored dirs (`claude-code`, `codex`, `kimi-code`, `opencode`, `pi`) under `docs/` are reference-only, not part of the workspace.
 
-Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use `cx`/`rtk` CLIs to save tokens. Parallelize substantial work across ≥3 subagents when slices are independent.
+Read [CX.md](../../.neo/CX.md) and [RTK.md](../../.neo/RTK.md). Use `cx`/`rtk` CLIs to save tokens. Parallelize substantial work across ≥3 subagents when slices are independent.
 
 ## Critical rules
 
