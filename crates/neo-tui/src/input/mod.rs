@@ -125,6 +125,9 @@ impl InputParser {
         if matches_key(seq, "ctrl+j") {
             return vec![InputEvent::NewLine];
         }
+        if matches_key(seq, "ctrl+enter") {
+            return vec![InputEvent::NewLine];
+        }
         if matches_key(seq, "shift+enter") {
             return vec![InputEvent::NewLine];
         }
@@ -429,6 +432,12 @@ mod tests {
     }
 
     #[test]
+    fn raw_ctrl_enter_csi_u_produces_newline() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert_eq!(parser.feed_bytes(b"\x1b[13;5u"), vec![InputEvent::NewLine]);
+    }
+
+    #[test]
     fn raw_shift_enter_kitty_csi_u() {
         let mut parser = InputParser::new();
         // CSI-u for Shift+Enter: codepoint 13, modifier 2 (shift)
@@ -476,6 +485,15 @@ mod tests {
     }
 
     #[test]
+    fn raw_ctrl_h_backspace_with_keybindings_deletes_backward() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert_eq!(
+            parser.feed_bytes(b"\x08"),
+            vec![InputEvent::Key(KeyId::new("backspace").expect("valid key"))]
+        );
+    }
+
+    #[test]
     fn raw_arrow_keys() {
         let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
         let events = parser.feed_bytes(b"\x1b[A");
@@ -502,6 +520,15 @@ mod tests {
     fn raw_plus_produces_insert() {
         let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
         assert_eq!(parser.feed_bytes(b"+"), vec![InputEvent::Insert('+')]);
+    }
+
+    #[test]
+    fn raw_legacy_uppercase_alt_v_with_keybindings_pastes_image() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert_eq!(
+            parser.feed_bytes(b"\x1bV"),
+            vec![InputEvent::Key(KeyId::new("alt+v").expect("valid key"))]
+        );
     }
 
     #[test]

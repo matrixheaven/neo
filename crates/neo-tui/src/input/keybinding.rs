@@ -411,7 +411,7 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
     vec![
         definition(
             Action::InputNewLine,
-            &["alt+enter", "ctrl+j"],
+            &["alt+enter", "ctrl+enter", "ctrl+j"],
             "Insert newline",
         ),
         definition(Action::InputSubmit, &["enter"], "Submit input"),

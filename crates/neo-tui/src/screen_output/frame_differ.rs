@@ -66,6 +66,53 @@ const fn height_change_requires_clear(height_changed: bool, is_termux: bool) -> 
     height_changed && !is_termux
 }
 
+#[cfg(windows)]
+pub(super) mod windows_input_mode {
+    use std::io;
+
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct WindowsInputModeGuard {
+        original_mode: u32,
+        changed: bool,
+    }
+
+    impl WindowsInputModeGuard {
+        pub(super) const fn inactive() -> Self {
+            Self {
+                original_mode: 0,
+                changed: false,
+            }
+        }
+
+        pub(super) fn enter() -> io::Result<Self> {
+            let stdin = io::stdin();
+            let Ok(mode) = winapi_util::console::mode(&stdin) else {
+                return Ok(Self::inactive());
+            };
+            let vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
+            if vt_mode == mode {
+                return Ok(Self::inactive());
+            }
+            winapi_util::console::set_mode(&stdin, vt_mode)?;
+            Ok(Self {
+                original_mode: mode,
+                changed: true,
+            })
+        }
+
+        pub(super) fn restore(&mut self) {
+            if !self.changed {
+                return;
+            }
+            let stdin = io::stdin();
+            let _ = winapi_util::console::set_mode(&stdin, self.original_mode);
+            self.changed = false;
+        }
+    }
+}
+
 pub struct TuiRenderer {
     pub(super) previous_lines: Vec<String>,
     pub(super) previous_kitty_image_ids: BTreeSet<u32>,
@@ -88,6 +135,8 @@ pub struct TuiRenderer {
     pub(super) clear_on_shrink: bool,
     pub(super) show_hardware_cursor: bool,
     pub(super) capabilities: TerminalCapabilities,
+    #[cfg(windows)]
+    windows_input_mode: windows_input_mode::WindowsInputModeGuard,
 }
 
 #[derive(Clone, Copy)]
@@ -296,6 +345,8 @@ impl TuiRenderer {
     /// Does NOT enter alternate screen.
     pub fn enter(capabilities: TerminalCapabilities) -> std::io::Result<Self> {
         enable_raw_mode()?;
+        #[cfg(windows)]
+        let windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
         let mut output = stdout();
         write_enter_output(&mut output, capabilities)?;
         Ok(Self {
@@ -314,6 +365,8 @@ impl TuiRenderer {
                 env::var("NEO_HARDWARE_CURSOR").ok().as_deref(),
             ),
             capabilities,
+            #[cfg(windows)]
+            windows_input_mode,
         })
     }
 
@@ -324,6 +377,8 @@ impl TuiRenderer {
         let _ = output.flush();
 
         let _ = write_leave_terminal_output(&mut output, self.capabilities);
+        #[cfg(windows)]
+        self.windows_input_mode.restore();
         let _ = disable_raw_mode();
     }
 
@@ -350,6 +405,11 @@ impl TuiRenderer {
     /// Re-enter after suspend.
     pub fn suspend_resume(&mut self) -> std::io::Result<()> {
         enable_raw_mode()?;
+        #[cfg(windows)]
+        {
+            self.windows_input_mode.restore();
+            self.windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
+        }
         let mut output = stdout();
         write_enter_output(&mut output, self.capabilities)?;
         // Force full redraw after resume
@@ -983,6 +1043,8 @@ mod tests {
             clear_on_shrink: false,
             show_hardware_cursor: true,
             capabilities: TerminalCapabilities::default(),
+            #[cfg(windows)]
+            windows_input_mode: windows_input_mode::WindowsInputModeGuard::inactive(),
         }
     }
 

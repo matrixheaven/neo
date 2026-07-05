@@ -715,13 +715,6 @@ fn is_symbol_key(c: char) -> bool {
     )
 }
 
-fn is_windows_terminal() -> bool {
-    std::env::var("WT_SESSION").is_ok()
-        && std::env::var("SSH_CONNECTION").is_err()
-        && std::env::var("SSH_CLIENT").is_err()
-        && std::env::var("SSH_TTY").is_err()
-}
-
 /// Compute the raw control character for a key (code & 0x1f).
 fn raw_ctrl_char(key: &str) -> Option<char> {
     let c = key.chars().next()?;
@@ -1066,17 +1059,7 @@ fn matches_printable_modify_other_keys(
 }
 
 fn matches_raw_backspace(data: &str, expected_modifier: u32) -> bool {
-    if data == "\x7f" {
-        return expected_modifier == 0;
-    }
-    if data != "\x08" {
-        return false;
-    }
-    if is_windows_terminal() {
-        expected_modifier == MOD_CTRL
-    } else {
-        expected_modifier == 0
-    }
+    matches!(data, "\x7f" | "\x08") && expected_modifier == 0
 }
 
 // ===========================================================================
@@ -1186,14 +1169,7 @@ pub fn parse_key(data: &str) -> Option<String> {
         return Some("backspace".to_owned());
     }
     if data == "\x08" {
-        return Some(
-            if is_windows_terminal() {
-                "ctrl+backspace"
-            } else {
-                "backspace"
-            }
-            .to_owned(),
-        );
+        return Some("backspace".to_owned());
     }
     if data == "\x1b[Z" {
         return Some("shift+tab".to_owned());
@@ -1220,8 +1196,8 @@ pub fn parse_key(data: &str) -> Option<String> {
         if (1..=26).contains(&code) {
             return Some(format!("ctrl+alt+{}", char::from(code + 96)));
         }
-        if (97..=122).contains(&code) || (48..=57).contains(&code) {
-            return Some(format!("alt+{}", char::from(code)));
+        if code.is_ascii_alphabetic() || (48..=57).contains(&code) {
+            return Some(format!("alt+{}", char::from(code.to_ascii_lowercase())));
         }
     }
 
