@@ -1744,7 +1744,7 @@ async fn event_loop_ctrl_p_toggles_slash_completion() {
         .await
         .expect("ctrl+p opens slash completion");
 
-    assert_eq!(controller.chrome().prompt().text, "/");
+    assert_eq!(controller.chrome().prompt().text, "");
     assert!(matches!(
         controller
             .chrome()
@@ -1759,6 +1759,40 @@ async fn event_loop_ctrl_p_toggles_slash_completion() {
         .expect("ctrl+p closes slash completion");
 
     assert_eq!(controller.chrome().prompt().text, "");
+    assert!(controller.chrome().focused_overlay().is_none());
+}
+
+#[tokio::test]
+async fn event_loop_ctrl_p_toggles_slash_completion_without_editing_existing_prompt() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.type_text("hello");
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+        .await
+        .expect("ctrl+p opens slash completion");
+
+    assert_eq!(controller.chrome().prompt().text, "hello");
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::PromptCompletion(_))
+    ));
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+        .await
+        .expect("ctrl+p closes slash completion");
+
+    assert_eq!(controller.chrome().prompt().text, "hello");
     assert!(controller.chrome().focused_overlay().is_none());
 }
 
@@ -6184,6 +6218,89 @@ async fn session_picker_ctrl_a_toggles_scope() {
     assert!(
         snapshot.to_lowercase().contains("beta"),
         "all scope should show beta: {snapshot}"
+    );
+}
+
+#[tokio::test]
+async fn session_picker_ctrl_a_empty_target_scope_can_toggle_back() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let project_a = temp.path().join("project_a");
+    fs::create_dir_all(&project_a).expect("create project_a");
+    let config_a = test_config(&project_a, sessions_dir.clone());
+    let bucket_a = workspace_sessions_dir(&config_a);
+    fs::create_dir_all(&bucket_a).expect("create bucket_a");
+    write_main_wire(
+        &bucket_a,
+        SESSION_A,
+        r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
+    );
+    let store_a = SessionMetadataStore::new(&bucket_a);
+    store_a
+        .record_activity(
+            SESSION_A,
+            Some(project_a.display().to_string()),
+            Some("alpha prompt".into()),
+            "200".to_owned(),
+        )
+        .expect("record alpha");
+
+    let mut controller = controller_for_config(&config_a);
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+r").expect("valid key")))
+        .await
+        .expect("ctrl+r opens session picker");
+    let overlay = controller.chrome().focused_overlay().expect("picker open");
+    assert!(
+        matches!(
+            &overlay.kind,
+            OverlayKind::SessionPicker(p) if p.scope() == SessionPickerScope::Workspace
+        ),
+        "workspace scope on open"
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+a").expect("valid key")))
+        .await
+        .expect("ctrl+a switches to empty all-sessions scope");
+    let overlay = controller
+        .chrome()
+        .focused_overlay()
+        .expect("empty picker stays open");
+    assert!(
+        matches!(
+            &overlay.kind,
+            OverlayKind::SessionPicker(p) if p.scope() == SessionPickerScope::All
+        ),
+        "all scope remains toggleable when empty"
+    );
+    assert!(transcript_has_status(
+        &controller,
+        "No sessions in all sessions. Press Ctrl+A again to switch back to current workspace."
+    ));
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+a").expect("valid key")))
+        .await
+        .expect("ctrl+a toggles back to workspace scope");
+    let overlay = controller
+        .chrome()
+        .focused_overlay()
+        .expect("workspace picker opens again");
+    assert!(
+        matches!(
+            &overlay.kind,
+            OverlayKind::SessionPicker(p) if p.scope() == SessionPickerScope::Workspace
+        ),
+        "workspace scope after toggling back"
+    );
+    let snapshot = controller.render_snapshot();
+    assert!(
+        snapshot.to_lowercase().contains("alpha"),
+        "workspace scope should show alpha after toggling back: {snapshot}"
     );
 }
 

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use crossterm::terminal::size;
 
-use neo_tui::shell::{OverlayKind, SessionPickerScope};
+use neo_tui::shell::{OverlayKind, SessionPickerItem, SessionPickerScope};
 use neo_tui::transcript::TranscriptPane;
 
 use crate::modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries};
@@ -60,6 +60,12 @@ impl InteractiveController {
         };
         match session_summaries(config, new_scope) {
             Ok(summaries) => {
+                if summaries.is_empty() {
+                    self.tui.chrome_mut().close_focused_overlay();
+                    self.open_empty_session_picker_with_scope(new_scope);
+                    self.push_status(empty_scope_toggle_message(new_scope));
+                    return;
+                }
                 self.session_items = summaries;
                 self.tui.chrome_mut().close_focused_overlay();
                 self.open_session_picker_with_scope(new_scope);
@@ -68,6 +74,19 @@ impl InteractiveController {
                 self.push_status(format!("Error loading sessions: {error}"));
             }
         }
+    }
+
+    fn open_empty_session_picker_with_scope(&mut self, scope: SessionDataScope) {
+        let current_session_id = self.active_session_id.clone().unwrap_or_default();
+        let picker_scope = match scope {
+            SessionDataScope::Workspace => SessionPickerScope::Workspace,
+            SessionDataScope::All => SessionPickerScope::All,
+        };
+        self.tui.chrome_mut().open_session_picker(
+            &current_session_id,
+            picker_scope,
+            Vec::<SessionPickerItem>::new(),
+        );
     }
 
     pub(super) async fn fork_selected_session(&mut self) -> Result<()> {
@@ -193,5 +212,16 @@ impl InteractiveController {
         self.close_inline_prompt_completion();
         self.reset_for_new_session();
         self.push_status("Started fresh session");
+    }
+}
+
+fn empty_scope_toggle_message(scope: SessionDataScope) -> &'static str {
+    match scope {
+        SessionDataScope::Workspace => {
+            "No sessions in current workspace. Press Ctrl+A again to switch back to all sessions."
+        }
+        SessionDataScope::All => {
+            "No sessions in all sessions. Press Ctrl+A again to switch back to current workspace."
+        }
     }
 }

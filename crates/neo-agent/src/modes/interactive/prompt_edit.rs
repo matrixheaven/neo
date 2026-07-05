@@ -3,8 +3,9 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use super::{
-    Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind, PromptEdit,
-    frame_content_width, longest_common_completion_prefix, prompt_completions, size,
+    Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind,
+    PromptCompletionPrefix, PromptEdit, frame_content_width, longest_common_completion_prefix,
+    prompt_completions, size,
 };
 
 pub(super) fn content_to_display_text(content: &[Content]) -> String {
@@ -545,12 +546,7 @@ impl InteractiveController {
             .focused_overlay()
             .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
         {
-            let prompt = self.tui.chrome().prompt();
-            let should_clear_prompt = prompt.text == "/" && prompt.cursor == 1;
             self.close_inline_prompt_completion();
-            if should_clear_prompt {
-                self.tui.chrome_mut().prompt_mut().set_text("");
-            }
             return;
         }
 
@@ -558,10 +554,38 @@ impl InteractiveController {
             return;
         }
 
-        if self.tui.chrome().prompt().text.is_empty() {
-            self.tui.chrome_mut().prompt_mut().set_text("/");
+        self.open_slash_prompt_completion_at_cursor();
+    }
+
+    fn open_slash_prompt_completion_at_cursor(&mut self) {
+        self.refresh_skill_store_for_completion();
+        let completions = match prompt_completions(
+            &self.completion_root,
+            "/",
+            &self.model_items,
+            self.skill_store.as_ref(),
+            self.project_trusted(),
+        ) {
+            Ok(completions) => completions,
+            Err(error) => {
+                self.push_status(format!("Completion error: {error}"));
+                return;
+            }
+        };
+
+        if completions.is_empty() {
+            return;
         }
-        self.sync_inline_prompt_completion();
+
+        let cursor = self.tui.chrome().prompt().cursor;
+        self.tui.chrome_mut().open_prompt_completion_picker(
+            PromptCompletionPrefix {
+                start: cursor,
+                end: cursor,
+                text: String::new(),
+            },
+            completions,
+        );
     }
 
     pub(super) fn close_inline_prompt_completion(&mut self) {

@@ -48,7 +48,7 @@ Each action maps to a stable configuration ID (e.g. `tui.editor.cursorUp`) that 
 | `Ctrl+K` | Delete to end of line |
 | `Ctrl+Y` | Yank (paste deleted content) |
 | `Ctrl+-` / `Ctrl+_` | Undo |
-| `Alt+Enter` / `Ctrl+J` | Insert a newline |
+| `Alt+Enter` / `Ctrl+J` / `Shift+Enter` | Insert a newline |
 | `Ctrl+V` (Windows: `Alt+V`) | Paste image from clipboard |
 
 ## Streaming Control

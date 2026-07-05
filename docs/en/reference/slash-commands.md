@@ -13,6 +13,7 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/resume` | — | Open the session picker to restore a local session. |
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | View currently active background tasks. |
+| `/fork` | — | Create a new branch from the current session and switch to it. |
 
 ## Mode Control
 

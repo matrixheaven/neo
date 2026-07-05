@@ -35,7 +35,8 @@ use neo_tui::{
     primitive::InputResult,
     shell::{
         ApprovalChoice, ApprovalResult, ContextWindow, MainAgentTokenUsage, NeoChromeState,
-        OverlayKind, PickerItem, PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
+        OverlayKind, PickerItem, PromptCompletionPrefix, PromptEdit, SessionPickerItem,
+        SessionPickerScope, StreamUpdate,
     },
     transcript::{TranscriptPane, frame_content_width},
 };
