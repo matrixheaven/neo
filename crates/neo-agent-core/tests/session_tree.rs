@@ -52,44 +52,29 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
     let sessions = store.list().expect("list sessions");
     assert!(child.id.starts_with("session_"));
 
-    assert_eq!(
-        sessions,
-        vec![
-            SessionRecord {
-                id: SESSION_A.to_owned(),
-                name: Some("Main thread".to_owned()),
-                summary: Some("Investigating parser branch".to_owned()),
-                parent_id: None,
-                summary_record: Some(SessionSummaryRecord {
-                    text: "Investigating parser branch".to_owned(),
-                    source: SessionSummarySource::LocalExtractive,
-                    model: None,
-                    updated_at: None,
-                }),
-                title: Some("Main thread".to_owned()),
-                title_model: None,
-                title_updated_at: None,
-                workspace: None,
-                last_user_prompt: None,
+    let expected = vec![
+        SessionRecord {
+            id: SESSION_A.to_owned(),
+            name: Some("Main thread".to_owned()),
+            summary: Some("Investigating parser branch".to_owned()),
+            parent_id: None,
+            summary_record: Some(SessionSummaryRecord {
+                text: "Investigating parser branch".to_owned(),
+                source: SessionSummarySource::LocalExtractive,
+                model: None,
                 updated_at: None,
-                children: vec![child.id.clone()],
-            },
-            SessionRecord {
-                id: child.id,
-                name: Some("Investigate parser".to_owned()),
-                summary: None,
-                parent_id: Some(SESSION_A.to_owned()),
-                summary_record: None,
-                title: Some("Investigate parser".to_owned()),
-                title_model: None,
-                title_updated_at: None,
-                workspace: None,
-                last_user_prompt: None,
-                updated_at: None,
-                children: Vec::new(),
-            },
-        ]
-    );
+            }),
+            title: Some("Main thread".to_owned()),
+            title_model: None,
+            title_updated_at: None,
+            workspace: None,
+            last_user_prompt: None,
+            updated_at: None,
+            children: vec![child.id.clone()],
+        },
+        child,
+    ];
+    assert_eq!(sessions, expected);
 }
 
 #[test]

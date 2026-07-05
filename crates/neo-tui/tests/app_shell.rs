@@ -1095,8 +1095,10 @@ fn app_shell_prompt_shows_scroll_indicators_when_clipped() {
     );
 
     // Move cursor back to the top; viewport should scroll back and show bottom indicator.
-    app.prompt_mut()
-        .apply_edit_with_width(PromptEdit::MoveHome, 72);
+    for _ in 0..9 {
+        app.prompt_mut()
+            .apply_edit_with_width(PromptEdit::MoveUp(72), 72);
+    }
     let render = render_chrome_lines(&app, width, 30);
     let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
     let bottom_border =

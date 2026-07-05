@@ -3567,7 +3567,7 @@ async fn event_loop_opens_command_palette_and_runs_local_model_command() {
         )]),
     ));
     controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+        .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
         .await
         .expect("command palette opens");
     let Some(OverlayKind::CommandPalette(palette)) = controller
