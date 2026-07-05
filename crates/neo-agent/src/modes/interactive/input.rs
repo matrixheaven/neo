@@ -472,6 +472,7 @@ impl InteractiveController {
             KeybindingAction::AppSuspend => {
                 self.suspend_requested = true;
             }
+            KeybindingAction::PromptCompletionToggle => self.toggle_slash_prompt_completion(),
             KeybindingAction::CommandPaletteOpen => self.open_command_palette(),
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
@@ -482,6 +483,8 @@ impl InteractiveController {
             KeybindingAction::SessionFork => {
                 if self.tui.chrome_mut().selected_session().is_some() {
                     self.fork_selected_session().await?;
+                } else {
+                    self.fork_current_session().await?;
                 }
             }
             KeybindingAction::ToolOutputToggle => {

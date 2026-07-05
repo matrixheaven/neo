@@ -252,6 +252,7 @@ mod tests {
             KeybindingAction::AppClear,
             KeybindingAction::AppExit,
             KeybindingAction::AppSuspend,
+            KeybindingAction::PromptCompletionToggle,
             KeybindingAction::CommandPaletteOpen,
             KeybindingAction::SessionPickerOpen,
             KeybindingAction::SessionPickerToggleScope,

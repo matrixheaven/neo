@@ -538,6 +538,32 @@ impl InteractiveController {
             .open_prompt_completion_picker(prefix, completions);
     }
 
+    pub(super) fn toggle_slash_prompt_completion(&mut self) {
+        if self
+            .tui
+            .chrome_mut()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+        {
+            let prompt = self.tui.chrome().prompt();
+            let should_clear_prompt = prompt.text == "/" && prompt.cursor == 1;
+            self.close_inline_prompt_completion();
+            if should_clear_prompt {
+                self.tui.chrome_mut().prompt_mut().set_text("");
+            }
+            return;
+        }
+
+        if self.tui.chrome_mut().focused_overlay_id().is_some() {
+            return;
+        }
+
+        if self.tui.chrome().prompt().text.is_empty() {
+            self.tui.chrome_mut().prompt_mut().set_text("/");
+        }
+        self.sync_inline_prompt_completion();
+    }
+
     pub(super) fn close_inline_prompt_completion(&mut self) {
         if self
             .tui

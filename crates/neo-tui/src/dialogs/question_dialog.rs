@@ -747,6 +747,7 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::AppClear
         | KeybindingAction::AppExit
         | KeybindingAction::AppSuspend
+        | KeybindingAction::PromptCompletionToggle
         | KeybindingAction::CommandPaletteOpen
         | KeybindingAction::SessionPickerOpen
         | KeybindingAction::SessionPickerToggleScope

@@ -47,6 +47,7 @@ pub enum KeybindingAction {
     AppClear,
     AppExit,
     AppSuspend,
+    PromptCompletionToggle,
     CommandPaletteOpen,
     SessionPickerOpen,
     SessionPickerToggleScope,
@@ -157,6 +158,10 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
     (KeybindingAction::AppClear, "app.clear"),
     (KeybindingAction::AppExit, "app.exit"),
     (KeybindingAction::AppSuspend, "app.suspend"),
+    (
+        KeybindingAction::PromptCompletionToggle,
+        "tui.promptCompletion.toggle",
+    ),
     (KeybindingAction::CommandPaletteOpen, "tui.command.open"),
     (KeybindingAction::SessionPickerOpen, "tui.session.open"),
     (
@@ -501,10 +506,11 @@ fn picker_keybinding_definitions() -> Vec<KeybindingDefinition> {
 
     vec![
         definition(
-            Action::CommandPaletteOpen,
+            Action::PromptCompletionToggle,
             &["ctrl+p"],
-            "Open command palette",
+            "Toggle prompt completion",
         ),
+        definition(Action::CommandPaletteOpen, &[], "Open command palette"),
         definition(Action::SessionPickerOpen, &["ctrl+r"], "Open sessions"),
         definition(
             Action::SessionPickerToggleScope,

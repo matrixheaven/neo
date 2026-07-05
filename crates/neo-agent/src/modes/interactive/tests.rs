@@ -1730,6 +1730,39 @@ async fn event_loop_opens_slash_completion_after_typing_slash() {
 }
 
 #[tokio::test]
+async fn event_loop_ctrl_p_toggles_slash_completion() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+        .await
+        .expect("ctrl+p opens slash completion");
+
+    assert_eq!(controller.chrome().prompt().text, "/");
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::PromptCompletion(_))
+    ));
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+        .await
+        .expect("ctrl+p closes slash completion");
+
+    assert_eq!(controller.chrome().prompt().text, "");
+    assert!(controller.chrome().focused_overlay().is_none());
+}
+
+#[tokio::test]
 async fn event_loop_opens_slash_completion_after_whitespace() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -5645,13 +5678,13 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
     );
 
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+r").expect("valid key")))
         .await
-        .expect("session picker opens");
+        .expect("ctrl+r opens session picker");
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::SessionFork))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+n").expect("valid key")))
         .await
-        .expect("session fork loads child transcript");
+        .expect("ctrl+n forks selected session");
 
     assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
     assert!(controller.chrome().focused_overlay().is_none());
@@ -6107,9 +6140,9 @@ async fn session_picker_ctrl_a_toggles_scope() {
     let mut controller = controller_for_config(&config_a);
 
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+r").expect("valid key")))
         .await
-        .expect("session picker opens");
+        .expect("ctrl+r opens session picker");
     let overlay = controller.chrome().focused_overlay().expect("picker open");
     assert!(
         matches!(
@@ -6129,11 +6162,9 @@ async fn session_picker_ctrl_a_toggles_scope() {
     );
 
     controller
-        .handle_input_event(InputEvent::Action(
-            KeybindingAction::SessionPickerToggleScope,
-        ))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+a").expect("valid key")))
         .await
-        .expect("scope toggles");
+        .expect("ctrl+a toggles scope");
     let overlay = controller
         .chrome()
         .focused_overlay()
@@ -10968,6 +10999,63 @@ async fn slash_fork_forks_current_session_and_enters_child() {
 
     let consumed = controller.handle_slash_command("/fork").await;
     assert!(consumed, "/fork should be consumed as a slash command");
+
+    assert_eq!(
+        controller.active_session_id(),
+        Some(SESSION_CHILD),
+        "active session switched to fork child"
+    );
+    assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
+    assert!(
+        transcript_has_status(&controller, &format!("fork from session {SESSION_A}")),
+        "transcript shows fork-from notice"
+    );
+    assert!(
+        transcript_has_status(
+            &controller,
+            &format!("switch to fork session {SESSION_CHILD}")
+        ),
+        "transcript shows switch-to notice"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_n_forks_current_session_and_enters_child() {
+    let mut controller = InteractiveController::new_with_event_driver_and_forker(
+        "neo",
+        SESSION_A,
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| async move {
+            Ok(vec![AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            }])
+        },
+        PickerCatalogs {
+            session_items: Vec::new(),
+            session_error: None,
+            model_items: Vec::new(),
+        },
+        |_session_id| async move {
+            panic!("fork should not use the load_session callback");
+            #[allow(unreachable_code)]
+            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+        },
+        |parent_id| async move {
+            assert_eq!(parent_id, SESSION_A);
+            Ok(ForkedSessionTranscript::new(
+                SESSION_CHILD,
+                LoadedSessionTranscript::new(SESSION_CHILD, [], [AgentMessage::user_text("hello")]),
+            ))
+        },
+    );
+    controller.active_session_id = Some(SESSION_A.to_owned());
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+n").expect("valid key")))
+        .await
+        .expect("ctrl+n forks current session");
 
     assert_eq!(
         controller.active_session_id(),

@@ -22,10 +22,10 @@ Each action maps to a stable configuration ID (e.g. `tui.editor.cursorUp`) that 
 | Shortcut | Action | Description |
 | --- | --- | --- |
 | `Shift+Tab` | `CycleDevelopmentMode` | Cycle through normal → plan → goal modes. |
-| `Ctrl+P` | `CommandPaletteOpen` | Open the command palette. |
+| `Ctrl+P` | `PromptCompletionToggle` | Open the `/` command completion list; close it when already open. |
 | `Ctrl+R` | `SessionPickerOpen` | Open the session picker. |
-| `Ctrl+N` | `SessionFork` | Fork the selected session within the session picker. |
-| `Ctrl+A` | `SessionPickerToggleScope` | Toggle the scope of the session picker. |
+| `Ctrl+N` | `SessionFork` | Fork the selected session when the picker is open; otherwise fork the current session. |
+| `Ctrl+A` | `SessionPickerToggleScope` | Toggle current workspace / all sessions in the session picker. |
 
 > Plan / Goal / Model picker also expose `TogglePlanMode` / `ModelPickerOpen` actions, but they have no default key binding and are triggered via the command palette or slash commands.
 

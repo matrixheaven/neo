@@ -16,8 +16,10 @@ pub(super) const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::TranscriptSelectionExtendDown,
     KeybindingAction::TranscriptSelectionExtendPageUp,
     KeybindingAction::TranscriptSelectionExtendPageDown,
+    KeybindingAction::PromptCompletionToggle,
     KeybindingAction::CommandPaletteOpen,
     KeybindingAction::SessionPickerOpen,
+    KeybindingAction::SessionFork,
     KeybindingAction::ToolOutputToggle,
     KeybindingAction::TodoPanelToggle,
     KeybindingAction::ModelPickerOpen,
@@ -47,6 +49,7 @@ pub(super) const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::SelectConfirm,
     KeybindingAction::SelectCancel,
     KeybindingAction::SessionFork,
+    KeybindingAction::SessionPickerToggleScope,
     KeybindingAction::SelectUp,
     KeybindingAction::SelectDown,
     KeybindingAction::SelectPageUp,
@@ -78,6 +81,7 @@ pub(super) const QUESTION_ACTION_PRIORITY: &[KeybindingAction] = &[
 ];
 
 pub(super) const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
+    KeybindingAction::PromptCompletionToggle,
     KeybindingAction::SelectConfirm,
     KeybindingAction::SelectCancel,
     KeybindingAction::SelectUp,

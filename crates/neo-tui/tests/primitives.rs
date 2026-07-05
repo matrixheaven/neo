@@ -86,7 +86,7 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
     ));
     assert!(manager.matches(
         &KeyId::new("ctrl+p").expect("valid key"),
-        KeybindingAction::CommandPaletteOpen
+        KeybindingAction::PromptCompletionToggle
     ));
     assert!(!manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
