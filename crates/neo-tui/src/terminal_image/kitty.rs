@@ -25,6 +25,8 @@ pub struct KittyGraphicsOptions {
     image_id: Option<u32>,
     pixel_width: Option<u32>,
     pixel_height: Option<u32>,
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
     chunk_size: usize,
 }
 
@@ -38,6 +40,8 @@ impl KittyGraphicsOptions {
             image_id: None,
             pixel_width: None,
             pixel_height: None,
+            cell_width: None,
+            cell_height: None,
             chunk_size: Self::DEFAULT_CHUNK_SIZE,
         }
     }
@@ -52,6 +56,13 @@ impl KittyGraphicsOptions {
     pub const fn with_pixel_size(mut self, width: u32, height: u32) -> Self {
         self.pixel_width = Some(width);
         self.pixel_height = Some(height);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_cell_size(mut self, width: u32, height: u32) -> Self {
+        self.cell_width = Some(width);
+        self.cell_height = Some(height);
         self
     }
 
@@ -74,6 +85,8 @@ pub fn encode_kitty_graphics(
     }
     validate_optional_dimension(options.pixel_width)?;
     validate_optional_dimension(options.pixel_height)?;
+    validate_optional_dimension(options.cell_width)?;
+    validate_optional_dimension(options.cell_height)?;
 
     let encoded = encode_base64(data);
     let mut output = String::new();
@@ -116,6 +129,12 @@ fn first_kitty_parameters(
     }
     if let Some(height) = options.pixel_height {
         parameters.push(("v", height.to_string()));
+    }
+    if let Some(width) = options.cell_width {
+        parameters.push(("c", width.to_string()));
+    }
+    if let Some(height) = options.cell_height {
+        parameters.push(("r", height.to_string()));
     }
     if has_more {
         parameters.push(("m", "1".to_owned()));

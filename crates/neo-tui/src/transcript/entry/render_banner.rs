@@ -1,5 +1,8 @@
-use super::{BannerData, Style, TuiTheme};
+use super::{BannerData, Style, TranscriptImageAttachment, TuiTheme};
 use crate::primitive::{Color, Line, paint, visible_width, wrap_width};
+use crate::terminal_image::{
+    ImageDisplayOptions, ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
+};
 use crate::widgets::box_draw;
 
 const NEON_CYAN: Color = Color::Rgb(63, 247, 255);
@@ -154,9 +157,79 @@ pub(super) fn render_welcome_banner(
     rows
 }
 
-pub(super) fn render_user_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
+pub(super) fn render_user_message(
+    content: &str,
+    images: &[TranscriptImageAttachment],
+    width: usize,
+    theme: &TuiTheme,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
+) -> Vec<Line> {
     let style = Style::default().fg(theme.user_message);
-    bulleted_wrap(content, width, "✨ ", style)
+    let prefix = "✨ ";
+    let mut rows = bulleted_wrap(content, width, prefix, style);
+    let prefix_width = visible_width(prefix);
+    let body_width = width.saturating_sub(prefix_width).max(1);
+    let indent = " ".repeat(prefix_width);
+    for image in images {
+        rows.extend(render_user_image(
+            image,
+            body_width,
+            &indent,
+            style,
+            image_render_policy,
+            image_capabilities,
+        ));
+    }
+    rows
+}
+
+fn render_user_image(
+    attachment: &TranscriptImageAttachment,
+    body_width: usize,
+    indent: &str,
+    fallback_style: Style,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
+) -> Vec<Line> {
+    let inline = InlineImage::bytes(
+        attachment.id.clone(),
+        attachment.mime_type.clone(),
+        attachment.payload.clone(),
+        Some(attachment.placeholder.clone()),
+        ImageSource::Base64,
+    );
+    let display = ImageDisplayOptions::thumbnail(
+        attachment.width,
+        attachment.height,
+        attachment.placeholder.clone(),
+    )
+    .with_max_cols(
+        u32::try_from(
+            body_width
+                .saturating_sub(2)
+                .min(ImageDisplayOptions::DEFAULT_MAX_COLS as usize),
+        )
+        .unwrap_or(ImageDisplayOptions::DEFAULT_MAX_COLS),
+    );
+    let rendered = image_render_policy.render_inline_image(&inline, image_capabilities, &display);
+    let inline_rendered = rendered.protocol != crate::terminal_image::NegotiatedImageProtocol::None;
+    rendered
+        .lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if inline_rendered {
+                if index == 0 {
+                    Line::raw(format!("{indent}{line}"))
+                } else {
+                    Line::raw("")
+                }
+            } else {
+                Line::styled(format!("{indent}{line}"), fallback_style)
+            }
+        })
+        .collect()
 }
 
 /// Render a queued/steered message. Steer uses `↳` (brand color) to signal an

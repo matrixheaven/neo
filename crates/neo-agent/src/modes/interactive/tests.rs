@@ -881,6 +881,53 @@ async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
 }
 
 #[tokio::test]
+async fn image_prompt_submit_renders_user_transcript_with_attachment() {
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+        .to_vec();
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |request| async move {
+            assert_eq!(request.prompt.len(), 2);
+            assert_eq!(request.prompt[0], Content::text("look "));
+            assert!(matches!(request.prompt[1], Content::Image { .. }));
+            Ok(vec![AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            }])
+        },
+    );
+    controller.image_attachment_store.add(
+        "sha256".to_owned(),
+        "image/png".to_owned(),
+        1,
+        1,
+        Some(png),
+    );
+
+    controller.type_text("look [image #1 (1x1)]");
+    controller.submit_prompt().await.expect("prompt succeeds");
+
+    let image_entry = transcript_entries(&controller)
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::UserMessage { content, images }
+                if content == "look [image #1 (1x1)]" =>
+            {
+                Some(images)
+            }
+            _ => None,
+        })
+        .expect("user transcript entry with image placeholder");
+    assert_eq!(image_entry.len(), 1);
+    assert_eq!(image_entry[0].mime_type, "image/png");
+    assert_eq!(image_entry[0].placeholder, "[image #1 (1x1)]");
+    assert!(!image_entry[0].payload.is_empty());
+}
+
+#[tokio::test]
 async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
     struct FakeEvents {
         events: std::vec::IntoIter<InputEvent>,
@@ -2179,7 +2226,7 @@ amigo";
     assert!(
         !transcript_entries(&controller)
             .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == stripped)),
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == stripped)),
         "skill activation body should not be rendered again as a user message"
     );
 }
@@ -2242,7 +2289,7 @@ async fn inline_skill_directive_with_paste_marker_renders_one_card() {
 
     assert!(
         !entries.iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == &expected_display)
+            |entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == &expected_display)
         ),
         "expanded skill activation body should not be rendered again as a user message"
     );
@@ -5330,7 +5377,7 @@ async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
         "branch summary: Local branch summary"
     ));
     assert!(transcript_entries(&controller).iter().any(|entry| {
-        matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
+        matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "hello")
     }));
     assert!(transcript_entries(&controller).iter().any(|entry| {
         matches!(entry, TranscriptEntry::AssistantMessage { content } if content == "hi back")
@@ -5602,7 +5649,7 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
         &format!("switch to fork session {SESSION_CHILD}")
     ));
     assert!(transcript_entries(&controller).iter().any(|entry| {
-        matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
+        matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "hello")
     }));
 
     controller.type_text("continue fork");
@@ -8255,7 +8302,7 @@ async fn queued_follow_up_message_appended_renders_user_transcript_entry() {
 
     assert!(
         transcript_entries(&controller).iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "queued transcript content")
+            |entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "queued transcript content")
         ),
         "queued follow-up should be rendered as a user prompt when it is appended"
     );
@@ -8274,7 +8321,7 @@ async fn appended_user_prompt_renders_single_transcript_entry() {
     let matching_entries = transcript_entries(&controller)
         .iter()
         .filter(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "long running"),
+            |entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "long running"),
         )
         .count();
     assert_eq!(
@@ -8312,7 +8359,7 @@ async fn idle_submit_renders_user_prompt_immediately_without_duplicate_runtime_a
     let matching_entries = transcript_entries(&controller)
         .iter()
         .filter(|entry| {
-            matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
+            matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "wait for runtime append")
         })
         .count();
     assert_eq!(
@@ -8327,7 +8374,7 @@ async fn idle_submit_renders_user_prompt_immediately_without_duplicate_runtime_a
     let matching_entries = transcript_entries(&controller)
         .iter()
         .filter(|entry| {
-            matches!(entry, TranscriptEntry::UserMessage(text) if text == "wait for runtime append")
+            matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "wait for runtime append")
         })
         .count();
     assert_eq!(
@@ -8426,7 +8473,7 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
 
     assert!(
         !transcript_entries(&controller).iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "steer this")
+            |entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "steer this")
         ),
         "Ctrl+S should wait for MessageAppended before rendering the steered user prompt"
     );
@@ -8464,7 +8511,7 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
     });
     assert!(
         transcript_entries(&controller).iter().any(
-            |entry| matches!(entry, TranscriptEntry::UserMessage(text) if text == "steer this")
+            |entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == "steer this")
         ),
         "steered user prompt should render when the runtime appends it"
     );
@@ -8667,13 +8714,13 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
     let steered_user_messages = transcript_entries(&controller)
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage(text)
+            TranscriptEntry::UserMessage { content, .. }
                 if matches!(
-                    text.as_str(),
+                    content.as_str(),
                     "queued one" | "queued two" | "queued D" | "current steer"
                 ) =>
             {
-                Some(text.as_str())
+                Some(content.as_str())
             }
             _ => None,
         })
@@ -8692,13 +8739,13 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
     let steered_user_messages = transcript_entries(&controller)
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage(text)
+            TranscriptEntry::UserMessage { content, .. }
                 if matches!(
-                    text.as_str(),
+                    content.as_str(),
                     "queued one" | "queued two" | "queued D" | "current steer"
                 ) =>
             {
-                Some(text.as_str())
+                Some(content.as_str())
             }
             _ => None,
         })

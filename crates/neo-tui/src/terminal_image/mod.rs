@@ -107,8 +107,6 @@ impl ImageRenderPolicy {
                     NegotiatedImageProtocol::Kitty
                 } else if capabilities.iterm2 {
                     NegotiatedImageProtocol::Iterm2
-                } else if capabilities.sixel {
-                    NegotiatedImageProtocol::Sixel
                 } else {
                     NegotiatedImageProtocol::None
                 }
@@ -130,12 +128,15 @@ impl ImageRenderPolicy {
         self,
         image: &InlineImage,
         capabilities: TerminalImageCapabilities,
+        display: &ImageDisplayOptions,
     ) -> RenderedInlineImage {
         let metadata = image.metadata_summary();
+        let fallback = display.fallback_line(metadata.clone());
         let Some(bytes) = image.data_bytes() else {
             return RenderedInlineImage {
                 metadata,
                 protocol: NegotiatedImageProtocol::None,
+                lines: vec![fallback],
                 escape_sequence: None,
             };
         };
@@ -143,26 +144,42 @@ impl ImageRenderPolicy {
             return RenderedInlineImage {
                 metadata,
                 protocol: NegotiatedImageProtocol::None,
+                lines: vec![fallback],
                 escape_sequence: None,
             };
         }
+        let Some((cell_width, cell_height)) = display.cell_size() else {
+            return RenderedInlineImage {
+                metadata,
+                protocol: NegotiatedImageProtocol::None,
+                lines: vec![fallback],
+                escape_sequence: None,
+            };
+        };
 
         let protocol = self.negotiate(capabilities);
         let escape_sequence = match protocol {
             NegotiatedImageProtocol::Kitty => encode_kitty_graphics(
                 bytes,
                 &KittyGraphicsOptions::new(kitty_format_for_mime(&image.mime_type))
-                    .with_image_id(stable_image_id(&image.id)),
+                    .with_image_id(stable_image_id(&image.id))
+                    .with_cell_size(cell_width, cell_height),
             )
             .ok(),
             NegotiatedImageProtocol::Iterm2 => encode_iterm2_inline_image(
                 bytes,
-                &Iterm2InlineImageOptions::new().with_name(image.id.clone()),
+                &Iterm2InlineImageOptions::new()
+                    .with_name(image.id.clone())
+                    .with_width(Iterm2Dimension::Cells(cell_width))
+                    .with_height(Iterm2Dimension::Cells(cell_height)),
             )
             .ok(),
-            NegotiatedImageProtocol::Sixel => render_bytes_as_sixel(bytes).ok(),
-            NegotiatedImageProtocol::None => None,
+            NegotiatedImageProtocol::Sixel | NegotiatedImageProtocol::None => None,
         };
+        let lines = escape_sequence.as_ref().map_or_else(
+            || vec![fallback],
+            |sequence| image_lines(sequence, protocol, cell_height),
+        );
 
         RenderedInlineImage {
             metadata,
@@ -171,6 +188,7 @@ impl ImageRenderPolicy {
             } else {
                 NegotiatedImageProtocol::None
             },
+            lines,
             escape_sequence,
         }
     }
@@ -186,7 +204,91 @@ impl Default for ImageRenderPolicy {
 pub struct RenderedInlineImage {
     pub metadata: String,
     pub protocol: NegotiatedImageProtocol,
+    pub lines: Vec<String>,
     pub escape_sequence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageDisplayOptions {
+    source_width: u32,
+    source_height: u32,
+    max_cols: u32,
+    max_rows: u32,
+    placeholder: Option<String>,
+}
+
+impl ImageDisplayOptions {
+    pub const DEFAULT_MAX_COLS: u32 = 40;
+    pub const DEFAULT_MAX_ROWS: u32 = 12;
+
+    #[must_use]
+    pub fn thumbnail(
+        source_width: u32,
+        source_height: u32,
+        placeholder: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_width,
+            source_height,
+            max_cols: Self::DEFAULT_MAX_COLS,
+            max_rows: Self::DEFAULT_MAX_ROWS,
+            placeholder: Some(placeholder.into()),
+        }
+    }
+
+    #[must_use]
+    pub const fn bounded(source_width: u32, source_height: u32) -> Self {
+        Self {
+            source_width,
+            source_height,
+            max_cols: Self::DEFAULT_MAX_COLS,
+            max_rows: Self::DEFAULT_MAX_ROWS,
+            placeholder: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_max_cols(mut self, max_cols: u32) -> Self {
+        self.max_cols = max_cols;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_rows(mut self, max_rows: u32) -> Self {
+        self.max_rows = max_rows;
+        self
+    }
+
+    fn fallback_line(&self, metadata: String) -> String {
+        self.placeholder.clone().unwrap_or(metadata)
+    }
+
+    fn cell_size(&self) -> Option<(u32, u32)> {
+        if self.source_width == 0
+            || self.source_height == 0
+            || self.max_cols == 0
+            || self.max_rows == 0
+        {
+            return None;
+        }
+        let source_width = u64::from(self.source_width);
+        let source_height = u64::from(self.source_height);
+        let max_cols = u64::from(self.max_cols);
+        let max_rows = u64::from(self.max_rows);
+
+        let width_limited_rows = div_round(max_cols * source_height, source_width).max(1);
+        if width_limited_rows <= max_rows {
+            return Some((
+                self.max_cols,
+                u32::try_from(width_limited_rows).unwrap_or(self.max_rows),
+            ));
+        }
+        let height_limited_cols = div_round(max_rows * source_width, source_height).max(1);
+        Some((
+            u32::try_from(height_limited_cols.min(max_cols)).unwrap_or(self.max_cols),
+            self.max_rows,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +421,86 @@ fn kitty_format_for_mime(_mime_type: &str) -> KittyImageFormat {
     KittyImageFormat::Png
 }
 
+#[must_use]
+pub fn detect_image_dimensions(bytes: &[u8], mime_type: &str) -> Option<(u32, u32)> {
+    match mime_type {
+        "image/png" => png_dimensions(bytes),
+        "image/jpeg" => jpeg_dimensions(bytes),
+        "image/gif" => gif_dimensions(bytes),
+        "image/webp" => webp_dimensions(bytes),
+        _ => None,
+    }
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    Some((
+        u32::from_be_bytes(bytes[16..20].try_into().ok()?),
+        u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+    ))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut index = 0;
+    while index + 8 < bytes.len() {
+        if bytes[index] != 0xFF {
+            index += 1;
+            continue;
+        }
+        let marker = bytes[index + 1];
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            index += 2;
+            continue;
+        }
+        if index + 4 >= bytes.len() {
+            break;
+        }
+        let segment_len = u16::from_be_bytes([bytes[index + 2], bytes[index + 3]]) as usize;
+        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+            if index + 9 >= bytes.len() {
+                break;
+            }
+            let height = u32::from(u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[index + 7], bytes[index + 8]]));
+            return Some((width, height));
+        }
+        index += 2 + segment_len;
+    }
+    None
+}
+
+fn gif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 10 || &bytes[0..3] != b"GIF" {
+        return None;
+    }
+    Some((
+        u32::from(u16::from_le_bytes([bytes[6], bytes[7]])),
+        u32::from(u16::from_le_bytes([bytes[8], bytes[9]])),
+    ))
+}
+
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 30 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    if &bytes[12..16] == b"VP8 " {
+        return Some((
+            u32::from(u16::from_le_bytes([bytes[26], bytes[27]])) & 0x3FFF,
+            u32::from(u16::from_le_bytes([bytes[28], bytes[29]])) & 0x3FFF,
+        ));
+    }
+    if &bytes[12..16] == b"VP8L" {
+        if bytes.len() < 25 {
+            return None;
+        }
+        let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+        return Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1));
+    }
+    None
+}
+
 fn stable_image_id(id: &str) -> u32 {
     let mut hash = 2_166_136_261_u32;
     for byte in id.as_bytes() {
@@ -328,23 +510,31 @@ fn stable_image_id(id: &str) -> u32 {
     hash.max(1)
 }
 
-fn render_bytes_as_sixel(bytes: &[u8]) -> Result<String, ImageProtocolError> {
-    let color = if bytes.is_empty() { 0 } else { bytes[0] % 2 };
-    encode_sixel_image(
-        &[color],
-        &SixelImageOptions::new(
-            1,
-            1,
-            vec![
-                SixelPaletteColor::rgb_percent(0, 0, 0),
-                SixelPaletteColor::rgb_percent(100, 100, 100),
-            ],
-        ),
-    )
-}
-
 fn escape_metadata_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn image_lines(
+    escape_sequence: &str,
+    protocol: NegotiatedImageProtocol,
+    cell_height: u32,
+) -> Vec<String> {
+    let reserved_rows = if matches!(protocol, NegotiatedImageProtocol::Kitty) {
+        cell_height.max(1) as usize
+    } else {
+        1
+    };
+    let mut lines = Vec::with_capacity(reserved_rows);
+    lines.push(escape_sequence.to_owned());
+    lines.extend(std::iter::repeat_n(
+        String::new(),
+        reserved_rows.saturating_sub(1),
+    ));
+    lines
+}
+
+fn div_round(numerator: u64, denominator: u64) -> u64 {
+    (numerator + denominator / 2) / denominator
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

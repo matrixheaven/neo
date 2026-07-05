@@ -1,6 +1,7 @@
 use crate::primitive::Line;
 use crate::primitive::theme::TuiTheme;
 use crate::shell::ToolStatusKind;
+use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::transcript::{
     DelegateCardComponent, DelegateGroupComponent, ShellRunComponent, SwarmCardComponent,
     ToolCallComponent, ToolCallState, WorkflowCardComponent,
@@ -743,7 +744,14 @@ impl TranscriptStore {
             return cached.lines.clone();
         }
 
-        let lines = self.render_entry_lines(index, width, theme, activity_frame);
+        let lines = self.render_entry_lines(
+            index,
+            width,
+            theme,
+            activity_frame,
+            ImageRenderPolicy::default(),
+            TerminalImageCapabilities::default(),
+        );
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
             let ansi_lines = lines.iter().map(Line::to_ansi).collect();
@@ -766,6 +774,8 @@ impl TranscriptStore {
         width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
     ) -> Vec<String> {
         self.sync_cache_len();
 
@@ -781,7 +791,14 @@ impl TranscriptStore {
             return cached.ansi_lines.clone();
         }
 
-        let lines = self.render_entry_lines(index, width, theme, activity_frame);
+        let lines = self.render_entry_lines(
+            index,
+            width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+        );
         let ansi_lines = lines.iter().map(Line::to_ansi).collect::<Vec<_>>();
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
@@ -801,9 +818,17 @@ impl TranscriptStore {
         width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
     ) -> Vec<Line> {
         match self.entries.get(index) {
-            Some(entry) => entry.render_with_activity_frame(width, theme, activity_frame),
+            Some(entry) => entry.render_with_image_context(
+                width,
+                theme,
+                activity_frame,
+                image_render_policy,
+                image_capabilities,
+            ),
             None => Vec::new(),
         }
     }
@@ -923,11 +948,28 @@ mod tests {
         let theme = TuiTheme::default();
         store.push(TranscriptEntry::assistant_message("cached answer"));
 
-        let first = store.render_entry_ansi_cached(0, 80, &theme, 0);
+        let first = store.render_entry_ansi_cached(
+            0,
+            80,
+            &theme,
+            0,
+            ImageRenderPolicy::default(),
+            TerminalImageCapabilities::default(),
+        );
 
         assert!(first.iter().any(|line| line.contains("cached answer")));
         let cached = store.render_cache[0].as_ref().expect("cached render");
         assert_eq!(cached.ansi_lines, first);
-        assert_eq!(store.render_entry_ansi_cached(0, 80, &theme, 99), first);
+        assert_eq!(
+            store.render_entry_ansi_cached(
+                0,
+                80,
+                &theme,
+                99,
+                ImageRenderPolicy::default(),
+                TerminalImageCapabilities::default(),
+            ),
+            first
+        );
     }
 }

@@ -72,7 +72,7 @@ fn transcript_store_uses_explicit_entry_names_and_tool_runs() {
 
     assert!(matches!(
         store.entries()[0],
-        TranscriptEntry::UserMessage(_)
+        TranscriptEntry::UserMessage { .. }
     ));
     assert!(matches!(
         store.entries()[1],

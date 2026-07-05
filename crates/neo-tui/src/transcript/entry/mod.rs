@@ -3,7 +3,7 @@ use crate::primitive::wrap_width;
 use crate::primitive::{Color, Style, visible_width};
 use crate::primitive::{Line, Span};
 use crate::terminal_image::{
-    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
+    ImageDisplayOptions, ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::DelegateCardComponent;
 use crate::transcript::DelegateGroupComponent;
@@ -77,9 +77,43 @@ pub struct ApprovalPromptData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptImageAttachment {
+    pub id: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub placeholder: String,
+    pub payload: Vec<u8>,
+}
+
+impl TranscriptImageAttachment {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        mime_type: impl Into<String>,
+        width: u32,
+        height: u32,
+        placeholder: impl Into<String>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            mime_type: mime_type.into(),
+            width,
+            height,
+            placeholder: placeholder.into(),
+            payload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Banner(BannerData),
-    UserMessage(String),
+    UserMessage {
+        content: String,
+        images: Vec<TranscriptImageAttachment>,
+    },
     AssistantMessage {
         content: String,
     },
@@ -237,7 +271,21 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn user_message(content: impl Into<String>) -> Self {
-        Self::UserMessage(content.into())
+        Self::UserMessage {
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn user_message_with_images(
+        content: impl Into<String>,
+        images: Vec<TranscriptImageAttachment>,
+    ) -> Self {
+        Self::UserMessage {
+            content: content.into(),
+            images,
+        }
     }
 
     #[must_use]
@@ -368,13 +416,37 @@ impl TranscriptEntry {
         theme: &TuiTheme,
         activity_frame: usize,
     ) -> Vec<Line> {
+        self.render_with_image_context(
+            width,
+            theme,
+            activity_frame,
+            ImageRenderPolicy::default(),
+            TerminalImageCapabilities::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn render_with_image_context(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
+    ) -> Vec<Line> {
         // Every `Line` returned here MUST map to exactly one terminal row:
         // content is split on `\n` and soft-wrapped to `width` so no line ever
         // carries an embedded newline. The renderer's diff/scroll math treats
         // each `Vec<String>` entry as one screen row, so an un-split long line
         // would corrupt the coordinate model and garble streaming output.
         let inner_width = width.max(1);
-        self.render_inner(inner_width, theme, activity_frame)
+        self.render_inner(
+            inner_width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+        )
     }
 
     fn render_inner(
@@ -382,11 +454,25 @@ impl TranscriptEntry {
         inner_width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
     ) -> Vec<Line> {
-        if let Some(lines) = self.render_message_entry(inner_width, theme, activity_frame) {
+        if let Some(lines) = self.render_message_entry(
+            inner_width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+        ) {
             return lines;
         }
-        self.render_structured_entry(inner_width, theme, activity_frame)
+        self.render_structured_entry(
+            inner_width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+        )
     }
 
     fn render_message_entry(
@@ -394,12 +480,19 @@ impl TranscriptEntry {
         inner_width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
     ) -> Option<Vec<Line>> {
         let lines = match self {
             Self::Banner(data) => render_banner::render_welcome_banner(data, inner_width, theme),
-            Self::UserMessage(content) => {
-                render_banner::render_user_message(content, inner_width, theme)
-            }
+            Self::UserMessage { content, images } => render_banner::render_user_message(
+                content,
+                images,
+                inner_width,
+                theme,
+                image_render_policy,
+                image_capabilities,
+            ),
             Self::Status { text, severity } => {
                 render_status::render_status(text, *severity, inner_width, theme)
             }
@@ -437,14 +530,33 @@ impl TranscriptEntry {
         inner_width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
     ) -> Vec<Line> {
         match self {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ShellRun { component } => component.render(inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
-            Self::Image { metadata, .. } => {
-                styled_wrap(metadata, inner_width, render_status::status_style(theme))
-            }
+            Self::Image {
+                id,
+                mime_type,
+                alt,
+                source,
+                metadata,
+                payload,
+                ..
+            } => render_image_entry(
+                id,
+                mime_type,
+                alt.as_deref(),
+                *source,
+                metadata,
+                payload.as_deref(),
+                inner_width,
+                theme,
+                image_render_policy,
+                image_capabilities,
+            ),
             Self::Compaction {
                 phase,
                 percent,
@@ -484,7 +596,7 @@ impl TranscriptEntry {
             Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
             Self::Workflow { component } => render_workflow_card(component, inner_width, theme),
             Self::Banner(_)
-            | Self::UserMessage(_)
+            | Self::UserMessage { .. }
             | Self::Status { .. }
             | Self::McpStartupStatus { .. }
             | Self::AssistantMessage { .. }
@@ -512,12 +624,16 @@ impl TranscriptEntry {
     /// `ToolRun` entries are excluded because they go through group rendering
     /// (`render_ordered_tools`), not the per-entry cache path.
     #[must_use]
+    #[allow(clippy::match_same_arms)]
     pub fn is_render_cacheable(&self) -> bool {
         match self {
             // MCP startup status uses activity_frame spinner when connecting.
             Self::McpStartupStatus { data } => !matches!(data.phase, McpStartupPhase::Connecting),
             // ThinkingBlock uses activity_frame spinner when streaming.
             Self::ThinkingBlock { phase, .. } => *phase == ThinkingPhase::Complete,
+            // Image rendering depends on terminal image capabilities and render policy.
+            Self::UserMessage { images, .. } if !images.is_empty() => false,
+            Self::Image { .. } => false,
             // Live entries (per-tick animation) and ToolRun (group rendering)
             // are never cached individually.
             Self::Delegate { .. }
@@ -525,8 +641,8 @@ impl TranscriptEntry {
             | Self::DelegateSwarm { .. }
             | Self::Compaction { .. }
             | Self::ToolRun { .. } => false,
-            // All other entries (Banner, UserMessage, AssistantMessage, Status,
-            // QueuedMessage, ShellRun, ApprovalPrompt, Image, GoalCard,
+            // All other entries (Banner, text-only UserMessage, AssistantMessage, Status,
+            // QueuedMessage, ShellRun, ApprovalPrompt, GoalCard,
             // SkillActivation, Workflow) are static.
             _ => true,
         }
@@ -566,7 +682,11 @@ impl TranscriptEntry {
             *source,
         );
         image_render_policy
-            .render_inline_image(&inline, image_capabilities)
+            .render_inline_image(
+                &inline,
+                image_capabilities,
+                &ImageDisplayOptions::bounded(1, 1),
+            )
             .escape_sequence
             .map(|escape_sequence| InlineImageRender {
                 id: id.clone(),
@@ -795,6 +915,54 @@ fn styled_wrap_with_prefix(
 fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let mut component = component.clone();
     component.render_with_theme(width, theme)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_image_entry(
+    id: &str,
+    mime_type: &str,
+    alt: Option<&str>,
+    source: ImageSource,
+    metadata: &str,
+    payload: Option<&[u8]>,
+    width: usize,
+    theme: &TuiTheme,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
+) -> Vec<Line> {
+    let Some(payload) = payload else {
+        return styled_wrap(metadata, width, render_status::status_style(theme));
+    };
+    let Some((image_width, image_height)) =
+        crate::terminal_image::detect_image_dimensions(payload, mime_type)
+    else {
+        return styled_wrap(metadata, width, render_status::status_style(theme));
+    };
+    let placeholder = format!("[image ({image_width}x{image_height})]");
+    let inline = InlineImage::bytes(
+        id.to_owned(),
+        mime_type.to_owned(),
+        payload.to_vec(),
+        alt.map(str::to_owned),
+        source,
+    );
+    let display = ImageDisplayOptions::thumbnail(image_width, image_height, placeholder)
+        .with_max_cols(thumbnail_cols(width));
+    image_render_policy
+        .render_inline_image(&inline, image_capabilities, &display)
+        .lines
+        .into_iter()
+        .map(Line::raw)
+        .collect()
+}
+
+fn thumbnail_cols(width: usize) -> u32 {
+    u32::try_from(
+        width
+            .saturating_sub(2)
+            .min(ImageDisplayOptions::DEFAULT_MAX_COLS as usize),
+    )
+    .unwrap_or(ImageDisplayOptions::DEFAULT_MAX_COLS)
 }
 
 fn render_delegate_card(

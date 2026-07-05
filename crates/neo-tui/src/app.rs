@@ -77,6 +77,10 @@ impl NeoTui {
         }
         self.transcript.set_theme(self.chrome.theme());
         self.transcript
+            .set_image_render_policy(self.chrome.image_render_policy());
+        self.transcript
+            .set_image_capabilities(self.chrome.image_capabilities());
+        self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
         self.transcript.tick_cached_live_entries_for_parent_render();

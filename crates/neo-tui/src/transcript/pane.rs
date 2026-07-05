@@ -102,6 +102,8 @@ pub struct TranscriptPane {
     /// without holding a reference to the app. The interactive mode keeps it
     /// in sync via [`Self::set_theme`].
     theme: TuiTheme,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
     pub(super) skill_store: Option<SkillStore>,
 }
 
@@ -129,6 +131,8 @@ impl TranscriptPane {
             #[cfg(test)]
             last_reused_prefix_rows: 0,
             theme: TuiTheme::default(),
+            image_render_policy: ImageRenderPolicy::default(),
+            image_capabilities: TerminalImageCapabilities::default(),
             skill_store: None,
         }
     }
@@ -146,6 +150,26 @@ impl TranscriptPane {
             return;
         }
         self.theme = theme;
+        self.body_cache = None;
+        self.transcript.invalidate_render_cache();
+        self.mark_dirty();
+    }
+
+    pub fn set_image_render_policy(&mut self, policy: ImageRenderPolicy) {
+        if self.image_render_policy == policy {
+            return;
+        }
+        self.image_render_policy = policy;
+        self.body_cache = None;
+        self.transcript.invalidate_render_cache();
+        self.mark_dirty();
+    }
+
+    pub fn set_image_capabilities(&mut self, capabilities: TerminalImageCapabilities) {
+        if self.image_capabilities == capabilities {
+            return;
+        }
+        self.image_capabilities = capabilities;
         self.body_cache = None;
         self.transcript.invalidate_render_cache();
         self.mark_dirty();
@@ -178,6 +202,14 @@ impl TranscriptPane {
 
     pub fn push_user_message(&mut self, content: impl Into<String>) {
         self.push_transcript(TranscriptEntry::user_message(content));
+    }
+
+    pub fn push_user_message_with_images(
+        &mut self,
+        content: impl Into<String>,
+        images: Vec<crate::transcript::TranscriptImageAttachment>,
+    ) {
+        self.push_transcript(TranscriptEntry::user_message_with_images(content, images));
     }
 
     /// Push a queued (Enter while busy) or steered (Ctrl+S) message preview
@@ -289,9 +321,13 @@ impl TranscriptPane {
         }
         match message {
             AgentMessage::User { content, .. } => {
-                let text = content_display_text(content);
+                let (text, images) = user_content_display(content);
                 if !text.is_empty() {
-                    self.replay_user_message(text);
+                    if images.is_empty() {
+                        self.replay_user_message(text);
+                    } else {
+                        self.push_user_message_with_images(text, images);
+                    }
                 }
             }
             AgentMessage::Assistant {
@@ -1036,6 +1072,8 @@ impl TranscriptPane {
                     width,
                     &self.theme,
                     self.activity_frame,
+                    self.image_render_policy,
+                    self.image_capabilities,
                 );
                 append_ansi_transcript_block(&mut rows, lines);
             }
@@ -1220,7 +1258,11 @@ fn append_line_transcript_block(rows: &mut Vec<String>, block: Vec<Line>) {
 
 fn append_ansi_transcript_block(rows: &mut Vec<String>, block: Vec<String>) {
     let first = block.iter().position(|line| !ansi_line_is_blank(line));
-    let last = block.iter().rposition(|line| !ansi_line_is_blank(line));
+    let last = if block.iter().any(|line| ansi_line_is_image(line)) {
+        block.len().checked_sub(1)
+    } else {
+        block.iter().rposition(|line| !ansi_line_is_blank(line))
+    };
     let (Some(first), Some(last)) = (first, last) else {
         return;
     };
@@ -1231,6 +1273,9 @@ fn append_ansi_transcript_block(rows: &mut Vec<String>, block: Vec<String>) {
 }
 
 fn ansi_line_is_blank(line: &str) -> bool {
+    if ansi_line_is_image(line) {
+        return false;
+    }
     let mut index = 0;
     while index < line.len() {
         if let Some(sequence) = next_sequence(line, index) {
@@ -1248,8 +1293,59 @@ fn ansi_line_is_blank(line: &str) -> bool {
     true
 }
 
+fn ansi_line_is_image(line: &str) -> bool {
+    line.contains("\x1b_G") || line.contains("\x1b]1337;File=")
+}
+
 fn content_display_text(content: &[Content]) -> String {
     content.iter().filter_map(content_visible_text).collect()
+}
+
+fn user_content_display(
+    content: &[Content],
+) -> (String, Vec<crate::transcript::TranscriptImageAttachment>) {
+    let mut image_index = 0;
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for part in content {
+        match part {
+            Content::Text { text: part_text } => text.push_str(part_text),
+            Content::Thinking { .. } => {}
+            Content::Image { mime_type, data } => {
+                image_index += 1;
+                if let Some(image) =
+                    transcript_attachment_from_content_image(image_index, mime_type, data)
+                {
+                    text.push_str(&image.placeholder);
+                    images.push(image);
+                } else {
+                    text.push_str(&image_summary(mime_type, data));
+                }
+            }
+        }
+    }
+    (text, images)
+}
+
+fn transcript_attachment_from_content_image(
+    image_index: usize,
+    mime_type: &str,
+    data: &ImageRef,
+) -> Option<crate::transcript::TranscriptImageAttachment> {
+    let ImageRef::Base64(encoded) = data else {
+        return None;
+    };
+    let bytes = decode_base64(encoded)?;
+    let (width, height) = crate::terminal_image::detect_image_dimensions(&bytes, mime_type)?;
+    let placeholder = format!("[image #{image_index} ({width}x{height})]");
+    Some(crate::transcript::TranscriptImageAttachment::new(
+        format!("image-{image_index}"),
+        mime_type.to_owned(),
+        width,
+        height,
+        placeholder,
+        bytes,
+    ))
 }
 
 fn content_visible_text(content: &Content) -> Option<String> {

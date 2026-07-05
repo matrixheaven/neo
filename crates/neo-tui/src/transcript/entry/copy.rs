@@ -42,7 +42,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
             copy_goal(*kind, objective, detail.as_deref(), *turns),
         ),
         TranscriptEntry::SkillActivation { names, body, .. } => ("Skill", copy_skill(names, body)),
-        TranscriptEntry::UserMessage(_)
+        TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::AssistantMessage { .. }
         | TranscriptEntry::ThinkingBlock { .. }
         | TranscriptEntry::ApprovalPrompt(_)
@@ -69,7 +69,7 @@ pub(super) fn simple_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str
 
 fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
     match entry {
-        TranscriptEntry::UserMessage(content) => Some(("You", content.clone())),
+        TranscriptEntry::UserMessage { content, .. } => Some(("You", content.clone())),
         TranscriptEntry::AssistantMessage { content } => Some(("Assistant", content.clone())),
         TranscriptEntry::ThinkingBlock { content, .. } => Some(("Thinking", content.clone())),
         TranscriptEntry::QueuedMessage { text, is_steer } => {

@@ -1363,15 +1363,25 @@ impl InteractiveController {
             &self.paste_store,
             &self.image_attachment_store,
         );
+        let transcript_images = crate::prompt::parts::transcript_image_attachments(
+            &prompt,
+            &self.image_attachment_store,
+        );
         // Persist the resolved user prompt (after @model/prompt-template
         // expansion) to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
         let display_text = content_to_display_text(&content);
         self.append_prompt_history(&display_text);
         if render_local_user_message {
-            self.tui
-                .transcript_mut()
-                .push_user_message(display_text.clone());
+            if transcript_images.is_empty() {
+                self.tui
+                    .transcript_mut()
+                    .push_user_message(display_text.clone());
+            } else {
+                self.tui
+                    .transcript_mut()
+                    .push_user_message_with_images(display_text.clone(), transcript_images);
+            }
             self.pending_local_user_message_to_suppress = Some(display_text);
         }
         self.start_turn_with_prompt(content, model_override);

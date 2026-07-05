@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use neo_agent_core::{Content, ImageRef};
-use neo_tui::paste::{ImageAttachmentStore, Marker, parse_markers};
+use neo_tui::{
+    paste::{ImageAttachmentStore, Marker, parse_markers},
+    transcript::TranscriptImageAttachment,
+};
 
 /// Expand `[paste ...]` and `[image #N ...]` markers in `text` into a mixed
 /// text/image content vector. Adjacent text parts are coalesced.
@@ -60,6 +63,30 @@ pub fn expand_prompt_markers(
         });
     }
     coalesce_text_parts(parts)
+}
+
+pub fn transcript_image_attachments(
+    text: &str,
+    image_store: &ImageAttachmentStore,
+) -> Vec<TranscriptImageAttachment> {
+    parse_markers(text)
+        .into_iter()
+        .filter_map(|(_, marker)| match marker {
+            Marker::Image { id, .. } => {
+                let attachment = image_store.get(id)?;
+                let bytes = image_store.pending_bytes(id)?.clone();
+                Some(TranscriptImageAttachment::new(
+                    format!("image-{id}"),
+                    attachment.mime_type.clone(),
+                    attachment.width,
+                    attachment.height,
+                    marker.as_placeholder(),
+                    bytes,
+                ))
+            }
+            Marker::Paste { .. } => None,
+        })
+        .collect()
 }
 
 fn coalesce_text_parts(parts: Vec<Content>) -> Vec<Content> {

@@ -10,7 +10,7 @@ use neo_tui::tasks_browser::{
 use neo_tui::terminal_image::{
     ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities,
 };
-use neo_tui::transcript::{TranscriptPane, render_chrome_lines};
+use neo_tui::transcript::{TranscriptImageAttachment, TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 
 fn write_session_scope() -> neo_agent_core::SessionApprovalScope {
@@ -1384,6 +1384,60 @@ fn transcript_pane_inline_images_are_structured_entries() {
         TerminalImageCapabilities::default().with_iterm2(true),
     );
     assert_eq!(sequences.len(), 1);
+}
+
+#[test]
+fn transcript_user_images_render_thumbnail_inside_normal_frame() {
+    let mut chrome = NeoChromeState::new("neo", "session", "openai/gpt-4.1", "/tmp/neo-ws");
+    chrome.set_image_render_policy(ImageRenderPolicy::new(
+        ImageProtocolPreference::Kitty,
+        false,
+    ));
+    chrome.set_image_capabilities(TerminalImageCapabilities::default().with_kitty(true));
+    let mut transcript = TranscriptPane::new(100, 20);
+    transcript.push_user_message_with_images(
+        "look",
+        vec![TranscriptImageAttachment::new(
+            "image-1",
+            "image/png",
+            1_184,
+            650,
+            "[image #1 (1184x650)]",
+            vec![137, 80, 78, 71],
+        )],
+    );
+    let mut tui = neo_tui::NeoTui::new(chrome, transcript);
+
+    let frame = tui.render_frame(100, 20).0;
+
+    assert!(frame.iter().any(|line| line.contains("\x1b_G")));
+    assert!(frame.iter().any(|line| line.contains("c=22")));
+    assert!(frame.iter().any(|line| line.contains("r=12")));
+    assert!(
+        !frame
+            .iter()
+            .any(|line| line.contains("[image: image/png data="))
+    );
+}
+
+#[test]
+fn replayed_user_image_content_keeps_transcript_attachment() {
+    let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe";
+    let mut transcript = TranscriptPane::new(100, 20);
+
+    transcript.replay_message(&neo_agent_core::AgentMessage::user_content([
+        neo_agent_core::Content::text("look "),
+        neo_agent_core::Content::Image {
+            mime_type: "image/png".into(),
+            data: neo_agent_core::ImageRef::Base64(encoded.into()),
+        },
+    ]));
+
+    assert!(matches!(
+        transcript.transcript().entries().last(),
+        Some(neo_tui::transcript::TranscriptEntry::UserMessage { content, images })
+            if content == "look [image #1 (1x1)]" && images.len() == 1
+    ));
 }
 
 #[test]

@@ -1,9 +1,10 @@
 use neo_tui::shell::InlineImageRenderCache;
 use neo_tui::terminal_image::{
-    ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy, ImageSource, InlineImage,
-    Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions, KittyImageFormat,
-    NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor, TerminalImageCapabilities,
-    encode_iterm2_inline_image, encode_kitty_graphics, encode_sixel_image,
+    ImageDisplayOptions, ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy,
+    ImageSource, InlineImage, Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions,
+    KittyImageFormat, NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor,
+    TerminalImageCapabilities, encode_iterm2_inline_image, encode_kitty_graphics,
+    encode_sixel_image,
 };
 use neo_tui::transcript::InlineImageRender;
 
@@ -188,7 +189,7 @@ fn image_protocol_auto_negotiates_available_terminal_protocol() {
     assert_eq!(
         ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
             .negotiate(TerminalImageCapabilities::default().with_sixel(true)),
-        NegotiatedImageProtocol::Sixel
+        NegotiatedImageProtocol::None
     );
     assert_eq!(
         ImageRenderPolicy::new(ImageProtocolPreference::None, true).negotiate(
@@ -214,6 +215,7 @@ fn image_render_policy_keeps_remote_images_metadata_only_by_default() {
     let rendered = policy.render_inline_image(
         &remote,
         TerminalImageCapabilities::default().with_kitty(true),
+        &ImageDisplayOptions::bounded(1, 1),
     );
 
     assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
@@ -239,6 +241,7 @@ fn image_render_policy_renders_local_or_base64_payloads_with_selected_protocol()
     let rendered = policy.render_inline_image(
         &local,
         TerminalImageCapabilities::default().with_kitty(true),
+        &ImageDisplayOptions::bounded(1, 1),
     );
 
     assert_eq!(local.size_bytes(), Some(4));
@@ -254,6 +257,99 @@ fn image_render_policy_renders_local_or_base64_payloads_with_selected_protocol()
             .as_deref()
             .is_some_and(|sequence| sequence.starts_with("\x1b_G"))
     );
+}
+
+#[test]
+fn terminal_image_thumbnail_uses_bounded_kitty_cell_dimensions() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let image = InlineImage::bytes(
+        "img-wide",
+        "image/png",
+        [137, 80, 78, 71],
+        Some("wide screenshot"),
+        ImageSource::Base64,
+    );
+
+    let rendered = policy.render_inline_image(
+        &image,
+        TerminalImageCapabilities::default().with_kitty(true),
+        &ImageDisplayOptions::thumbnail(1_184, 650, "[image #1 (1184x650)]"),
+    );
+
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::Kitty);
+    assert_eq!(rendered.lines.len(), 12);
+    assert!(rendered.lines[0].contains("\x1b_G"));
+    assert!(rendered.lines[0].contains("c=22"));
+    assert!(rendered.lines[0].contains("r=12"));
+    assert!(rendered.lines.iter().skip(1).all(String::is_empty));
+}
+
+#[test]
+fn terminal_image_thumbnail_uses_bounded_iterm2_cell_dimensions() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Iterm2, false);
+    let image = InlineImage::bytes(
+        "img-wide",
+        "image/png",
+        [137, 80, 78, 71],
+        Some("wide screenshot"),
+        ImageSource::Base64,
+    );
+
+    let rendered = policy.render_inline_image(
+        &image,
+        TerminalImageCapabilities::default().with_iterm2(true),
+        &ImageDisplayOptions::thumbnail(1_184, 650, "[image #1 (1184x650)]"),
+    );
+
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::Iterm2);
+    assert_eq!(rendered.lines.len(), 1);
+    assert!(rendered.lines[0].contains("\x1b]1337;File="));
+    assert!(rendered.lines[0].contains("width=22"));
+    assert!(rendered.lines[0].contains("height=12"));
+}
+
+#[test]
+fn terminal_image_thumbnail_falls_back_without_inline_support_or_space() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Auto, false);
+    let image = InlineImage::bytes(
+        "img-local",
+        "image/png",
+        [137, 80, 78, 71],
+        None::<String>,
+        ImageSource::Base64,
+    );
+
+    let rendered = policy.render_inline_image(
+        &image,
+        TerminalImageCapabilities::default().with_sixel(true),
+        &ImageDisplayOptions::thumbnail(640, 480, "[image #1 (640x480)]").with_max_cols(0),
+    );
+
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
+    assert_eq!(rendered.lines, vec!["[image #1 (640x480)]"]);
+    assert!(rendered.escape_sequence.is_none());
+}
+
+#[test]
+fn terminal_image_thumbnail_does_not_fake_sixel_for_encoded_image_bytes() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Sixel, false);
+    let image = InlineImage::bytes(
+        "img-local",
+        "image/png",
+        [137, 80, 78, 71],
+        None::<String>,
+        ImageSource::Base64,
+    );
+
+    let rendered = policy.render_inline_image(
+        &image,
+        TerminalImageCapabilities::default().with_sixel(true),
+        &ImageDisplayOptions::thumbnail(640, 480, "[image #1 (640x480)]"),
+    );
+
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
+    assert_eq!(rendered.lines, vec!["[image #1 (640x480)]"]);
+    assert!(rendered.escape_sequence.is_none());
 }
 
 #[test]
