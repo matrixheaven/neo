@@ -982,13 +982,14 @@ mod tests {
             cursor_row: line_count.saturating_sub(1),
             clear_on_shrink: false,
             show_hardware_cursor: true,
+            capabilities: TerminalCapabilities::default(),
         }
     }
 
     #[test]
     fn enter_output_leaves_mouse_wheel_to_terminal_scrollback() {
         let mut buf = Vec::new();
-        write_enter_output(&mut buf).unwrap();
+        write_enter_output(&mut buf, TerminalCapabilities::default()).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(
             !output.contains("\x1b[?1000h")
@@ -1005,7 +1006,7 @@ mod tests {
         let mut renderer = test_renderer(Vec::new());
         let mut buf = Vec::new();
         renderer.write_leave_output(&mut buf);
-        write_leave_terminal_output(&mut buf).unwrap();
+        write_leave_terminal_output(&mut buf, TerminalCapabilities::default()).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(
             !output.contains("\x1b[?1000l")

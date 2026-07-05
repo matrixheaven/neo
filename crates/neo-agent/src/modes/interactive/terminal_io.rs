@@ -110,7 +110,7 @@ fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> 
                     break;
                 }
             }
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }

@@ -745,6 +745,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn slim_jsonl_session_strips_prior_messages_and_coalesces_updates() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("wire.jsonl");
