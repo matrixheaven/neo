@@ -635,10 +635,23 @@ fn result_chip(state: &ToolCallState) -> String {
     {
         return format!(" · +{} -{}", model.stats().added, model.stats().removed);
     }
+    if state.name == "Write" {
+        if let Some(line_count) = state
+            .details
+            .as_ref()
+            .and_then(|details| details.get("line_count"))
+            .and_then(serde_json::Value::as_u64)
+        {
+            return format!(" · {line_count} lines");
+        }
+        if let Some((_, content)) = parse_write_arguments(state.arguments.as_deref()) {
+            return format!(" · {} lines", content.lines().count());
+        }
+    }
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
         return String::new();
     };
-    if state.name == "Read" || state.name == "Write" {
+    if state.name == "Read" {
         return format!(" · {} lines", result.lines().count());
     }
     String::new()

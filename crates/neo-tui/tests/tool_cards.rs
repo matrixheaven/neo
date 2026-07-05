@@ -246,7 +246,7 @@ fn write_tool_card_renders_finalized_diff_from_details() {
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("Used Write (src/generated.rs) · 1 lines"))
+            .any(|line| line.contains("Used Write (src/generated.rs) · 20 lines"))
     );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
     // New files show a syntax-highlighted preview, not an all-green diff.
