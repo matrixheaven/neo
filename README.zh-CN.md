@@ -108,7 +108,7 @@ neo --no-session run "不创建会话直接回答"
 | MCP | [docs/zh/customization/mcp.md](docs/zh/customization/mcp.md) |
 | 技能 | [docs/zh/customization/skills.md](docs/zh/customization/skills.md) |
 | 目标 | [docs/zh/guides/goals.md](docs/zh/guides/goals.md) |
-| 排队与引导 | [docs/zh/guides/interaction.md](docs/zh/guides/interaction.md) |
+| 交互 | [docs/zh/guides/interaction.md](docs/zh/guides/interaction.md) |
 
 ---
 
