@@ -51,6 +51,11 @@ jobs:
         with:
           key: ${{ matrix.target }}-${{ matrix.cross || 'native' }}
 
+      - uses: goto-bus-stop/setup-zig@v2
+        if: matrix.cross == 'zigbuild'
+        with:
+          version: 0.13.0
+
       - uses: taiki-e/install-action@v2
         if: matrix.cross == 'zigbuild'
         with:
