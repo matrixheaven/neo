@@ -3,15 +3,9 @@ target
 .references/
 .DS_Store
 .worktrees/
-kimi-code.worktrees/
 .superpowers
 .mimocode
 .codegraph/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
-# Per-machine Cargo overrides (sccache, custom linker). Keep the shared
-# .cargo/config.toml platform-neutral; local tuning goes in
-# .cargo/config.local.toml or the user-global ~/.cargo/config.toml.
-.cargo/config.local.toml
-librust_out.rlib.worktrees/
