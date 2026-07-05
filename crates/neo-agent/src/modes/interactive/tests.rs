@@ -5987,6 +5987,54 @@ fn controller_for_config_loads_builtin_skills() {
     );
 }
 
+#[tokio::test]
+async fn slash_model_opens_picker_when_no_config_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.config_file_exists = false;
+    config.models.clear();
+    config.providers.clear();
+    let mut controller = controller_for_config(&config);
+
+    controller.type_text("/model");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("/model submits");
+
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::TabbedModelSelector(_))
+    ));
+}
+
+#[tokio::test]
+async fn slash_provider_opens_picker_when_no_config_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.config_file_exists = false;
+    config.providers.clear();
+    config.models.clear();
+    let mut controller = controller_for_config(&config);
+
+    controller.type_text("/provider");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("/provider submits");
+
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::ProviderManager(_))
+    ));
+}
+
 #[test]
 fn model_picker_items_include_parseable_context_window() {
     let item = model_to_picker_item(&neo_ai::ModelSpec {
@@ -6946,6 +6994,7 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         project_trust: crate::trust::ProjectTrustState::NotRequired,
         project_dir: project_dir.to_path_buf(),
         config_path: project_dir.join(".neo/config.toml"),
+        config_file_exists: true,
     }
 }
 

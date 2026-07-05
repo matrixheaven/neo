@@ -867,6 +867,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         let model = ModelSpec {
             provider: ProviderId("openai".to_owned()),
@@ -950,6 +951,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         // Model declares max_output_tokens; runtime does not override.
         let model = ModelSpec {
@@ -998,6 +1000,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
 
         let path = create_session_path(&config)
@@ -1058,6 +1061,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
 
         let wire_path = create_session_path(&config)
@@ -1108,6 +1112,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         let bucket_dir = crate::config::workspace_sessions_dir(&config);
         let valid_id = "session_00000000-0000-4000-8000-000000000001";
@@ -1179,6 +1184,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         let model = ModelSpec {
             provider: ProviderId("anthropic".to_owned()),
@@ -1260,6 +1266,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         let model = ModelSpec {
             provider: ProviderId("anthropic".to_owned()),
@@ -1321,6 +1328,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
+            config_file_exists: true,
         };
         let model = ModelSpec {
             provider: ProviderId("openai".to_owned()),
@@ -1875,6 +1883,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
+            config_file_exists: true,
         }
     }
 

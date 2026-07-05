@@ -20,6 +20,8 @@ pub(super) struct RawStdinEvents {
     pending: VecDeque<InputEvent>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     disconnected: bool,
+    #[cfg(windows)]
+    last_size: Option<(u16, u16)>,
 }
 
 impl RawStdinEvents {
@@ -40,6 +42,8 @@ impl RawStdinEvents {
             pending: VecDeque::new(),
             rx,
             disconnected: false,
+            #[cfg(windows)]
+            last_size: None,
         }
     }
 }
@@ -96,7 +100,29 @@ impl TerminalEvents for RawStdinEvents {
             self.pending.extend(self.parser.flush_timeout());
         }
 
+        #[cfg(windows)]
+        if let Some(event) = self.poll_resize() {
+            self.pending.push_back(event);
+        }
+
         Ok(self.pending.pop_front())
+    }
+}
+
+impl RawStdinEvents {
+    /// On Windows the terminal does not deliver resize via a signal, so poll the
+    /// current console dimensions and emit a resize event when they change.
+    #[cfg(windows)]
+    fn poll_resize(&mut self) -> Option<InputEvent> {
+        let (cols, rows) = size().ok()?;
+        if self.last_size == Some((cols, rows)) {
+            return None;
+        }
+        self.last_size = Some((cols, rows));
+        Some(InputEvent::Resize {
+            columns: cols,
+            rows,
+        })
     }
 }
 
@@ -116,6 +142,10 @@ fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> 
     }
 }
 
+/// Create the platform-appropriate input backend.
+pub(super) fn input_events(keybindings: KeybindingsManager) -> impl TerminalEvents {
+    RawStdinEvents::new(keybindings)
+}
 pub(super) struct NeoTerminal {
     tui: TuiRenderer,
 }

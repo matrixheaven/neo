@@ -45,6 +45,7 @@ impl AppConfig {
         let project_dir = overrides.project_dir.map_or_else(env::current_dir, Ok)?;
 
         let file_config = read_file_config(&config_path)?;
+        let config_file_exists = config_path.exists();
         let (project_trusted, project_trust) =
             resolve_project_trust_state(&project_dir, overrides.yolo, overrides.trust_store)?;
         anyhow::ensure!(
@@ -120,6 +121,7 @@ impl AppConfig {
             project_trusted,
             project_trust,
             project_dir,
+            config_file_exists,
             config_path,
         })
     }

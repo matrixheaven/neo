@@ -88,7 +88,9 @@ pub(super) fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
     PickerItem::new(value.clone(), value, Some(description))
 }
 
-/// Build `ModelEntry` list directly from `[models.*]` in config.
+/// Build `ModelEntry` list directly from `[models.*]` in config, falling back to
+/// the seeded model registry when no inline models are configured so the picker
+/// is still usable before the user has created a config file.
 pub(super) fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
     if !config.models.is_empty() {
         return config
@@ -113,7 +115,53 @@ pub(super) fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dial
             })
             .collect();
     }
-    Vec::new()
+    match crate::modes::run::model_registry_for_config(config) {
+        Ok(registry) => registry
+            .list()
+            .iter()
+            .map(model_spec_to_model_entry)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn capabilities_from_model_capabilities(capabilities: &neo_ai::ModelCapabilities) -> Vec<String> {
+    let mut caps = Vec::new();
+    if capabilities.streaming {
+        caps.push("streaming".to_owned());
+    }
+    if capabilities.tools {
+        caps.push("tools".to_owned());
+    }
+    if capabilities.images {
+        caps.push("images".to_owned());
+    }
+    if capabilities.reasoning {
+        caps.push("reasoning".to_owned());
+    }
+    if capabilities.embeddings {
+        caps.push("embeddings".to_owned());
+    }
+    caps
+}
+
+fn model_spec_to_model_entry(model: &neo_ai::ModelSpec) -> neo_tui::dialogs::ModelEntry {
+    let provider_id = model.provider.0.clone();
+    let alias = format!("{}/{}", provider_id, model.model);
+    let mut capabilities = capabilities_from_model_capabilities(&model.capabilities);
+    if capabilities.iter().any(|c| c == "reasoning")
+        && !capabilities.iter().any(|c| c == "thinking")
+    {
+        capabilities.push("thinking".to_owned());
+    }
+    neo_tui::dialogs::ModelEntry {
+        alias: alias.clone(),
+        provider_id,
+        display_name: alias,
+        model_id: model.model.clone(),
+        capabilities,
+        max_context_tokens: model.capabilities.max_context_tokens,
+    }
 }
 
 pub(super) fn context_window_from_picker_item(item: &PickerItem) -> Option<u32> {
@@ -139,11 +187,11 @@ fn parse_token_count(value: &str) -> Option<u32> {
 
 impl InteractiveController {
     pub(super) fn open_model_picker(&mut self) {
-        let entries = self.model_entries_for_picker();
-        if entries.is_empty() {
-            self.push_status("No configured models");
+        let Some(config) = &self.local_config else {
+            self.push_status("No config available");
             return;
-        }
+        };
+        let entries = model_entries_from_config(config);
         let current_alias = self
             .active_model
             .as_ref()
@@ -164,11 +212,11 @@ impl InteractiveController {
 
     /// Open the model picker with a specific alias pre-selected.
     pub(super) fn open_model_picker_with_alias(&mut self, alias: &str) {
-        let entries = self.model_entries_for_picker();
-        if entries.is_empty() {
-            self.push_status("No configured models");
+        let Some(config) = &self.local_config else {
+            self.push_status("No config available");
             return;
-        }
+        };
+        let entries = model_entries_from_config(config);
         let current_alias = self
             .active_model
             .as_ref()
@@ -189,15 +237,6 @@ impl InteractiveController {
                 theme,
             },
         );
-    }
-
-    /// Resolve the ordered list of `ModelEntry` to show in the picker.
-    /// Only providers/models explicitly configured via `[models.*]` are shown
-    /// so the picker does not list providers the user has not set up.
-    pub(super) fn model_entries_for_picker(&self) -> Vec<neo_tui::dialogs::ModelEntry> {
-        self.local_config
-            .as_ref()
-            .map_or_else(Vec::new, model_entries_from_config)
     }
 
     pub(super) fn apply_selected_model(&mut self) {

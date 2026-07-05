@@ -114,7 +114,7 @@ use terminal_capabilities::terminal_image_capabilities_for_policy;
 mod turn;
 
 mod terminal_io;
-use terminal_io::{NeoTerminal, RawStdinEvents, TerminalEvents};
+use terminal_io::{NeoTerminal, TerminalEvents, input_events};
 
 mod shell_command;
 use shell_command::{RunningShellCommand, ShellDriver, ShellDriverError};
@@ -255,7 +255,7 @@ pub async fn execute_tty_with_startup(
         controller
             .resolve_trust_dialog_at_startup(
                 data,
-                RawStdinEvents::new(controller.keybindings.clone()),
+                input_events(controller.keybindings.clone()),
                 |tui| terminal.borrow_mut().draw_tui(tui),
             )
             .await?;
@@ -270,7 +270,7 @@ pub async fn execute_tty_with_startup(
     controller
         .connect_mcp_at_startup(|tui| terminal.borrow_mut().draw_tui(tui))
         .await?;
-    let events = RawStdinEvents::new(controller.keybindings.clone());
+    let events = input_events(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
             |tui| terminal.borrow_mut().draw_tui(tui),
@@ -1657,11 +1657,9 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
-        if config.providers.is_empty() {
-            self.push_status("No configured providers");
-            return;
-        }
-        // Build provider sources from config
+        // Build provider sources from config. When no providers are configured
+        // the picker still opens and shows the empty-state message plus the
+        // "Add New Platform" row.
         let active_provider_id = self.active_model.as_ref().map(|m| m.provider.clone());
         let sources: Vec<neo_tui::dialogs::ProviderSource> = config
             .providers

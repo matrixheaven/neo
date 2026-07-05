@@ -734,6 +734,7 @@ model = "old"
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
+            config_file_exists: true,
         }
     }
 }

@@ -923,6 +923,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir,
             config_path: temp.path().join("config.toml"),
+            config_file_exists: true,
         };
         let summaries = summarize_mcp_servers_from_snapshots(
             &config,
@@ -994,6 +995,7 @@ mod tests {
             project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir,
             config_path: temp.path().join("config.toml"),
+            config_file_exists: true,
         };
         let summaries = summarize_mcp_servers_from_snapshots(
             &config,

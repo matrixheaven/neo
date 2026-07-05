@@ -102,6 +102,12 @@ pub struct AppConfig {
     pub project_trust: trust::ProjectTrustState,
     pub project_dir: PathBuf,
 
+    /// Whether the configuration was loaded from an existing config file. When
+    /// false, the application is using hard-coded defaults and should indicate
+    /// to the user that no providers or models are configured.
+    #[serde(skip)]
+    pub config_file_exists: bool,
+
     #[serde(skip)]
     pub config_path: PathBuf,
 }
@@ -116,6 +122,9 @@ impl AppConfig {
     /// `default_provider`, while already-qualified values are used as-is.
     #[must_use]
     pub fn default_model_label(&self) -> String {
+        if !self.config_file_exists {
+            return "No configured providers/models".to_owned();
+        }
         if let Some(model) = self.models.get(&self.default_model) {
             return format!("{}/{}", model.provider, model.model);
         }
@@ -252,6 +261,27 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.permission_mode, PermissionMode::Ask);
+    }
+
+    #[test]
+    fn no_config_file_shows_unconfigured_label() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
+        })
+        .expect("load config without file");
+        assert!(!config.config_file_exists);
+        assert_eq!(
+            config.default_model_label(),
+            "No configured providers/models"
+        );
     }
 
     #[test]
