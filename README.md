@@ -6,7 +6,7 @@ A Rust-native, local-only AI coding agent. Neo runs entirely on your machine as 
 
 - **Local-first.** All sessions, config, skills, and trust decisions live under `~/.neo/`. Nothing leaves your machine except the API calls you explicitly configure.
 - **Multi-provider.** OpenAI Responses, Anthropic Messages, Google Generative AI, and any OpenAI-compatible endpoint (Ollama, vLLM, etc.).
-- **Built-in tools.** Read, write, edit, grep, glob, bash, PTY terminal, todo lists, plan mode, and goal tracking — all gated by a layered permission system.
+- **Built-in tools.** Read, list, find, grep, glob, write, edit, bash, PTY terminal, todo lists, plan mode, and goal tracking — all gated by a layered permission system.
 - **MCP support.** Connect stdio or remote MCP servers; their tools are auto-discovered and namespaced as `mcp__<server>__<tool>`.
 - **Sessions.** Every conversation is a resumable, forkable JSONL transcript stored locally by workspace.
 - **Skills.** Layered prompt-injection system (project → user → extra → built-in) that activates contextually.
@@ -68,44 +68,45 @@ export OPENAI_API_KEY=sk-...
 neo run "explain this codebase"
 ```
 
-For Anthropic, Google, custom providers, model aliases, MCP servers, and all other options, see the **[Configuration Guide](docs/config.md)**.
+For Anthropic, Google, custom providers, model aliases, MCP servers, and all other options, see the **[Configuration Guide](docs/en/configuration/config-files.md)**.
 
 ## Quick Start
 
 ```bash
 # One-shot prompt
-neo print "write a function that reverses a linked list in Rust"
+neo run "write a function that reverses a linked list in Rust"
 
 # Interactive TUI session
-neo run
+neo
 
 # Resume a previous session
-neo sessions list
-neo resume <session-id>
+neo resume                 # open session picker
+neo resume <session-id>    # or resume a specific session
+neo sessions list          # list sessions in current workspace
 ```
 
 ### Useful flags
 
 ```bash
-neo --no-tools print "answer without any tools"
-neo --thinking high print "reason carefully about this problem"
-neo --tools Read,Grep print "only let me read and search"
+neo run --output text "plain text output"
+neo run --output json "JSON output"
+neo --no-session run "answer without creating a session"
 ```
 
 ## Documentation
 
 | Topic | Link |
 |-------|------|
-| Quickstart | [docs/quickstart.md](docs/quickstart.md) |
-| Configuration | [docs/config.md](docs/config.md) |
-| Architecture | [docs/architecture.md](docs/architecture.md) |
-| Providers | [docs/providers.md](docs/providers.md) |
-| Built-in Tools | [docs/tools.md](docs/tools.md) |
-| Sessions | [docs/sessions.md](docs/sessions.md) |
-| MCP | [docs/mcp.md](docs/mcp.md) |
-| Skills | [docs/skills.md](docs/skills.md) |
-| Goals | [docs/goals.md](docs/goals.md) |
-| Queue & Steer | [docs/queue-and-steer.md](docs/queue-and-steer.md) |
+| Quickstart | [docs/en/quickstart.md](docs/en/quickstart.md) |
+| Configuration | [docs/en/configuration/config-files.md](docs/en/configuration/config-files.md) |
+| Overview | [docs/en/index.md](docs/en/index.md) |
+| Providers | [docs/en/configuration/providers.md](docs/en/configuration/providers.md) |
+| Built-in Tools | [docs/en/reference/tools.md](docs/en/reference/tools.md) |
+| Sessions | [docs/en/guides/sessions.md](docs/en/guides/sessions.md) |
+| MCP | [docs/en/customization/mcp.md](docs/en/customization/mcp.md) |
+| Skills | [docs/en/customization/skills.md](docs/en/customization/skills.md) |
+| Goals | [docs/en/guides/goals.md](docs/en/guides/goals.md) |
+| Queue & Steer | [docs/en/guides/interaction.md](docs/en/guides/interaction.md) |
 
 ---
 
