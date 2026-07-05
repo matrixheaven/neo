@@ -346,12 +346,12 @@ impl PromptState {
                 None
             }
             PromptEdit::MoveHome => {
-                self.cursor = 0;
+                self.cursor = self.current_line_start();
                 self.selected_marker = None;
                 None
             }
             PromptEdit::MoveEnd => {
-                self.cursor = self.char_len();
+                self.cursor = self.current_line_end();
                 self.selected_marker = None;
                 None
             }
@@ -374,10 +374,25 @@ impl PromptState {
                 self.apply_delete(self.cursor, end, DeleteDirection::Forward, true)
             }
             PromptEdit::DeleteToLineStart => {
-                self.apply_delete(0, self.cursor, DeleteDirection::Backward, true)
+                let line_start = self.current_line_start();
+                if line_start == self.cursor && self.cursor > 0 {
+                    self.apply_delete(
+                        self.cursor - 1,
+                        self.cursor,
+                        DeleteDirection::Backward,
+                        true,
+                    )
+                } else {
+                    self.apply_delete(line_start, self.cursor, DeleteDirection::Backward, true)
+                }
             }
             PromptEdit::DeleteToLineEnd => {
-                self.apply_delete(self.cursor, self.char_len(), DeleteDirection::Forward, true)
+                let line_end = self.current_line_end();
+                if line_end == self.cursor && self.cursor < self.char_len() {
+                    self.apply_delete(self.cursor, self.cursor + 1, DeleteDirection::Forward, true)
+                } else {
+                    self.apply_delete(self.cursor, line_end, DeleteDirection::Forward, true)
+                }
             }
             PromptEdit::Yank => {
                 let yanked = self.kill_ring.last().cloned()?;
@@ -606,6 +621,26 @@ impl PromptState {
             .char_indices()
             .nth(char_index)
             .map_or(self.text.len(), |(index, _)| index)
+    }
+
+    fn current_line_start(&self) -> usize {
+        let cursor = self.cursor.min(self.char_len());
+        self.text
+            .chars()
+            .take(cursor)
+            .enumerate()
+            .filter_map(|(index, ch)| (ch == '\n').then_some(index + 1))
+            .last()
+            .unwrap_or(0)
+    }
+
+    fn current_line_end(&self) -> usize {
+        let cursor = self.cursor.min(self.char_len());
+        self.text
+            .chars()
+            .skip(cursor)
+            .position(|ch| ch == '\n')
+            .map_or_else(|| self.char_len(), |offset| cursor + offset)
     }
 
     fn slice_chars(&self, start: usize, end: usize) -> Option<String> {

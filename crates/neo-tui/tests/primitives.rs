@@ -463,6 +463,48 @@ fn prompt_move_up_down_wraps_logical_lines() {
 }
 
 #[test]
+fn prompt_move_home_stays_on_current_logical_line() {
+    let mut prompt = PromptState::new("ABC\nQWE\nXYZ").with_cursor(11);
+
+    prompt.apply_edit(PromptEdit::MoveHome);
+
+    assert_eq!(prompt.text, "ABC\nQWE\nXYZ");
+    assert_eq!(prompt.cursor, 8);
+}
+
+#[test]
+fn prompt_delete_to_line_start_stays_on_current_logical_line() {
+    let mut prompt = PromptState::new("ABC\nQWE\nXYZ").with_cursor(11);
+
+    let deleted = prompt.apply_edit(PromptEdit::DeleteToLineStart);
+
+    assert_eq!(deleted, Some("XYZ".to_owned()));
+    assert_eq!(prompt.text, "ABC\nQWE\n");
+    assert_eq!(prompt.cursor, 8);
+}
+
+#[test]
+fn prompt_move_end_stays_on_current_logical_line() {
+    let mut prompt = PromptState::new("ABC\nQWE\nXYZ").with_cursor(5);
+
+    prompt.apply_edit(PromptEdit::MoveEnd);
+
+    assert_eq!(prompt.text, "ABC\nQWE\nXYZ");
+    assert_eq!(prompt.cursor, 7);
+}
+
+#[test]
+fn prompt_delete_to_line_end_stays_on_current_logical_line() {
+    let mut prompt = PromptState::new("ABC\nQWE\nXYZ").with_cursor(5);
+
+    let deleted = prompt.apply_edit(PromptEdit::DeleteToLineEnd);
+
+    assert_eq!(deleted, Some("WE".to_owned()));
+    assert_eq!(prompt.text, "ABC\nQ\nXYZ");
+    assert_eq!(prompt.cursor, 5);
+}
+
+#[test]
 fn prompt_scroll_offset_keeps_cursor_visible() {
     let mut prompt = PromptState::default();
     // Insert nine newlines so there are ten display rows at body_width 4.
@@ -470,12 +512,14 @@ fn prompt_scroll_offset_keeps_cursor_visible() {
         prompt.apply_edit(PromptEdit::Insert("\n"));
     }
     prompt.apply_edit(PromptEdit::Insert("x"));
-    prompt.apply_edit_with_width(PromptEdit::MoveEnd, 4);
+    prompt.cursor = prompt.char_len();
+    prompt.apply_edit_with_width(PromptEdit::MoveRight, 4);
     // Cursor is on the last line; viewport should scroll so the cursor is visible.
     assert!(prompt.scroll_offset() > 0);
 
     // Move to the first line; viewport should scroll back to the top.
-    prompt.apply_edit_with_width(PromptEdit::MoveHome, 4);
+    prompt.cursor = 0;
+    prompt.apply_edit_with_width(PromptEdit::MoveLeft, 4);
     assert_eq!(prompt.scroll_offset(), 0);
 }
 
