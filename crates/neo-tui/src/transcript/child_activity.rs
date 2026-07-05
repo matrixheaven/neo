@@ -268,9 +268,19 @@ fn body_is_redundant_with_final(body: &str, final_text: &str) -> bool {
 }
 
 fn comparable_child_text(text: &str) -> String {
+    // Normalize markdown emphasis/inline-code markers into whitespace so that
+    // formatting differences such as `**word` vs `** word` do not prevent
+    // detecting duplicate body/final content.
+    let cleaned = one_line(text)
+        .replace("**", " ")
+        .replace('*', " ")
+        .replace("__", " ")
+        .replace('_', " ")
+        .replace("~~", " ")
+        .replace('`', " ");
     let mut normalized = String::new();
     let mut previous: Option<char> = None;
-    for ch in one_line(text).chars() {
+    for ch in cleaned.chars() {
         if ch == '#' {
             normalized.push(' ');
             normalized.push('#');

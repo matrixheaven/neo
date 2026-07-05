@@ -2338,6 +2338,28 @@ fn completed_delegate_card_does_not_duplicate_identical_latest_text_and_summary(
 }
 
 #[test]
+fn completed_delegate_card_suppresses_body_when_markdown_formatting_differs_only() {
+    let mut snapshot = completed_delegate();
+    snapshot.latest_text = Some("## Result**File changed:** `path/to/file.rs`".to_owned());
+    snapshot.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Text {
+            text: "## Result**File changed:** `path/to/file.rs`".to_owned(),
+            thinking: false,
+        },
+    });
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: "## Result **File changed:** `path/to/file.rs`".to_owned(),
+        is_error: false,
+    });
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()));
+
+    let count: usize = text.iter().map(|l| l.matches("File changed").count()).sum();
+    assert_eq!(count, 1, "{text:?}");
+}
+
+#[test]
 fn delegate_card_header_uses_role_display_label() {
     let mut snapshot = running_delegate();
     snapshot.display_name = AgentDisplayName::new("Hypatia");
