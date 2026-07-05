@@ -152,7 +152,7 @@ pub struct AgentSnapshot {
     /// Prior conversation messages accumulated across previous runs of this
     /// agent. On resume, these are replayed into the fresh `AgentContext` so
     /// the model retains conversation history.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip)]
     pub prior_messages: Vec<AgentMessage>,
     pub outcome: Option<AgentTerminalOutcome>,
 }

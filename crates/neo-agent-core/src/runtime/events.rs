@@ -130,7 +130,7 @@ impl EventPublisher for EventSink {
 /// emit lifecycle events without holding a mutable emitter reference.
 pub(super) fn make_tool_event_callback(sink: EventSink) -> crate::tools::ToolEventCallback {
     std::sync::Arc::new(move |event: AgentEvent| {
-        sink.emit_event(event);
+        sink.emit_event(event.without_delegate_prior_messages());
     })
 }
 

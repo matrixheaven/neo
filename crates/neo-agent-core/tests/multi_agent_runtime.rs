@@ -189,6 +189,68 @@ fn replayed_delegate_snapshot_can_be_resumed_after_session_restore() {
 }
 
 #[test]
+fn delegate_events_do_not_serialize_prior_messages() {
+    let runtime = MultiAgentRuntime::new();
+    let mut snapshot = runtime.start_foreground_delegate_for_test("audit session bloat");
+    snapshot.prior_messages = vec![
+        AgentMessage::user_text("large child prompt"),
+        AgentMessage::system_text("large child answer"),
+    ];
+
+    let event = AgentEvent::DelegateUpdated {
+        turn: 7,
+        agent: snapshot,
+    };
+    let serialized = serde_json::to_value(&event).expect("serialize delegate event");
+
+    assert_eq!(
+        serialized.pointer("/DelegateUpdated/agent/prior_messages"),
+        None,
+        "main-agent delegate progress events must not persist child conversation history: {serialized}"
+    );
+}
+
+#[test]
+fn delegate_swarm_events_do_not_serialize_child_prior_messages() {
+    use neo_agent_core::multi_agent::{SwarmChildSnapshot, SwarmSnapshot};
+
+    let runtime = MultiAgentRuntime::new();
+    let swarm_id = runtime.new_swarm_id();
+    let mut child = runtime.start_delegate(
+        "write docs",
+        Some("docs"),
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
+        AgentPathKind::SwarmChild(&swarm_id),
+    );
+    child.prior_messages = vec![AgentMessage::user_text("large child history")];
+    let swarm = SwarmSnapshot {
+        swarm_id,
+        description: "docs".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: AgentLifecycleState::Running,
+        max_concurrency: 1,
+        aggregate: SwarmAggregate::from_states([AgentLifecycleState::Running]),
+        children: vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "docs".to_owned(),
+            agent: child,
+        }],
+    };
+
+    let event = AgentEvent::DelegateSwarmUpdated { turn: 8, swarm };
+    let serialized = serde_json::to_value(&event).expect("serialize swarm event");
+
+    assert_eq!(
+        serialized.pointer("/DelegateSwarmUpdated/swarm/children/0/agent/prior_messages"),
+        None,
+        "main-agent swarm progress events must not persist child conversation history: {serialized}"
+    );
+}
+
+#[test]
 fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
     use neo_agent_core::multi_agent::{DelegateContext, DelegateRequest};
 

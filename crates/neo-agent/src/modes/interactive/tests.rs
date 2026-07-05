@@ -5182,6 +5182,30 @@ async fn load_session_transcript_preserves_delegate_events_for_replay() {
     );
 }
 
+#[tokio::test]
+async fn load_session_transcript_rejects_oversized_main_wire_before_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+    fs::create_dir_all(session_path.parent().expect("main wire parent")).expect("create parent");
+    let file = fs::File::create(&session_path).expect("create oversized session");
+    file.set_len(crate::modes::sessions::MAX_RESUME_SESSION_BYTES + 1)
+        .expect("make sparse oversized session");
+
+    let error = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect_err("oversized session should be rejected before replay");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("neo sessions slim") && message.contains("--write"),
+        "{message}"
+    );
+}
+
 #[test]
 fn rebuild_transcript_from_session_restores_footer_token_usage() {
     let mut controller = InteractiveController::new_for_test(

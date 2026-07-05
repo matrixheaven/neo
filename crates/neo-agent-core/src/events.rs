@@ -338,6 +338,32 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    #[must_use]
+    pub fn without_delegate_prior_messages(mut self) -> Self {
+        self.strip_delegate_prior_messages();
+        self
+    }
+
+    pub fn strip_delegate_prior_messages(&mut self) {
+        match self {
+            Self::DelegateStarted { agent, .. }
+            | Self::DelegateUpdated { agent, .. }
+            | Self::DelegateFinished { agent, .. } => {
+                agent.prior_messages.clear();
+            }
+            Self::DelegateSwarmStarted { swarm, .. }
+            | Self::DelegateSwarmUpdated { swarm, .. }
+            | Self::DelegateSwarmFinished { swarm, .. } => {
+                for child in &mut swarm.children {
+                    child.agent.prior_messages.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Value types for new events
 // ---------------------------------------------------------------------------

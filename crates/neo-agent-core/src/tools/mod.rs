@@ -369,7 +369,7 @@ impl ToolContext {
     /// Used by delegate/swarm tools to announce lifecycle transitions.
     pub fn emit_event(&self, event: AgentEvent) {
         if let Some(callback) = &self.tool_event {
-            callback(event);
+            callback(event.without_delegate_prior_messages());
         }
     }
 

@@ -1850,6 +1850,7 @@ async fn load_session_transcript(
     config: &AppConfig,
 ) -> Result<LoadedSessionTranscript> {
     let path = crate::modes::sessions::session_path(&session_id, config)?;
+    crate::modes::sessions::ensure_session_can_be_replayed(&session_id, &path)?;
     let events = JsonlSessionReader::read_all(&path)
         .await
         .with_context(|| format!("failed to replay session {}", path.display()))?;
