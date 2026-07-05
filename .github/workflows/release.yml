@@ -66,6 +66,11 @@ jobs:
         with:
           tool: cargo-xwin
 
+      - uses: KyleMayes/install-llvm-action@v2
+        if: matrix.cross == 'xwin'
+        with:
+          version: "17.0"
+
       - name: Build neo
         run: |
           if [ "${{ matrix.cross }}" = "zigbuild" ]; then
@@ -86,9 +91,10 @@ jobs:
 
       - name: Package (windows)
         if: ${{ endsWith(matrix.target, '-windows-msvc') }}
+        shell: pwsh
         run: |
-          mkdir dist
-          cp target/${{ matrix.target }}/release/neo.exe dist/neo-${{ matrix.suffix }}.exe
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/neo.exe dist/neo-${{ matrix.suffix }}.exe
           Compress-Archive -Path dist/neo-${{ matrix.suffix }}.exe -DestinationPath dist/neo-${{ matrix.suffix }}.zip
 
       - uses: actions/upload-artifact@v4
