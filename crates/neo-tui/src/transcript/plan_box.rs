@@ -55,11 +55,7 @@ impl PlanBoxComponent {
         let content_width = horz_len.saturating_sub(2 * SIDE_PADDING).max(1);
 
         // Title
-        let basename = self
-            .path
-            .as_ref()
-            .and_then(|p| p.rsplit('/').next())
-            .unwrap_or("plan");
+        let basename = self.path.as_deref().map_or("plan", display_basename);
         let title = if let Some(status) = &self.status {
             format!(" plan: {basename} · {status} ")
         } else {
@@ -178,6 +174,12 @@ impl PlanBoxComponent {
     }
 }
 
+fn display_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or("plan")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +191,16 @@ mod tests {
         assert!(lines.len() >= 3); // top border + content lines + bottom border
         let top = lines[0].to_ansi();
         assert!(top.contains("plan: abc.md"));
+    }
+
+    #[test]
+    fn render_title_uses_windows_path_basename() {
+        let comp = PlanBoxComponent::new("# Plan", Some(r"C:\Users\alice\plan.md".to_string()));
+        let lines = comp.render(50, &TuiTheme::default());
+        let top = crate::primitive::strip_ansi(&lines[0].to_ansi());
+
+        assert!(top.contains("plan: plan.md"), "top border: {top}");
+        assert!(!top.contains(r"C:\Users"), "top border: {top}");
     }
 
     #[test]

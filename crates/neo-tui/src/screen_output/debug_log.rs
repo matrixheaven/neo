@@ -1,6 +1,6 @@
 //! Debug logging helpers extracted from `frame_differ`.
 //!
-//! These functions write diagnostic logs to `/tmp/neo-tui-debug/` when the
+//! These functions write diagnostic logs to the platform temp directory when the
 //! `NEO_TUI_DEBUG=1` environment variable is set.
 
 use std::env;
@@ -29,7 +29,7 @@ fn create_debug_log_file(stem: &str) -> std::io::Result<fs::File> {
 }
 
 fn debug_log_path(stem: &str) -> std::io::Result<PathBuf> {
-    let dir = PathBuf::from("/tmp/neo-tui-debug");
+    let dir = env::temp_dir().join("neo-tui-debug");
     fs::create_dir_all(&dir)?;
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -205,5 +205,17 @@ impl TuiRenderer {
                 final_cursor_row = diff_render.final_cursor_row
             )),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_log_path_uses_platform_temp_dir() {
+        let path = debug_log_path("render-start").expect("debug log path");
+
+        assert!(path.starts_with(env::temp_dir().join("neo-tui-debug")));
     }
 }

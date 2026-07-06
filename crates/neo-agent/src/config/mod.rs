@@ -388,6 +388,16 @@ model = "gpt-4.1"
     }
 
     #[test]
+    fn tilde_expansion_accepts_windows_separator() {
+        let home = PathBuf::from(r"C:\Users\Alice");
+
+        assert_eq!(
+            super::expand_user_path_with_home(PathBuf::from(r"~\neo-sessions"), Some(&home)),
+            home.join("neo-sessions")
+        );
+    }
+
+    #[test]
     fn config_loads_permission_mode_auto() {
         let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"auto\"\n");
         let config = load_config(config_path, project_dir);

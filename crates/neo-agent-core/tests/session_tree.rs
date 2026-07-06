@@ -210,3 +210,125 @@ fn session_metadata_ignores_legacy_numeric_session_files() {
     );
     assert!(store.fork("1781719048514", None).is_err());
 }
+
+#[test]
+fn failed_session_fork_cleans_up_child_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_session_transcript(dir.path(), SESSION_A);
+    std::fs::write(dir.path().join("sessions.metadata.json"), "{").expect("write invalid metadata");
+
+    let store = SessionMetadataStore::new(dir.path());
+    store
+        .fork(SESSION_A, Some("Broken fork".to_owned()))
+        .expect_err("metadata failure should fail fork");
+
+    let session_dirs = std::fs::read_dir(dir.path())
+        .expect("read sessions dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("session_"))
+        .count();
+    assert_eq!(
+        session_dirs, 1,
+        "failed fork must not leave a child session"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_metadata_write_rejects_symlink_instead_of_following_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    write_session_transcript(dir.path(), SESSION_A);
+
+    let outside_metadata = outside.path().join("sessions.metadata.json");
+    std::fs::write(&outside_metadata, "{\"sessions\":{}}\n").expect("write outside metadata");
+    std::os::unix::fs::symlink(&outside_metadata, dir.path().join("sessions.metadata.json"))
+        .expect("symlink metadata");
+
+    let store = SessionMetadataStore::new(dir.path());
+    let error = store
+        .rename(SESSION_A, "Main thread".to_owned())
+        .expect_err("metadata symlink should be rejected");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "error should name symlink risk: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_metadata).expect("read outside metadata"),
+        "{\"sessions\":{}}\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_metadata_rejects_symlinked_sessions_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    write_session_transcript(outside.path(), SESSION_A);
+    let sessions_link = dir.path().join("sessions");
+    std::os::unix::fs::symlink(outside.path(), &sessions_link).expect("symlink sessions dir");
+
+    let store = SessionMetadataStore::new(&sessions_link);
+    let error = store
+        .rename(SESSION_A, "Main thread".to_owned())
+        .expect_err("symlinked sessions dir should be rejected");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "error should name symlink risk: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_fork_rejects_symlinked_artifacts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    write_session_transcript(dir.path(), SESSION_A);
+    let outside_blob = outside.path().join("secret.txt");
+    std::fs::write(&outside_blob, "external secret").expect("write outside blob");
+
+    let session_dir = dir.path().join(SESSION_A);
+    let linked_blob = session_dir.join("linked-secret.txt");
+    std::os::unix::fs::symlink(&outside_blob, &linked_blob).expect("symlink blob");
+
+    let store = SessionMetadataStore::new(dir.path());
+    let error = store
+        .fork(SESSION_A, Some("Fork with link".to_owned()))
+        .expect_err("fork should reject symlinked session artifacts");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "error should name symlink risk: {error}"
+    );
+    let session_dirs = std::fs::read_dir(dir.path())
+        .expect("read sessions dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("session_"))
+        .count();
+    assert_eq!(
+        session_dirs, 1,
+        "failed fork must not leave a child session"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_fork_rejects_symlinked_session_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    write_session_transcript(outside.path(), SESSION_A);
+    std::os::unix::fs::symlink(outside.path().join(SESSION_A), dir.path().join(SESSION_A))
+        .expect("symlink session root");
+
+    let store = SessionMetadataStore::new(dir.path());
+    let error = store
+        .fork(SESSION_A, Some("Fork with linked root".to_owned()))
+        .expect_err("fork should reject symlinked session root");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "error should name symlink risk: {error}"
+    );
+}

@@ -1,12 +1,14 @@
 use std::{
-    io,
-    path::{Path, PathBuf},
+    fs as stdfs, io,
+    io::Write,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::skills::{SkillSource, SkillStore, SkillStoreHandle, discovery};
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
@@ -250,33 +252,26 @@ impl Tool for CreateSkillTool {
         let reload = self.reload.clone();
         Box::pin(async move {
             let args = args?;
-            let skill_type = if args.skill_type.is_empty() {
-                "prompt"
-            } else {
-                &args.skill_type
+            validate_skill_name(&args.name)?;
+            let skill_type = parse_skill_type(&args.skill_type)?;
+            let frontmatter = CreateSkillFrontmatter {
+                name: &args.name,
+                description: &args.description,
+                skill_type,
             };
-            let content = format!(
-                "---\nname: {}\ndescription: {}\ntype: {}\n---\n\n{}",
-                args.name, args.description, skill_type, args.body
-            );
-            // Validate frontmatter by parsing it.
-            let (frontmatter, _) = crate::skills::split_frontmatter(&content).ok_or_else(|| {
-                ToolError::InvalidInput {
-                    tool: "CreateSkill".to_owned(),
-                    message: "skill body is missing YAML frontmatter".to_owned(),
-                }
-            })?;
-            let _manifest: crate::skills::SkillManifest = serde_yaml::from_str(frontmatter)
-                .map_err(|err| ToolError::InvalidInput {
+            let frontmatter =
+                serde_yaml::to_string(&frontmatter).map_err(|err| ToolError::InvalidInput {
                     tool: "CreateSkill".to_owned(),
                     message: format!("invalid skill frontmatter: {err}"),
                 })?;
+            let content = format!("---\n{frontmatter}---\n\n{}", args.body);
 
-            let skill_dir = user_home.join("skills").join(&args.name);
-            fs::create_dir_all(&skill_dir)
-                .await
+            let skills_root = user_home.join("skills");
+            ensure_safe_directory(&skills_root)?;
+            let skill_dir = ensure_safe_child_directory(&skills_root, Path::new(&args.name))
                 .map_err(ToolError::Io)?;
             let path = skill_dir.join("SKILL.md");
+            reject_reparse_or_symlink_if_present(&path).map_err(ToolError::Io)?;
 
             // Backup existing file before overwrite.
             if path.exists() {
@@ -284,20 +279,21 @@ impl Tool for CreateSkillTool {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let backup_dir = user_home
-                    .join("backups")
-                    .join("skills")
-                    .join(format!("{timestamp}"))
-                    .join(&args.name);
-                fs::create_dir_all(&backup_dir)
-                    .await
+                let backup_root = user_home.join("backups").join("skills");
+                ensure_safe_directory(&backup_root)?;
+                let timestamp_dir =
+                    ensure_safe_child_directory(&backup_root, Path::new(&format!("{timestamp}")))
+                        .map_err(ToolError::Io)?;
+                let backup_dir = ensure_safe_child_directory(&timestamp_dir, Path::new(&args.name))
                     .map_err(ToolError::Io)?;
-                fs::copy(&path, backup_dir.join("SKILL.md"))
-                    .await
-                    .map_err(ToolError::Io)?;
+                let backup_path = backup_dir.join("SKILL.md");
+                if let Err(error) = copy_file_safely(&path, &backup_path) {
+                    let _ = fs::remove_dir_all(&backup_dir).await;
+                    return Err(ToolError::Io(error));
+                }
             }
 
-            fs::write(&path, content).await.map_err(ToolError::Io)?;
+            write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
             let reload_message =
                 reload_shared_skill_store("CreateSkill", skill_store.as_ref(), reload.as_ref())?;
             Ok(ToolResult::ok(format!(
@@ -307,6 +303,268 @@ impl Tool for CreateSkillTool {
             )))
         })
     }
+}
+
+fn ensure_safe_directory(path: &Path) -> Result<(), ToolError> {
+    ensure_safe_directory_tree(path).map_err(ToolError::Io)
+}
+
+#[derive(Serialize)]
+struct CreateSkillFrontmatter<'a> {
+    name: &'a str,
+    description: &'a str,
+    #[serde(rename = "type")]
+    skill_type: crate::skills::SkillType,
+}
+
+fn validate_skill_name(name: &str) -> Result<(), ToolError> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(invalid_create_skill_input(
+            "skill name must not be empty".to_owned(),
+        ));
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(invalid_create_skill_input(format!(
+            "invalid skill name {name:?}: use lowercase letters, digits, '.', '_' or '-', starting with a letter or digit"
+        )));
+    }
+    if !chars
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(invalid_create_skill_input(format!(
+            "invalid skill name {name:?}: use lowercase letters, digits, '.', '_' or '-'"
+        )));
+    }
+    if name.ends_with('.') {
+        return Err(invalid_create_skill_input(format!(
+            "invalid skill name {name:?}: trailing dots are not portable"
+        )));
+    }
+    let reserved_prefix = name.split('.').next().unwrap_or(name);
+    if is_windows_reserved_basename(reserved_prefix) {
+        return Err(invalid_create_skill_input(format!(
+            "invalid skill name {name:?}: reserved Windows device name"
+        )));
+    }
+    Ok(())
+}
+
+fn is_windows_reserved_basename(name: &str) -> bool {
+    matches!(
+        name,
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    )
+}
+
+fn parse_skill_type(value: &str) -> Result<crate::skills::SkillType, ToolError> {
+    match value {
+        "" | "prompt" => Ok(crate::skills::SkillType::Prompt),
+        "inline" => Ok(crate::skills::SkillType::Inline),
+        "flow" => Ok(crate::skills::SkillType::Flow),
+        other => Err(invalid_create_skill_input(format!(
+            "invalid skill_type {other:?}: expected 'prompt', 'inline', or 'flow'"
+        ))),
+    }
+}
+
+fn invalid_create_skill_input(message: String) -> ToolError {
+    ToolError::InvalidInput {
+        tool: "CreateSkill".to_owned(),
+        message,
+    }
+}
+
+fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    ensure_existing_safe_directory_tree(parent)?;
+    reject_reparse_or_symlink_if_present(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("skill");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let write_result = write_temp_file(&temp_path, content)
+        .and_then(|()| replace_with_temp_file(&temp_path, path));
+    if write_result.is_err() {
+        let _ = stdfs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+fn write_temp_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = stdfs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+fn replace_with_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    // Rust's cross-platform `rename` contract replaces an existing file in one
+    // filesystem operation, including on Windows, without a remove-first gap.
+    stdfs::rename(temp_path, path)
+}
+
+fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
+    let metadata = match stdfs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write through symlinked skill file {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
+    stdfs::create_dir_all(path)?;
+    validate_safe_directory(path)
+}
+
+fn ensure_existing_safe_directory_tree(path: &Path) -> io::Result<()> {
+    validate_safe_directory(path)
+}
+
+fn ensure_safe_child_directory(parent: &Path, child: &Path) -> io::Result<PathBuf> {
+    validate_safe_directory(parent)?;
+    let mut current = parent.to_path_buf();
+    for component in child.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                current.push(part);
+                match stdfs::symlink_metadata(&current) {
+                    Ok(_) => validate_safe_directory(&current)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        stdfs::create_dir(&current)?;
+                        validate_safe_directory(&current)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing unsafe child path: {}", child.display()),
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn validate_safe_directory(path: &Path) -> io::Result<()> {
+    let metadata = stdfs::symlink_metadata(path)?;
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write through symlinked skill directory {}",
+                path.display()
+            ),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("skill path is not a directory: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_path_absent(path: &Path) -> io::Result<()> {
+    match stdfs::symlink_metadata(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("path already exists: {}", path.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_regular_file(path: &Path) -> io::Result<()> {
+    let metadata = stdfs::symlink_metadata(path)?;
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to read symlinked skill file {}", path.display()),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("skill path is not a file: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_file_safely(source: &Path, destination: &Path) -> io::Result<u64> {
+    validate_regular_file(source)?;
+    reject_reparse_or_symlink_if_present(destination)?;
+    ensure_path_absent(destination)?;
+    let mut input = stdfs::File::open(source)?;
+    let mut output = stdfs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let bytes = io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    Ok(bytes)
+}
+
+fn is_reparse_or_symlink(metadata: &stdfs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
+}
+
+#[cfg(windows)]
+fn platform_reparse_point(metadata: &stdfs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn platform_reparse_point(_metadata: &stdfs::Metadata) -> bool {
+    false
 }
 
 pub struct MoveSkillTool {
@@ -384,29 +642,49 @@ impl Tool for MoveSkillTool {
         Box::pin(async move {
             let args = args?;
             let source = PathBuf::from(&args.source);
-            if !source.exists() {
-                return Ok(ToolResult::error(format!(
-                    "source path does not exist: {}",
-                    source.display()
-                )));
+            match stdfs::symlink_metadata(&source) {
+                Ok(_) => ensure_existing_safe_directory_tree(&source).map_err(ToolError::Io)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(ToolResult::error(format!(
+                        "source path does not exist: {}",
+                        source.display()
+                    )));
+                }
+                Err(error) => return Err(ToolError::Io(error)),
             }
-            if !source.join("SKILL.md").exists() {
-                return Ok(ToolResult::error(format!(
-                    "source is not a skill directory (no SKILL.md): {}",
-                    source.display()
-                )));
+            let source_skill_file = source.join("SKILL.md");
+            match validate_regular_file(&source_skill_file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(ToolResult::error(format!(
+                        "source is not a skill directory (no SKILL.md): {}",
+                        source.display()
+                    )));
+                }
+                Err(error) => return Err(ToolError::Io(error)),
             }
             let parent = PathBuf::from(&args.destination_parent);
-            fs::create_dir_all(&parent).await.map_err(ToolError::Io)?;
+            ensure_safe_directory(&parent)?;
             let destination =
                 parent.join(source.file_name().ok_or_else(|| ToolError::InvalidInput {
                     tool: "MoveSkill".to_owned(),
                     message: "source has no directory name".to_owned(),
                 })?);
 
-            if destination.exists() {
+            match stdfs::symlink_metadata(&destination) {
+                Ok(_) => {
+                    return Ok(ToolResult::error(format!(
+                        "destination already exists: {}",
+                        destination.display()
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(ToolError::Io(error)),
+            }
+
+            if paths_refer_to_same_location(&source, &destination).await? {
                 return Ok(ToolResult::error(format!(
-                    "destination already exists: {}",
+                    "destination resolves to source path: {}",
                     destination.display()
                 )));
             }
@@ -415,23 +693,23 @@ impl Tool for MoveSkillTool {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let backup_dir = backup_home
-                .join("backups")
-                .join("skills")
-                .join(format!("{timestamp}"));
-            fs::create_dir_all(&backup_dir)
-                .await
-                .map_err(ToolError::Io)?;
+            let backup_root = backup_home.join("backups").join("skills");
+            ensure_safe_directory(&backup_root)?;
+            let backup_dir =
+                ensure_safe_child_directory(&backup_root, Path::new(&format!("{timestamp}")))
+                    .map_err(ToolError::Io)?;
             let backup_target = backup_dir.join(source.file_name().unwrap());
+            ensure_path_absent(&backup_target).map_err(ToolError::Io)?;
             if paths_refer_to_same_location(&source, &backup_target).await? {
                 return Ok(ToolResult::error(format!(
                     "backup target resolves to source path: {}",
                     backup_target.display()
                 )));
             }
-            copy_dir(&source, &backup_target)
-                .await
-                .map_err(ToolError::Io)?;
+            if let Err(error) = copy_dir(&source, &backup_target).await {
+                let _ = fs::remove_dir_all(&backup_target).await;
+                return Err(ToolError::Io(error));
+            }
 
             fs::rename(&source, &destination)
                 .await
@@ -482,15 +760,44 @@ async fn paths_refer_to_same_location(left: &Path, right: &Path) -> io::Result<b
 }
 
 async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::create_dir_all(destination).await?;
+    ensure_existing_safe_directory_tree(source)?;
+    let parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", destination.display()),
+        )
+    })?;
+    ensure_existing_safe_directory_tree(parent)?;
+    ensure_path_absent(destination)?;
+    stdfs::create_dir(destination)?;
+    validate_safe_directory(destination)?;
     let mut entries = fs::read_dir(source).await?;
     while let Some(entry) = entries.next_entry().await? {
         let source_path = entry.path();
         let dest_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
+        let metadata = stdfs::symlink_metadata(&source_path)?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to copy symlinked skill artifact {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        let file_type = metadata.file_type();
+        if file_type.is_dir() {
             Box::pin(copy_dir(&source_path, &dest_path)).await?;
+        } else if file_type.is_file() {
+            copy_file_safely(&source_path, &dest_path)?;
         } else {
-            fs::copy(&source_path, &dest_path).await?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to copy non-file skill artifact {}",
+                    source_path.display()
+                ),
+            ));
         }
     }
     Ok(())
@@ -606,6 +913,186 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_skill_rejects_path_like_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "../escaped",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("path-like names should be invalid input");
+
+        assert!(error.to_string().contains("invalid skill name"));
+        assert!(
+            !temp.path().join("escaped").exists(),
+            "invalid skill name must not write outside the skills directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_windows_reserved_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "con",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("reserved names should be invalid input");
+
+        assert!(error.to_string().contains("reserved Windows device name"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_skill_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let skills_dir = temp.path().join("skills");
+        fs::create_dir_all(&skills_dir).await.expect("mkdir skills");
+        std::os::unix::fs::symlink(outside.path(), skills_dir.join("linked-skill"))
+            .expect("symlink skill dir");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "linked-skill",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("symlinked skill directories should be invalid input");
+
+        assert!(error.to_string().contains("symlinked skill directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_skills_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("skills"))
+            .expect("symlink skills root");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "new-skill",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("symlinked skills root should be invalid input");
+
+        assert!(error.to_string().contains("symlinked skill directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_skill_file_without_following_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("SKILL.md");
+        std::fs::write(&outside_file, "outside").expect("write outside");
+        let skill_dir = temp.path().join("skills").join("safe-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        std::os::unix::fs::symlink(&outside_file, skill_dir.join("SKILL.md"))
+            .expect("symlink skill file");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "safe-skill",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("symlinked skill file should be invalid input");
+
+        assert!(error.to_string().contains("symlinked skill file"));
+        assert_eq!(
+            std::fs::read_to_string(outside_file).expect("read outside"),
+            "outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_dangling_symlinked_skill_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("safe-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        std::os::unix::fs::symlink(temp.path().join("missing.md"), skill_dir.join("SKILL.md"))
+            .expect("symlink dangling skill file");
+        let tool = CreateSkillTool::new(temp.path());
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "safe-skill",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("dangling symlinked skill file should be invalid input");
+
+        assert!(error.to_string().contains("symlinked skill file"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_escapes_frontmatter_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let description = "first line\nname: injected";
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "quoted-skill",
+                    "description": description,
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        let path = temp
+            .path()
+            .join("skills")
+            .join("quoted-skill")
+            .join("SKILL.md");
+        let content = fs::read_to_string(&path).await.expect("read");
+        let (frontmatter, _) = crate::skills::split_frontmatter(&content).expect("frontmatter");
+        let manifest: crate::skills::SkillManifest =
+            serde_yaml::from_str(frontmatter).expect("manifest");
+        assert_eq!(manifest.name, "quoted-skill");
+        assert_eq!(manifest.description, description);
+    }
+
     #[test]
     fn create_skill_schema_describes_plain_markdown_body() {
         let schema = CreateSkillTool::new(".").input_schema();
@@ -642,6 +1129,103 @@ mod tests {
             .join("SKILL.md");
         let content = fs::read_to_string(&path).await.expect("read");
         assert!(content.contains("type: inline"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_overwrites_existing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "old content")
+            .await
+            .expect("write old skill");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# New"
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        let content = fs::read_to_string(skill_dir.join("SKILL.md"))
+            .await
+            .expect("read new skill");
+        assert!(content.contains("Updated skill"));
+        assert!(!content.contains("old content"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_backup_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "old content")
+            .await
+            .expect("write old skill");
+        let outside_file = outside.path().join("backup-target.md");
+        fs::write(&outside_file, "outside")
+            .await
+            .expect("write outside");
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("timestamp")
+            .as_secs();
+        for offset in 0..=30 {
+            let backup_dir = temp
+                .path()
+                .join("backups")
+                .join("skills")
+                .join(format!("{}", timestamp + offset))
+                .join("existing-skill");
+            fs::create_dir_all(&backup_dir)
+                .await
+                .expect("mkdir backup dir");
+            std::os::unix::fs::symlink(&outside_file, backup_dir.join("SKILL.md"))
+                .expect("symlink backup file");
+        }
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# New"
+                }),
+            )
+            .await
+            .expect_err("symlinked backup file should fail");
+
+        assert!(
+            error.to_string().contains("symlinked skill file"),
+            "error should name symlink risk: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_file)
+                .await
+                .expect("read outside"),
+            "outside"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .await
+                .expect("read original skill"),
+            "old content"
+        );
     }
 
     #[tokio::test]
@@ -773,6 +1357,93 @@ mod tests {
         assert!(
             !temp.path().join("backups").exists(),
             "rejected move must not create a backup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn move_skill_rejects_symlinked_source_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_skill = outside.path().join("linked-skill");
+        fs::create_dir_all(&outside_skill)
+            .await
+            .expect("mkdir outside skill");
+        fs::write(outside_skill.join("SKILL.md"), "outside")
+            .await
+            .expect("write outside skill");
+        let source_parent = temp.path().join("skills");
+        fs::create_dir_all(&source_parent)
+            .await
+            .expect("mkdir source parent");
+        let source = source_parent.join("linked-skill");
+        std::os::unix::fs::symlink(&outside_skill, &source).expect("symlink source skill");
+        let tool = MoveSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "source": source.to_str().unwrap(),
+                    "destination_parent": temp.path().join("bundle").to_str().unwrap()
+                }),
+            )
+            .await
+            .expect_err("symlinked source skill should be rejected");
+
+        assert!(
+            error.to_string().contains("symlinked skill directory"),
+            "error should name symlink risk: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside_skill.join("SKILL.md"))
+                .await
+                .expect("read outside skill"),
+            "outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn move_skill_rejects_symlinked_source_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let source = temp.path().join("skills").join("to-move");
+        fs::create_dir_all(&source).await.expect("mkdir source");
+        fs::write(source.join("SKILL.md"), "original")
+            .await
+            .expect("write source");
+        let outside_file = outside.path().join("secret.md");
+        fs::write(&outside_file, "outside")
+            .await
+            .expect("write outside");
+        std::os::unix::fs::symlink(&outside_file, source.join("linked.md"))
+            .expect("symlink source artifact");
+        let destination_parent = temp.path().join("bundles");
+        let tool = MoveSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "source": source.to_str().unwrap(),
+                    "destination_parent": destination_parent.to_str().unwrap()
+                }),
+            )
+            .await
+            .expect_err("symlinked source artifact should fail backup");
+
+        assert!(
+            error.to_string().contains("symlinked skill artifact"),
+            "error should name symlink risk: {error}"
+        );
+        assert!(
+            source.exists(),
+            "source should remain in place after rejected move"
+        );
+        assert!(
+            !destination_parent.join("to-move").exists(),
+            "destination should not be created after rejected move"
         );
     }
 

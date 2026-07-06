@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    path::{Path, PathBuf},
+    fs,
+    io::{self, Write},
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -513,13 +515,29 @@ impl SessionMetadataStore {
     ) -> Result<SessionRecord, SessionError> {
         validate_session_id(parent_id)?;
         self.ensure_session_exists(parent_id)?;
-        std::fs::create_dir_all(&self.sessions_dir)?;
+        ensure_safe_directory_tree(&self.sessions_dir)?;
 
         let child_id = self.next_child_id()?;
         let parent_dir = self.session_dir(parent_id);
         let child_dir = self.session_dir(&child_id);
-        copy_dir_all(&parent_dir, &child_dir).map_err(SessionError::Io)?;
+        if let Err(error) = copy_dir_all(&parent_dir, &child_dir) {
+            let _ = fs::remove_dir_all(&child_dir);
+            return Err(SessionError::Io(error));
+        }
 
+        let result = self.record_fork_metadata(parent_id, &child_id, name);
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&child_dir);
+        }
+        result
+    }
+
+    fn record_fork_metadata(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        name: Option<String>,
+    ) -> Result<SessionRecord, SessionError> {
         let mut metadata = self.read_metadata()?;
         let parent_stored = metadata
             .sessions
@@ -534,7 +552,7 @@ impl SessionMetadataStore {
             .or_else(|| parent_stored.last_user_prompt.clone())
             .map(|t| format!("[fork] {t}"));
         metadata.sessions.insert(
-            child_id.clone(),
+            child_id.to_owned(),
             StoredSessionMetadata {
                 name,
                 summary: parent_stored.summary.clone(),
@@ -550,11 +568,10 @@ impl SessionMetadataStore {
         );
         self.write_metadata(&metadata)?;
 
-        Ok(self
-            .list()?
+        self.list()?
             .into_iter()
             .find(|session| session.id == child_id)
-            .expect("forked session should be listable"))
+            .ok_or_else(|| SessionError::MissingSession(child_id.to_owned()))
     }
 
     fn metadata_path(&self) -> PathBuf {
@@ -570,79 +587,327 @@ impl SessionMetadataStore {
     }
 
     fn ensure_session_exists(&self, session_id: &str) -> Result<(), SessionError> {
-        if self.session_path(session_id).is_file() {
-            Ok(())
-        } else {
-            Err(SessionError::MissingSession(session_id.to_owned()))
+        ensure_existing_safe_directory_tree(&self.sessions_dir)?;
+        let path = self.session_path(session_id);
+        let session_dir =
+            ensure_existing_child_directory_tree(&self.sessions_dir, Path::new(session_id))?;
+        ensure_existing_child_directory_tree(&session_dir, Path::new(AGENTS_DIR))?;
+        let parent = path.parent().ok_or_else(|| {
+            SessionError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("path has no parent directory: {}", path.display()),
+            ))
+        })?;
+        ensure_existing_safe_directory_tree(parent)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(SessionError::MissingSession(session_id.to_owned()));
+            }
+            Err(error) => return Err(SessionError::Io(error)),
+        };
+        if is_reparse_or_symlink(&metadata) {
+            return Err(SessionError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing symlinked session transcript {}", path.display()),
+            )));
         }
+        if !metadata.is_file() {
+            return Err(SessionError::MissingSession(session_id.to_owned()));
+        }
+        Ok(())
     }
 
     fn next_child_id(&self) -> Result<String, SessionError> {
         loop {
             let child_id = format!("{SESSION_ID_PREFIX}{}", Uuid::new_v4());
-            if !self.session_dir(&child_id).exists() {
-                return Ok(child_id);
+            match fs::symlink_metadata(self.session_dir(&child_id)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(child_id),
+                Err(error) => return Err(SessionError::Io(error)),
             }
         }
     }
 
     fn read_metadata(&self) -> Result<SessionMetadataFile, SessionError> {
-        let path = self.metadata_path();
-        if !path.exists() {
+        if !ensure_existing_safe_directory_tree_if_present(&self.sessions_dir)? {
             return Ok(SessionMetadataFile::default());
+        }
+        let path = self.metadata_path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(SessionMetadataFile::default());
+            }
+            Err(error) => return Err(SessionError::Io(error)),
+        };
+        if is_reparse_or_symlink(&metadata) {
+            return Err(SessionError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing symlinked session metadata {}", path.display()),
+            )));
+        }
+        if !metadata.is_file() {
+            return Err(SessionError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("session metadata is not a file: {}", path.display()),
+            )));
         }
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content).map_err(|source| SessionError::Json { line: 0, source })
     }
 
     fn write_metadata(&self, metadata: &SessionMetadataFile) -> Result<(), SessionError> {
-        std::fs::create_dir_all(&self.sessions_dir)?;
+        ensure_safe_directory_tree(&self.sessions_dir)?;
         let content = serde_json::to_string_pretty(metadata)
             .map_err(|source| SessionError::Json { line: 0, source })?;
-        std::fs::write(self.metadata_path(), format!("{content}\n"))?;
+        write_file_atomic(&self.metadata_path(), format!("{content}\n").as_bytes())?;
         Ok(())
     }
 
     fn session_ids(&self) -> Result<BTreeSet<String>, SessionError> {
         let mut ids = BTreeSet::new();
-        if self.sessions_dir.exists() {
-            for entry in std::fs::read_dir(&self.sessions_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let Some(name) = path.file_name().and_then(OsStr::to_str) else {
-                    continue;
-                };
-                if !name.starts_with(SESSION_ID_PREFIX) {
-                    continue;
-                }
-                if !main_agent_wire_path(&path).is_file() {
-                    continue;
-                }
-                if validate_session_id(name).is_ok() {
-                    ids.insert(name.to_owned());
-                }
+        if !ensure_existing_safe_directory_tree_if_present(&self.sessions_dir)? {
+            return Ok(ids);
+        }
+        for entry in std::fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                continue;
+            };
+            if !name.starts_with(SESSION_ID_PREFIX) {
+                continue;
+            }
+            let wire_path = main_agent_wire_path(&path);
+            let Ok(wire_metadata) = fs::symlink_metadata(&wire_path) else {
+                continue;
+            };
+            if is_reparse_or_symlink(&wire_metadata) || !wire_metadata.is_file() {
+                continue;
+            }
+            if validate_session_id(name).is_ok() {
+                ids.insert(name.to_owned());
             }
         }
         Ok(ids)
     }
 }
 
+fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    validate_safe_directory(path)
+}
+
+fn ensure_existing_safe_directory_tree_if_present(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            ensure_existing_safe_directory_tree(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_existing_safe_directory_tree(path: &Path) -> io::Result<()> {
+    validate_safe_directory(path)
+}
+
+fn ensure_existing_child_directory_tree(parent: &Path, child: &Path) -> io::Result<PathBuf> {
+    validate_safe_directory(parent)?;
+    let mut current = parent.to_path_buf();
+    for component in child.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                current.push(part);
+                validate_safe_directory(&current)?;
+            }
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing unsafe child path: {}", child.display()),
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn validate_safe_directory(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing symlinked session directory {}", path.display()),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session path is not a directory: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_path_absent(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("path already exists: {}", path.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_new_safe_directory(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    ensure_existing_safe_directory_tree(parent)?;
+    ensure_path_absent(path)?;
+    fs::create_dir(path)?;
+    validate_safe_directory(path)
+}
+
 /// Recursively copy a directory tree.
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
-    std::fs::create_dir_all(&dst)?;
-    for entry in std::fs::read_dir(src)? {
+    let src = src.as_ref();
+    let metadata = fs::symlink_metadata(src)?;
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to fork symlinked session root {}", src.display()),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session root is not a directory: {}", src.display()),
+        ));
+    }
+    create_new_safe_directory(dst.as_ref())?;
+    for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let ty = entry.file_type()?;
+        let source_path = entry.path();
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to fork symlinked session artifact {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        let ty = metadata.file_type();
+        let destination = dst.as_ref().join(entry.file_name());
         if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+            copy_dir_all(source_path, destination)?;
+        } else if ty.is_file() {
+            fs::copy(source_path, destination)?;
         } else {
-            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to fork non-file session artifact {}",
+                    source_path.display()
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    ensure_safe_directory_tree(parent)?;
+    reject_reparse_or_symlink_if_present(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("metadata");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let write_result = write_temp_file(&temp_path, content).and_then(|()| {
+        replace_with_temp_file(&temp_path, path)?;
+        sync_parent_dir(parent)
+    });
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_reparse_or_symlink(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing symlinked session file {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn write_temp_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+fn replace_with_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    // Rust's cross-platform `rename` contract replaces an existing file in one
+    // filesystem operation, including on Windows, without a remove-first gap.
+    fs::rename(temp_path, path)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
+}
+
+#[cfg(windows)]
+fn platform_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn platform_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn records_from_metadata(

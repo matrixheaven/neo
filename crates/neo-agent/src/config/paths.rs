@@ -73,7 +73,7 @@ pub(crate) fn expand_user_path_with_home(path: PathBuf, home: Option<&std::path:
     if raw == "~" {
         return home.map(std::path::Path::to_path_buf).unwrap_or(path);
     }
-    let Some(rest) = raw.strip_prefix("~/") else {
+    let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) else {
         return path;
     };
     home.map_or(path, |home| home.join(rest))
