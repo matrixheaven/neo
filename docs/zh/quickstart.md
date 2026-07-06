@@ -6,7 +6,7 @@
 
 | 依赖 | 版本 | 说明 |
 | --- | --- | --- |
-| Rust | 1.88+（stable） | 仓库通过 `rust-toolchain.toml` 锁定工具链，`rustup` 会自动安装 |
+| Rust | 1.96.1+（stable） | 仓库通过 `rust-toolchain.toml` 锁定工具链，`rustup` 会自动安装 |
 | `cargo` / `rustfmt` / `clippy` | 随 Rust 附带 | 标准安装即可 |
 | API Key | 至少一个供应商 | 例如 `OPENAI_API_KEY` |
 

@@ -6,7 +6,7 @@ This page walks you from zero to a working install, a configured API key, and yo
 
 | Dependency | Version | Notes |
 | --- | --- | --- |
-| Rust | 1.88+ (stable) | The repo pins the toolchain via `rust-toolchain.toml`; `rustup` installs it automatically |
+| Rust | 1.96.1+ (stable) | The repo pins the toolchain via `rust-toolchain.toml`; `rustup` installs it automatically |
 | `cargo` / `rustfmt` / `clippy` | Bundled with Rust | A standard install is enough |
 | API key | At least one provider | e.g. `OPENAI_API_KEY` |
 

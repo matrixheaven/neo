@@ -17,7 +17,7 @@ A Rust-native, local-only AI coding agent. Neo runs entirely on your machine as 
 
 ## Prerequisites
 
-- **Rust** 1.88+ (stable channel). The repo pins the toolchain via `rust-toolchain.toml`, so `rustup` handles it automatically.
+- **Rust** 1.96.1+ (stable channel). The repo pins the toolchain via `rust-toolchain.toml`, so `rustup` handles it automatically.
 - **`cargo`**, **`rustfmt`**, and **`clippy`** — all included with a standard Rust installation.
 - An API key for at least one provider (e.g. `OPENAI_API_KEY`).
 

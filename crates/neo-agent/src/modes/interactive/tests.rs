@@ -2703,6 +2703,139 @@ fn completion_catalog_excludes_extension_commands() {
     assert_eq!(models[0].source, CompletionSource::ProviderModel);
 }
 
+fn slash_test_catalog() -> CompletionCatalog {
+    CompletionCatalog {
+        slash_prompts: vec![PickerItem::new(
+            "/review",
+            "/review",
+            Some("Review project changes"),
+        )],
+        prompt_packages: vec![PickerItem::new(
+            "/review-package",
+            "/review-package",
+            Some("Packaged review prompt"),
+        )],
+        session_commands: vec![
+            PickerItem::new("/resume", "/resume", Some("Resume a local session")),
+            PickerItem::new("/new", "/new", Some("Start a fresh local session")),
+            PickerItem::new("/clear", "/clear", Some("Alias for /new")),
+            PickerItem::new("/fork", "/fork", Some("Fork the current session")),
+            PickerItem::new("/help", "/help", Some("Show help information")),
+            PickerItem::new("/model", "/model", Some("Switch active model")),
+            PickerItem::new("/provider", "/provider", Some("View configured providers")),
+            PickerItem::new("/mcp", "/mcp", Some("View and manage MCP servers")),
+            PickerItem::new("/tasks", "/tasks", Some("View active background tasks")),
+            PickerItem::new("/plan", "/plan", Some("Toggle plan mode")),
+            PickerItem::new(
+                "/compact",
+                "/compact",
+                Some("Request manual context compaction"),
+            ),
+            PickerItem::new(
+                "/permissions",
+                "/permissions",
+                Some("select permission mode"),
+            ),
+            PickerItem::new("/ask", "/ask", Some("ask permission mode")),
+            PickerItem::new("/auto", "/auto", Some("auto permission mode")),
+            PickerItem::new("/yolo", "/yolo", Some("yolo permission mode")),
+            PickerItem::new("/btw", "/btw", Some("Open a temporary side-question panel")),
+            PickerItem::new(
+                "/skill:code-simplifier",
+                "/skill:code-simplifier",
+                Some("Simplify and refine code"),
+            ),
+        ],
+        model_items: Vec::new(),
+    }
+}
+
+fn slash_values_for(prefix: &str, catalog: &CompletionCatalog) -> Vec<String> {
+    completion_source_candidates(&test_workspace_root(), prefix, catalog)
+        .expect("slash completions")
+        .into_iter()
+        .map(|candidate| candidate.value)
+        .collect()
+}
+
+#[test]
+fn slash_fuzzy_completions_keep_empty_query_order() {
+    let catalog = slash_test_catalog();
+    let values = slash_values_for("/", &catalog);
+
+    assert_eq!(
+        values[..5],
+        ["/review", "/review-package", "/resume", "/new", "/clear"],
+        "empty slash query keeps source order and curated command order"
+    );
+}
+
+#[test]
+fn slash_fuzzy_completions_rank_prefix_before_fuzzy() {
+    let catalog = slash_test_catalog();
+    let values = slash_values_for("/m", &catalog);
+
+    let model_index = values
+        .iter()
+        .position(|value| value == "/model")
+        .expect("/model present");
+    let permissions_index = values
+        .iter()
+        .position(|value| value == "/permissions")
+        .expect("/permissions present as a weaker fuzzy match");
+
+    assert!(
+        model_index < permissions_index,
+        "prefix match /model should rank before fuzzy-only /permissions"
+    );
+}
+
+#[test]
+fn slash_fuzzy_completions_match_command_abbreviations() {
+    let catalog = slash_test_catalog();
+
+    assert_eq!(
+        slash_values_for("/mdl", &catalog).first(),
+        Some(&"/model".to_owned())
+    );
+    assert_eq!(
+        slash_values_for("/prv", &catalog).first(),
+        Some(&"/provider".to_owned())
+    );
+    assert_eq!(
+        slash_values_for("/perm", &catalog).first(),
+        Some(&"/permissions".to_owned())
+    );
+}
+
+#[test]
+fn slash_fuzzy_completions_match_skill_name_without_skill_prefix() {
+    let catalog = slash_test_catalog();
+    let values = slash_values_for("/code", &catalog);
+
+    assert_eq!(
+        values.first(),
+        Some(&"/skill:code-simplifier".to_owned()),
+        "skill commands should be searchable by skill name without typing /skill:"
+    );
+}
+
+#[test]
+fn slash_fuzzy_completions_match_prompt_templates() {
+    let catalog = slash_test_catalog();
+    let values = slash_values_for("/rvw", &catalog);
+
+    assert_eq!(values.first(), Some(&"/review".to_owned()));
+}
+
+#[test]
+fn slash_fuzzy_completions_return_empty_for_miss() {
+    let catalog = slash_test_catalog();
+    let values = slash_values_for("/zzzznotacommand", &catalog);
+
+    assert!(values.is_empty());
+}
+
 #[tokio::test]
 async fn event_loop_slash_resume_opens_local_session_picker() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

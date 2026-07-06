@@ -17,7 +17,7 @@ Rust 原生、纯本地运行的 AI 编程助手。Neo 作为 CLI 和 TUI 完全
 
 ## 前置要求
 
-- **Rust** 1.88+（stable 通道）。仓库通过 `rust-toolchain.toml` 固定工具链，`rustup` 会自动处理。
+- **Rust** 1.96.1+（stable 通道）。仓库通过 `rust-toolchain.toml` 固定工具链，`rustup` 会自动处理。
 - **`cargo`**、**`rustfmt`** 和 **`clippy`** —— 标准 Rust 安装已包含。
 - 至少一个提供商的 API 密钥（例如 `OPENAI_API_KEY`）。
 

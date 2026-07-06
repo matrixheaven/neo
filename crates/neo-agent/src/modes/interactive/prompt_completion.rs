@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::prompt::templates::{
     PromptTemplateLocation, discover_prompt_template_commands, load_project_prompt_templates,
@@ -18,10 +19,17 @@ pub(super) fn prompt_completions(
     skill_store: Option<&SkillStore>,
     project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
+    let (slash_prompts, prompt_packages) = if prefix.starts_with('/') {
+        (
+            slash_prompt_template_completion_items(root, project_trusted),
+            prompt_package_completion_items(root, project_trusted)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let catalog = CompletionCatalog {
-        slash_prompts: slash_prompt_template_completion_items(root, prefix, project_trusted)
-            .unwrap_or_default(),
-        prompt_packages: prompt_package_completion_items(root, project_trusted)?,
+        slash_prompts,
+        prompt_packages,
         session_commands: session_completion_items(skill_store),
         model_items: model_items.to_vec(),
     };
@@ -97,16 +105,7 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
     items
 }
 
-fn slash_prompt_template_completion_items(
-    root: &Path,
-    prefix: &str,
-    project_trusted: bool,
-) -> Option<Vec<PickerItem>> {
-    let name_prefix = prefix.strip_prefix('/')?;
-    if name_prefix.contains('/') {
-        return None;
-    }
-
+fn slash_prompt_template_completion_items(root: &Path, project_trusted: bool) -> Vec<PickerItem> {
     let project_prompts_dir = root.join(".neo/prompts");
     let mut completions = load_project_prompt_templates(root, project_trusted)
         .into_iter()
@@ -120,7 +119,6 @@ fn slash_prompt_template_completion_items(
                         .is_none_or(|parent| parent.as_os_str().is_empty())
                 })
         })
-        .filter(|template| template.name.starts_with(name_prefix))
         .map(|template| {
             let value = format!("/{}", template.name);
             let description = (!template.description.is_empty()).then_some(template.description);
@@ -129,7 +127,7 @@ fn slash_prompt_template_completion_items(
         .collect::<Vec<_>>();
     completions.sort_by(|left, right| left.value.cmp(&right.value));
     completions.truncate(100);
-    Some(completions)
+    completions
 }
 
 fn filesystem_completion_candidates(root: &Path, prefix: &str) -> Result<Vec<CompletionCandidate>> {
@@ -280,9 +278,13 @@ pub(super) fn completion_source_candidates(
     prefix: &str,
     catalog: &CompletionCatalog,
 ) -> Result<Vec<CompletionCandidate>> {
-    let mut candidates = if prefix.starts_with('/') {
-        slash_source_candidates(prefix, catalog)
-    } else if prefix.starts_with('@') {
+    if prefix.starts_with('/') {
+        let mut candidates = slash_source_candidates(prefix, catalog);
+        candidates.truncate(100);
+        return Ok(candidates);
+    }
+
+    let mut candidates = if prefix.starts_with('@') {
         model_completion_candidates(prefix, &catalog.model_items).unwrap_or_default()
     } else {
         filesystem_completion_candidates(root, prefix)?
@@ -297,6 +299,63 @@ pub(super) fn completion_source_candidates(
 }
 
 fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<CompletionCandidate> {
+    let query = slash_query(prefix);
+    let candidates = collect_slash_candidates(catalog);
+    if query.is_empty() {
+        return candidates
+            .into_iter()
+            .map(|candidate| candidate.candidate)
+            .collect();
+    }
+
+    let matcher = SkimMatcherV2::default().smart_case();
+    let mut scored = candidates
+        .into_iter()
+        .filter_map(|candidate| score_slash_candidate(candidate, query, &matcher))
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        left.tier
+            .cmp(&right.tier)
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.source_rank.cmp(&right.source_rank))
+            .then_with(|| left.collection_index.cmp(&right.collection_index))
+            .then_with(|| left.candidate.value.cmp(&right.candidate.value))
+    });
+    scored
+        .into_iter()
+        .map(|candidate| candidate.candidate)
+        .collect()
+}
+
+fn slash_query(prefix: &str) -> &str {
+    prefix.strip_prefix('/').unwrap_or(prefix).trim()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SlashMatchTier {
+    Exact,
+    Prefix,
+    SegmentPrefix,
+    Fuzzy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScoredSlashCandidate {
+    candidate: CompletionCandidate,
+    tier: SlashMatchTier,
+    score: i64,
+    source_rank: u8,
+    collection_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlashCandidate {
+    candidate: CompletionCandidate,
+    source_rank: u8,
+    collection_index: usize,
+}
+
+fn collect_slash_candidates(catalog: &CompletionCatalog) -> Vec<SlashCandidate> {
     let sources = [
         (&catalog.slash_prompts, CompletionSource::SlashPrompt),
         (&catalog.prompt_packages, CompletionSource::PromptPackage),
@@ -307,10 +366,68 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
         .flat_map(|(items, source)| {
             items
                 .iter()
-                .filter(move |item| item.value.starts_with(prefix))
                 .cloned()
-                .map(move |item| CompletionCandidate::from_picker(item, source))
+                .enumerate()
+                .map(move |(collection_index, item)| SlashCandidate {
+                    candidate: CompletionCandidate::from_picker(item, source),
+                    source_rank: completion_source_rank(source),
+                    collection_index,
+                })
         })
+        .collect()
+}
+
+fn score_slash_candidate(
+    candidate: SlashCandidate,
+    query: &str,
+    matcher: &SkimMatcherV2,
+) -> Option<ScoredSlashCandidate> {
+    slash_search_keys(&candidate.candidate.value)
+        .into_iter()
+        .filter_map(|key| score_slash_key(&key, query, matcher))
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+        .map(|(tier, score)| ScoredSlashCandidate {
+            candidate: candidate.candidate,
+            tier,
+            score,
+            source_rank: candidate.source_rank,
+            collection_index: candidate.collection_index,
+        })
+}
+
+fn score_slash_key(
+    key: &str,
+    query: &str,
+    matcher: &SkimMatcherV2,
+) -> Option<(SlashMatchTier, i64)> {
+    if key == query {
+        Some((SlashMatchTier::Exact, 0))
+    } else if key.starts_with(query) {
+        Some((SlashMatchTier::Prefix, 0))
+    } else if slash_key_segments(key)
+        .into_iter()
+        .any(|segment| segment.starts_with(query))
+    {
+        Some((SlashMatchTier::SegmentPrefix, 0))
+    } else {
+        matcher
+            .fuzzy_match(key, query)
+            .map(|score| (SlashMatchTier::Fuzzy, score))
+    }
+}
+
+fn slash_search_keys(value: &str) -> Vec<String> {
+    let command = value.strip_prefix('/').unwrap_or(value);
+    let mut keys = vec![command.to_owned()];
+    if let Some(skill_name) = command.strip_prefix("skill:") {
+        keys.push(skill_name.to_owned());
+    }
+    keys
+}
+
+fn slash_key_segments(key: &str) -> Vec<&str> {
+    key.split([':', '-', '_', '.', '/'])
+        .filter(|segment| !segment.is_empty())
         .collect()
 }
 
