@@ -511,8 +511,8 @@ fn complete_json_value_end(raw: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// Drop a trailing assistant message that issued `tool_calls` whose results
-/// never arrived. Unlike `sanitize_tool_exchange_messages` (which synthesizes
+/// Drop a trailing assistant/tool-result exchange when the exchange never
+/// completed. Unlike `sanitize_tool_exchange_messages` (which synthesizes
 /// missing results), this *removes* the incomplete turn so replay/projection
 /// don't feed the model a turn that was never completed.
 #[must_use]
@@ -525,6 +525,46 @@ pub fn trim_trailing_incomplete_tool_turn(
     {
         return std::borrow::Cow::Owned(messages[..messages.len() - 1].to_vec());
     }
+
+    let mut first_trailing_result = messages.len();
+    while first_trailing_result > 0
+        && matches!(
+            messages[first_trailing_result - 1],
+            AgentMessage::ToolResult { .. }
+        )
+    {
+        first_trailing_result -= 1;
+    }
+
+    if first_trailing_result == messages.len() || first_trailing_result == 0 {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+
+    if let AgentMessage::Assistant { tool_calls, .. } = &messages[first_trailing_result - 1]
+        && !tool_calls.is_empty()
+    {
+        let ids: HashSet<&str> = tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.as_ref())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut all_results_match = true;
+        for message in &messages[first_trailing_result..] {
+            let AgentMessage::ToolResult { tool_call_id, .. } = message else {
+                unreachable!("suffix was checked to contain only tool results");
+            };
+            if ids.contains(tool_call_id.as_ref()) {
+                seen.insert(tool_call_id.as_ref());
+            } else {
+                all_results_match = false;
+            }
+        }
+
+        if !all_results_match || seen.len() != ids.len() {
+            return std::borrow::Cow::Owned(messages[..first_trailing_result - 1].to_vec());
+        }
+    }
+
     std::borrow::Cow::Borrowed(messages)
 }
 

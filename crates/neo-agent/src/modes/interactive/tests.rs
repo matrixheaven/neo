@@ -5606,7 +5606,7 @@ fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_t
 }
 
 #[test]
-fn rebuild_transcript_from_session_initializes_context_window_usage() {
+fn rebuild_transcript_from_session_keeps_context_window_unseeded() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "new",
@@ -5620,19 +5620,18 @@ fn rebuild_transcript_from_session_initializes_context_window_usage() {
         .set_context_window(Some(ContextWindow::new(1_000_000)));
 
     let loaded =
-        LoadedSessionTranscript::new("alpha", Vec::new(), [AgentMessage::user_text("hello")])
-            .with_estimated_context_tokens(393);
+        LoadedSessionTranscript::new("alpha", Vec::new(), [AgentMessage::user_text("hello")]);
 
     controller.rebuild_transcript_from_session(&loaded);
 
     assert_eq!(
         controller.chrome().context_window(),
-        Some(ContextWindow::new(1_000_000).with_used_tokens(393))
+        Some(ContextWindow::new(1_000_000))
     );
 }
 
 #[tokio::test]
-async fn load_session_transcript_estimates_context_usage_for_replayed_session() {
+async fn load_session_transcript_keeps_context_usage_event_authoritative() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
     let config = test_config(temp.path(), sessions_dir);
@@ -5654,7 +5653,10 @@ async fn load_session_transcript_estimates_context_usage_for_replayed_session() 
         .await
         .expect("load transcript");
 
-    assert_eq!(loaded.estimated_context_tokens, Some(5));
+    assert_eq!(
+        loaded.messages,
+        vec![AgentMessage::user_text("remember this")]
+    );
 }
 
 #[tokio::test]
@@ -5776,7 +5778,6 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
         input_cache_write_tokens: 0,
     });
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
-        .with_estimated_context_tokens(5_000)
         .with_main_agent_token_usage(usage);
 
     controller.rebuild_transcript_from_session(&loaded);
@@ -5788,7 +5789,7 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
         .expect("footer contains context")
         .to_owned();
 
-    assert!(footer.contains("ctx 5k/512k"));
+    assert!(footer.contains("ctx --/512k"));
     assert!(footer.contains("↑33.9k"));
     assert!(footer.contains("↓2.8k"));
     assert!(footer.contains("cache 169.2k read"));

@@ -574,7 +574,6 @@ pub(crate) struct LoadedSessionTranscript {
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
     events: Vec<AgentEvent>,
-    estimated_context_tokens: Option<u32>,
     main_agent_token_usage: MainAgentTokenUsage,
 }
 
@@ -590,7 +589,6 @@ impl LoadedSessionTranscript {
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
             events: Vec::new(),
-            estimated_context_tokens: None,
             main_agent_token_usage: MainAgentTokenUsage::default(),
         }
     }
@@ -598,12 +596,6 @@ impl LoadedSessionTranscript {
     #[must_use]
     pub(crate) fn with_events(mut self, events: impl IntoIterator<Item = AgentEvent>) -> Self {
         self.events = events.into_iter().collect();
-        self
-    }
-
-    #[must_use]
-    pub(crate) const fn with_estimated_context_tokens(mut self, used_tokens: u32) -> Self {
-        self.estimated_context_tokens = Some(used_tokens);
         self
     }
 
@@ -1945,11 +1937,9 @@ async fn load_session_transcript(
     {
         notices.push(format!("branch summary: {summary}"));
     }
-    let estimated_context_tokens = context.estimated_context_tokens();
     Ok(
         LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
             .with_events(events)
-            .with_estimated_context_tokens(estimated_context_tokens)
             .with_main_agent_token_usage(main_agent_token_usage),
     )
 }

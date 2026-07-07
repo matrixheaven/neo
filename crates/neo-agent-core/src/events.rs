@@ -260,9 +260,6 @@ pub enum AgentEvent {
     CompactionApplied {
         summary: CompactionSummary,
     },
-    MicroCompactionApplied {
-        cutoff: usize,
-    },
     MessageAppended {
         message: AgentMessage,
     },

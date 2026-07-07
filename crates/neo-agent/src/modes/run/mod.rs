@@ -713,7 +713,8 @@ async fn finish_compaction_turn_streaming(
     streaming: StreamingTurnIo,
 ) -> anyhow::Result<PromptTurn> {
     let mut events = forward_initial_streaming_events(&streaming.event_tx, initial_events);
-    let mut stream = runtime.run_compaction_turn_with_cancel(&mut context, streaming.cancel_token);
+    let mut stream =
+        runtime.run_manual_compaction_turn_with_cancel(&mut context, streaming.cancel_token);
     while let Some(event) = stream.next().await {
         let event = streaming_event_or_bail(event, &streaming.event_tx)?;
         writer.append_event(&event).await?;

@@ -7,8 +7,8 @@ use neo_agent_core::session::{
     session_state_path,
 };
 use neo_agent_core::{
-    AgentContext, AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, StopReason,
-    TodoEventData,
+    AgentContext, AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content,
+    ContextWindowSource, StopReason, TodoEventData,
 };
 use serde_json::json;
 
@@ -88,6 +88,86 @@ async fn jsonl_session_reads_legacy_token_usage_without_cache_fields() {
             },
         }]
     );
+}
+
+#[test]
+fn replay_accepts_old_context_window_updated_shape() {
+    let json = r#"{"ContextWindowUpdated":{"turn":1,"used_tokens":123}}"#;
+    let event: AgentEvent = serde_json::from_str(json).expect("old event should parse");
+    assert!(matches!(
+        event,
+        AgentEvent::ContextWindowUpdated {
+            turn: 1,
+            used_tokens: 123,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn replay_accepts_compaction_summary_without_new_metadata() {
+    let json = r#"{
+        "summary":"old summary",
+        "tokens_before":100,
+        "tokens_after":50,
+        "first_kept_message_index":2
+    }"#;
+    let summary: CompactionSummary = serde_json::from_str(json).expect("old summary should parse");
+    assert_eq!(summary.summary, "old summary");
+    assert_eq!(summary.first_kept_message_index, 2);
+}
+
+#[test]
+fn replay_ignores_old_context_window_event_for_authority() {
+    let events = vec![
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("real history ".repeat(1_000)),
+        },
+        AgentEvent::ContextWindowUpdated {
+            turn: 1,
+            used_tokens: 1,
+            projected_tokens: Some(1),
+            max_tokens: Some(1_000_000),
+            trigger_tokens: Some(800_000),
+            remaining_tokens: Some(799_999),
+            source: Some(ContextWindowSource::Configured),
+        },
+    ];
+
+    let context = AgentContext::from_replay(events.iter());
+
+    assert!(context.estimated_tokens() > 1);
+}
+
+#[test]
+fn replay_drops_incomplete_trailing_tool_exchange_before_budgeting() {
+    let events = vec![
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                Vec::new(),
+                vec![
+                    AgentToolCall {
+                        id: "a".into(),
+                        name: "Read".into(),
+                        raw_arguments: "{}".into(),
+                    },
+                    AgentToolCall {
+                        id: "b".into(),
+                        name: "Read".into(),
+                        raw_arguments: "{}".into(),
+                    },
+                ],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result("a", "Read", vec![Content::text("done")], false),
+        },
+    ];
+
+    let context = AgentContext::from_replay(events.iter());
+
+    assert!(context.messages().is_empty());
 }
 
 #[tokio::test]

@@ -20,7 +20,6 @@ use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
 use super::stream_aggregator::run_model_turn;
-use super::tokens::estimate_messages_tokens;
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
@@ -81,11 +80,12 @@ async fn recover_from_overflow(
     cancel_token: &CancellationToken,
     turn: u32,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
-    // Record observed overflow for adaptive threshold.
-    let messages_snapshot = emitter.context.messages().to_vec();
-    let estimated = estimate_messages_tokens(&messages_snapshot);
-    super::config::observe_context_overflow(config, estimated);
-
+    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+        config,
+        &emitter.context,
+        ProjectionPlan::disabled(),
+    );
+    super::config::observe_context_overflow(config, snapshot.raw_effective_tokens);
     let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
         config,
         &emitter.context,
@@ -547,7 +547,10 @@ fn request_projection_plan(
     }
     ProjectionPlan {
         enabled: true,
-        cutoff_index: context.micro_compaction_cutoff(),
+        cutoff_index: context
+            .messages()
+            .len()
+            .saturating_sub(settings.micro_keep_recent),
         min_tool_result_tokens: 1_000,
         keep_recent_messages: settings.micro_keep_recent,
         mode: ProjectionMode::Request,

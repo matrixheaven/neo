@@ -3,7 +3,10 @@ use crate::primitive::theme::format_token_count;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindow {
     pub used_tokens: Option<u32>,
-    pub max_tokens: u32,
+    pub projected_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub trigger_tokens: Option<u32>,
+    pub source: Option<neo_agent_core::ContextWindowSource>,
 }
 
 impl ContextWindow {
@@ -11,7 +14,10 @@ impl ContextWindow {
     pub const fn new(max_tokens: u32) -> Self {
         Self {
             used_tokens: None,
-            max_tokens,
+            projected_tokens: None,
+            max_tokens: Some(max_tokens),
+            trigger_tokens: None,
+            source: None,
         }
     }
 
@@ -22,11 +28,49 @@ impl ContextWindow {
     }
 
     #[must_use]
+    pub const fn with_projected_tokens(mut self, projected_tokens: Option<u32>) -> Self {
+        self.projected_tokens = projected_tokens;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_trigger_tokens(mut self, trigger_tokens: Option<u32>) -> Self {
+        self.trigger_tokens = trigger_tokens;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_source(
+        mut self,
+        source: Option<neo_agent_core::ContextWindowSource>,
+    ) -> Self {
+        self.source = source;
+        self
+    }
+
+    #[must_use]
+    pub const fn display_tokens(self) -> Option<u32> {
+        match self.projected_tokens {
+            Some(tokens) => Some(tokens),
+            None => self.used_tokens,
+        }
+    }
+
+    #[must_use]
     pub fn label(self) -> String {
         let used = self
-            .used_tokens
+            .display_tokens()
             .map_or_else(|| "--".to_owned(), format_token_count);
-        format!("ctx {used}/{}", format_token_count(self.max_tokens))
+        let max = self
+            .max_tokens
+            .map_or_else(|| "--".to_owned(), format_token_count);
+        format!("ctx {used}/{max}")
     }
 }
 

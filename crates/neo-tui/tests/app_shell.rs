@@ -398,6 +398,38 @@ fn app_shell_updates_context_usage_from_agent_event() {
 }
 
 #[test]
+fn footer_renders_projected_context_when_available() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ContextWindowUpdated {
+        turn: 1,
+        used_tokens: 72_000,
+        projected_tokens: Some(43_000),
+        max_tokens: Some(64_000),
+        trigger_tokens: Some(51_200),
+        remaining_tokens: Some(8_200),
+        source: Some(neo_agent_core::ContextWindowSource::Configured),
+    });
+
+    assert_eq!(app.context_window_label(), Some("ctx 43k/64k".to_owned()));
+}
+
+#[test]
+fn footer_falls_back_to_used_tokens_for_old_events() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ContextWindowUpdated {
+        turn: 1,
+        used_tokens: 12_345,
+        projected_tokens: None,
+        max_tokens: Some(200_000),
+        trigger_tokens: None,
+        remaining_tokens: None,
+        source: None,
+    });
+
+    assert_eq!(app.context_window_label(), Some("ctx 12k/200k".to_owned()));
+}
+
+#[test]
 fn app_shell_footer_shows_main_agent_token_usage_and_cache() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));

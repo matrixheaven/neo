@@ -242,7 +242,15 @@ pub fn compute_compact_count(
                 let next_index = messages.len() - recent_messages;
                 recent_size += estimate_message_tokens(&messages[next_index]);
             }
-            fit_compact_count_to_window(messages, best_n.unwrap_or(0), max_context_tokens)
+            let compacted_count = best_n.unwrap_or_else(|| {
+                let last_index = messages.len() - 1;
+                if can_split_after(messages, last_index) {
+                    messages.len()
+                } else {
+                    0
+                }
+            });
+            fit_compact_count_to_window(messages, compacted_count, max_context_tokens)
         }
     }
 }
@@ -667,6 +675,24 @@ mod tests {
         let count = compute_compact_count(&messages, CompactionSource::Auto, &strategy, 0);
         // Should keep at most max_recent_messages (4), compact the rest
         assert!(count <= messages.len() - 3, "count={count}");
+    }
+
+    #[test]
+    fn compute_compact_count_auto_can_compact_closed_trailing_tool_group() {
+        let messages = vec![
+            user_msg("run tools"),
+            assistant_with_tools(vec![tool_call("tc1"), tool_call("tc2")]),
+            tool_result("tc1"),
+            tool_result("tc2"),
+        ];
+        let strategy = CompactionStrategy {
+            max_recent_messages: 1,
+            ..CompactionStrategy::default()
+        };
+
+        let count = compute_compact_count(&messages, CompactionSource::Auto, &strategy, 0);
+
+        assert_eq!(count, messages.len());
     }
 
     #[test]

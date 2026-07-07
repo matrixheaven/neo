@@ -129,14 +129,6 @@ impl InteractiveController {
             .chrome_mut()
             .set_main_agent_token_usage(loaded.main_agent_token_usage);
 
-        if let Some(used_tokens) = loaded.estimated_context_tokens
-            && let Some(window) = self.tui.chrome().context_window()
-        {
-            self.tui
-                .chrome_mut()
-                .set_context_window(Some(window.with_used_tokens(used_tokens)));
-        }
-
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
         transcript.set_theme(self.tui.chrome().theme());

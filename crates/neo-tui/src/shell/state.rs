@@ -268,13 +268,16 @@ impl NeoChromeState {
         let Some(context) = self.context_window else {
             return self.theme().footer_context_ok;
         };
-        if context.max_tokens == 0 {
-            return self.theme().footer_context_ok;
-        }
-        let Some(used) = context.used_tokens else {
+        let Some(max_tokens) = context.max_tokens else {
             return self.theme().footer_context_ok;
         };
-        let ratio = f64::from(used) / f64::from(context.max_tokens);
+        if max_tokens == 0 {
+            return self.theme().footer_context_ok;
+        }
+        let Some(used) = context.display_tokens() else {
+            return self.theme().footer_context_ok;
+        };
+        let ratio = f64::from(used) / f64::from(max_tokens);
         if ratio >= 0.9 {
             self.theme().footer_context_critical
         } else if ratio >= 0.7 {

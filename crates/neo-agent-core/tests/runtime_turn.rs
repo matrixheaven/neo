@@ -25,6 +25,22 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+async fn collect_turn_events(
+    harness: &FakeHarness,
+    config: AgentConfig,
+    context: &mut AgentContext,
+    input: AgentMessage,
+) -> Vec<AgentEvent> {
+    let runtime = AgentRuntime::new(config, harness.client());
+    runtime
+        .run_turn(context, input)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed")
+}
+
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
     let harness = FakeHarness::from_events([
@@ -1253,6 +1269,365 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
         percents.windows(2).all(|w| w[0] <= w[1]),
         "progress percents should be monotonic: {percents:?}"
     );
+}
+
+#[tokio::test]
+async fn runtime_context_window_events_share_budget_snapshot() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "done".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("history ".repeat(4_000)));
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_system_prompt("system ".repeat(1_000))
+        .with_compaction(CompactionSettings::new(usize::MAX, 4));
+    config.model.capabilities.max_context_tokens = Some(200_000);
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("continue"),
+    )
+    .await;
+
+    let update = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextWindowUpdated {
+                used_tokens,
+                projected_tokens,
+                trigger_tokens,
+                ..
+            } => Some((*used_tokens, *projected_tokens, *trigger_tokens)),
+            _ => None,
+        })
+        .expect("context update");
+    assert!(update.0 > 0);
+    assert!(update.1.is_some());
+    assert!(update.2.is_some());
+}
+
+#[tokio::test]
+async fn runtime_compacts_before_model_call_when_resume_exceeds_window() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "summary".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "resumed".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("history ".repeat(40_000)));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("previous answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    let mut config =
+        AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(1, 1));
+    config.model.capabilities.max_context_tokens = Some(8_000);
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("continue"),
+    )
+    .await;
+
+    let compaction = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+        .expect("compaction");
+    let assistant = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageAppended {
+                    message: AgentMessage::Assistant { .. }
+                }
+            )
+        })
+        .expect("assistant");
+    assert!(compaction < assistant);
+}
+
+#[tokio::test]
+async fn runtime_overflow_records_observed_window_and_retries_once() {
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::ContextOverflow {
+            message: "too many tokens".to_owned(),
+        })],
+        vec![
+            Ok(AiStreamEvent::MessageStart {
+                id: "summary".to_owned(),
+            }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+        vec![
+            Ok(AiStreamEvent::MessageStart {
+                id: "retry".to_owned(),
+            }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "recovered".to_owned(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+    ]);
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("history"));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("old answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_system_prompt("system ".repeat(4_000))
+        .with_compaction(CompactionSettings::new(usize::MAX, 1));
+    config.model.capabilities.max_context_tokens = Some(200_000);
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("continue"),
+    )
+    .await;
+
+    assert_eq!(harness.requests().len(), 3);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+    );
+    let observed_max = events.iter().find_map(|event| match event {
+        AgentEvent::ContextWindowUpdated {
+            max_tokens: Some(max_tokens),
+            source: Some(neo_agent_core::ContextWindowSource::ObservedOverflow),
+            ..
+        } => Some(*max_tokens),
+        _ => None,
+    });
+    assert!(observed_max.is_some_and(|max| max > 1_000));
+}
+
+#[tokio::test]
+async fn runtime_does_not_compact_mid_parallel_tool_group() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "a".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "a".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "b".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "b".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "c".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "c".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "summary".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "after tools".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = runtime_with_large_tool(&harness);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("use tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let last_tool_result = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageAppended {
+                    message: AgentMessage::ToolResult { .. }
+                }
+            )
+        })
+        .expect("tool result");
+    let first_compaction = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+        .expect("compaction");
+    assert!(first_compaction > last_tool_result);
+}
+
+#[tokio::test]
+async fn runtime_compacts_after_parallel_tool_group_before_followup() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "a".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "a".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "b".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "b".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "c".to_owned(),
+                name: "LargeTool".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "c".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "summary".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "after compaction".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = runtime_with_large_tool(&harness);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("use tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let compaction = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+        .expect("compaction");
+    let second_assistant = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageAppended {
+                    message: AgentMessage::Assistant { .. }
+                }
+            )
+        })
+        .expect("assistant");
+    assert!(compaction < second_assistant);
 }
 
 #[tokio::test]
@@ -5962,6 +6337,35 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
 }
 
 struct EchoTool;
+
+fn runtime_with_large_tool(harness: &FakeHarness) -> AgentRuntime {
+    let mut registry = ToolRegistry::new();
+    registry.register(LargeTool);
+    let config = AgentConfig::for_model(harness.model())
+        .with_tool_execution_mode(ToolExecutionMode::Parallel)
+        .with_compaction(CompactionSettings::new(1, 1));
+    AgentRuntime::with_tools(config, harness.client(), registry)
+}
+
+struct LargeTool;
+
+impl Tool for LargeTool {
+    fn name(&self) -> &'static str {
+        "LargeTool"
+    }
+
+    fn description(&self) -> &'static str {
+        "Returns a large payload."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async { Ok(ToolResult::ok("tool output ".repeat(20_000))) })
+    }
+}
 
 impl Tool for EchoTool {
     fn name(&self) -> &'static str {

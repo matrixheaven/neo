@@ -255,15 +255,15 @@ impl AgentRuntime {
     /// not call the model afterwards; it simply executes any pending compaction
     /// (manual or automatic) and finishes.  Used by the TUI's `/compact` slash
     /// command when the session is idle.
-    pub fn run_compaction_turn<'a>(
+    pub fn run_manual_compaction_turn<'a>(
         &'a self,
         context: &'a mut AgentContext,
     ) -> AgentEventStream<'a> {
-        self.run_compaction_turn_with_cancel(context, CancellationToken::new())
+        self.run_manual_compaction_turn_with_cancel(context, CancellationToken::new())
     }
 
     /// Run a compaction-only turn with an external cancellation token.
-    pub fn run_compaction_turn_with_cancel<'a>(
+    pub fn run_manual_compaction_turn_with_cancel<'a>(
         &'a self,
         context: &'a mut AgentContext,
         cancel_token: CancellationToken,
@@ -401,7 +401,7 @@ mod tests {
         ));
 
         let events: Vec<AgentEvent> = runtime
-            .run_compaction_turn(&mut context)
+            .run_manual_compaction_turn(&mut context)
             .try_collect()
             .await
             .expect("compaction turn succeeds");
@@ -461,7 +461,7 @@ mod tests {
         ));
 
         let _events: Vec<AgentEvent> = runtime
-            .run_compaction_turn(&mut context)
+            .run_manual_compaction_turn(&mut context)
             .try_collect()
             .await
             .expect("compaction turn succeeds");

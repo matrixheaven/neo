@@ -5,6 +5,7 @@ use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus};
 use crate::widgets::{TodoDisplayItem, TodoDisplayStatus};
 
 use super::approval::ApprovalRequestModal;
+use super::context::ContextWindow;
 use super::state::NeoChromeState;
 use super::stream::StreamUpdate;
 
@@ -171,10 +172,23 @@ impl NeoChromeState {
                 self.focused_overlay = None;
                 self.mode = ChromeMode::Approval;
             }
-            AgentEvent::ContextWindowUpdated { used_tokens, .. } => {
-                if let Some(context_window) = &mut self.context_window {
-                    *context_window = context_window.with_used_tokens(used_tokens);
-                }
+            AgentEvent::ContextWindowUpdated {
+                used_tokens,
+                projected_tokens,
+                max_tokens,
+                trigger_tokens,
+                source,
+                ..
+            } => {
+                let window = self.context_window.unwrap_or(ContextWindow::new(0));
+                self.context_window = Some(
+                    window
+                        .with_used_tokens(used_tokens)
+                        .with_projected_tokens(projected_tokens)
+                        .with_max_tokens(max_tokens.or(window.max_tokens))
+                        .with_trigger_tokens(trigger_tokens)
+                        .with_source(source),
+                );
             }
             AgentEvent::TurnFinished { .. } => {
                 self.apply_stream_update(StreamUpdate::TurnFinished);
@@ -200,7 +214,6 @@ impl NeoChromeState {
             AgentEvent::CompactionStarted { .. }
             | AgentEvent::CompactionProgress { .. }
             | AgentEvent::CompactionApplied { .. }
-            | AgentEvent::MicroCompactionApplied { .. }
             | AgentEvent::MessageAppended { .. }
             | AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
