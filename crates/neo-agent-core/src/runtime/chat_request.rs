@@ -3,9 +3,14 @@ use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::image_blobs::resolve_image_blobs;
+use crate::compaction::projection::{ProjectionPlan, project_for_request};
 use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
-pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
+pub(super) async fn chat_request(
+    config: &AgentConfig,
+    context: &AgentContext,
+    projection_plan: &ProjectionPlan,
+) -> ChatRequest {
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt.as_str()).to_chat_message());
@@ -20,22 +25,7 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     // Resolve blob references to inline base64 before sending to the provider.
     let context_messages =
         resolve_image_blobs(context_messages, config.session_directory.as_deref()).await;
-    // Apply micro compaction (experimental): truncate old, large tool results
-    // to reclaim context tokens without a full LLM-driven compaction.
-    let context_messages = if config
-        .compaction
-        .is_some_and(|settings| settings.micro_enabled)
-    {
-        crate::compaction::micro::apply_micro_compaction(
-            &context_messages,
-            &crate::compaction::micro::MicroCompactionConfig {
-                cutoff: context.micro_compaction_cutoff(),
-                ..crate::compaction::micro::MicroCompactionConfig::default()
-            },
-        )
-    } else {
-        context_messages
-    };
+    let context_messages = project_for_request(&context_messages, projection_plan).messages;
     // Never send a provider request with an assistant message that has pending
     // tool_calls but no matching tool results.  This guards against incomplete
     // trailing tool turns and against compaction boundaries that accidentally
@@ -169,6 +159,8 @@ mod tests {
     use neo_ai::{ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId};
 
     use super::*;
+    use crate::Content;
+    use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
     use crate::tools::ToolRegistry;
 
     fn tool_model() -> ModelSpec {
@@ -197,6 +189,82 @@ mod tests {
             .join("\n")
     }
 
+    fn tool_result_texts(request: &ChatRequest) -> String {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatMessage::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn chat_request_applies_supplied_projection_plan() {
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::assistant(
+            Vec::new(),
+            vec![crate::AgentToolCall {
+                id: "call".into(),
+                name: "Read".into(),
+                raw_arguments: "{}".into(),
+            }],
+            crate::StopReason::ToolUse,
+        ));
+        context.append_message(AgentMessage::tool_result(
+            "call",
+            "Read",
+            vec![Content::text("x".repeat(8_000))],
+            false,
+        ));
+        let config = AgentConfig::for_model(tool_model())
+            .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
+        let plan = ProjectionPlan {
+            enabled: true,
+            cutoff_index: 2,
+            min_tool_result_tokens: 100,
+            keep_recent_messages: 0,
+            mode: ProjectionMode::Request,
+        };
+
+        let request = chat_request(&config, &context, &plan).await;
+
+        assert!(tool_result_texts(&request).contains("[tool result omitted"));
+    }
+
+    #[tokio::test]
+    async fn chat_request_disabled_projection_keeps_tool_result_content() {
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::assistant(
+            Vec::new(),
+            vec![crate::AgentToolCall {
+                id: "call".into(),
+                name: "Read".into(),
+                raw_arguments: "{}".into(),
+            }],
+            crate::StopReason::ToolUse,
+        ));
+        context.append_message(AgentMessage::tool_result(
+            "call",
+            "Read",
+            vec![Content::text("x".repeat(8_000))],
+            false,
+        ));
+        let config = AgentConfig::for_model(tool_model())
+            .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
+
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+
+        assert!(tool_result_texts(&request).contains(&"x".repeat(100)));
+    }
+
     #[tokio::test]
     async fn chat_request_sends_tools_without_duplicate_system_schema_catalog() {
         let tools = ToolRegistry::with_builtin_tools().specs();
@@ -205,7 +273,7 @@ mod tests {
             .with_tools(tools.clone());
         let context = AgentContext::new();
 
-        let request = chat_request(&config, &context).await;
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
         let system_text = system_texts(&request);
 
         assert!(
@@ -220,7 +288,7 @@ mod tests {
         let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
         let context = AgentContext::new();
 
-        let request = chat_request(&config, &context).await;
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
         let system_text = system_texts(&request);
 
         assert!(
@@ -236,7 +304,7 @@ mod tests {
             .with_session_directory("/tmp/neo/session_00000000-0000-4000-8000-000000000123");
         let context = AgentContext::new();
 
-        let request = chat_request(&config, &context).await;
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
 
         assert_eq!(
             request.options.session_id.as_deref(),
@@ -254,7 +322,7 @@ mod tests {
             .with_permission_mode(crate::PermissionMode::Yolo);
         let context = AgentContext::new();
 
-        let request = chat_request(&config, &context).await;
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
         let system_text = system_texts(&request);
 
         assert!(system_text.contains("Runtime Context"), "{system_text}");
@@ -279,7 +347,7 @@ mod tests {
         let mut context = AgentContext::new();
         context.append_message(AgentMessage::user_text("Please review this change"));
 
-        let request = chat_request(&config, &context).await;
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
         let system_text = system_texts(&request);
 
         assert!(!system_text.contains("Review Mode"), "{system_text}");

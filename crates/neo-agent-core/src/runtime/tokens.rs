@@ -2,32 +2,10 @@
 
 use neo_ai::ToolSpec;
 
-use super::config::AgentConfig;
-use super::context::AgentContext;
 use crate::{AgentMessage, Content};
 
 pub(crate) fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
-}
-
-pub(crate) fn estimate_effective_context_tokens(
-    config: &AgentConfig,
-    context: &AgentContext,
-) -> usize {
-    let mut tokens = context.estimated_tokens();
-    if let Some(system_prompt) = &config.system_prompt {
-        tokens += estimate_message_tokens(&AgentMessage::system_text(system_prompt.as_str()));
-    }
-    if let Some(workspace_context) = super::chat_request::workspace_context_message(config) {
-        tokens += estimate_message_tokens(&workspace_context);
-    }
-    if let Some(transform) = &config.context_append_transform {
-        tokens += estimate_messages_tokens(&transform(context.messages()));
-    }
-    let tool_tokens = *config
-        .cached_tool_spec_tokens
-        .get_or_init(|| estimate_tool_specs_tokens(&config.tools));
-    tokens + tool_tokens
 }
 
 pub(crate) fn estimate_message_tokens(message: &AgentMessage) -> usize {

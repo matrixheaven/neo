@@ -63,6 +63,11 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
                 used_tokens: 4,
+                projected_tokens: Some(4),
+                max_tokens: None,
+                trigger_tokens: None,
+                remaining_tokens: None,
+                source: Some(neo_agent_core::ContextWindowSource::MissingModelWindow),
             },
             AgentEvent::TurnStarted { turn: 1 },
             AgentEvent::MessageStarted {
@@ -92,6 +97,11 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
                 used_tokens: 9,
+                projected_tokens: Some(9),
+                max_tokens: None,
+                trigger_tokens: None,
+                remaining_tokens: None,
+                source: Some(neo_agent_core::ContextWindowSource::MissingModelWindow),
             },
             AgentEvent::TurnFinished {
                 turn: 1,
@@ -196,7 +206,8 @@ async fn runtime_context_window_estimate_includes_effective_request_messages() {
             event,
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
-                used_tokens
+                used_tokens,
+                ..
             } if *used_tokens > 20
         )),
         "context estimate should include system/workspace request messages, not only the user buffer"
@@ -385,6 +396,11 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
         AgentEvent::ContextWindowUpdated {
             turn: 1,
             used_tokens: 3,
+            projected_tokens: Some(3),
+            max_tokens: None,
+            trigger_tokens: None,
+            remaining_tokens: None,
+            source: Some(neo_agent_core::ContextWindowSource::MissingModelWindow),
         }
     );
     assert_eq!(
@@ -1200,9 +1216,6 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
                 "applied:{}:{}",
                 summary.first_kept_message_index, summary.tokens_before
             )),
-            AgentEvent::ContextWindowUpdated { used_tokens, .. } => {
-                Some(format!("context:{used_tokens}"))
-            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1365,6 +1378,11 @@ async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
             AgentEvent::ContextWindowUpdated {
                 turn: 1,
                 used_tokens: 6,
+                projected_tokens: Some(6),
+                max_tokens: None,
+                trigger_tokens: None,
+                remaining_tokens: None,
+                source: Some(neo_agent_core::ContextWindowSource::MissingModelWindow),
             },
             AgentEvent::RunFinished {
                 turn: 1,

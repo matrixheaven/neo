@@ -227,6 +227,16 @@ pub enum AgentEvent {
     ContextWindowUpdated {
         turn: u32,
         used_tokens: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        projected_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ContextWindowSource>,
     },
     SteeringQueued {
         message: AgentMessage,
@@ -410,6 +420,13 @@ pub struct QuestionOptionData {
 pub enum QueueKind {
     Steering,
     FollowUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ContextWindowSource {
+    Configured,
+    ObservedOverflow,
+    MissingModelWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -604,5 +621,24 @@ mod tests {
             }
             _ => panic!("expected Error variant"),
         }
+    }
+
+    #[test]
+    fn context_window_updated_accepts_old_json_shape() {
+        let json = r#"{"ContextWindowUpdated":{"turn":3,"used_tokens":42}}"#;
+        let event: AgentEvent = serde_json::from_str(json).expect("deserialize");
+
+        assert_eq!(
+            event,
+            AgentEvent::ContextWindowUpdated {
+                turn: 3,
+                used_tokens: 42,
+                projected_tokens: None,
+                max_tokens: None,
+                trigger_tokens: None,
+                remaining_tokens: None,
+                source: None,
+            }
+        );
     }
 }

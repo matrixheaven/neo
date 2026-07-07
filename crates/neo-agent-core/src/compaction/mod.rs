@@ -13,7 +13,8 @@
 //!   structured summary.
 //! - [`CompactionStrategy`] — trigger ratio and retention heuristics.
 
-pub mod micro;
+pub mod projection;
+pub mod summary;
 
 use std::sync::Arc;
 
@@ -21,9 +22,8 @@ use futures::StreamExt;
 use neo_ai::{AiStreamEvent, ChatMessage, ChatRequest, ModelClient, RequestOptions};
 use tokio_util::sync::CancellationToken;
 
-use crate::events::{AgentEvent, CompactionReason};
-use crate::runtime::{estimate_message_tokens, estimate_messages_tokens};
-use crate::{AgentConfig, AgentContext, AgentMessage, CompactionPhase, CompactionSummary, Content};
+use crate::runtime::estimate_message_tokens;
+use crate::{AgentConfig, AgentMessage, Content};
 
 pub use crate::events::CompactionSource;
 
@@ -43,10 +43,6 @@ pub enum CompactionError {
     Cancelled,
     #[error("no safe compaction boundary found in the current history")]
     NoBoundary,
-    #[error("compaction truncated: model returned empty/truncated after {0} attempts")]
-    Truncated(u32),
-    #[error("compaction stale: history changed during summarization")]
-    Stale,
 }
 
 /// Heuristics for when and how much to compact.
@@ -545,231 +541,6 @@ fn render_instruction(custom_instruction: Option<&str>) -> String {
     COMPACTION_INSTRUCTION.replace("{{ customInstruction }}", custom)
 }
 
-/// Find a safe compaction split point smaller than `current_count`.
-///
-/// Walks backward from `current_count - 1` looking for a valid
-/// [`can_split_after`] boundary. Returns 0 if no smaller safe split exists.
-#[must_use]
-pub(crate) fn reduce_compact_count(messages: &[AgentMessage], current_count: usize) -> usize {
-    if current_count <= 1 {
-        return 0;
-    }
-    for index in (0..current_count - 1).rev() {
-        if can_split_after(messages, index) {
-            return index + 1;
-        }
-    }
-    0
-}
-
-/// Whether the current context messages differ from a snapshot taken
-/// before compaction began. Used to detect undo/clear during the LLM call.
-#[must_use]
-pub(crate) fn is_stale(snapshot: &[AgentMessage], current: &[AgentMessage]) -> bool {
-    if current.len() < snapshot.len() {
-        return true;
-    }
-    snapshot.iter().zip(current.iter()).any(|(a, b)| a != b)
-}
-
-/// Whether a compaction LLM error is worth retrying (rate limit, timeout, etc.).
-fn is_retryable_compaction_error(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    lower.contains("rate limit")
-        || lower.contains("429")
-        || lower.contains("timeout")
-        || lower.contains("connection")
-}
-
-/// Generate a compaction summary with retry on empty/truncated responses.
-///
-/// Each retry shrinks the prefix to a smaller safe boundary, giving the
-/// model a shorter input that is more likely to produce a valid summary.
-///
-/// Returns `(summary_text, actual_compacted_count)` so the caller knows
-/// exactly which messages were summarized.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn generate_with_retry<F>(
-    model: &Arc<dyn ModelClient>,
-    config: &AgentConfig,
-    messages: &[AgentMessage],
-    strategy: &CompactionStrategy,
-    max_context_tokens: usize,
-    instruction: Option<&str>,
-    cancel_token: &CancellationToken,
-    max_retry_attempts: u32,
-    on_progress: F,
-) -> Result<(String, usize), CompactionError>
-where
-    F: Fn(usize) + Send + Sync,
-{
-    let mut compacted_count = compute_compact_count(
-        messages,
-        CompactionSource::Auto,
-        strategy,
-        max_context_tokens,
-    );
-
-    for attempt in 0..max_retry_attempts {
-        if compacted_count == 0 {
-            return Err(CompactionError::NoBoundary);
-        }
-        if cancel_token.is_cancelled() {
-            return Err(CompactionError::Cancelled);
-        }
-
-        let prefix = &messages[..compacted_count];
-        let result =
-            generate_compaction_summary(model, config, prefix, instruction, cancel_token, |len| {
-                on_progress(len);
-            })
-            .await;
-
-        match result {
-            Ok(summary) if !summary.trim().is_empty() => return Ok((summary, compacted_count)),
-            Ok(_) => match shrink_prefix(messages, compacted_count, attempt) {
-                Ok(reduced) => compacted_count = reduced,
-                Err(e) => return Err(e),
-            },
-            Err(CompactionError::Llm(msg)) if is_retryable_compaction_error(&msg) => {
-                match shrink_prefix(messages, compacted_count, attempt) {
-                    Ok(reduced) => compacted_count = reduced,
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(CompactionError::Truncated(max_retry_attempts))
-}
-
-/// Shrink the compaction prefix to a smaller safe boundary.
-/// Returns the new count, or `Truncated` if no smaller split exists.
-fn shrink_prefix(
-    messages: &[AgentMessage],
-    current_count: usize,
-    attempt: u32,
-) -> Result<usize, CompactionError> {
-    let reduced = reduce_compact_count(messages, current_count);
-    if reduced == 0 {
-        Err(CompactionError::Truncated(attempt + 1))
-    } else {
-        Ok(reduced)
-    }
-}
-
-/// Run LLM-driven compaction and emit the lifecycle events.
-///
-/// This replaces the old `maybe_compact` counter logic.  It:
-/// 1. Computes the safe split boundary.
-/// 2. Emits `CompactionStarted` + progress events.
-/// 3. Calls the model to generate a structured summary (hard-fail on error).
-/// 4. Emits `CompactionApplied` with `tokens_after`.
-///
-/// Returns `Ok(true)` if compaction ran, `Ok(false)` if it was skipped, or
-/// `Err` if the LLM call failed (caller should surface the error).
-pub async fn run_compaction(
-    model: &Arc<dyn ModelClient>,
-    config: &AgentConfig,
-    context: &mut AgentContext,
-    events: &mut Vec<AgentEvent>,
-    source: CompactionSource,
-    cancel_token: &CancellationToken,
-) -> Result<bool, CompactionError> {
-    let Some(settings) = &config.compaction else {
-        return Ok(false);
-    };
-    if !settings.enabled {
-        return Ok(false);
-    }
-
-    let messages = context.messages();
-    let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
-    let strategy = CompactionStrategy {
-        trigger_ratio: settings.trigger_ratio,
-        max_recent_messages: settings.max_recent_messages,
-        max_recent_size_ratio: 0.2,
-        reserved_context_tokens: settings.reserved_context_tokens,
-    };
-
-    let used_tokens = estimate_messages_tokens(messages);
-    let force = matches!(source, CompactionSource::Manual);
-    if !force && !strategy.should_compact(used_tokens, max_context_tokens) {
-        return Ok(false);
-    }
-
-    let compacted_count = compute_compact_count(messages, source, &strategy, max_context_tokens);
-    if compacted_count == 0 {
-        return Err(CompactionError::NoBoundary);
-    }
-
-    let reason = if force {
-        CompactionReason::Manual
-    } else {
-        CompactionReason::Threshold
-    };
-
-    events.push(AgentEvent::CompactionStarted {
-        reason,
-        tokens_before: used_tokens,
-        message_count: messages.len(),
-    });
-    events.push(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::Estimating,
-        percent: 15,
-    });
-
-    let messages_to_compact = &messages[..compacted_count];
-
-    events.push(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::SelectingBoundary,
-        percent: 35,
-    });
-    events.push(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::Summarizing,
-        percent: 70,
-    });
-
-    let summary_text = generate_compaction_summary(
-        model,
-        config,
-        messages_to_compact,
-        None,
-        cancel_token,
-        |_| {},
-    )
-    .await?;
-
-    let kept_messages = &messages[compacted_count..];
-    let tokens_after =
-        estimate_message_tokens_summary(&summary_text) + estimate_messages_tokens(kept_messages);
-
-    let summary = CompactionSummary {
-        summary: summary_text,
-        tokens_before: used_tokens,
-        tokens_after,
-        first_kept_message_index: compacted_count,
-    };
-
-    events.push(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::Applying,
-        percent: 90,
-    });
-    events.push(AgentEvent::CompactionApplied { summary });
-
-    // Apply to the live context immediately.
-    let last_event = events.last().expect("CompactionApplied just pushed");
-    if let AgentEvent::CompactionApplied { summary } = last_event {
-        context.apply_compaction(summary.clone());
-    }
-
-    Ok(true)
-}
-
-fn estimate_message_tokens_summary(text: &str) -> usize {
-    text.len().div_ceil(4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,81 +795,6 @@ mod tests {
         ];
         // suffix would start with assistant that still needs tc2 result
         assert!(!can_split_after(&messages, 2));
-    }
-
-    #[test]
-    fn truncated_error_displays_attempt_count() {
-        let err = CompactionError::Truncated(5);
-        let msg = err.to_string();
-        assert!(msg.contains('5'));
-        assert!(msg.contains("truncated"));
-    }
-
-    #[test]
-    fn stale_error_has_message() {
-        let err = CompactionError::Stale;
-        let msg = err.to_string();
-        assert!(msg.contains("stale"));
-    }
-
-    #[test]
-    fn generate_with_retry_has_correct_signature() {
-        // Full async testing requires FakeModelClient + tokio runtime.
-        // The integration is verified by the multi-round compaction tests in
-        // compaction_trigger.rs (Task 7). This test is a compilation marker:
-        // if the function signature changes, this fails to compile.
-        //
-        // If this compiles, the signature is correct.
-    }
-
-    #[test]
-    fn reduce_compact_count_finds_smaller_safe_boundary() {
-        let messages = vec![
-            user_msg("task 1"),
-            assistant_text("done 1"),
-            user_msg("task 2"),
-            assistant_text("done 2"),
-            user_msg("task 3"),
-            assistant_text("done 3"),
-        ];
-        // Current count = 4 (split after index 3). Should find index 1 as smaller safe split.
-        let reduced = reduce_compact_count(&messages, 4);
-        assert_eq!(reduced, 2);
-    }
-
-    #[test]
-    fn reduce_compact_count_returns_zero_when_no_smaller_split() {
-        let messages = vec![user_msg("only"), assistant_text("reply")];
-        // Current count = 1. Can't reduce below 1 safely.
-        let reduced = reduce_compact_count(&messages, 1);
-        assert_eq!(reduced, 0);
-    }
-
-    #[test]
-    fn is_stale_detects_shorter_history() {
-        let snapshot = vec![user_msg("a"), assistant_text("b"), user_msg("c")];
-        let current = vec![user_msg("a")];
-        assert!(is_stale(&snapshot, &current));
-    }
-
-    #[test]
-    fn is_stale_detects_modified_message() {
-        let snapshot = vec![user_msg("original"), assistant_text("reply")];
-        let current = vec![user_msg("changed"), assistant_text("reply")];
-        assert!(is_stale(&snapshot, &current));
-    }
-
-    #[test]
-    fn is_stale_allows_append() {
-        let snapshot = vec![user_msg("a"), assistant_text("b")];
-        let current = vec![user_msg("a"), assistant_text("b"), user_msg("follow-up")];
-        assert!(!is_stale(&snapshot, &current));
-    }
-
-    #[test]
-    fn is_stale_returns_false_for_identical() {
-        let messages = vec![user_msg("a"), assistant_text("b")];
-        assert!(!is_stale(&messages, &messages));
     }
 
     #[test]

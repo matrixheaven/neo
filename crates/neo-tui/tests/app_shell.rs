@@ -382,6 +382,11 @@ fn app_shell_updates_context_usage_from_agent_event() {
     app.apply_agent_event(neo_agent_core::AgentEvent::ContextWindowUpdated {
         turn: 1,
         used_tokens: 168,
+        projected_tokens: None,
+        max_tokens: None,
+        trigger_tokens: None,
+        remaining_tokens: None,
+        source: None,
     });
 
     assert_eq!(

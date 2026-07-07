@@ -2,9 +2,10 @@
 //!
 mod agent;
 mod chat_request;
-mod compaction_trigger;
+pub(crate) mod compaction_controller;
 mod config;
 mod context;
+pub(crate) mod context_budget;
 mod error;
 mod events;
 mod image_blobs;

@@ -4,11 +4,13 @@ use neo_ai::{AiError, ModelClient};
 use tokio_util::sync::CancellationToken;
 
 use super::chat_request::{chat_request, validate_model_capabilities};
-use super::compaction_trigger::maybe_compact;
+use super::compaction_controller::{
+    CompactionController, CompactionDecision, DeferredCompaction, ToolGroupBudgetState,
+};
 use super::config::AgentConfig;
 use super::error::AgentRuntimeError;
 use super::events::{
-    EventEmitter, emit_context_window_update, emit_goal_event_from_result, emit_todo_event,
+    EventEmitter, emit_context_window_snapshot, emit_goal_event_from_result, emit_todo_event,
 };
 use super::permission::current_permission_mode;
 use super::plan_orchestration::{
@@ -18,10 +20,13 @@ use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
 use super::stream_aggregator::run_model_turn;
-use super::tokens::{estimate_effective_context_tokens, estimate_messages_tokens};
+use super::tokens::estimate_messages_tokens;
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
+use crate::compaction::CompactionError;
+use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
+use crate::compaction::summary::run_full_compaction;
 use crate::goal::GoalManager;
 use crate::skills::SkillStoreHandle;
 use crate::{
@@ -81,21 +86,29 @@ async fn recover_from_overflow(
     let estimated = estimate_messages_tokens(&messages_snapshot);
     super::config::observe_context_overflow(config, estimated);
 
-    // Trigger forced compaction via the live path. Setting the
-    // manual_compact_request mutex is the same mechanism `/compact`
-    // uses — `evaluate_compaction_need` reads it and sets
-    // `force = true` in the trigger.
-    {
-        let mut guard = config
-            .manual_compact_request
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(String::new());
+    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+        config,
+        &emitter.context,
+        ProjectionPlan::disabled(),
+    );
+    let mut compaction_events = Vec::new();
+    run_full_compaction(
+        model,
+        config,
+        &mut emitter.context,
+        crate::CompactionReason::Threshold,
+        snapshot,
+        None,
+        cancel_token,
+        |event| compaction_events.push(event),
+    )
+    .await?;
+    for event in compaction_events {
+        emitter.emit(event);
     }
-    maybe_compact(model, config, emitter, cancel_token).await;
 
     // Rebuild request with compacted context and retry once.
-    let retry_request = chat_request(config, &emitter.context).await;
+    let retry_request = chat_request(config, &emitter.context, &ProjectionPlan::disabled()).await;
     run_model_turn(
         Arc::clone(model),
         config,
@@ -126,6 +139,7 @@ pub(super) async fn run_agent_turn(
 ) -> Result<(), AgentRuntimeError> {
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
+    let mut pending_compaction_debt: Option<DeferredCompaction> = None;
     drain_live_steer_input(&steer_input, emitter);
     let mut pending_messages = drain_steering_queue(&config, emitter);
 
@@ -134,7 +148,6 @@ pub(super) async fn run_agent_turn(
             append_queued_messages(emitter, pending_messages);
         }
 
-        maybe_compact(&model, &config, emitter, &cancel_token).await;
         append_runtime_reminders(&config, emitter);
 
         if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
@@ -144,8 +157,15 @@ pub(super) async fn run_agent_turn(
         }
 
         let turn = emitter.context.turns.saturating_add(1);
-        let request = chat_request(&config, &emitter.context).await;
-        emit_effective_context_window(&config, emitter, turn).await;
+        let projection_plan = prepare_model_request(
+            &model,
+            &config,
+            emitter,
+            &cancel_token,
+            pending_compaction_debt.take(),
+        )
+        .await?;
+        let request = chat_request(&config, &emitter.context, &projection_plan).await;
         validate_model_capabilities(&request)?;
         let assistant =
             run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
@@ -222,6 +242,8 @@ pub(super) async fn run_agent_turn(
             attach_enter_plan_details(&config, &mut tool_results);
         }
         append_tool_result_messages(&tool_results, emitter);
+        pending_compaction_debt =
+            observe_tool_group_debt(&config, emitter, turn, tool_results.len());
         emit_effective_context_window(&config, emitter, turn).await;
         emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
         drain_live_steer_input(&steer_input, emitter);
@@ -389,6 +411,156 @@ fn goal_continuation_messages(manager: Option<&GoalManager>) -> Option<Vec<Agent
     )])
 }
 
+async fn prepare_model_request(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+    pending_debt: Option<DeferredCompaction>,
+) -> Result<ProjectionPlan, AgentRuntimeError> {
+    let manual_requested = take_manual_compact_request(config).is_some();
+    let request_projection = request_projection_plan(config, &emitter.context);
+    let mut snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+        config,
+        &emitter.context,
+        request_projection,
+    );
+
+    let projection_plan = match CompactionController::decide_before_model_call(
+        snapshot.clone(),
+        pending_debt.as_ref(),
+        manual_requested,
+    ) {
+        CompactionDecision::NoAction { snapshot: decided } => {
+            snapshot = decided;
+            ProjectionPlan::disabled()
+        }
+        CompactionDecision::UseProjectionOnly {
+            snapshot: decided,
+            plan,
+        } => {
+            snapshot = decided;
+            plan
+        }
+        CompactionDecision::RunFullCompaction {
+            snapshot: decided,
+            reason,
+            ..
+        } => {
+            let mut compaction_events = Vec::new();
+            let compaction_result = run_full_compaction(
+                model,
+                config,
+                &mut emitter.context,
+                reason,
+                decided,
+                None,
+                cancel_token,
+                |event| compaction_events.push(event),
+            )
+            .await;
+            if matches!(compaction_result, Err(CompactionError::NoBoundary))
+                && reason == crate::CompactionReason::Threshold
+            {
+                snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+                    config,
+                    &emitter.context,
+                    request_projection_plan(config, &emitter.context),
+                );
+                snapshot.projection
+            } else {
+                compaction_result?;
+                for event in compaction_events {
+                    emitter.emit(event);
+                }
+                snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+                    config,
+                    &emitter.context,
+                    request_projection_plan(config, &emitter.context),
+                );
+                snapshot.projection
+            }
+        }
+        CompactionDecision::ForceAfterOverflow {
+            snapshot: decided, ..
+        } => {
+            let mut compaction_events = Vec::new();
+            run_full_compaction(
+                model,
+                config,
+                &mut emitter.context,
+                crate::CompactionReason::Threshold,
+                decided,
+                None,
+                cancel_token,
+                |event| compaction_events.push(event),
+            )
+            .await?;
+            for event in compaction_events {
+                emitter.emit(event);
+            }
+            snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+                config,
+                &emitter.context,
+                request_projection_plan(config, &emitter.context),
+            );
+            snapshot.projection
+        }
+        CompactionDecision::StopWithContextError { message, .. } => {
+            return Err(AgentRuntimeError::Model(AiError::ContextOverflow {
+                message,
+            }));
+        }
+    };
+
+    emit_context_window_snapshot(emitter, &snapshot);
+    Ok(projection_plan)
+}
+
+fn observe_tool_group_debt(
+    config: &AgentConfig,
+    emitter: &EventEmitter,
+    turn: u32,
+    tool_result_count: usize,
+) -> Option<DeferredCompaction> {
+    if tool_result_count == 0 {
+        return None;
+    }
+    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+        config,
+        &emitter.context,
+        request_projection_plan(config, &emitter.context),
+    );
+    let mut group = ToolGroupBudgetState::new(turn, tool_result_count, snapshot.clone());
+    group.observe_completed_result(tool_result_count.saturating_sub(1), snapshot)
+}
+
+fn request_projection_plan(
+    config: &AgentConfig,
+    context: &super::context::AgentContext,
+) -> ProjectionPlan {
+    let Some(settings) = config.compaction else {
+        return ProjectionPlan::disabled();
+    };
+    if !settings.micro_enabled {
+        return ProjectionPlan::disabled();
+    }
+    ProjectionPlan {
+        enabled: true,
+        cutoff_index: context.micro_compaction_cutoff(),
+        min_tool_result_tokens: 1_000,
+        keep_recent_messages: settings.micro_keep_recent,
+        mode: ProjectionMode::Request,
+    }
+}
+
+fn take_manual_compact_request(config: &AgentConfig) -> Option<String> {
+    config.manual_compact_request.lock().map_or_else(
+        |poisoned| poisoned.into_inner().take(),
+        |mut guard| guard.take(),
+    )
+}
+
 pub(super) async fn emit_run_finished(
     config: &AgentConfig,
     emitter: &mut EventEmitter,
@@ -404,8 +576,13 @@ pub(super) async fn emit_effective_context_window(
     emitter: &mut EventEmitter,
     turn: u32,
 ) {
-    let used_tokens = estimate_effective_context_tokens(config, &emitter.context);
-    emit_context_window_update(emitter, turn, used_tokens);
+    let mut snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+        config,
+        &emitter.context,
+        ProjectionPlan::disabled(),
+    );
+    snapshot.turn = turn;
+    emit_context_window_snapshot(emitter, &snapshot);
 }
 
 fn terminal_pre_model_stop(

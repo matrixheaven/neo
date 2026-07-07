@@ -162,7 +162,7 @@ pub struct AgentConfig {
     pub background_tasks: BackgroundTaskManager,
     /// Shared manual `/compact` request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
-    /// means no request is pending. Set by the TUI and taken by `maybe_compact`.
+    /// means no request is pending. Set by the TUI and taken by runtime compaction.
     #[serde(skip)]
     #[schemars(skip)]
     pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
@@ -568,7 +568,7 @@ impl CompactionSettings {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: true,
+            micro_enabled: false,
             micro_keep_recent: 20,
             max_rounds: 5,
             max_retry_attempts: 5,
@@ -640,5 +640,12 @@ mod tests {
             *config.observed_max_context_tokens.lock().unwrap(),
             Some(85_000)
         );
+    }
+
+    #[test]
+    fn compaction_settings_disable_micro_by_default() {
+        let settings = CompactionSettings::new(100_000, 4);
+
+        assert!(!settings.micro_enabled);
     }
 }

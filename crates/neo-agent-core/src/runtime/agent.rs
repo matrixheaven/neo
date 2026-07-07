@@ -10,15 +10,17 @@ use neo_ai::ModelClient;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::compaction_trigger::*;
 use super::config::*;
 use super::context::AgentContext;
+use super::context_budget::ContextBudgetEstimator;
 use super::error::AgentRuntimeError;
 use super::events::*;
 use super::plan_orchestration::*;
 use super::queue::*;
 use super::skill_dispatch::*;
 use super::turn_loop::{emit_run_finished, run_agent_turn};
+use crate::compaction::projection::ProjectionPlan;
+use crate::compaction::summary::run_full_compaction;
 use crate::goal::GoalManager;
 use crate::skills::{SkillStore, SkillStoreHandle};
 use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistry};
@@ -277,7 +279,33 @@ impl AgentRuntime {
             let mut emitter = EventEmitter::new(sender, live_context);
             let turn = emitter.context.turns.saturating_add(1);
             emitter.emit(AgentEvent::RunStarted { turn });
-            maybe_compact(&model, &config, &mut emitter, &cancel_token).await;
+            let instruction = config.manual_compact_request.lock().map_or_else(
+                |poisoned| poisoned.into_inner().take(),
+                |mut guard| guard.take(),
+            );
+            let snapshot = ContextBudgetEstimator::snapshot(
+                &config,
+                &emitter.context,
+                ProjectionPlan::disabled(),
+            );
+            let mut compaction_events = Vec::new();
+            if let Err(err) = run_full_compaction(
+                &model,
+                &config,
+                &mut emitter.context,
+                crate::CompactionReason::Manual,
+                snapshot,
+                instruction.as_deref(),
+                &cancel_token,
+                |event| compaction_events.push(event),
+            )
+            .await
+            {
+                let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
+            }
+            for event in compaction_events {
+                emitter.emit(event);
+            }
             process_supervisor.cleanup_all().await;
             emit_run_finished(&config, &mut emitter, turn, StopReason::EndTurn).await;
             let _ = final_sender.send(emitter.context);

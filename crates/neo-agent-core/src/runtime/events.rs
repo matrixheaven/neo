@@ -227,17 +227,30 @@ pub(super) fn emit_goal_event_from_result(
     }
 }
 
-pub(super) fn emit_context_window_update(
+pub(super) fn emit_context_window_snapshot(
     emitter: &mut EventEmitter,
-    turn: u32,
-    used_tokens: usize,
+    snapshot: &super::context_budget::ContextBudgetSnapshot,
 ) {
-    let used_tokens = u32::try_from(used_tokens).unwrap_or(u32::MAX);
+    let used_tokens = u32::try_from(snapshot.projected_tokens).unwrap_or(u32::MAX);
     if emitter.last_context_window_tokens == Some(used_tokens) {
         return;
     }
     emitter.last_context_window_tokens = Some(used_tokens);
-    emitter.emit(AgentEvent::ContextWindowUpdated { turn, used_tokens });
+    emitter.emit(AgentEvent::ContextWindowUpdated {
+        turn: snapshot.turn,
+        used_tokens,
+        projected_tokens: Some(used_tokens),
+        max_tokens: snapshot
+            .effective_max_context_tokens
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
+        trigger_tokens: snapshot
+            .trigger_tokens
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
+        remaining_tokens: snapshot
+            .remaining_to_max
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
+        source: Some(snapshot.source),
+    });
 }
 
 pub(super) fn emit_shell_started(
