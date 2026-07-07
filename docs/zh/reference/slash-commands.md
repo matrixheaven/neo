@@ -14,6 +14,9 @@
 | `/compact` | — | 请求手动压缩上下文；可附加指令 `/compact <instruction>`。 |
 | `/tasks` | — | 查看当前活跃的后台任务。 |
 | `/fork` | — | 为当前会话创建一个新的分支并跳转 |
+| `/init [instruction]` | — | 创建或刷新工作区 `AGENTS.md`；后续文本会作为自然语言指导传入 init 工作流。 |
+
+`/init` 仅支持 TUI 交互模式。在 Auto 权限模式下会先打开预检对话框，方便用户切换到 Ask 模式，以便工作流询问 reference 位置和长期项目偏好。
 
 ## 模式控制
 

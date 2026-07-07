@@ -1,5 +1,6 @@
 //! Extracted: slash command parsing and dispatch (`/model`, `/plan`, `/skill:*`, etc.).
 
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -25,6 +26,18 @@ impl InteractiveController {
                 Some(arg.to_owned())
             })
             .await;
+            return true;
+        }
+        if let Some(instruction) = super::init_command::init_instruction(prompt) {
+            let instruction = instruction.to_owned();
+            self.clear_submitted_prompt();
+            if self.permission_mode == super::PermissionMode::Auto {
+                self.open_init_preflight(&instruction);
+                return true;
+            }
+            if let Err(error) = self.run_init_workflow(&instruction, false).await {
+                self.push_status(format!("Failed to start /init: {error}"));
+            }
             return true;
         }
         if self.handle_simple_slash_command(prompt).await {
@@ -103,6 +116,100 @@ impl InteractiveController {
         state.apply_snapshot(&snapshot);
         self.last_task_browser_refresh = Some(Instant::now());
         self.tui.chrome_mut().push_task_browser_overlay(state);
+    }
+
+    pub(super) fn start_init_workflow(
+        &mut self,
+        instruction: &str,
+        auto_mode_best_effort: bool,
+    ) -> Result<()> {
+        let current_date = chrono::Local::now().date_naive().to_string();
+        let source_commit = current_git_commit();
+        let workflow_prompt = super::init_command::build_init_workflow_prompt(
+            super::init_command::InitPromptRequest {
+                workspace_root: &self.completion_root,
+                current_date: &current_date,
+                source_commit: source_commit.as_deref(),
+                instruction: (!instruction.is_empty()).then_some(instruction),
+                auto_mode_best_effort,
+            },
+        );
+        let prompt = super::init_command::wrap_init_system_reminder(&workflow_prompt);
+        self.start_generated_injection_turn_from_text(prompt, "init", "/init AGENTS.md workflow")
+    }
+
+    pub(super) async fn run_init_workflow(
+        &mut self,
+        instruction: &str,
+        auto_mode_best_effort: bool,
+    ) -> Result<()> {
+        self.start_init_workflow(instruction, auto_mode_best_effort)?;
+        self.wait_for_active_turn().await?;
+        self.repair_agents_guide_once_if_needed().await?;
+        self.start_pending_background_question_followups().await
+    }
+
+    async fn repair_agents_guide_once_if_needed(&mut self) -> Result<()> {
+        let path = self.workspace_root.join("AGENTS.md");
+        let Ok(markdown) = tokio::fs::read_to_string(&path).await else {
+            return Ok(());
+        };
+        let issues = super::init_command::validate_agents_guide(&markdown);
+        if issues.is_empty() {
+            self.push_status("AGENTS.md structure validation passed");
+            return Ok(());
+        }
+
+        let repair_prompt = super::init_command::build_agents_guide_repair_prompt(&issues);
+        let reminder = super::init_command::wrap_init_system_reminder(&repair_prompt);
+        self.start_generated_injection_turn_from_text(reminder, "init", "/init AGENTS.md repair")?;
+        self.wait_for_active_turn().await?;
+
+        let Ok(repaired_markdown) = tokio::fs::read_to_string(&path).await else {
+            self.push_status("AGENTS.md repair finished, but file could not be re-read");
+            return Ok(());
+        };
+        let remaining = super::init_command::validate_agents_guide(&repaired_markdown);
+        if remaining.is_empty() {
+            self.push_status("AGENTS.md structure validation passed after repair");
+        } else {
+            self.push_status(format!(
+                "AGENTS.md still has {} structure validation issue(s)",
+                remaining.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_init_preflight(&mut self, instruction: &str) {
+        let preflight = super::init_command::init_preflight();
+        self.pending_init_instruction = Some(instruction.to_owned());
+        let theme = self.tui.chrome().theme();
+        self.tui
+            .chrome_mut()
+            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                title: preflight.title,
+                items: vec![
+                    neo_tui::dialogs::ChoiceItem::new(
+                        preflight.recommended_id,
+                        "Switch to Ask and start",
+                    )
+                    .with_description(preflight.body.clone()),
+                    neo_tui::dialogs::ChoiceItem::new(
+                        preflight.alternate_id,
+                        "Stay Auto and generate best effort",
+                    )
+                    .with_description(
+                        "Start /init without user questions. The agent will proceed with best-effort assumptions.",
+                    ),
+                    neo_tui::dialogs::ChoiceItem::new(preflight.cancel_id, "Cancel")
+                        .with_description("Do not start /init."),
+                ],
+                initial_id: Some("preflight:init:switch-ask".to_owned()),
+                theme,
+                page_size: 3,
+                current_id: None,
+            });
     }
 
     fn handle_model_or_skill_slash_command(&mut self, prompt: &str) -> bool {
@@ -283,6 +390,23 @@ fn strip_goal_separator(text: &str) -> &str {
     text.trim()
         .strip_prefix("--")
         .map_or(text.trim(), str::trim)
+}
+
+fn current_git_commit() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8(output.stdout).ok()?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit.to_owned())
+    }
 }
 
 fn render_user_slash_skill_context(

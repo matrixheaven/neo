@@ -72,6 +72,7 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Alias for /new"),
     ("/fork", "Fork the current session"),
     ("/help", "Show help information"),
+    ("/init", "Create or refresh AGENTS.md"),
     ("/model", "Switch active model"),
     ("/provider", "View configured providers"),
     ("/mcp", "View and manage MCP servers"),

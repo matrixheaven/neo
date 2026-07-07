@@ -33,7 +33,7 @@ use neo_agent_core::goal::GoalManager;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
-    ListSkillsTool, McpConnectionManager, MoveSkillTool, PendingQuestion,
+    ListSkillsTool, McpConnectionManager, MessageOrigin, MoveSkillTool, PendingQuestion,
     PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool, mode::PlanMode,
     skills::SkillStoreHandle,
 };
@@ -106,7 +106,8 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(content, &mut writer).await?;
+    let (user_message, events) =
+        append_user_event(content, MessageOrigin::User, &mut writer).await?;
     record_session_activity(config, &session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -141,7 +142,8 @@ pub async fn run_prompt_ephemeral(
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
     let mut writer = SessionEventWriter::memory();
-    let (user_message, events) = append_user_event(content, &mut writer).await?;
+    let (user_message, events) =
+        append_user_event(content, MessageOrigin::User, &mut writer).await?;
     let runtime = runtime_for_config(
         config,
         None,
@@ -181,7 +183,8 @@ pub async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(user_content, &mut writer).await?;
+    let (user_message, events) =
+        append_user_event(user_content, MessageOrigin::User, &mut writer).await?;
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -211,6 +214,7 @@ pub async fn run_prompt_in_session(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_streaming(
     prompt: &[Content],
+    prompt_origin: MessageOrigin,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
@@ -226,7 +230,9 @@ pub async fn run_prompt_streaming(
     manual_compact_request: Arc<Mutex<Option<String>>>,
     compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
-    let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
+    let prepared =
+        prepare_new_streaming_turn(prompt, prompt_origin, config, session_id_tx, skill_context)
+            .await?;
     let prompt = prepared.prompt.clone();
     let runtime = runtime_for_config(
         config,
@@ -252,6 +258,7 @@ pub async fn run_prompt_streaming(
 pub async fn run_prompt_in_session_streaming(
     session_id: &str,
     prompt: &[Content],
+    prompt_origin: MessageOrigin,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
@@ -267,9 +274,15 @@ pub async fn run_prompt_in_session_streaming(
     manual_compact_request: Arc<Mutex<Option<String>>>,
     compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
-    let prepared =
-        prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
-            .await?;
+    let prepared = prepare_existing_streaming_turn(
+        session_id,
+        prompt,
+        prompt_origin,
+        config,
+        session_id_tx,
+        skill_context,
+    )
+    .await?;
     let runtime = runtime_for_config(
         config,
         Some(prepared.session_directory.clone()),
@@ -289,6 +302,7 @@ pub async fn run_prompt_in_session_streaming(
 
 async fn prepare_new_streaming_turn(
     prompt: &[Content],
+    prompt_origin: MessageOrigin,
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
@@ -305,7 +319,7 @@ async fn prepare_new_streaming_turn(
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, &session_id);
     let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
+        append_user_event_jsonl(prompt.to_vec(), prompt_origin, &mut writer).await?;
     record_session_activity(config, &session_id, &prompt_text);
     let session_directory = session_root_from_wire_path(&session_path)?;
     Ok(PreparedStreamingTurn {
@@ -322,6 +336,7 @@ async fn prepare_new_streaming_turn(
 async fn prepare_existing_streaming_turn(
     session_id: &str,
     prompt: &[Content],
+    prompt_origin: MessageOrigin,
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
@@ -342,7 +357,7 @@ async fn prepare_existing_streaming_turn(
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, session_id);
     let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
+        append_user_event_jsonl(prompt.to_vec(), prompt_origin, &mut writer).await?;
     record_session_activity(config, session_id, &prompt_text);
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
@@ -520,8 +535,12 @@ async fn run_prompt_with_runtime(
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    let (user_message, events) =
-        append_user_event(vec![Content::text(prompt)], &mut writer).await?;
+    let (user_message, events) = append_user_event(
+        vec![Content::text(prompt)],
+        MessageOrigin::User,
+        &mut writer,
+    )
+    .await?;
     finish_prompt_turn(
         user_message,
         context,
@@ -535,9 +554,10 @@ async fn run_prompt_with_runtime(
 
 async fn append_user_event(
     content: Vec<Content>,
+    origin: MessageOrigin,
     writer: &mut SessionEventWriter<'_>,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
-    let user_message = AgentMessage::user_content(content);
+    let user_message = AgentMessage::User { content, origin };
     let user_event = AgentEvent::MessageAppended {
         message: user_message.clone(),
     };
@@ -548,10 +568,11 @@ async fn append_user_event(
 
 async fn append_user_event_jsonl(
     content: Vec<Content>,
+    origin: MessageOrigin,
     writer: &mut JsonlSessionWriter,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    append_user_event(content, &mut writer).await
+    append_user_event(content, origin, &mut writer).await
 }
 
 async fn finish_prompt_turn(
@@ -790,7 +811,7 @@ mod tests {
 
     use neo_agent_core::{
         AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
-        PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
+        MessageOrigin, PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
         StopReason as AgentStopReason, ToolExecutionMode,
         session::{JsonlSessionReader, JsonlSessionWriter},
         skills::SkillStore,
@@ -809,7 +830,10 @@ mod tests {
     use super::session_mgmt::{
         create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
-    use super::{PromptApprovalRequest, run_prompt_with_runtime, runtime_for_config};
+    use super::{
+        PromptApprovalRequest, SessionEventWriter, append_user_event, run_prompt_with_runtime,
+        runtime_for_config,
+    };
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
@@ -1027,6 +1051,36 @@ mod tests {
             )
         );
         assert!(session_dir.join("state.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn append_user_event_preserves_injection_origin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.jsonl");
+        let mut writer = JsonlSessionWriter::create(&path)
+            .await
+            .expect("create jsonl writer");
+        let mut event_writer = SessionEventWriter::jsonl(&mut writer);
+        let origin = MessageOrigin::injection("init");
+
+        let (message, events) = append_user_event(
+            vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
+            origin.clone(),
+            &mut event_writer,
+        )
+        .await
+        .expect("append user event");
+
+        assert!(message.is_injection());
+        assert_eq!(
+            events,
+            vec![AgentEvent::MessageAppended {
+                message: AgentMessage::User {
+                    content: vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
+                    origin,
+                },
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1569,6 +1623,7 @@ mod tests {
         let prepared = super::prepare_existing_streaming_turn(
             session_id,
             &[Content::text("continue")],
+            MessageOrigin::User,
             &config,
             None,
             None,

@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::{
     ContextWindow, InputResult, InteractiveController, PermissionMode, SelectedModel,
-    dialog_result_may_close,
+    dialog_result_may_close, init_command,
 };
 
 impl InteractiveController {
@@ -42,7 +42,7 @@ impl InteractiveController {
         } else if self.tui.chrome_mut().mcp_manager_action().is_some() {
             self.handle_mcp_manager_action().await;
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
-            self.handle_choice_picker_result();
+            self.handle_choice_picker_result().await;
         } else if self.tui.chrome_mut().text_input_result().is_some() {
             self.handle_text_input_result();
         } else if self.tui.chrome_mut().api_key_input_result().is_some() {
@@ -209,17 +209,25 @@ impl InteractiveController {
     }
 
     /// Handle a `ChoicePicker` result.
-    pub(super) fn handle_choice_picker_result(&mut self) {
+    pub(super) async fn handle_choice_picker_result(&mut self) {
         let Some(result) = self.tui.chrome_mut().choice_picker_result().cloned() else {
             return;
         };
         self.tui.chrome_mut().close_focused_overlay();
-        if let neo_tui::dialogs::ChoiceResult::Selected(item) = result {
-            self.handle_selected_choice_item(&item.id);
+        match result {
+            neo_tui::dialogs::ChoiceResult::Selected(item) => {
+                self.handle_selected_choice_item(&item.id).await;
+            }
+            neo_tui::dialogs::ChoiceResult::Cancelled => {
+                self.pending_init_instruction = None;
+            }
         }
     }
 
-    pub(super) fn handle_selected_choice_item(&mut self, id: &str) {
+    pub(super) async fn handle_selected_choice_item(&mut self, id: &str) {
+        if self.handle_preflight_choice_item(id).await {
+            return;
+        }
         if self.handle_permission_choice_item(id) {
             return;
         }
@@ -227,6 +235,30 @@ impl InteractiveController {
             return;
         }
         self.handle_builtin_choice_item(id);
+    }
+
+    pub(super) async fn handle_preflight_choice_item(&mut self, id: &str) -> bool {
+        let Some(decision) = init_command::preflight_decision(id) else {
+            return false;
+        };
+        let instruction = self.pending_init_instruction.take().unwrap_or_default();
+        match decision {
+            init_command::PreflightDecision::SwitchPermissionMode(mode) => {
+                self.set_permission_mode(mode);
+                if let Err(error) = self.run_init_workflow(&instruction, false).await {
+                    self.push_status(format!("Failed to start /init: {error}"));
+                }
+            }
+            init_command::PreflightDecision::Continue => {
+                if let Err(error) = self.run_init_workflow(&instruction, true).await {
+                    self.push_status(format!("Failed to start /init: {error}"));
+                }
+            }
+            init_command::PreflightDecision::Cancel => {
+                self.push_status("/init cancelled");
+            }
+        }
+        true
     }
 
     pub(super) fn handle_builtin_choice_item(&mut self, id: &str) -> bool {

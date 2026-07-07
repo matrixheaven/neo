@@ -24,8 +24,9 @@ use anyhow::{Context, Result};
 use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, McpOAuthService,
-    McpOAuthServiceConfig, McpServerStatus, PendingQuestion, PermissionApprovalDecision,
-    PermissionMode, ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
+    McpOAuthServiceConfig, McpServerStatus, MessageOrigin, PendingQuestion,
+    PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
+    ShellCommandOrigin, ShellCommandOutcome,
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
@@ -71,6 +72,8 @@ use clipboard::write_system_clipboard;
 
 mod snapshot;
 use snapshot::render_transcript_snapshot;
+
+mod init_command;
 
 mod prompt_completion;
 use prompt_completion::{
@@ -336,6 +339,7 @@ pub(crate) struct InteractiveController {
     /// Transport selected in the MCP add transport picker, kept while the
     /// single-page add form is open so submission can build the right input.
     pending_mcp_add_transport: Option<&'static str>,
+    pending_init_instruction: Option<String>,
     mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Kimi-style skill activation prompt waiting to be injected as context for
@@ -426,6 +430,7 @@ pub(crate) struct PickerCatalogs {
 #[derive(Clone)]
 pub(crate) struct TurnRequest {
     pub prompt: Vec<Content>,
+    pub prompt_origin: MessageOrigin,
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
     pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
@@ -469,6 +474,7 @@ impl TurnRequest {
     ) -> Self {
         Self {
             prompt,
+            prompt_origin: MessageOrigin::User,
             session_id,
             model,
             reasoning_effort,
@@ -712,6 +718,7 @@ impl InteractiveController {
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
+            pending_init_instruction: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
             skill_store: None,
             pending_skill_context: None,
@@ -1390,6 +1397,39 @@ impl InteractiveController {
             self.pending_local_user_message_to_suppress = Some(display_text);
         }
         self.start_turn_with_prompt(content, model_override);
+        Ok(())
+    }
+
+    fn start_generated_injection_turn_from_text(
+        &mut self,
+        prompt: String,
+        variant: &str,
+        local_message: &str,
+    ) -> Result<()> {
+        let PromptSubmission {
+            prompt,
+            model_override,
+        } = PromptSubmission::from_text(
+            prompt,
+            &self.model_items,
+            self.local_config.as_ref(),
+            &self.completion_root,
+        )?;
+        let content = crate::prompt::parts::expand_prompt_markers(
+            &prompt,
+            &self.paste_store,
+            &self.image_attachment_store,
+        );
+        let display_text = content_to_display_text(&content);
+        self.tui
+            .transcript_mut()
+            .push_user_message(local_message.to_owned());
+        self.pending_local_user_message_to_suppress = Some(display_text);
+        self.start_turn_with_prompt_origin(
+            content,
+            model_override,
+            MessageOrigin::injection(variant.to_owned()),
+        );
         Ok(())
     }
 

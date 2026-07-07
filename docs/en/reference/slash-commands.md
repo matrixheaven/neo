@@ -14,6 +14,9 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | View currently active background tasks. |
 | `/fork` | — | Create a new branch from the current session and switch to it. |
+| `/init [instruction]` | — | Create or refresh the workspace `AGENTS.md`. Extra text is passed to the init workflow as natural-language guidance. |
+
+`/init` is TUI-only. In Auto permission mode it first opens a preflight dialog so the user can switch to Ask mode before the workflow asks for reference locations or durable project preferences.
 
 ## Mode Control
 

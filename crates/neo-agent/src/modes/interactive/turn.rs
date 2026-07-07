@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use neo_agent_core::{Content, PendingQuestion};
+use neo_agent_core::{Content, MessageOrigin, PendingQuestion};
 
 use neo_tui::shell::{DevelopmentMode, GoalModeStatus, StreamUpdate};
 
@@ -19,6 +19,15 @@ impl InteractiveController {
         &mut self,
         prompt: Vec<Content>,
         model_override: Option<super::SelectedModel>,
+    ) {
+        self.start_turn_with_prompt_origin(prompt, model_override, MessageOrigin::User);
+    }
+
+    pub(super) fn start_turn_with_prompt_origin(
+        &mut self,
+        prompt: Vec<Content>,
+        model_override: Option<super::SelectedModel>,
+        prompt_origin: MessageOrigin,
     ) {
         if self.active_turn.is_some() {
             self.push_status("A turn is already running");
@@ -48,6 +57,7 @@ impl InteractiveController {
                 None
             },
         );
+        request.prompt_origin = prompt_origin;
         request.permission_mode = self.permission_mode;
         request.live_permission_mode = std::sync::Arc::clone(&self.live_permission_mode);
         request.plan_mode = std::sync::Arc::clone(&self.plan_mode);
