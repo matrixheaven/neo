@@ -890,6 +890,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 neo_agent_core::PermissionMode::Ask,
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: crate::config::Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -962,6 +963,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 neo_agent_core::PermissionMode::Ask,
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: crate::config::Defaults {
                 mode: "interactive".to_owned(),
             },

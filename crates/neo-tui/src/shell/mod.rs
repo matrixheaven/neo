@@ -445,6 +445,36 @@ mod tests {
     }
 
     #[test]
+    fn confirm_dialog_result_is_available_after_approval_input() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        let id = chrome.open_confirm_dialog(crate::dialogs::ConfirmDialogOptions {
+            id: "toggle-write:/tmp/shared".to_owned(),
+            title: "Confirm Write Access".to_owned(),
+            hint: "Y approve · N cancel · Esc cancel".to_owned(),
+            lines: vec![" /tmp/shared".to_owned()],
+            theme: crate::primitive::theme::TuiTheme::default(),
+        });
+
+        assert_eq!(chrome.focused_overlay_id(), Some(id));
+        assert!(chrome.focused_overlay_is_rich_dialog());
+        assert_eq!(
+            chrome.handle_focused_dialog_input(crate::input::InputEvent::Insert('Y')),
+            crate::primitive::InputResult::Submitted
+        );
+        assert!(matches!(
+            chrome.confirm_dialog_result(),
+            Some(crate::dialogs::ConfirmDialogResult::Approved { id })
+                if id == "toggle-write:/tmp/shared"
+        ));
+        assert!(matches!(
+            chrome.take_confirm_dialog_result(),
+            Some(crate::dialogs::ConfirmDialogResult::Approved { id })
+                if id == "toggle-write:/tmp/shared"
+        ));
+        assert!(chrome.confirm_dialog_result().is_none());
+    }
+
+    #[test]
     fn help_panel_overlay_opens_as_rich_dialog_and_blocks_prompt() {
         let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
         let id = chrome.open_help_panel(vec![

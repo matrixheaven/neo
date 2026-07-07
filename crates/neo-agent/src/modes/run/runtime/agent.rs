@@ -23,6 +23,7 @@ pub(crate) fn agent_config_for_app(
     let mut agent_config = AgentConfig::for_model(model)
         .with_permission_mode(config.permission_mode)
         .with_live_permission_mode(Arc::clone(&config.live_permission_mode))
+        .with_workspace_policy(Arc::clone(&config.workspace_policy))
         .with_queue_modes(
             config.runtime.steering_queue_mode,
             config.runtime.follow_up_queue_mode,

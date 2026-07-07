@@ -14,6 +14,7 @@ pub mod sidecar;
 pub mod skills;
 pub mod tools;
 pub mod workflow;
+pub mod workspace_policy;
 
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,
@@ -29,6 +30,9 @@ pub use permissions::{
 };
 pub use runtime::*;
 pub use tools::*;
+pub use workspace_policy::{
+    WorkspaceAccessError, WorkspaceAccessPolicy, WorkspaceAccessRoot, WorkspaceAccessRootKind,
+};
 
 pub use neo_ai::NeoErrorInfo;
 pub use neo_ai::error_info;

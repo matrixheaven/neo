@@ -717,6 +717,7 @@ model = "old"
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 neo_agent_core::PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },

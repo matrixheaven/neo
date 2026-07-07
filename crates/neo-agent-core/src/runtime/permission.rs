@@ -963,3 +963,56 @@ fn tool_approval_scope(
     };
     (Some(scope), None)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::harness::fake_model;
+    use crate::workspace_policy::{
+        WorkspaceAccessPolicy, WorkspaceAccessRoot, WorkspaceAccessRootKind,
+    };
+
+    #[test]
+    fn plan_mode_denies_write_to_added_write_root() {
+        let primary = tempfile::tempdir().expect("primary tempdir");
+        let added = tempfile::tempdir().expect("added tempdir");
+        let policy = WorkspaceAccessPolicy::with_roots(
+            primary.path(),
+            [WorkspaceAccessRoot {
+                path: added.path().to_path_buf(),
+                kind: WorkspaceAccessRootKind::Added,
+                read: true,
+                write: true,
+            }],
+        )
+        .expect("workspace policy");
+        let config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(primary.path())
+            .expect("workspace root")
+            .with_workspace_policy(Arc::new(RwLock::new(Some(policy))))
+            .with_permission_mode(PermissionMode::Ask);
+        config
+            .plan_mode
+            .write()
+            .expect("plan mode lock")
+            .enter_in_memory();
+        let blocked_path = added.path().join("blocked.txt");
+        let arguments = json!({
+            "path": blocked_path.display().to_string(),
+            "content": "blocked",
+        });
+        let call = AgentToolCall {
+            id: "call-write-added-root".into(),
+            name: "Write".into(),
+            raw_arguments: arguments.to_string().into(),
+        };
+
+        let preparation = permission_preparation_for_mode(&config, &call, &arguments);
+
+        assert!(matches!(preparation, PermissionPreparation::Deny(_)));
+    }
+}

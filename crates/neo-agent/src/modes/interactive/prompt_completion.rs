@@ -76,6 +76,7 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "Switch active model"),
     ("/provider", "View configured providers"),
     ("/mcp", "View and manage MCP servers"),
+    ("/add-workspace", "Manage additional workspace directories"),
     ("/tasks", "View active background tasks"),
     ("/plan", "Toggle plan mode (on / off / clear)"),
     ("/compact", "Request manual context compaction"),

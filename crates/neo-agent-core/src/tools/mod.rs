@@ -45,7 +45,7 @@ use crate::goal::GoalManager;
 use crate::multi_agent::MultiAgentRuntime;
 use crate::runtime::AgentConfig;
 
-use crate::AgentEvent;
+use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
@@ -179,6 +179,7 @@ pub struct ToolContext {
     pub agent_id: Option<String>,
     pub session_directory: Option<PathBuf>,
     pub access: ToolAccess,
+    workspace_policy: WorkspaceAccessPolicy,
     allowed_external_write_paths: BTreeSet<PathBuf>,
     pub bash_timeout: Duration,
     pub max_output_bytes: usize,
@@ -211,6 +212,7 @@ impl std::fmt::Debug for ToolContext {
             .field("agent_id", &self.agent_id)
             .field("session_directory", &self.session_directory)
             .field("access", &self.access)
+            .field("workspace_policy_roots", &self.workspace_policy.roots())
             .field(
                 "allowed_external_write_paths",
                 &self.allowed_external_write_paths,
@@ -234,11 +236,13 @@ impl std::fmt::Debug for ToolContext {
 impl ToolContext {
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, ToolError> {
         let cwd = workspace_root.as_ref().canonicalize()?;
+        let workspace_policy = WorkspaceAccessPolicy::new(&cwd).map_err(map_workspace_error)?;
         Ok(Self {
             cwd,
             agent_id: None,
             session_directory: None,
             access: ToolAccess::none(),
+            workspace_policy,
             allowed_external_write_paths: BTreeSet::new(),
             bash_timeout: DEFAULT_BASH_TIMEOUT,
             max_output_bytes: 64 * 1024,
@@ -270,6 +274,12 @@ impl ToolContext {
             .into_iter()
             .map(|path| normalize_path(&path))
             .collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_policy(mut self, workspace_policy: WorkspaceAccessPolicy) -> Self {
+        self.workspace_policy = workspace_policy;
         self
     }
 
@@ -402,44 +412,21 @@ impl ToolContext {
     }
 
     pub fn resolve_workspace_path(&self, path: &Path) -> Result<PathBuf, ToolError> {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        if self.is_allowed_external_write_path(&candidate) {
-            return Ok(normalize_path(&candidate));
+        if self.is_allowed_external_write_path(path) {
+            return Ok(normalize_path(path));
         }
-        let normalized = normalize_inside_workspace(&self.cwd, &candidate)?;
-        if normalized.exists() {
-            let canonical = normalized.canonicalize()?;
-            if canonical.starts_with(&self.cwd) {
-                Ok(canonical)
-            } else {
-                Err(ToolError::PathOutsideWorkspace { path: canonical })
-            }
-        } else {
-            Ok(normalized)
-        }
+        self.workspace_policy
+            .resolve_read_path(path)
+            .map_err(map_workspace_error)
     }
 
     pub fn resolve_parent_for_write(&self, path: &Path) -> Result<PathBuf, ToolError> {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        if self.is_allowed_external_write_path(&candidate) {
-            return Ok(normalize_path(&candidate));
+        if self.is_allowed_external_write_path(path) {
+            return Ok(normalize_path(path));
         }
-        let parent = candidate.parent().unwrap_or(&self.cwd);
-        let resolved_parent = normalize_inside_workspace(&self.cwd, parent)?;
-        let file_name = candidate
-            .file_name()
-            .ok_or_else(|| ToolError::PathOutsideWorkspace {
-                path: candidate.clone(),
-            })?;
-        Ok(resolved_parent.join(file_name))
+        self.workspace_policy
+            .resolve_write_path(path)
+            .map_err(map_workspace_error)
     }
 
     fn is_allowed_external_write_path(&self, path: &Path) -> bool {
@@ -708,14 +695,12 @@ where
     neo_ai::tool_schema::schema_for::<T>()
 }
 
-fn normalize_inside_workspace(workspace_root: &Path, path: &Path) -> Result<PathBuf, ToolError> {
-    let normalized = normalize_path(path);
-    if normalized.starts_with(workspace_root) {
-        Ok(normalized)
-    } else {
-        Err(ToolError::PathOutsideWorkspace {
-            path: path.to_path_buf(),
-        })
+fn map_workspace_error(error: WorkspaceAccessError) -> ToolError {
+    match error {
+        WorkspaceAccessError::PathOutsideWorkspace { path }
+        | WorkspaceAccessError::ReadDenied { path }
+        | WorkspaceAccessError::WriteDenied { path } => ToolError::PathOutsideWorkspace { path },
+        WorkspaceAccessError::Io(source) => ToolError::Io(source),
     }
 }
 
@@ -785,6 +770,31 @@ mod tests {
             .expect("read output"),
             "hello\n"
         );
+    }
+
+    #[test]
+    fn tool_context_resolve_workspace_path_uses_added_read_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let added = tempfile::tempdir().expect("added");
+        let file = added.path().join("lib.rs");
+        std::fs::write(&file, "pub fn lib() {}").expect("write");
+        let policy = crate::WorkspaceAccessPolicy::with_roots(
+            primary.path(),
+            [crate::WorkspaceAccessRoot {
+                path: added.path().canonicalize().expect("canonical added"),
+                kind: crate::WorkspaceAccessRootKind::Added,
+                read: true,
+                write: false,
+            }],
+        )
+        .expect("policy");
+        let ctx = ToolContext::new(primary.path())
+            .expect("context")
+            .with_workspace_policy(policy);
+
+        let resolved = ctx.resolve_workspace_path(&file).expect("resolve");
+
+        assert_eq!(resolved, file.canonicalize().expect("canonical file"));
     }
 
     #[test]

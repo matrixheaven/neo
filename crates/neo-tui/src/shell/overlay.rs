@@ -7,9 +7,9 @@ use crate::primitive::theme::TuiTheme;
 
 use crate::dialogs::QuestionStateMachine;
 use crate::dialogs::{
-    ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, HelpPanelState,
-    McpAddFormState, McpManagerState, ModelSelectorState, ProviderManagerState,
-    TabbedModelSelectorState, TextInputState, TrustDialogState,
+    ApiKeyInputState, ChoicePickerState, ConfirmDialogState, CustomRegistryImportState,
+    HelpPanelState, McpAddFormState, McpManagerState, ModelSelectorState, ProviderManagerState,
+    TabbedModelSelectorState, TextInputState, TrustDialogState, WorkspaceManagerState,
 };
 use crate::input::KeybindingAction;
 use crate::tasks_browser::{TaskBrowserRenderer, TaskBrowserState};
@@ -135,6 +135,8 @@ pub enum OverlayKind {
     TabbedModelSelector(TabbedModelSelectorState),
     ProviderManager(ProviderManagerState),
     McpManager(McpManagerState),
+    WorkspaceManager(WorkspaceManagerState),
+    ConfirmDialog(ConfirmDialogState),
     McpAddForm(McpAddFormState),
     ChoicePicker(ChoicePickerState),
     ApiKeyInput(ApiKeyInputState),
@@ -188,6 +190,7 @@ impl OverlayKind {
             Self::TabbedModelSelector(state) => Some(state.render_lines(width)),
             Self::ProviderManager(state) => Some(state.render_lines(width)),
             Self::McpManager(state) => Some(state.render_lines(width)),
+            Self::WorkspaceManager(state) => Some(state.render_lines(width)),
             Self::HelpPanel(state) => Some(state.render_lines(width)),
             _ => self.input_dialog_lines(width),
         }
@@ -198,6 +201,7 @@ impl OverlayKind {
         match self {
             Self::ChoicePicker(state) => Some(state.render_lines(width)),
             Self::ApiKeyInput(state) => Some(state.render_lines(width)),
+            Self::ConfirmDialog(state) => Some(state.render_lines(width)),
             Self::TextInput(state) => Some(state.render_lines(width)),
             Self::CustomRegistryImport(state) => Some(state.render_lines(width)),
             Self::McpAddForm(state) => Some(state.render_lines(width)),
@@ -248,6 +252,8 @@ impl OverlayKind {
             | Self::TabbedModelSelector(_)
             | Self::ProviderManager(_)
             | Self::McpManager(_)
+            | Self::WorkspaceManager(_)
+            | Self::ConfirmDialog(_)
             | Self::McpAddForm(_)
             | Self::ChoicePicker(_)
             | Self::TrustDialog(_)

@@ -23,6 +23,8 @@ impl NeoChromeState {
             OverlayKind::TabbedModelSelector(state) => state.handle_input(&input),
             OverlayKind::ProviderManager(state) => state.handle_input(&input),
             OverlayKind::McpManager(state) => state.handle_input(&input),
+            OverlayKind::WorkspaceManager(state) => state.handle_input(&input),
+            OverlayKind::ConfirmDialog(state) => state.handle_input(&input),
             OverlayKind::ChoicePicker(state) => state.handle_input(&input),
             OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
             OverlayKind::TextInput(state) => state.handle_input(&input),
@@ -126,6 +128,38 @@ impl NeoChromeState {
             return None;
         };
         state.take_action()
+    }
+
+    #[must_use]
+    pub fn workspace_manager_action(&self) -> Option<crate::dialogs::WorkspaceManagerAction> {
+        let OverlayKind::WorkspaceManager(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.action()
+    }
+
+    pub fn take_workspace_manager_action(
+        &mut self,
+    ) -> Option<crate::dialogs::WorkspaceManagerAction> {
+        let OverlayKind::WorkspaceManager(state) = &mut self.focused_overlay_mut()?.kind else {
+            return None;
+        };
+        state.take_action()
+    }
+
+    #[must_use]
+    pub fn confirm_dialog_result(&self) -> Option<&crate::dialogs::ConfirmDialogResult> {
+        let OverlayKind::ConfirmDialog(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    pub fn take_confirm_dialog_result(&mut self) -> Option<crate::dialogs::ConfirmDialogResult> {
+        let OverlayKind::ConfirmDialog(state) = &mut self.focused_overlay_mut()?.kind else {
+            return None;
+        };
+        state.take_result()
     }
 
     #[must_use]

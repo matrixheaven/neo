@@ -39,8 +39,14 @@ impl InteractiveController {
     pub(super) async fn process_provider_dialog_result(&mut self) -> bool {
         if self.tui.chrome_mut().provider_manager_action().is_some() {
             self.handle_provider_manager_action();
+        } else if self.tui.chrome_mut().workspace_manager_action().is_some() {
+            self.handle_workspace_manager_action();
         } else if self.tui.chrome_mut().mcp_manager_action().is_some() {
             self.handle_mcp_manager_action().await;
+        } else if self.tui.chrome_mut().confirm_dialog_result().is_some() {
+            if let Some(result) = self.tui.chrome_mut().take_confirm_dialog_result() {
+                self.handle_workspace_confirm_result(result);
+            }
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result().await;
         } else if self.tui.chrome_mut().text_input_result().is_some() {
@@ -300,6 +306,9 @@ impl InteractiveController {
         let Some(result) = self.tui.chrome_mut().text_input_result().cloned() else {
             return;
         };
+        if self.handle_workspace_text_input_result(result.clone()) {
+            return;
+        }
         self.tui.chrome_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::TextInputResult::Submitted(_value) => {}

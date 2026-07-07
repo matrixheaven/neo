@@ -99,6 +99,8 @@ mod sessions;
 mod mcp_manager;
 use mcp_manager::PendingMcpProbe;
 
+mod workspace_manager;
+
 mod catalog_fetch;
 use catalog_fetch::{PendingCatalogFetch, PendingCustomRegistry};
 
@@ -370,6 +372,10 @@ pub(crate) struct InteractiveController {
     /// Optional trust store override for tests. Production controllers created
     /// via `controller_for_config` initialize this from `~/.neo/trust.json`.
     trust_store: Option<crate::trust::ProjectTrustStore>,
+    workspace_store: Option<crate::workspaces::WorkspaceStore>,
+    workspace_policy: Arc<RwLock<Option<neo_agent_core::WorkspaceAccessPolicy>>>,
+    pending_workspace_mutation: Option<workspace_manager::PendingWorkspaceMutation>,
+    pending_workspace_add_input: bool,
     /// Shared manual-compaction request. Set by `/compact`, passed to each turn's
     /// `AgentConfig` so the runtime can read it at the top of every loop
     /// iteration.
@@ -441,6 +447,7 @@ pub(crate) struct TurnRequest {
     /// Shared live permission state for this turn. Updated by `/ask` `/auto`
     /// `/yolo` while the turn runs; the runtime reads it at each tool call.
     pub live_permission_mode: Arc<RwLock<PermissionMode>>,
+    pub workspace_policy: Arc<RwLock<Option<neo_agent_core::WorkspaceAccessPolicy>>>,
     /// Shared runtime plan-mode state for this turn.
     pub plan_mode: Arc<RwLock<PlanMode>>,
     /// Whether this turn should use AI-assisted goal authoring.
@@ -481,6 +488,7 @@ impl TurnRequest {
             skill_context: None,
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
+            workspace_policy: Arc::new(RwLock::new(None)),
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
             plan_review_feedback: BTreeMap::new(),
@@ -731,6 +739,10 @@ impl InteractiveController {
             pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
             trust_store: None,
+            workspace_store: None,
+            workspace_policy: Arc::new(RwLock::new(None)),
+            pending_workspace_mutation: None,
+            pending_workspace_add_input: false,
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
@@ -896,6 +908,12 @@ impl InteractiveController {
     #[cfg(test)]
     fn set_trust_store(&mut self, store: crate::trust::ProjectTrustStore) {
         self.trust_store = Some(store);
+    }
+
+    #[cfg(test)]
+    fn set_workspace_store(&mut self, store: crate::workspaces::WorkspaceStore) {
+        self.workspace_store = Some(store);
+        self.refresh_workspace_policy_from_store();
     }
 
     #[cfg(test)]
@@ -1761,6 +1779,7 @@ impl InteractiveController {
             );
             request.permission_mode = self.permission_mode;
             request.live_permission_mode = Arc::clone(&self.live_permission_mode);
+            request.workspace_policy = Arc::clone(&self.workspace_policy);
             request.plan_mode = Arc::clone(&self.plan_mode);
             request.base_config.clone_from(&self.local_config);
             request.manual_compact_request = Arc::clone(&self.manual_compact_request);

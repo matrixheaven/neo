@@ -107,6 +107,7 @@ impl AppConfig {
             sessions_dir,
             permission_mode,
             live_permission_mode: Arc::new(RwLock::new(permission_mode)),
+            workspace_policy: Arc::new(RwLock::new(None)),
             defaults: Defaults { mode },
             runtime,
             background_tasks: BackgroundTaskManager::new(),

@@ -55,6 +55,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
             effective_config.runtime.reasoning_effort = request.reasoning_effort;
             effective_config.permission_mode = request.permission_mode;
             effective_config.live_permission_mode = Arc::clone(&request.live_permission_mode);
+            effective_config.workspace_policy = Arc::clone(&request.workspace_policy);
             if let Some(session_id) = request.session_id {
                 let turn = crate::modes::run::run_prompt_in_session_streaming(
                     &session_id,
@@ -184,6 +185,8 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     ));
     controller.load_prompt_history();
     controller.trust_store = crate::trust::ProjectTrustStore::from_home().ok();
+    controller.workspace_store = crate::workspaces::WorkspaceStore::from_home().ok();
+    controller.refresh_workspace_policy_from_store();
     controller.completion_notification = config.tui.completion_notification;
     controller.question_notification = config.tui.question_notification;
     controller

@@ -75,6 +75,7 @@ impl InteractiveController {
             "/provider" => self.open_provider_picker(),
             "/help" => self.open_help_panel(),
             "/mcp" => self.open_mcp_manager().await,
+            "/add-workspace" => self.open_workspace_manager(),
             "/tasks" => self.show_background_tasks().await,
             "/compact" => {
                 let instruction = slash_arg(prompt, "/compact").map(|arg| {

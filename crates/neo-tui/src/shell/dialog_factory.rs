@@ -189,14 +189,47 @@ impl NeoChromeState {
         self.push_overlay(Overlay::new("mcp", OverlayKind::McpManager(state)))
     }
 
+    pub fn open_workspace_manager(
+        &mut self,
+        opts: &crate::dialogs::WorkspaceManagerOptions,
+    ) -> OverlayId {
+        let existing_id =
+            self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::WorkspaceManager(_)));
+        if let Some(id) = existing_id {
+            if let Some(overlay) = self.overlays.iter_mut().find(|overlay| overlay.id == id)
+                && let OverlayKind::WorkspaceManager(state) = &mut overlay.kind
+            {
+                state.set_options(opts);
+            }
+            self.focus_overlay(id);
+            return id;
+        }
+
+        let state = crate::dialogs::WorkspaceManagerState::new(opts);
+        self.push_overlay(Overlay::new(
+            "workspace-access",
+            OverlayKind::WorkspaceManager(state),
+        ))
+    }
+
     pub fn open_choice_picker(&mut self, opts: crate::dialogs::ChoicePickerOptions) -> OverlayId {
         let state = crate::dialogs::ChoicePickerState::new(opts);
         self.push_overlay(Overlay::new("choice", OverlayKind::ChoicePicker(state)))
     }
 
+    pub fn open_confirm_dialog(&mut self, opts: crate::dialogs::ConfirmDialogOptions) -> OverlayId {
+        let state = crate::dialogs::ConfirmDialogState::new(opts);
+        self.push_overlay(Overlay::new("confirm", OverlayKind::ConfirmDialog(state)))
+    }
+
     pub fn open_api_key_input(&mut self, opts: crate::dialogs::ApiKeyInputOptions) -> OverlayId {
         let state = crate::dialogs::ApiKeyInputState::new(opts, self.theme);
         self.push_overlay(Overlay::new("api-key", OverlayKind::ApiKeyInput(state)))
+    }
+
+    pub fn open_text_input(&mut self, opts: crate::dialogs::TextInputOptions) -> OverlayId {
+        let state = crate::dialogs::TextInputState::new(opts, self.theme);
+        self.push_overlay(Overlay::new("text-input", OverlayKind::TextInput(state)))
     }
 
     pub fn open_custom_registry_import(
@@ -291,6 +324,8 @@ impl NeoChromeState {
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
                 | OverlayKind::McpManager(_)
+                | OverlayKind::WorkspaceManager(_)
+                | OverlayKind::ConfirmDialog(_)
                 | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
@@ -301,5 +336,23 @@ impl NeoChromeState {
                 | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_manager_overlay_is_rich_dialog() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        let id = chrome.open_workspace_manager(&crate::dialogs::WorkspaceManagerOptions {
+            trusted: true,
+            rows: Vec::new(),
+            theme: crate::primitive::theme::TuiTheme::default(),
+        });
+
+        assert_eq!(chrome.focused_overlay_id(), Some(id));
+        assert!(chrome.focused_overlay_is_rich_dialog());
     }
 }

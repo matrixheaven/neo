@@ -14,6 +14,7 @@ use super::permission::ApprovalRequest;
 use crate::multi_agent::MultiAgentRuntime;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
 use crate::tools::BackgroundTaskManager;
+use crate::workspace_policy::WorkspaceAccessPolicy;
 use crate::{
     AgentMessage, AgentToolCall, PermissionApprovalDecision, PermissionMode, PlanMode,
     TodoEventData, ToolResult,
@@ -53,6 +54,9 @@ pub enum ToolExecutionMode {
 pub struct AgentConfig {
     pub model: ModelSpec,
     pub workspace_root: Option<PathBuf>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workspace_policy: Arc<RwLock<Option<WorkspaceAccessPolicy>>>,
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
@@ -181,6 +185,7 @@ impl AgentConfig {
         Self {
             model,
             workspace_root: None,
+            workspace_policy: Arc::new(RwLock::new(None)),
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -272,6 +277,15 @@ impl AgentConfig {
     ) -> Result<Self, std::io::Error> {
         self.workspace_root = Some(workspace_root.into().canonicalize()?);
         Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_workspace_policy(
+        mut self,
+        workspace_policy: Arc<RwLock<Option<WorkspaceAccessPolicy>>>,
+    ) -> Self {
+        self.workspace_policy = workspace_policy;
+        self
     }
 
     #[must_use]

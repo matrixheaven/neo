@@ -854,6 +854,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -949,6 +950,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1007,6 +1009,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1098,6 +1101,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1149,6 +1153,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1201,6 +1206,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -1283,6 +1289,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -1365,6 +1372,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -1921,6 +1929,7 @@ mod tests {
             live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
                 PermissionMode::default(),
             )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },

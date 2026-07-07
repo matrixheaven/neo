@@ -1,9 +1,9 @@
 use super::overlay::OverlayKind;
 
 use crate::dialogs::{
-    ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, McpAddFormState,
-    McpManagerState, ModelSelectorState, ProviderManagerState, TabbedModelSelectorState,
-    TextInputState,
+    ApiKeyInputState, ChoicePickerState, ConfirmDialogState, CustomRegistryImportState,
+    McpAddFormState, McpManagerState, ModelSelectorState, ProviderManagerState,
+    TabbedModelSelectorState, TextInputState, WorkspaceManagerState,
 };
 use crate::input::{InputEvent, KeybindingAction};
 
@@ -35,6 +35,7 @@ fn handle_provider_choice_dialog_selection(kind: &mut OverlayKind, input: &Input
     match kind {
         OverlayKind::ProviderManager(state) => handle_input_ref(state, input),
         OverlayKind::McpManager(state) => handle_input_ref(state, input),
+        OverlayKind::WorkspaceManager(state) => handle_input_ref(state, input),
         OverlayKind::ChoicePicker(state) => handle_input_ref(state, input),
         _ => return false,
     }
@@ -44,6 +45,7 @@ fn handle_provider_choice_dialog_selection(kind: &mut OverlayKind, input: &Input
 fn handle_input_dialog_selection(kind: &mut OverlayKind, input: InputEvent) {
     match kind {
         OverlayKind::ApiKeyInput(state) => handle_input_ref(state, &input),
+        OverlayKind::ConfirmDialog(state) => handle_input_ref(state, &input),
         OverlayKind::CustomRegistryImport(state) => handle_input_owned(state, input),
         OverlayKind::McpAddForm(state) => handle_input_owned(state, input),
         _ => {}
@@ -90,6 +92,12 @@ impl DialogInputRef for McpManagerState {
     }
 }
 
+impl DialogInputRef for WorkspaceManagerState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
 impl DialogInputRef for ChoicePickerState {
     fn handle_dialog_input(&mut self, input: &InputEvent) {
         let _ = self.handle_input(input);
@@ -97,6 +105,12 @@ impl DialogInputRef for ChoicePickerState {
 }
 
 impl DialogInputRef for ApiKeyInputState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for ConfirmDialogState {
     fn handle_dialog_input(&mut self, input: &InputEvent) {
         let _ = self.handle_input(input);
     }

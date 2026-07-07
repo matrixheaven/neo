@@ -4,8 +4,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::multi_agent::MultiAgentRuntime;
+use neo_agent_core::{BackgroundTaskManager, WorkspaceAccessPolicy};
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
 use neo_tui::notify::NotificationMode;
@@ -72,6 +72,8 @@ pub struct AppConfig {
     /// `permission_mode` at construction.
     #[serde(skip)]
     pub live_permission_mode: Arc<RwLock<PermissionMode>>,
+    #[serde(skip)]
+    pub workspace_policy: Arc<RwLock<Option<WorkspaceAccessPolicy>>>,
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
     /// Shared background task registry for the interactive session.

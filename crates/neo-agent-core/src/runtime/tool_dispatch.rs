@@ -645,8 +645,18 @@ fn default_tool_context(
     } else {
         config.multi_agent.clone()
     };
+    let configured_policy = config
+        .workspace_policy
+        .read()
+        .ok()
+        .and_then(|policy| policy.clone());
     ToolContext::new(workspace_root)
         .map(|context| {
+            let context = if let Some(policy) = configured_policy.clone() {
+                context.with_workspace_policy(policy)
+            } else {
+                context
+            };
             let context = context
                 .with_access(ToolAccess::none())
                 .with_cancel_token(cancel_token.clone())

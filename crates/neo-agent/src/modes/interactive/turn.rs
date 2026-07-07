@@ -60,6 +60,7 @@ impl InteractiveController {
         request.prompt_origin = prompt_origin;
         request.permission_mode = self.permission_mode;
         request.live_permission_mode = std::sync::Arc::clone(&self.live_permission_mode);
+        request.workspace_policy = std::sync::Arc::clone(&self.workspace_policy);
         request.plan_mode = std::sync::Arc::clone(&self.plan_mode);
         request.goal_mode_authoring = matches!(
             self.tui.chrome().development_mode(),

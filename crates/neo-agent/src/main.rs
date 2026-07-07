@@ -11,6 +11,7 @@ mod rpc;
 mod themes;
 mod trust;
 mod trust_commands;
+mod workspaces;
 
 use std::{
     collections::BTreeMap,

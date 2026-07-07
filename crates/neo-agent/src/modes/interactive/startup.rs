@@ -119,6 +119,7 @@ impl InteractiveController {
             };
         }
 
+        self.refresh_workspace_policy_from_store();
         self.push_status(status_message);
         Ok(())
     }

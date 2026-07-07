@@ -105,3 +105,44 @@ fn diff_stats(diff: &str) -> (usize, usize) {
     }
     (added, removed)
 }
+
+#[cfg(test)]
+mod workspace_policy_tests {
+    use super::*;
+    use crate::{
+        ToolAccess, ToolContext, WorkspaceAccessPolicy, WorkspaceAccessRoot,
+        WorkspaceAccessRootKind,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn write_denies_read_only_added_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let added = tempfile::tempdir().expect("added");
+        let policy = WorkspaceAccessPolicy::with_roots(
+            primary.path(),
+            [WorkspaceAccessRoot {
+                path: added.path().canonicalize().expect("canonical added"),
+                kind: WorkspaceAccessRootKind::Added,
+                read: true,
+                write: false,
+            }],
+        )
+        .expect("policy");
+        let ctx = ToolContext::new(primary.path())
+            .expect("context")
+            .with_workspace_policy(policy)
+            .with_access(ToolAccess::all());
+        let path = added.path().join("new.txt");
+
+        let err = WriteTool
+            .execute(&ctx, json!({ "path": path, "content": "hello" }))
+            .await
+            .expect_err("write denied");
+
+        assert!(matches!(
+            err,
+            crate::tools::ToolError::PathOutsideWorkspace { .. }
+        ));
+    }
+}

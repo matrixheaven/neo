@@ -2,9 +2,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, normalize_path, parse_input, schema,
-};
+use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 
 const MAX_LINES: usize = 1000;
 const MAX_LINE_LENGTH: usize = 2000;
@@ -15,7 +13,7 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 struct ReadInput {
     #[schemars(
-        description = "Path to the text file. Relative paths resolve against the working directory; absolute paths are used as-is, including paths outside the working directory."
+        description = "Path to the text file. Relative paths resolve against the working directory; absolute paths must be inside an allowed workspace root."
     )]
     path: std::path::PathBuf,
     #[schemars(
@@ -44,7 +42,7 @@ impl Tool for ReadTool {
         \
         Parameters:\
         - path: Path to the text file. Relative paths resolve against the working directory; \
-          absolute paths are used as-is, including paths outside the working directory.\
+          absolute paths must be inside an allowed workspace root.\
         - line_offset: 1-based line number to start reading from. Omit to start at line 1. Negative \
           values read from the end (e.g. -100 reads the last 100 lines); the absolute value must \
           not exceed 1000.\
@@ -70,7 +68,7 @@ impl Tool for ReadTool {
         Box::pin(async move {
             ctx.ensure_file_read_allowed()?;
             let input: ReadInput = parse_input(self.name(), input)?;
-            let path = resolve_read_path(ctx, &input.path);
+            let path = ctx.resolve_workspace_path(&input.path)?;
 
             match run_read(&path, input.line_offset, input.n_lines).await {
                 Ok(result) => Ok(ToolResult::ok(result.finish_output())),
@@ -87,19 +85,6 @@ impl Tool for ReadTool {
             }
         })
     }
-}
-
-fn resolve_read_path(ctx: &ToolContext, path: &std::path::Path) -> std::path::PathBuf {
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        ctx.workspace_root().join(path)
-    };
-    normalize_path(
-        &candidate
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.clone()),
-    )
 }
 
 #[derive(Debug)]
@@ -702,9 +687,12 @@ mod tests {
         let input = json!({
             "path": external_file.to_str().unwrap(),
         });
-        let result = tool.execute(&ctx, input).await.expect("execute");
-        assert!(!result.is_error);
-        assert!(result.content.contains("external content"));
+        let err = tool.execute(&ctx, input).await.expect_err("outside denied");
+
+        assert!(matches!(
+            err,
+            crate::tools::ToolError::PathOutsideWorkspace { .. }
+        ));
     }
 
     #[tokio::test]
@@ -867,5 +855,70 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(temp.path(), content).expect("write temp");
         runtime.block_on(run_read(temp.path(), line_offset, n_lines))
+    }
+}
+
+#[cfg(test)]
+mod workspace_policy_tests {
+    use super::*;
+    use crate::{
+        ToolAccess, ToolContext, WorkspaceAccessPolicy, WorkspaceAccessRoot,
+        WorkspaceAccessRootKind,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn read_allows_added_read_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let added = tempfile::tempdir().expect("added");
+        let file = added.path().join("lib.rs");
+        std::fs::write(&file, "pub fn lib() {}\n").expect("write");
+        let policy = WorkspaceAccessPolicy::with_roots(
+            primary.path(),
+            [WorkspaceAccessRoot {
+                path: added.path().canonicalize().expect("canonical added"),
+                kind: WorkspaceAccessRootKind::Added,
+                read: true,
+                write: false,
+            }],
+        )
+        .expect("policy");
+        let ctx = ToolContext::new(primary.path())
+            .expect("context")
+            .with_workspace_policy(policy)
+            .with_access(ToolAccess::all());
+
+        let result = ReadTool
+            .execute(&ctx, json!({ "path": file }))
+            .await
+            .expect("read");
+
+        assert!(
+            !result.is_error,
+            "unexpected read error: {}",
+            result.content
+        );
+        assert!(result.content.contains("pub fn lib()"));
+    }
+
+    #[tokio::test]
+    async fn read_denies_path_outside_all_roots() {
+        let primary = tempfile::tempdir().expect("primary");
+        let outside = tempfile::tempdir().expect("outside");
+        let file = outside.path().join("secret.txt");
+        std::fs::write(&file, "secret\n").expect("write");
+        let ctx = ToolContext::new(primary.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let err = ReadTool
+            .execute(&ctx, json!({ "path": file }))
+            .await
+            .expect_err("outside denied");
+
+        assert!(matches!(
+            err,
+            crate::tools::ToolError::PathOutsideWorkspace { .. }
+        ));
     }
 }

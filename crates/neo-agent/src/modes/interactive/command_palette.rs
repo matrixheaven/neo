@@ -23,6 +23,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
         ),
         CommandSpec::new("mcp", "Open MCP servers", Some("Manage MCP servers")),
         CommandSpec::new(
+            "add-workspace",
+            "Open workspace access",
+            Some("Manage additional workspace directories"),
+        ),
+        CommandSpec::new(
             "session.new",
             "New session",
             Some("Start a fresh local session"),
@@ -158,6 +163,7 @@ impl InteractiveController {
             "models" => self.open_model_picker(),
             "providers" => self.open_provider_picker(),
             "mcp" => self.open_mcp_manager().await,
+            "add-workspace" => self.open_workspace_manager(),
             _ => return false,
         }
         true

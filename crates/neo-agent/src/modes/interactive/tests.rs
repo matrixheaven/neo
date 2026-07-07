@@ -3979,6 +3979,60 @@ async fn command_palette_inserts_project_prompt_template_command() {
 }
 
 #[tokio::test]
+async fn command_palette_add_workspace_opens_workspace_manager_overlay() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let project_dir = test_workspace_root();
+    controller.local_config = Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+        .await
+        .expect("command palette opens");
+    for _ in 0..32 {
+        let selected = controller
+            .chrome()
+            .selected_command()
+            .expect("selected command");
+        if selected.id == "add-workspace" {
+            break;
+        }
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to add workspace command");
+    }
+    let selected = controller
+        .chrome()
+        .selected_command()
+        .expect("add workspace command");
+    assert_eq!(selected.id, "add-workspace");
+    assert_eq!(selected.label, "Open workspace access");
+    assert_eq!(
+        selected.description.as_deref(),
+        Some("Manage additional workspace directories")
+    );
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("add workspace command runs");
+
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::WorkspaceManager(_))
+    ));
+}
+
+#[tokio::test]
 async fn command_palette_exports_active_session_to_html() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
@@ -6873,6 +6927,22 @@ fn slash_completions_include_compact_command() {
     assert!(values.contains(&"/compact"), "missing /compact: {values:?}");
 }
 
+#[test]
+fn slash_completions_include_add_workspace_command() {
+    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
+        .expect("completions resolve");
+    let add_workspace = completions
+        .iter()
+        .find(|item| item.value == "/add-workspace")
+        .expect("missing /add-workspace completion");
+
+    assert_eq!(add_workspace.label, "/add-workspace");
+    assert_eq!(
+        add_workspace.description.as_deref(),
+        Some("Manage additional workspace directories")
+    );
+}
+
 #[tokio::test]
 async fn slash_plan_toggles_plan_mode_and_footer() {
     let mut controller = InteractiveController::new_for_test(
@@ -7274,6 +7344,7 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         sessions_dir,
         permission_mode: PermissionMode::default(),
         live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
+        workspace_policy: Arc::new(RwLock::new(None)),
         defaults: Defaults {
             mode: "interactive".to_owned(),
         },
@@ -7371,6 +7442,50 @@ async fn turn_request_carries_live_local_config() {
             .models
             .contains_key("minimax-cn-coding-plan/MiniMax-M3")
     );
+}
+
+#[tokio::test]
+async fn turn_request_carries_workspace_policy() {
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured_policy = std::sync::Arc::clone(&captured);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let captured_policy = std::sync::Arc::clone(&captured_policy);
+            async move {
+                *captured_policy.lock().expect("capture policy") =
+                    Some(std::sync::Arc::clone(&request.workspace_policy));
+                Ok(vec![
+                    AgentEvent::MessageStarted {
+                        turn: 1,
+                        id: "m".to_owned(),
+                    },
+                    AgentEvent::TurnFinished {
+                        turn: 1,
+                        stop_reason: neo_agent_core::StopReason::EndTurn,
+                    },
+                ])
+            }
+        },
+    );
+
+    let expected_policy = std::sync::Arc::clone(&controller.workspace_policy);
+    controller.type_text("hello");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    let captured = captured.lock().expect("captured").take();
+    let captured_policy = captured.expect("workspace policy was forwarded to the driver");
+    assert!(std::sync::Arc::ptr_eq(&captured_policy, &expected_policy));
 }
 
 fn controller_with_session_for_new_tests() -> (
@@ -8372,6 +8487,234 @@ async fn slash_mcp_opens_mcp_manager_overlay() {
         "/mcp should open the MCP manager overlay, got {:?}",
         overlay.kind
     );
+}
+
+#[tokio::test]
+async fn slash_add_workspace_opens_workspace_manager_overlay() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async { Ok(vec![]) },
+    );
+    let project_dir = test_workspace_root();
+    controller.local_config = Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+    controller.type_text("/add-workspace");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("slash command handled");
+    let overlay = controller
+        .chrome()
+        .focused_overlay()
+        .expect("/add-workspace should open an overlay");
+    assert!(
+        matches!(overlay.kind, OverlayKind::WorkspaceManager(_)),
+        "/add-workspace should open the workspace manager overlay, got {:?}",
+        overlay.kind
+    );
+}
+
+#[tokio::test]
+async fn add_workspace_approved_persists_enabled_read_only_entry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    let added_dir = temp.path().join("added");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::create_dir_all(&added_dir).expect("create added");
+    let store = crate::workspaces::WorkspaceStore::new(temp.path().join("workspaces.json"));
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async { Ok(vec![]) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    config.project_trust = crate::trust::ProjectTrustState::Trusted {
+        target: project_dir.clone(),
+    };
+    controller.local_config = Some(config);
+    controller.set_workspace_store(store.clone());
+
+    controller.type_text("/add-workspace");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("open workspace manager");
+    controller
+        .handle_input_event(InputEvent::Insert('A'))
+        .await
+        .expect("start add workspace");
+    controller
+        .handle_input_event(InputEvent::Paste(added_dir.display().to_string()))
+        .await
+        .expect("paste path");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit path");
+
+    assert!(
+        matches!(
+            controller.chrome().focused_overlay().map(|o| &o.kind),
+            Some(OverlayKind::ConfirmDialog(_))
+        ),
+        "add must show confirmation before persistence"
+    );
+    assert!(
+        store
+            .read_project(&project_dir)
+            .expect("read project before confirmation")
+            .entries
+            .is_empty(),
+        "workspace entry must not persist before confirmation"
+    );
+
+    controller
+        .handle_input_event(InputEvent::Insert('Y'))
+        .await
+        .expect("approve add");
+
+    let project = store.read_project(&project_dir).expect("read project");
+    assert_eq!(project.entries.len(), 1);
+    let entry = &project.entries[0];
+    assert_eq!(
+        entry.path,
+        added_dir.canonicalize().expect("canonical added")
+    );
+    assert!(entry.enabled);
+    assert!(entry.read);
+    assert!(!entry.write);
+}
+
+#[tokio::test]
+async fn workspace_write_toggle_keeps_read_enabled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    let added_dir = temp.path().join("added");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::create_dir_all(&added_dir).expect("create added");
+    let store = crate::workspaces::WorkspaceStore::new(temp.path().join("workspaces.json"));
+    let added_dir = added_dir.canonicalize().expect("canonical added");
+    store
+        .write_project(
+            &project_dir,
+            crate::workspaces::WorkspaceProject {
+                entries: vec![crate::workspaces::WorkspaceEntry::read_only(
+                    added_dir.clone(),
+                )],
+            },
+        )
+        .expect("seed workspace store");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async { Ok(vec![]) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    config.project_trust = crate::trust::ProjectTrustState::Trusted {
+        target: project_dir.clone(),
+    };
+    controller.local_config = Some(config);
+    controller.set_workspace_store(store.clone());
+
+    controller.type_text("/add-workspace");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("open workspace manager");
+    controller
+        .handle_input_event(InputEvent::Insert('W'))
+        .await
+        .expect("toggle write");
+    assert!(
+        matches!(
+            controller.chrome().focused_overlay().map(|o| &o.kind),
+            Some(OverlayKind::ConfirmDialog(_))
+        ),
+        "write toggle must show confirmation"
+    );
+    controller
+        .handle_input_event(InputEvent::Insert('Y'))
+        .await
+        .expect("approve write toggle");
+
+    let project = store.read_project(&project_dir).expect("read project");
+    assert_eq!(project.entries.len(), 1);
+    assert_eq!(project.entries[0].path, added_dir);
+    assert!(project.entries[0].read);
+    assert!(project.entries[0].write);
+}
+
+#[tokio::test]
+async fn workspace_read_toggle_off_turns_write_off() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    let added_dir = temp.path().join("added");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::create_dir_all(&added_dir).expect("create added");
+    let store = crate::workspaces::WorkspaceStore::new(temp.path().join("workspaces.json"));
+    let added_dir = added_dir.canonicalize().expect("canonical added");
+    store
+        .write_project(
+            &project_dir,
+            crate::workspaces::WorkspaceProject {
+                entries: vec![crate::workspaces::WorkspaceEntry {
+                    path: added_dir.clone(),
+                    enabled: true,
+                    read: true,
+                    write: true,
+                }],
+            },
+        )
+        .expect("seed workspace store");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async { Ok(vec![]) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    config.project_trust = crate::trust::ProjectTrustState::Trusted {
+        target: project_dir.clone(),
+    };
+    controller.local_config = Some(config);
+    controller.set_workspace_store(store.clone());
+
+    controller.type_text("/add-workspace");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("open workspace manager");
+    controller
+        .handle_input_event(InputEvent::Insert('R'))
+        .await
+        .expect("toggle read");
+    assert!(
+        matches!(
+            controller.chrome().focused_overlay().map(|o| &o.kind),
+            Some(OverlayKind::ConfirmDialog(_))
+        ),
+        "read toggle must show confirmation"
+    );
+    controller
+        .handle_input_event(InputEvent::Insert('Y'))
+        .await
+        .expect("approve read toggle");
+
+    let project = store.read_project(&project_dir).expect("read project");
+    assert_eq!(project.entries.len(), 1);
+    assert_eq!(project.entries[0].path, added_dir);
+    assert!(!project.entries[0].read);
+    assert!(!project.entries[0].write);
 }
 
 #[tokio::test]
