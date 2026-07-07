@@ -16,6 +16,18 @@ use crate::transcript::{
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
+fn compaction_is_complete(phase: Option<neo_agent_core::CompactionPhase>, percent: u8) -> bool {
+    phase == Some(neo_agent_core::CompactionPhase::Applying) && percent >= 100
+}
+
+fn is_live_compaction_entry(entry: &TranscriptEntry) -> bool {
+    matches!(
+        entry,
+        TranscriptEntry::Compaction { phase, percent, .. }
+            if !compaction_is_complete(*phase, *percent)
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum AbsorbedToolKind {
     Delegate,
@@ -972,24 +984,26 @@ impl TranscriptPane {
         tokens_before: usize,
         tokens_after: usize,
     ) {
-        if let Some(TranscriptEntry::Compaction {
-            phase: existing_phase,
-            percent: existing_percent,
-            compacted_message_count: existing_count,
-            tokens_before: existing_tokens,
-            tokens_after: existing_tokens_after,
-        }) = self
+        if let Some(index) = self
             .transcript
-            .entries_mut()
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, TranscriptEntry::Compaction { .. }))
+            .entries()
+            .iter()
+            .rposition(is_live_compaction_entry)
         {
-            *existing_phase = phase;
-            *existing_percent = percent;
-            *existing_count = compacted_message_count;
-            *existing_tokens = tokens_before;
-            *existing_tokens_after = tokens_after;
+            if let TranscriptEntry::Compaction {
+                phase: existing_phase,
+                percent: existing_percent,
+                compacted_message_count: existing_count,
+                tokens_before: existing_tokens,
+                tokens_after: existing_tokens_after,
+            } = &mut self.transcript.entries_mut()[index]
+            {
+                *existing_phase = phase;
+                *existing_percent = percent;
+                *existing_count = compacted_message_count;
+                *existing_tokens = tokens_before;
+                *existing_tokens_after = tokens_after;
+            }
         } else {
             self.transcript.push(TranscriptEntry::Compaction {
                 phase,
@@ -1007,19 +1021,21 @@ impl TranscriptPane {
         phase: neo_agent_core::CompactionPhase,
         percent: u8,
     ) {
-        if let Some(TranscriptEntry::Compaction {
-            phase: existing_phase,
-            percent: existing_percent,
-            ..
-        }) = self
+        if let Some(index) = self
             .transcript
-            .entries_mut()
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, TranscriptEntry::Compaction { .. }))
+            .entries()
+            .iter()
+            .rposition(is_live_compaction_entry)
         {
-            *existing_phase = Some(phase);
-            *existing_percent = percent;
+            if let TranscriptEntry::Compaction {
+                phase: existing_phase,
+                percent: existing_percent,
+                ..
+            } = &mut self.transcript.entries_mut()[index]
+            {
+                *existing_phase = Some(phase);
+                *existing_percent = percent;
+            }
         } else {
             self.upsert_compaction(Some(phase), percent, 0, 0, 0);
             return;
@@ -1436,6 +1452,63 @@ fn format_replay_skill_arguments(tool_arguments: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_compaction_after_completed_card_appends_entry() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Applying),
+            100,
+            13,
+            42_000,
+            9_000,
+        );
+        pane.push_transcript(TranscriptEntry::assistant_message(
+            "tool transcript after compact",
+        ));
+
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Estimating),
+            0,
+            23,
+            51_000,
+            0,
+        );
+        pane.update_compaction_progress(neo_agent_core::CompactionPhase::Summarizing, 84);
+
+        let entries = pane.transcript().entries();
+        assert_eq!(
+            entries.len(),
+            3,
+            "new compaction should not rewrite the prior completed card"
+        );
+        assert!(
+            matches!(
+                &entries[0],
+                TranscriptEntry::Compaction {
+                    phase: Some(neo_agent_core::CompactionPhase::Applying),
+                    percent: 100,
+                    compacted_message_count: 13,
+                    tokens_before: 42_000,
+                    tokens_after: 9_000,
+                }
+            ),
+            "completed card should stay intact"
+        );
+        assert!(
+            matches!(
+                &entries[2],
+                TranscriptEntry::Compaction {
+                    phase: Some(neo_agent_core::CompactionPhase::Summarizing),
+                    percent: 84,
+                    compacted_message_count: 23,
+                    tokens_before: 51_000,
+                    tokens_after: 0,
+                }
+            ),
+            "latest card should carry the new compaction progress"
+        );
+    }
 
     #[test]
     fn append_only_render_reuses_cached_body_prefix() {
