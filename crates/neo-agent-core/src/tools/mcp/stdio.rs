@@ -3,7 +3,10 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use rmcp::{ServiceExt, transport::TokioChildProcess};
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 use super::{McpError, client::McpClient};
 use crate::tools::ProcessSupervisor;
@@ -54,14 +57,7 @@ pub async fn build_stdio_client(
     // stderr pipe. Lines are read and dropped — they must NOT be inherited
     // (which would leak onto the terminal in TUI mode).
     if let Some(stderr) = stderr_opt {
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut reader = BufReader::new(stderr).lines();
-            while reader.next_line().await.is_ok() {
-                // Intentionally drop lines — MCP server stderr is debug noise
-                // that must not reach the terminal.
-            }
-        });
+        tokio::spawn(async move { drain_stderr(stderr).await });
     }
 
     let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
@@ -85,9 +81,28 @@ pub async fn build_stdio_client(
     Ok(client)
 }
 
+async fn drain_stderr<R>(stderr: R)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut stderr = stderr;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                // Intentionally drop bytes — MCP server stderr is debug noise
+                // that must not reach the terminal.
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::time::{Duration, timeout};
 
     #[test]
     fn build_command_pipes_stderr() {
@@ -102,5 +117,30 @@ mod tests {
         // but we can verify the command is configured without panicking.
         // stderr piping is set on the TokioChildProcessBuilder, not here.
         let _cmd = build_command(&config);
+    }
+
+    #[tokio::test]
+    async fn drain_stderr_exits_after_eof() {
+        let (mut writer, stderr) = tokio::io::duplex(64);
+        writer.write_all(b"diagnostic\n").await.unwrap();
+        drop(writer);
+
+        let finished = timeout(Duration::from_millis(100), drain_stderr(stderr)).await;
+
+        assert!(finished.is_ok(), "stderr drain should stop at EOF");
+    }
+
+    #[tokio::test]
+    async fn drain_stderr_ignores_non_utf8_without_line_buffering() {
+        let (mut writer, stderr) = tokio::io::duplex(64);
+        writer.write_all(b"\xffunterminated").await.unwrap();
+        drop(writer);
+
+        let finished = timeout(Duration::from_millis(100), drain_stderr(stderr)).await;
+
+        assert!(
+            finished.is_ok(),
+            "stderr drain should treat stderr as raw bytes"
+        );
     }
 }

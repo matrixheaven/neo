@@ -36,6 +36,10 @@ toml.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi.workspace = true
+windows-acl.workspace = true
+
 [dev-dependencies]
 oauth2 = { version = "5.0", default-features = false }
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "macros"] }

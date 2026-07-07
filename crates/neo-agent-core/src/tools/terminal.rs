@@ -31,6 +31,7 @@ const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERMINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
+const TERMINAL_OUTPUT_BUFFER_CAP: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -163,7 +164,7 @@ struct TerminalSession {
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    output: Arc<StdMutex<Vec<u8>>>,
+    output: Arc<StdMutex<TerminalOutputBuffer>>,
     read_offset: usize,
     read_lock: Arc<Mutex<()>>,
     reader_thread: Option<ReaderThread>,
@@ -251,7 +252,9 @@ async fn start_terminal(
         .map_err(|err| pty_error("spawn terminal command", err))?;
     drop(pair.slave);
 
-    let output = Arc::new(StdMutex::new(Vec::new()));
+    let output = Arc::new(StdMutex::new(TerminalOutputBuffer::new(
+        TERMINAL_OUTPUT_BUFFER_CAP,
+    )));
     let stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>> = Arc::new(StdMutex::new(None));
     let stream_max_bytes: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
     let streamed: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
@@ -299,7 +302,7 @@ async fn start_terminal(
 
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
-    output: Arc<StdMutex<Vec<u8>>>,
+    output: Arc<StdMutex<TerminalOutputBuffer>>,
     stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
     stream_max_bytes: Arc<StdMutex<usize>>,
     streamed: Arc<StdMutex<usize>>,
@@ -315,7 +318,7 @@ fn spawn_reader_thread(
                     output
                         .lock()
                         .expect("terminal output lock poisoned")
-                        .extend_from_slice(chunk);
+                        .push(chunk);
                     let (max, mut already_streamed) = {
                         let max = *stream_max_bytes.lock().expect("stream max lock poisoned");
                         let already = *streamed.lock().expect("streamed lock poisoned");
@@ -418,33 +421,39 @@ async fn read_terminal(
         .map_err(ToolError::Io)?
         .or(initial_status);
     let read_offset_before = session.read_offset;
-    let (output, read_offset_after, total_output_bytes, unread_bytes_after) = {
+    let (
+        output,
+        read_offset_after,
+        total_output_bytes,
+        unread_bytes_after,
+        discarded_bytes_before_read,
+    ) = {
         let output = session
             .output
             .lock()
             .expect("terminal output lock poisoned");
-        let output_slice = output
-            .get(read_offset_before..)
-            .ok_or_else(|| unknown_terminal(tool, handle))?;
-        let total_output_bytes = output.len();
-        session.read_offset = total_output_bytes;
+        let read = output.read_since(read_offset_before);
+        session.read_offset = read.next_offset;
         (
-            String::from_utf8_lossy(output_slice).into_owned(),
-            session.read_offset,
-            total_output_bytes,
-            0_usize,
+            read.output,
+            read.next_offset,
+            read.total_bytes,
+            read.unread_bytes_after,
+            read.discarded_bytes,
         )
     };
-    let (output_capped, output_truncated) = cap_output(&output, max_output_bytes);
+    let (output_capped, output_truncated) = cap_terminal_output(&output, max_output_bytes);
     let output_details = cap_output_details(&output, max_output_bytes);
+    let truncated = output_truncated || discarded_bytes_before_read > 0;
+    let output_content = format_terminal_output(&output_capped, truncated);
     if let Some(callback) = ctx.tool_update.as_ref() {
-        callback(&output_capped);
+        callback(&output_content);
     }
     *session.streamed.lock().expect("streamed lock poisoned") = total_output_bytes;
     let status_text = status.as_ref().map_or("running", |_| "exited");
     let exit_code = status.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
     Ok(ToolResult::ok(format!(
-        "handle: {handle}\nstatus: {status_text}\nexit_code: {exit_code:?}\noutput:\n{output_capped}"
+        "handle: {handle}\nstatus: {status_text}\nexit_code: {exit_code:?}\noutput:\n{output_content}"
     ))
     .with_details(json!({
         "handle": handle,
@@ -452,17 +461,21 @@ async fn read_terminal(
         "exit_code": exit_code,
         "output": output_details,
         "output_truncated": output_truncated,
-        "truncated": output_truncated,
+        "truncated": truncated,
         "read_offset_before": read_offset_before,
         "read_offset_after": read_offset_after,
         "total_output_bytes": total_output_bytes,
         "unread_bytes_after": unread_bytes_after,
+        "discarded_bytes_before_read": discarded_bytes_before_read,
         "cols": session.cols,
         "rows": session.rows,
     })))
 }
 
-async fn wait_for_output_quiet_period(output: Arc<StdMutex<Vec<u8>>>, read_offset: usize) {
+async fn wait_for_output_quiet_period(
+    output: Arc<StdMutex<TerminalOutputBuffer>>,
+    read_offset: usize,
+) {
     let deadline = Instant::now() + TERMINAL_READ_MAX_WAIT;
     let mut last_len = output_len(&output);
     let mut last_change = Instant::now();
@@ -481,8 +494,11 @@ async fn wait_for_output_quiet_period(output: Arc<StdMutex<Vec<u8>>>, read_offse
     }
 }
 
-fn output_len(output: &StdMutex<Vec<u8>>) -> usize {
-    output.lock().expect("terminal output lock poisoned").len()
+fn output_len(output: &StdMutex<TerminalOutputBuffer>) -> usize {
+    output
+        .lock()
+        .expect("terminal output lock poisoned")
+        .total_bytes()
 }
 
 async fn resize_terminal(
@@ -589,13 +605,15 @@ fn stop_session(
         .output
         .lock()
         .expect("terminal output lock poisoned")
-        .clone();
-    let output = String::from_utf8_lossy(&output).into_owned();
-    let (output_capped, output_truncated) = cap_output(&output, max_output_bytes);
-    let output_details = cap_output_details(&output, max_output_bytes);
+        .full_output();
+    let discarded_bytes_before_stop = output.discarded_bytes;
+    let (output_capped, output_truncated) = cap_terminal_output(&output.output, max_output_bytes);
+    let output_details = cap_output_details(&output.output, max_output_bytes);
+    let truncated = output_truncated || discarded_bytes_before_stop > 0;
+    let output_content = format_terminal_output(&output_capped, truncated);
     let exit_code = exit_status.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
     ToolResult::ok(format!(
-        "handle: {handle}\nstatus: {status}\nexit_code: {exit_code:?}\noutput:\n{output_capped}"
+        "handle: {handle}\nstatus: {status}\nexit_code: {exit_code:?}\noutput:\n{output_content}"
     ))
     .with_details(json!({
         "handle": handle,
@@ -603,9 +621,97 @@ fn stop_session(
         "exit_code": exit_code,
         "output": output_details,
         "output_truncated": output_truncated,
-        "truncated": output_truncated,
+        "truncated": truncated,
+        "discarded_bytes_before_stop": discarded_bytes_before_stop,
         "reader_drained": reader_drained,
     }))
+}
+
+#[derive(Debug)]
+struct TerminalOutputBuffer {
+    bytes: Vec<u8>,
+    start_offset: usize,
+    total_bytes: usize,
+    cap: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TerminalOutputRead {
+    output: String,
+    next_offset: usize,
+    total_bytes: usize,
+    unread_bytes_after: usize,
+    discarded_bytes: usize,
+}
+
+impl TerminalOutputBuffer {
+    fn new(cap: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            start_offset: 0,
+            total_bytes: 0,
+            cap: cap.max(1),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len());
+        if chunk.len() >= self.cap {
+            self.bytes.clear();
+            self.bytes
+                .extend_from_slice(&chunk[chunk.len() - self.cap..]);
+            self.start_offset = self.total_bytes - self.bytes.len();
+            return;
+        }
+
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > self.cap {
+            let excess = self.bytes.len() - self.cap;
+            self.bytes.drain(..excess);
+            self.start_offset = self.start_offset.saturating_add(excess);
+        }
+    }
+
+    fn read_since(&self, offset: usize) -> TerminalOutputRead {
+        let effective_offset = offset.max(self.start_offset).min(self.total_bytes);
+        let start_index = effective_offset.saturating_sub(self.start_offset);
+        let output = self
+            .bytes
+            .get(start_index..)
+            .map(String::from_utf8_lossy)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default();
+        TerminalOutputRead {
+            output,
+            next_offset: self.total_bytes,
+            total_bytes: self.total_bytes,
+            unread_bytes_after: 0,
+            discarded_bytes: self.start_offset.saturating_sub(offset),
+        }
+    }
+
+    fn full_output(&self) -> TerminalOutputRead {
+        TerminalOutputRead {
+            output: String::from_utf8_lossy(&self.bytes).into_owned(),
+            next_offset: self.total_bytes,
+            total_bytes: self.total_bytes,
+            unread_bytes_after: 0,
+            discarded_bytes: self.start_offset,
+        }
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    #[cfg(test)]
+    fn retained_len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 fn cap_output_details(content: &str, max_bytes: usize) -> String {
@@ -621,6 +727,20 @@ fn cap_output_details(content: &str, max_bytes: usize) -> String {
         capped.push(character);
     }
     capped
+}
+
+fn cap_terminal_output(content: &str, max_bytes: usize) -> (String, bool) {
+    let (content, truncated) = cap_output(content, max_bytes);
+    let content = content
+        .strip_suffix("\ntruncated: true")
+        .or_else(|| content.strip_suffix("\ntruncated: false"))
+        .unwrap_or(&content)
+        .to_owned();
+    (content, truncated)
+}
+
+fn format_terminal_output(content: &str, truncated: bool) -> String {
+    format!("{content}\ntruncated: {truncated}")
 }
 
 fn unknown_terminal(tool: &str, handle: &str) -> ToolError {
@@ -641,4 +761,49 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
 
 fn pty_error(operation: &str, err: impl std::fmt::Display) -> ToolError {
     ToolError::Io(std::io::Error::other(format!("{operation}: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_output_buffer_discards_old_bytes_without_growing_unbounded() {
+        let mut buffer = TerminalOutputBuffer::new(5);
+
+        buffer.push(b"abcdef");
+        let read = buffer.read_since(0);
+
+        assert_eq!(buffer.retained_len(), 5);
+        assert_eq!(buffer.total_bytes(), 6);
+        assert_eq!(read.discarded_bytes, 1);
+        assert_eq!(read.output, "bcdef");
+        assert_eq!(read.next_offset, 6);
+    }
+
+    #[test]
+    fn terminal_output_buffer_reads_only_new_bytes_after_offset() {
+        let mut buffer = TerminalOutputBuffer::new(5);
+
+        buffer.push(b"abc");
+        let first = buffer.read_since(0);
+        buffer.push(b"de");
+        let second = buffer.read_since(first.next_offset);
+
+        assert_eq!(first.output, "abc");
+        assert_eq!(second.output, "de");
+        assert_eq!(second.discarded_bytes, 0);
+        assert_eq!(second.next_offset, 5);
+    }
+
+    #[test]
+    fn terminal_output_marker_uses_combined_truncation_state() {
+        let (output, output_truncated) = cap_terminal_output("tail", 64);
+
+        assert!(!output_truncated);
+        assert_eq!(
+            format_terminal_output(&output, true),
+            "tail\ntruncated: true"
+        );
+    }
 }

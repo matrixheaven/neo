@@ -2,8 +2,28 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(windows)]
+use winapi::{
+    shared::ntdef::HANDLE,
+    um::{
+        winbase::FILE_FLAG_BACKUP_SEMANTICS,
+        winnt::{
+            FILE_ALL_ACCESS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, PSID,
+            READ_CONTROL, WRITE_DAC,
+        },
+    },
+};
+#[cfg(windows)]
+use windows_acl::{
+    acl::{ACL, AceType},
+    helper::{current_user, name_to_sid, string_to_sid},
+};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -275,8 +295,8 @@ fn chmod_dir_private(path: &Path) -> Result<(), McpOAuthError> {
 }
 
 #[cfg(not(unix))]
-fn chmod_dir_private(_path: &Path) -> Result<(), McpOAuthError> {
-    Ok(())
+fn chmod_dir_private(path: &Path) -> Result<(), McpOAuthError> {
+    chmod_windows_private(path, true)
 }
 
 #[cfg(unix)]
@@ -290,8 +310,109 @@ fn chmod_file_private(path: &Path) -> Result<(), McpOAuthError> {
 }
 
 #[cfg(not(unix))]
-fn chmod_file_private(_path: &Path) -> Result<(), McpOAuthError> {
+fn chmod_file_private(path: &Path) -> Result<(), McpOAuthError> {
+    chmod_windows_private(path, false)
+}
+
+#[cfg(windows)]
+fn chmod_windows_private(path: &Path, directory: bool) -> Result<(), McpOAuthError> {
+    let target = windows_acl_target(path, directory)?;
+    let mut acl = ACL::from_file_handle(target.as_raw_handle() as HANDLE, false)
+        .map_err(|code| windows_acl_error("read ACL", path, code))?;
+    replace_windows_dacl(&mut acl, directory, path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn chmod_windows_private(_path: &Path, _directory: bool) -> Result<(), McpOAuthError> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_acl_target(path: &Path, directory: bool) -> Result<fs::File, McpOAuthError> {
+    let mut options = fs::OpenOptions::new();
+    options
+        .access_mode(READ_CONTROL | WRITE_DAC)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    if directory {
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options.open(path).map_err(|err| {
+        store_error(io::Error::other(format!(
+            "failed to open {} for Windows ACL update: {err}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(windows)]
+fn replace_windows_dacl(acl: &mut ACL, directory: bool, path: &Path) -> Result<(), McpOAuthError> {
+    for entry in acl
+        .all()
+        .map_err(|code| windows_acl_error("enumerate ACL", path, code))?
+        .into_iter()
+        .filter(|entry| is_windows_access_ace(entry.entry_type))
+    {
+        let sid = string_to_sid(&entry.string_sid)
+            .map_err(|code| windows_acl_error("parse existing ACL SID", path, code))?;
+        acl.remove_entry(
+            sid.as_ptr() as PSID,
+            Some(entry.entry_type),
+            Some(entry.flags),
+        )
+        .map_err(|code| windows_acl_error("remove existing ACL entry", path, code))?;
+    }
+
+    for sid in private_windows_acl_sids(path)? {
+        acl.allow(sid.as_ptr() as PSID, directory, FILE_ALL_ACCESS)
+            .map_err(|code| windows_acl_error("grant private ACL entry", path, code))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_access_ace(entry_type: AceType) -> bool {
+    matches!(
+        entry_type,
+        AceType::AccessAllow
+            | AceType::AccessAllowCallback
+            | AceType::AccessAllowObject
+            | AceType::AccessAllowCallbackObject
+            | AceType::AccessDeny
+            | AceType::AccessDenyCallback
+            | AceType::AccessDenyObject
+            | AceType::AccessDenyCallbackObject
+    )
+}
+
+#[cfg(windows)]
+fn private_windows_acl_sids(path: &Path) -> Result<Vec<Vec<u8>>, McpOAuthError> {
+    let user = current_user().ok_or_else(|| {
+        store_error(io::Error::other(format!(
+            "failed to identify current Windows user for {}",
+            path.display()
+        )))
+    })?;
+    Ok(vec![
+        name_to_sid(&user, None)
+            .map_err(|code| windows_acl_error("resolve user SID", path, code))?,
+        string_to_sid("S-1-5-18")
+            .map_err(|code| windows_acl_error("resolve SYSTEM SID", path, code))?,
+        string_to_sid("S-1-5-32-544")
+            .map_err(|code| windows_acl_error("resolve Administrators SID", path, code))?,
+    ])
+}
+
+#[cfg(windows)]
+fn windows_acl_error(operation: &str, path: &Path, code: u32) -> McpOAuthError {
+    store_error(io::Error::other(format!(
+        "failed to {operation} for {}: Windows error {code}",
+        path.display()
+    )))
+}
+
+#[cfg(test)]
+fn private_windows_acl_trustees() -> [&'static str; 3] {
+    ["current_user", "S-1-5-18", "S-1-5-32-544"]
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -307,7 +428,6 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-
     fn identity() -> McpOAuthIdentity {
         McpOAuthIdentity::new(
             "linear",
@@ -451,6 +571,20 @@ mod tests {
         assert_eq!(token_file_mode, 0o600);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn writes_private_windows_server_dir_and_json_file_acl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McpOAuthStore::new(dir.path().join("credentials").join("mcp"));
+        let identity = identity();
+
+        store.save_tokens(&identity, &token_record()).unwrap();
+
+        assert_private_windows_acl(store.root(), true);
+        assert_private_windows_acl(&store.server_dir(&identity), true);
+        assert_private_windows_acl(&store.server_dir(&identity).join("tokens.json"), false);
+    }
+
     #[test]
     fn successful_write_leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -467,6 +601,54 @@ mod tests {
         assert!(
             temp_files.is_empty(),
             "temp files left behind: {temp_files:?}"
+        );
+    }
+
+    #[test]
+    fn windows_private_acl_trustees_are_only_owner_system_and_admins() {
+        let trustees = private_windows_acl_trustees();
+
+        assert_eq!(trustees, ["current_user", "S-1-5-18", "S-1-5-32-544"]);
+        assert!(!trustees.contains(&"S-1-1-0"));
+        assert!(!trustees.contains(&"S-1-5-11"));
+        assert!(!trustees.contains(&"S-1-5-32-545"));
+    }
+
+    #[cfg(windows)]
+    fn assert_private_windows_acl(path: &Path, directory: bool) {
+        let target = windows_acl_target(path, directory).unwrap();
+        let acl = ACL::from_file_handle(target.as_raw_handle() as HANDLE, false).unwrap();
+        let entries = acl.all().unwrap();
+        let access_sids: std::collections::BTreeSet<_> = entries
+            .iter()
+            .filter(|entry| is_windows_access_ace(entry.entry_type))
+            .map(|entry| entry.string_sid.as_str())
+            .collect();
+
+        assert!(
+            !access_sids.contains("S-1-1-0"),
+            "Everyone must not have access ACEs on {}: {access_sids:?}",
+            path.display()
+        );
+        assert!(
+            !access_sids.contains("S-1-5-11"),
+            "Authenticated Users must not have access ACEs on {}: {access_sids:?}",
+            path.display()
+        );
+        assert!(
+            !access_sids.contains("S-1-5-32-545"),
+            "Users must not have access ACEs on {}: {access_sids:?}",
+            path.display()
+        );
+        assert!(
+            access_sids.contains("S-1-5-18"),
+            "SYSTEM must retain access to {}: {access_sids:?}",
+            path.display()
+        );
+        assert!(
+            access_sids.contains("S-1-5-32-544"),
+            "Administrators must retain access to {}: {access_sids:?}",
+            path.display()
         );
     }
 }
