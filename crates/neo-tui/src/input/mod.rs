@@ -523,12 +523,20 @@ mod tests {
     }
 
     #[test]
-    fn raw_legacy_uppercase_alt_v_with_keybindings_pastes_image() {
+    #[cfg(target_os = "windows")]
+    fn raw_legacy_uppercase_alt_v_with_keybindings_pastes_image_on_windows() {
         let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
         assert_eq!(
             parser.feed_bytes(b"\x1bV"),
             vec![InputEvent::Key(KeyId::new("alt+v").expect("valid key"))]
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn raw_legacy_uppercase_alt_v_without_default_keybinding_is_ignored() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert_eq!(parser.feed_bytes(b"\x1bV"), Vec::<InputEvent>::new());
     }
 
     #[test]

@@ -1832,10 +1832,12 @@ async fn slash_completion_includes_btw_command() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
 
-    controller
-        .handle_input_event(InputEvent::Insert('/'))
-        .await
-        .expect("slash insert opens completion");
+    for ch in "/btw".chars() {
+        controller
+            .handle_input_event(InputEvent::Insert(ch))
+            .await
+            .expect("typing slash command updates completion");
+    }
 
     let rendered = controller.chrome().focused_overlay_lines(80).join("\n");
     assert!(

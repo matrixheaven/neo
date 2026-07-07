@@ -156,7 +156,7 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
     let stdout = run(command);
 
     assert!(stdout.contains("Welcome to neo"));
-    assert!(stdout.contains("openai/gpt-4.1"));
+    assert!(stdout.contains("No configured providers/models"));
     assert!(stdout.contains("ctx --/1m"));
     assert!(!stdout.contains("enter send"));
     assert!(!stdout.contains("placeholder"));
