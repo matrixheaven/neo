@@ -420,6 +420,7 @@ struct ParseState {
     active_thinking_id: Option<String>,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
+    saw_tool_call: bool,
     terminal: bool,
     finished: bool,
 }
@@ -449,6 +450,7 @@ impl Default for ParseState {
             active_thinking_id: None,
             last_stop_reason: StopReason::EndTurn,
             usage: None,
+            saw_tool_call: false,
             terminal: false,
             finished: false,
         }
@@ -536,6 +538,7 @@ impl ParseState {
                     AiStreamEvent::ToolCallArgsDelta { id, json_fragment }
                 }
                 ToolCallAssemblyEvent::End { id, raw_arguments } => {
+                    self.saw_tool_call = true;
                     AiStreamEvent::ToolCallEnd { id, raw_arguments }
                 }
             }));
@@ -777,6 +780,10 @@ impl ParseState {
             .finish_all()
             .map_err(|err| ProviderError::Stream(err.to_string()))?;
         self.push_tool_events(tool_events);
+
+        if self.saw_tool_call {
+            self.last_stop_reason = StopReason::ToolUse;
+        }
 
         if self.started {
             self.events.push(AiStreamEvent::MessageEnd {

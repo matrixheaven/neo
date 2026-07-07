@@ -489,6 +489,48 @@ async fn openai_responses_output_item_done_overrides_argument_preview() {
 }
 
 #[tokio::test]
+async fn openai_responses_output_item_done_without_added_is_tool_use() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-1" } }),
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "id": "item-1",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "read_file",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+        id: "call-1".to_owned(),
+        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason_without_done() {
     let body = [
         "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
