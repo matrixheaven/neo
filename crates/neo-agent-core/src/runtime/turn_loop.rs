@@ -18,7 +18,7 @@ use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
 use super::stream_aggregator::run_model_turn;
-use super::tokens::{estimate_messages_tokens, estimate_tokens_with_config};
+use super::tokens::{estimate_effective_context_tokens, estimate_messages_tokens};
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
@@ -145,11 +145,7 @@ pub(super) async fn run_agent_turn(
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context).await;
-        emit_context_window_update(
-            emitter,
-            turn,
-            estimate_tokens_with_config(&request.messages, &config),
-        );
+        emit_effective_context_window(&config, emitter, turn).await;
         validate_model_capabilities(&request)?;
         let assistant =
             run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
@@ -408,16 +404,7 @@ pub(super) async fn emit_effective_context_window(
     emitter: &mut EventEmitter,
     turn: u32,
 ) {
-    // Avoid rebuilding the entire ChatRequest just to count tokens.
-    // Use the cached incremental estimate from AgentContext plus the cached
-    // tool-spec tokens from AgentConfig.  This is approximate (omits system
-    // prompt / workspace preamble overhead) but sufficiently accurate for the
-    // context-window bar display, and avoids 3-4 O(n) message rebuilds per
-    // turn iteration.
-    let tool_tokens = *config
-        .cached_tool_spec_tokens
-        .get_or_init(|| super::tokens::estimate_tool_specs_tokens(&config.tools));
-    let used_tokens = emitter.context.estimated_tokens() + tool_tokens;
+    let used_tokens = estimate_effective_context_tokens(config, &emitter.context);
     emit_context_window_update(emitter, turn, used_tokens);
 }
 

@@ -63,7 +63,7 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     }
 }
 
-fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
+pub(super) fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     let workspace_root = config.workspace_root.as_ref()?;
     Some(AgentMessage::system_text(format!(
         "Runtime Context\n\

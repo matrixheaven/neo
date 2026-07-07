@@ -147,10 +147,7 @@ fn evaluate_compaction_need(
     // safe suffix boundary.
     let messages = sanitize_tool_exchange_messages(emitter.context.messages()).into_owned();
     let max_context_tokens = super::config::effective_max_context_tokens(config);
-    // Use the cached incremental token estimate from AgentContext instead of
-    // re-walking all messages.  This is approximate (sanitize may have dropped
-    // orphaned tool exchanges) but the threshold check tolerates small error.
-    let used_tokens = emitter.context.estimated_tokens();
+    let used_tokens = super::tokens::estimate_effective_context_tokens(config, &emitter.context);
 
     let strategy = build_compaction_strategy(&settings);
 
@@ -413,8 +410,11 @@ async fn apply_compaction_result(
     }
 
     let kept_messages = &messages[compacted_count..];
-    let tokens_after =
-        summary_text.len().div_ceil(4) + super::estimate_messages_tokens(kept_messages);
+    let pre_compaction_message_tokens = super::estimate_messages_tokens(messages);
+    let fixed_context_overhead = used_tokens.saturating_sub(pre_compaction_message_tokens);
+    let tokens_after = fixed_context_overhead
+        + summary_text.len().div_ceil(4)
+        + super::estimate_messages_tokens(kept_messages);
 
     let summary = CompactionSummary {
         summary: summary_text,
@@ -444,4 +444,70 @@ async fn apply_compaction_result(
 
     let turn = emitter.context.turns.saturating_add(1);
     emit_effective_context_window(config, emitter, turn).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use neo_ai::ToolSpec;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::harness::fake_model;
+    use crate::runtime::context::AgentContext;
+    use crate::runtime::tokens::estimate_tool_specs_tokens;
+
+    #[test]
+    fn compaction_trigger_counts_tool_schema_tokens_against_context_window() {
+        let tool = ToolSpec {
+            name: "LargeSchemaTool".to_owned(),
+            description: "tool description that must count toward context ".repeat(80),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "string",
+                        "description": "schema description that must count toward context ".repeat(160),
+                    },
+                },
+                "required": ["payload"],
+                "additionalProperties": false,
+            }),
+        };
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text(
+            "history that is below the ratio threshold ".repeat(20),
+        ));
+
+        let mut config = AgentConfig::for_model(fake_model())
+            .with_tools(vec![tool])
+            .with_compaction(CompactionSettings {
+                enabled: true,
+                max_estimated_tokens: usize::MAX,
+                keep_recent_messages: 1,
+                trigger_ratio: 0.8,
+                reserved_context_tokens: 0,
+                max_recent_messages: 20,
+                micro_enabled: false,
+                micro_keep_recent: 4,
+                max_rounds: 5,
+                max_retry_attempts: 2,
+            });
+
+        let history_tokens = context.estimated_tokens();
+        let tool_tokens = estimate_tool_specs_tokens(&config.tools);
+        let displayed_tokens = history_tokens + tool_tokens;
+        assert!(
+            history_tokens.saturating_mul(5) < displayed_tokens.saturating_mul(4),
+            "test setup must keep history alone below 80% of displayed tokens"
+        );
+        config.model.capabilities.max_context_tokens =
+            Some(u32::try_from(displayed_tokens).expect("test token count should fit in u32"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let emitter = EventEmitter::new(tx, context);
+
+        assert!(
+            evaluate_compaction_need(&config, &emitter).is_some(),
+            "tool schema tokens are sent with the request and must contribute to auto-compaction"
+        );
+    }
 }

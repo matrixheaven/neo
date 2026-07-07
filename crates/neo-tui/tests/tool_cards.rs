@@ -330,6 +330,32 @@ fn streaming_write_tool_card_highlights_content_before_path_arrives() {
 }
 
 #[test]
+fn streaming_write_tool_card_does_not_panic_on_trailing_blank_lines() {
+    let theme = TuiTheme::default();
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "tool-1".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: None,
+        details: None,
+        status: ToolStatusKind::Pending,
+        exit_code: None,
+    });
+
+    card.update_call(Some(
+        r#"{"path":"openspec/changes/example/.comet/handoff/design.md","content":"---\nrole: technical-design\n---\n\n# Design\n\n"}"#
+            .to_owned(),
+    ));
+
+    let rows = card.render_with_theme(100, &theme);
+
+    assert!(
+        rows.iter().any(|line| line.text().contains(" 6 ")),
+        "preview should preserve trailing blank lines without panicking: {rows:?}"
+    );
+}
+
+#[test]
 fn bash_running_card_shows_live_output_tail() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),

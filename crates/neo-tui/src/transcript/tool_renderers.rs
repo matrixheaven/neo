@@ -267,13 +267,13 @@ fn render_write_preview(
 
     for (index, line) in lines.iter().take(limit).enumerate() {
         let line_num = format!("  {:>4} ", index + 1);
-        if use_highlight {
+        if use_highlight && let Some(highlighted_line) = highlighted.get(index) {
             let theme = palette.theme.expect("theme present when highlighted");
             let mut spans = vec![Span::styled(
                 line_num,
                 Style::default().fg(theme.text_muted),
             )];
-            spans.extend(highlighted[index].clone());
+            spans.extend(highlighted_line.clone());
             rows.push(Line::from_spans(spans));
         } else {
             rows.push(palette.body_line(format!("{line_num}{line}")));
