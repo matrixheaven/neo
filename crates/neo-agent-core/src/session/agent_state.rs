@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use super::SessionError;
+use super::atomic_file::write_file_atomic;
 use super::layout::{MAIN_AGENT_ID, relative_agent_record_dir, session_state_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,13 +118,9 @@ impl SessionStateStore {
 
     pub async fn write(&self, state: &SessionState) -> Result<(), SessionError> {
         let path = self.path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
         let content = serde_json::to_string_pretty(state)
             .map_err(|source| SessionError::Json { line: 0, source })?;
-        fs::write(path, content).await?;
+        write_file_atomic(&path, content.as_bytes())?;
         Ok(())
     }
 }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::session::main_agent_goals_dir;
+use crate::session::{atomic_file::write_file_atomic, main_agent_goals_dir};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -218,14 +218,15 @@ async fn ensure_goal_artifacts(session_dir: &Path, goal: &mut Goal) -> Result<()
     let thinking = "# Thinking\n\nRisks, assumptions, and recon notes go here.\n";
     let protocol = "# Protocol\n\nProceed phase by phase. Retry once, write a focused fix spec on the second failure, and block with handoff details on the third failure. Run a final audit before completion.\n";
 
-    fs::write(dir.join("GOAL.md"), goal_md).await?;
-    fs::write(dir.join("ROADMAP.md"), roadmap).await?;
-    fs::write(dir.join("STATE.md"), state).await?;
-    fs::write(dir.join("THINKING.md"), thinking).await?;
-    fs::write(dir.join("PROTOCOL.md"), protocol).await?;
+    write_file_atomic(&dir.join("GOAL.md"), goal_md.as_bytes())?;
+    write_file_atomic(&dir.join("ROADMAP.md"), roadmap.as_bytes())?;
+    write_file_atomic(&dir.join("STATE.md"), state.as_bytes())?;
+    write_file_atomic(&dir.join("THINKING.md"), thinking.as_bytes())?;
+    write_file_atomic(&dir.join("PROTOCOL.md"), protocol.as_bytes())?;
     for (index, phase) in goal.phases.iter().enumerate() {
         let path = phases_dir.join(format!("phase-{}.md", index + 1));
-        fs::write(path, format!("# Phase {}\n\n{}\n", index + 1, phase)).await?;
+        let content = format!("# Phase {}\n\n{}\n", index + 1, phase);
+        write_file_atomic(&path, content.as_bytes())?;
     }
     Ok(())
 }
@@ -264,7 +265,7 @@ pub async fn save_goal(session_dir: &Path, goal: &Goal) -> Result<()> {
     let goals_dir = goals_dir(session_dir);
     fs::create_dir_all(&goals_dir).await?;
     let content = serde_json::to_string_pretty(goal)?;
-    fs::write(&path, content).await?;
+    write_file_atomic(&path, content.as_bytes())?;
     Ok(())
 }
 

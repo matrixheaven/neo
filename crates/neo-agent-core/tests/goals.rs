@@ -71,6 +71,32 @@ async fn goal_persists_to_disk() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn save_goal_rejects_symlinked_goal_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let goal = Goal::new("do not follow links");
+    let goal_path = temp
+        .path()
+        .join("agents/main/goals")
+        .join(format!("{}.json", goal.id));
+    let outside_goal = outside.path().join("goal.json");
+    std::fs::create_dir_all(goal_path.parent().expect("goal parent")).unwrap();
+    std::fs::write(&outside_goal, "outside").unwrap();
+    std::os::unix::fs::symlink(&outside_goal, &goal_path).unwrap();
+
+    let error = save_goal(temp.path(), &goal)
+        .await
+        .expect_err("goal save should reject symlinked target");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "error should name symlink risk: {error}"
+    );
+    assert_eq!(std::fs::read_to_string(&outside_goal).unwrap(), "outside");
+}
+
 #[tokio::test]
 async fn goal_start_creates_supergoal_artifacts() {
     let temp = tempfile::tempdir().unwrap();

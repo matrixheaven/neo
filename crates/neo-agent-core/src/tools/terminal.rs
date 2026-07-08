@@ -355,7 +355,7 @@ async fn write_terminal(tool: &str, handle: &str, input: &str) -> Result<ToolRes
     let session = terminals
         .get_mut(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
-    let input = input.replace('\n', "\r");
+    let input = normalize_terminal_input_newlines(input);
     session
         .writer
         .write_all(input.as_bytes())
@@ -743,6 +743,24 @@ fn format_terminal_output(content: &str, truncated: bool) -> String {
     format!("{content}\ntruncated: {truncated}")
 }
 
+fn normalize_terminal_input_newlines(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                normalized.push('\r');
+                if chars.peek() == Some(&'\n') {
+                    let _ = chars.next();
+                }
+            }
+            '\n' => normalized.push('\r'),
+            _ => normalized.push(ch),
+        }
+    }
+    normalized
+}
+
 fn unknown_terminal(tool: &str, handle: &str) -> ToolError {
     ToolError::InvalidInput {
         tool: tool.to_owned(),
@@ -804,6 +822,14 @@ mod tests {
         assert_eq!(
             format_terminal_output(&output, true),
             "tail\ntruncated: true"
+        );
+    }
+
+    #[test]
+    fn terminal_input_newlines_collapse_crlf_to_single_carriage_return() {
+        assert_eq!(
+            normalize_terminal_input_newlines("one\r\ntwo\nthree\rfour"),
+            "one\rtwo\rthree\rfour"
         );
     }
 }

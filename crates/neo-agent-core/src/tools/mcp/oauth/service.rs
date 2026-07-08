@@ -44,6 +44,10 @@ impl McpOAuthService {
         &self.store
     }
 
+    pub(super) fn credential_store(&self, identity: McpOAuthIdentity) -> CanonicalCredentialStore {
+        CanonicalCredentialStore::new(self.store.clone(), identity)
+    }
+
     #[must_use]
     pub fn has_tokens(&self, identity: &McpOAuthIdentity) -> bool {
         self.store
@@ -209,30 +213,6 @@ impl McpOAuthService {
         ))
     }
 
-    pub fn persist_rmcp_credentials(
-        &self,
-        identity: &McpOAuthIdentity,
-        credentials: &StoredCredentials,
-    ) -> Result<(), McpOAuthError> {
-        let Some(tokens) = token_record_from_credentials(credentials) else {
-            return Err(McpOAuthError::NeedsAuth(
-                "OAuth authorization did not return an access token".to_owned(),
-            ));
-        };
-
-        self.store.save_tokens(identity, &tokens)?;
-        if self
-            .store
-            .load_client(identity)
-            .map_err(|err| McpOAuthError::Store(err.to_string()))?
-            .is_none()
-        {
-            self.store
-                .save_client(identity, &client_record_from_credentials(credentials))?;
-        }
-        Ok(())
-    }
-
     pub fn persist_client_and_discovery(
         &self,
         identity: &McpOAuthIdentity,
@@ -253,13 +233,13 @@ impl McpOAuthService {
 }
 
 #[derive(Debug, Clone)]
-struct CanonicalCredentialStore {
+pub(super) struct CanonicalCredentialStore {
     store: McpOAuthStore,
     identity: McpOAuthIdentity,
 }
 
 impl CanonicalCredentialStore {
-    const fn new(store: McpOAuthStore, identity: McpOAuthIdentity) -> Self {
+    pub(super) const fn new(store: McpOAuthStore, identity: McpOAuthIdentity) -> Self {
         Self { store, identity }
     }
 }
@@ -398,18 +378,6 @@ fn stored_credentials_from_records(
     ))
 }
 
-fn client_record_from_credentials(credentials: &StoredCredentials) -> McpOAuthClientRecord {
-    McpOAuthClientRecord {
-        client_id: credentials.client_id.clone(),
-        client_secret: None,
-        redirect_uris: Vec::new(),
-        token_endpoint_auth_method: None,
-        raw: serde_json::json!({
-            "client_id": credentials.client_id
-        }),
-    }
-}
-
 fn redirect_uri_from_stored_client(client: &McpOAuthClientRecord) -> Result<String, McpOAuthError> {
     client.redirect_uris.first().cloned().ok_or_else(|| {
         McpOAuthError::Flow("stored OAuth client is missing a redirect URI".to_owned())
@@ -496,7 +464,6 @@ mod tests {
         InvalidateScope, McpOAuthClientRecord, McpOAuthError, McpOAuthIdentity,
         McpOAuthTokenRecord, McpOAuthTransportKind,
     };
-    use rmcp::transport::auth::StoredCredentials;
 
     #[test]
     fn from_store_uses_supplied_store() {
@@ -589,27 +556,6 @@ mod tests {
         let store = McpOAuthStore::new(dir.path().join("credentials").join("mcp"));
         let service = McpOAuthService::from_store(store);
         (dir, service, identity())
-    }
-
-    fn stored_credentials(access_token: &str, expires_in: u64) -> StoredCredentials {
-        let token_response = serde_json::from_value(serde_json::json!({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "refresh_token": "refresh-token",
-            "expires_in": expires_in,
-            "scope": "read write"
-        }))
-        .unwrap();
-        StoredCredentials::new(
-            "client-id".to_owned(),
-            Some(token_response),
-            vec!["read".to_owned(), "write".to_owned()],
-            Some(unix_now_secs()),
-        )
-    }
-
-    fn stored_credentials_without_token_response() -> StoredCredentials {
-        StoredCredentials::new("client-id".to_owned(), None, Vec::new(), None)
     }
 
     async fn token_endpoint(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
@@ -906,25 +852,6 @@ mod tests {
         assert!(service.store().root().exists());
     }
 
-    #[tokio::test]
-    async fn persist_rmcp_credentials_writes_tokens_and_minimal_client() {
-        let (_dir, service, identity) = service();
-
-        service
-            .persist_rmcp_credentials(&identity, &stored_credentials("persisted-token", 3600))
-            .unwrap();
-
-        let tokens = service.store().load_tokens(&identity).unwrap().unwrap();
-        assert_eq!(tokens.access_token, "persisted-token");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-token"));
-        let client = service.store().load_client(&identity).unwrap().unwrap();
-        assert_eq!(client.client_id, "client-id");
-        assert!(client.client_secret.is_none());
-        assert!(client.redirect_uris.is_empty());
-        assert!(client.token_endpoint_auth_method.is_none());
-        assert!(service.store().load_discovery(&identity).unwrap().is_none());
-    }
-
     #[test]
     fn persist_client_and_discovery_writes_refresh_prerequisites() {
         let (_dir, service, identity) = service();
@@ -951,41 +878,6 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(metadata.token_endpoint.as_str())
         );
-    }
-
-    #[tokio::test]
-    async fn persist_rmcp_credentials_preserves_existing_rich_client_record() {
-        let (_dir, service, identity) = service();
-        let existing_client = client_record();
-        service
-            .store()
-            .save_client(&identity, &existing_client)
-            .unwrap();
-
-        service
-            .persist_rmcp_credentials(&identity, &stored_credentials("persisted-token", 3600))
-            .unwrap();
-
-        let client = service.store().load_client(&identity).unwrap().unwrap();
-        assert_eq!(client, existing_client);
-        let tokens = service.store().load_tokens(&identity).unwrap().unwrap();
-        assert_eq!(tokens.access_token, "persisted-token");
-    }
-
-    #[tokio::test]
-    async fn persist_rmcp_credentials_without_token_response_needs_auth_and_writes_nothing() {
-        let (_dir, service, identity) = service();
-
-        let err = service
-            .persist_rmcp_credentials(&identity, &stored_credentials_without_token_response())
-            .unwrap_err();
-
-        assert!(
-            matches!(err, McpOAuthError::NeedsAuth(message) if message == "OAuth authorization did not return an access token")
-        );
-        assert!(service.store().load_tokens(&identity).unwrap().is_none());
-        assert!(service.store().load_client(&identity).unwrap().is_none());
-        assert!(service.store().load_discovery(&identity).unwrap().is_none());
     }
 
     #[test]

@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +16,7 @@ use crate::runtime::estimate_messages_tokens;
 use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
 pub mod agent_state;
+pub(crate) mod atomic_file;
 pub mod export;
 pub mod index;
 pub mod layout;
@@ -836,67 +836,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 }
 
 fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path has no parent directory: {}", path.display()),
-        )
-    })?;
-    ensure_safe_directory_tree(parent)?;
-    reject_reparse_or_symlink_if_present(path)?;
-    let file_name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("metadata");
-    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let write_result = write_temp_file(&temp_path, content).and_then(|()| {
-        replace_with_temp_file(&temp_path, path)?;
-        sync_parent_dir(parent)
-    });
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    write_result
-}
-
-fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if is_reparse_or_symlink(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("refusing symlinked session file {}", path.display()),
-        ));
-    }
-    Ok(())
-}
-
-fn write_temp_file(path: &Path, content: &[u8]) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(content)?;
-    file.sync_all()
-}
-
-fn replace_with_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    // Rust's cross-platform `rename` contract replaces an existing file in one
-    // filesystem operation, including on Windows, without a remove-first gap.
-    fs::rename(temp_path, path)
-}
-
-#[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    atomic_file::write_file_atomic(path, content)
 }
 
 fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {

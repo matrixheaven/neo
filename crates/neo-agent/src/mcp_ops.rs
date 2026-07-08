@@ -9,8 +9,7 @@ use neo_agent_core::{
     ManagedMcpTransport, McpConnectionManager, McpOAuthIdentity, McpOAuthService,
     McpOAuthServiceConfig, McpOAuthTransportKind, McpReconnectPolicy, McpResourceListEntry,
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
-    build_authorization_manager,
-    oauth::{callback_server::CallbackServer, store::OAuthStore},
+    build_authorization_manager, oauth::callback_server::CallbackServer,
 };
 use neo_tui::transcript::{McpStartupPhase, McpStartupStatusData};
 
@@ -636,14 +635,9 @@ pub async fn authenticate_mcp_server_oauth(
         neo_home: Some(neo_home.to_path_buf()),
     });
     let identity = mcp_oauth_identity_for_server(server_id, server)?;
-    let temp_store_dir = tempfile::Builder::new()
-        .prefix("neo-mcp-oauth-")
-        .tempdir()
-        .context("failed to create temporary OAuth credential store")?;
-    let oauth_store_path = temp_store_dir.path().join("oauth.json");
 
     // Build rmcp AuthorizationManager (performs discovery from server URL).
-    let manager = build_authorization_manager(url, &oauth_store_path, server_id)
+    let manager = build_authorization_manager(url, &service, identity.clone())
         .await
         .context("failed to initialize OAuth authorization manager")?;
 
@@ -655,7 +649,7 @@ pub async fn authenticate_mcp_server_oauth(
     let port = callback_server.local_port;
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let (client_config, discovery_metadata) = {
+    {
         let mut mgr = manager.lock().await;
 
         // Discover OAuth metadata (RFC 8414 / RFC 9728) from the server.
@@ -671,6 +665,9 @@ pub async fn authenticate_mcp_server_oauth(
             .register_client("neo", &redirect_uri, &[])
             .await
             .context("OAuth dynamic client registration failed")?;
+        service
+            .persist_client_and_discovery(&identity, &client_config, metadata)
+            .context("failed to persist OAuth client metadata to Neo MCP credential store")?;
 
         // Get the authorization URL (PKCE + CSRF state are generated internally).
         let auth_url = mgr
@@ -679,8 +676,7 @@ pub async fn authenticate_mcp_server_oauth(
             .context("failed to build OAuth authorization URL")?;
 
         let _ = webbrowser::open(&auth_url);
-        (client_config, metadata)
-    };
+    }
 
     // Wait for the browser callback.
     let code = callback_server
@@ -703,19 +699,6 @@ pub async fn authenticate_mcp_server_oauth(
             .await
             .context("failed to exchange authorization code for token")?;
     }
-
-    let temp_store = OAuthStore::load(&oauth_store_path)
-        .context("failed to load temporary OAuth credentials after authorization")?;
-    let credentials = temp_store
-        .get(&format!("mcp:{server_id}"))
-        .cloned()
-        .context("OAuth authorization did not persist credentials")?;
-    service
-        .persist_client_and_discovery(&identity, &client_config, discovery_metadata)
-        .context("failed to persist OAuth client metadata to Neo MCP credential store")?;
-    service
-        .persist_rmcp_credentials(&identity, &credentials)
-        .context("failed to persist OAuth credentials to Neo MCP credential store")?;
 
     Ok(())
 }
