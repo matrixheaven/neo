@@ -116,10 +116,10 @@ impl JsonlSessionWriter {
     }
 
     async fn append_json_line<T: Serialize>(&mut self, record: &T) -> Result<(), SessionError> {
-        let line = serde_json::to_string(record)
-            .map_err(|source| SessionError::Json { line: 0, source })?;
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.write_all(b"\n").await?;
+        let mut line =
+            serde_json::to_vec(record).map_err(|source| SessionError::Json { line: 0, source })?;
+        line.push(b'\n');
+        self.writer.write_all(&line).await?;
         Ok(())
     }
 
@@ -143,14 +143,21 @@ impl JsonlSessionReader {
             if line.trim().is_empty() {
                 continue;
             }
-            if read_session_metadata_line(&line, line_number)? {
-                continue;
+            for value in serde_json::Deserializer::from_str(&line).into_iter::<serde_json::Value>()
+            {
+                let value = value.map_err(|source| SessionError::Json {
+                    line: line_number,
+                    source,
+                })?;
+                if read_session_metadata_value(&value, line_number)? {
+                    continue;
+                }
+                let event = serde_json::from_value(value).map_err(|source| SessionError::Json {
+                    line: line_number,
+                    source,
+                })?;
+                events.push(event);
             }
-            let event = serde_json::from_str(&line).map_err(|source| SessionError::Json {
-                line: line_number,
-                source,
-            })?;
-            events.push(event);
         }
 
         Ok(events)
@@ -169,12 +176,10 @@ impl JsonlSessionReader {
     }
 }
 
-fn read_session_metadata_line(line: &str, line_number: usize) -> Result<bool, SessionError> {
-    let value =
-        serde_json::from_str::<serde_json::Value>(line).map_err(|source| SessionError::Json {
-            line: line_number,
-            source,
-        })?;
+fn read_session_metadata_value(
+    value: &serde_json::Value,
+    line_number: usize,
+) -> Result<bool, SessionError> {
     let is_metadata = value
         .get("kind")
         .and_then(serde_json::Value::as_str)
@@ -183,12 +188,13 @@ fn read_session_metadata_line(line: &str, line_number: usize) -> Result<bool, Se
         return Ok(false);
     }
 
-    let metadata = serde_json::from_value::<SessionSchemaMetadata>(value).map_err(|source| {
-        SessionError::Json {
-            line: line_number,
-            source,
-        }
-    })?;
+    let metadata =
+        serde_json::from_value::<SessionSchemaMetadata>(value.clone()).map_err(|source| {
+            SessionError::Json {
+                line: line_number,
+                source,
+            }
+        })?;
     if metadata.format != SESSION_FORMAT_NAME {
         return Err(SessionError::UnsupportedMetadataFormat(metadata.format));
     }

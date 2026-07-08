@@ -8,7 +8,7 @@ use neo_agent_core::session::{
 };
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content,
-    ContextWindowSource, StopReason, TodoEventData,
+    ContextWindowSource, PermissionOperation, StopReason, TodoEventData,
 };
 use serde_json::json;
 
@@ -88,6 +88,86 @@ async fn jsonl_session_reads_legacy_token_usage_without_cache_fields() {
             },
         }]
     );
+}
+
+#[tokio::test]
+async fn jsonl_session_preserves_newline_when_large_unflushed_event_is_followed_by_append() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+
+    {
+        let mut writer = JsonlSessionWriter::create(&path)
+            .await
+            .expect("create session");
+        writer
+            .append(&AgentEvent::ApprovalRequested {
+                turn: 1,
+                id: "call_approval".to_owned(),
+                operation: PermissionOperation::FileWrite,
+                subject: "docs/large.md".to_owned(),
+                arguments: json!({ "content": "x".repeat(16 * 1024) }),
+                session_scope: None,
+                prefix_rule: None,
+                suggestions: Vec::new(),
+            })
+            .await
+            .expect("append large approval");
+        // Simulate an interrupted process while blocked on approval. Large writes
+        // must still leave the file ready for the next append.
+    }
+
+    let mut writer = JsonlSessionWriter::open_append(&path)
+        .await
+        .expect("open append");
+    writer
+        .append(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("continued"),
+        })
+        .await
+        .expect("append continued message");
+    writer.flush().await.expect("flush");
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AgentEvent::ApprovalRequested { .. },
+            AgentEvent::MessageAppended { .. }
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn jsonl_session_reads_concatenated_records_from_interrupted_append() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let approval = AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "call_approval".to_owned(),
+        operation: PermissionOperation::FileWrite,
+        subject: "docs/large.md".to_owned(),
+        arguments: json!({ "content": "x".repeat(16 * 1024) }),
+        session_scope: None,
+        prefix_rule: None,
+        suggestions: Vec::new(),
+    };
+    let continued = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("continued"),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{}{}\n",
+            serde_json::to_string(&approval).expect("approval json"),
+            serde_json::to_string(&continued).expect("continued json")
+        ),
+    )
+    .expect("write concatenated session");
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+
+    assert_eq!(events, vec![approval, continued]);
 }
 
 #[test]
