@@ -32,6 +32,7 @@ sha2.workspace = true
 similar = "2"
 thiserror.workspace = true
 tokio.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
@@ -44,7 +45,6 @@ windows-acl.workspace = true
 oauth2 = { version = "5.0", default-features = false }
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "macros"] }
 temp-env = "0.3"
-tempfile.workspace = true
 
 [lints]
 workspace = true

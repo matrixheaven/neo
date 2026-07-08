@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs as stdfs, io,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -14,6 +15,10 @@ use crate::skills::{SkillSource, SkillStore, SkillStoreHandle, discovery};
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 
 type SkillStoreReloader = Arc<dyn Fn() -> Result<SkillStore, String> + Send + Sync>;
+
+const RESOURCE_DIRS: &[&str] = &["references", "scripts", "assets"];
+const MAX_RESOURCE_BYTES: usize = 256 * 1024;
+const MAX_TOTAL_RESOURCE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListSkillsArgs {
@@ -40,6 +45,24 @@ pub struct MoveSkillArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateSkillResource {
+    /// Relative path under references/, scripts/, or assets/.
+    #[schemars(
+        description = "Relative resource path under references/, scripts/, or assets/. Absolute paths, '..', and SKILL.md are rejected."
+    )]
+    pub path: String,
+    /// UTF-8 text content for the resource file.
+    #[schemars(description = "UTF-8 text content for the resource file.")]
+    pub content: String,
+    /// Request executable permissions where supported. Intended for scripts/.
+    #[serde(default)]
+    #[schemars(
+        description = "Request executable permissions where supported. Intended for scripts/."
+    )]
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateSkillArgs {
     /// Name for the new skill. Used as the directory name under ~/.neo/skills/.
     #[schemars(
@@ -60,6 +83,12 @@ pub struct CreateSkillArgs {
         description = "Markdown body of the skill. Do not include YAML frontmatter; CreateSkill generates frontmatter from name, description, and skill_type."
     )]
     pub body: String,
+    /// Optional text resources to write under references/, scripts/, or assets/.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional text resources to create under references/, scripts/, or assets/."
+    )]
+    pub resources: Vec<CreateSkillResource>,
 }
 
 pub struct ListSkillsTool {
@@ -97,8 +126,9 @@ impl Tool for ListSkillsTool {
          include_builtin=true.\n\n\
          Output format:\n\
          Skills are grouped by tier and each entry shows the skill name and its absolute \
-         filesystem path. Skills discovered at a higher tier shadow lower-tier skills with the \
-         same name.\n\n\
+         filesystem path, plus an optional [references,scripts,assets] suffix when those \
+         top-level resource directories are non-empty. Skills discovered at a higher tier shadow \
+         lower-tier skills with the same name.\n\n\
          After identifying a skill, activate it via:\n\
          - The Skill tool (programmatic invocation).\n\
          - The /skill:<name> slash command (manual invocation in the TUI).\n\n\
@@ -156,12 +186,45 @@ impl Tool for ListSkillsTool {
                 skills.sort_by(|left, right| left.name.cmp(&right.name));
                 lines.push(format!("[{tier}]"));
                 for skill in skills {
-                    lines.push(format!("  {}: {}", skill.name, skill.root.display()));
+                    let resources = skill_resource_summary(&skill.root)
+                        .map_or_else(String::new, |summary| format!(" {summary}"));
+                    lines.push(format!(
+                        "  {}: {}{}",
+                        skill.name,
+                        skill.root.display(),
+                        resources
+                    ));
                 }
             }
             Ok(ToolResult::ok(lines.join("\n")))
         })
     }
+}
+
+fn skill_resource_summary(skill_root: &Path) -> Option<String> {
+    let dirs = RESOURCE_DIRS
+        .iter()
+        .copied()
+        .filter(|dir| resource_dir_has_entries(&skill_root.join(dir)))
+        .collect::<Vec<_>>();
+    if dirs.is_empty() {
+        None
+    } else {
+        Some(format!("[{}]", dirs.join(",")))
+    }
+}
+
+fn resource_dir_has_entries(path: &Path) -> bool {
+    let Ok(entries) = stdfs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries {
+        match entry {
+            Ok(_) => return true,
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 pub struct CreateSkillTool {
@@ -225,15 +288,17 @@ impl Tool for CreateSkillTool {
          message), \"inline\" (expanded directly into the prompt), or \"flow\" (multi-step \
          interactive workflow).\n\
          - whenToUse (recommended): Natural language trigger description for automatic skill selection.\n\n\
-         If a skill with the same name already exists, the existing file is backed up under \
-         ~/.neo/backups/skills/<timestamp>/<name>/SKILL.md before being overwritten.\n\n\
+         If a skill with the same name already exists, the existing skill directory is backed up \
+         under ~/.neo/backups/skills/<timestamp>/<name>/ before being overwritten.\n\n\
          After creation, the skill can be activated via the Skill tool or the /skill:<name> slash command.\n\n\
          Parameters:\n\
          - name: Directory name for the skill under ~/.neo/skills/.\n\
          - description: Short description of what the skill does.\n\
          - skill_type: \"prompt\", \"inline\", or \"flow\". Defaults to \"prompt\".\n\
          - body: Markdown body only. Do not include YAML frontmatter; this tool generates \
-         frontmatter from name, description, and skill_type."
+         frontmatter from name, description, and skill_type.\n\
+         - resources: Optional UTF-8 text files under references/, scripts/, or assets/. \
+         Resource paths must be relative and cannot target SKILL.md."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -254,6 +319,7 @@ impl Tool for CreateSkillTool {
             let args = args?;
             validate_skill_name(&args.name)?;
             let skill_type = parse_skill_type(&args.skill_type)?;
+            let resources = validate_resources(&args.resources)?;
             let frontmatter = CreateSkillFrontmatter {
                 name: &args.name,
                 description: &args.description,
@@ -266,34 +332,46 @@ impl Tool for CreateSkillTool {
                 })?;
             let content = format!("---\n{frontmatter}---\n\n{}", args.body);
 
-            let skills_root = user_home.join("skills");
-            ensure_safe_directory(&skills_root)?;
-            let skill_dir = ensure_safe_child_directory(&skills_root, Path::new(&args.name))
-                .map_err(ToolError::Io)?;
+            let skills_root = ensure_safe_home_subdirectory(&user_home, Path::new("skills"))?;
+            let skill_name = Path::new(&args.name);
+            let skill_dir_path = skills_root.join(skill_name);
+            let skill_dir_existed = match stdfs::symlink_metadata(&skill_dir_path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => return Err(ToolError::Io(error)),
+            };
+            let skill_dir =
+                ensure_safe_child_directory(&skills_root, skill_name).map_err(ToolError::Io)?;
             let path = skill_dir.join("SKILL.md");
             reject_reparse_or_symlink_if_present(&path).map_err(ToolError::Io)?;
 
-            // Backup existing file before overwrite.
-            if path.exists() {
+            for resource in &resources {
+                preflight_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
+            }
+
+            if skill_dir_existed {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let backup_root = user_home.join("backups").join("skills");
-                ensure_safe_directory(&backup_root)?;
+                let backup_child = PathBuf::from("backups").join("skills");
+                let backup_root = ensure_safe_home_subdirectory(&user_home, &backup_child)?;
+                let backup_id = format!("{timestamp}-{}", Uuid::new_v4());
                 let timestamp_dir =
-                    ensure_safe_child_directory(&backup_root, Path::new(&format!("{timestamp}")))
+                    ensure_safe_child_directory(&backup_root, Path::new(&backup_id))
                         .map_err(ToolError::Io)?;
-                let backup_dir = ensure_safe_child_directory(&timestamp_dir, Path::new(&args.name))
-                    .map_err(ToolError::Io)?;
-                let backup_path = backup_dir.join("SKILL.md");
-                if let Err(error) = copy_file_safely(&path, &backup_path) {
+                let backup_dir = timestamp_dir.join(&args.name);
+                reject_reparse_or_symlink_if_present(&backup_dir).map_err(ToolError::Io)?;
+                if let Err(error) = copy_dir(&skill_dir, &backup_dir).await {
                     let _ = fs::remove_dir_all(&backup_dir).await;
                     return Err(ToolError::Io(error));
                 }
             }
 
             write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
+            for resource in &resources {
+                write_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
+            }
             let reload_message =
                 reload_shared_skill_store("CreateSkill", skill_store.as_ref(), reload.as_ref())?;
             Ok(ToolResult::ok(format!(
@@ -309,12 +387,24 @@ fn ensure_safe_directory(path: &Path) -> Result<(), ToolError> {
     ensure_safe_directory_tree(path).map_err(ToolError::Io)
 }
 
+fn ensure_safe_home_subdirectory(home: &Path, child: &Path) -> Result<PathBuf, ToolError> {
+    ensure_safe_directory(home)?;
+    ensure_safe_child_directory(home, child).map_err(ToolError::Io)
+}
+
 #[derive(Serialize)]
 struct CreateSkillFrontmatter<'a> {
     name: &'a str,
     description: &'a str,
     #[serde(rename = "type")]
     skill_type: crate::skills::SkillType,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedResource {
+    relative_path: PathBuf,
+    content: String,
+    executable: bool,
 }
 
 fn validate_skill_name(name: &str) -> Result<(), ToolError> {
@@ -350,9 +440,164 @@ fn validate_skill_name(name: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+fn validate_resources(
+    resources: &[CreateSkillResource],
+) -> Result<Vec<ValidatedResource>, ToolError> {
+    let mut total_bytes = 0usize;
+    let mut planned_paths = BTreeSet::new();
+    let mut validated = Vec::with_capacity(resources.len());
+    for resource in resources {
+        let content_bytes = resource.content.len();
+        if content_bytes > MAX_RESOURCE_BYTES {
+            return Err(invalid_create_skill_input(format!(
+                "resource content too large for {:?}: {} bytes exceeds {} bytes",
+                resource.path, content_bytes, MAX_RESOURCE_BYTES
+            )));
+        }
+        total_bytes = total_bytes.checked_add(content_bytes).ok_or_else(|| {
+            invalid_create_skill_input("total resource content is too large".to_owned())
+        })?;
+        if total_bytes > MAX_TOTAL_RESOURCE_BYTES {
+            return Err(invalid_create_skill_input(format!(
+                "total resource content too large: {total_bytes} bytes exceeds {MAX_TOTAL_RESOURCE_BYTES} bytes"
+            )));
+        }
+        let relative_path = validate_resource_path(&resource.path)?;
+        let planned_key = planned_resource_path_key(&relative_path);
+        validate_planned_resource_path(&relative_path, &planned_key, &planned_paths)?;
+        planned_paths.insert(planned_key);
+        validated.push(ValidatedResource {
+            relative_path,
+            content: resource.content.clone(),
+            executable: resource.executable,
+        });
+    }
+    Ok(validated)
+}
+
+fn validate_planned_resource_path(
+    relative_path: &Path,
+    planned_key: &[String],
+    planned_paths: &BTreeSet<Vec<String>>,
+) -> Result<(), ToolError> {
+    for planned_path in planned_paths {
+        if planned_key == planned_path {
+            return Err(invalid_resource_path(
+                &relative_path.display().to_string(),
+                "path duplicates another resource",
+            ));
+        }
+        if planned_key.starts_with(planned_path) || planned_path.starts_with(planned_key) {
+            return Err(invalid_resource_path(
+                &relative_path.display().to_string(),
+                "path conflicts with another resource path",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn planned_resource_path_key(relative_path: &Path) -> Vec<String> {
+    relative_path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part.to_str().map(str::to_ascii_lowercase),
+            Component::CurDir
+            | Component::Prefix(_)
+            | Component::RootDir
+            | Component::ParentDir => None,
+        })
+        .collect()
+}
+
+fn validate_resource_path(raw: &str) -> Result<PathBuf, ToolError> {
+    if raw.is_empty() {
+        return Err(invalid_resource_path(raw, "path must not be empty"));
+    }
+    if raw.split(['/', '\\']).any(str::is_empty) {
+        return Err(invalid_resource_path(
+            raw,
+            "path contains an empty component",
+        ));
+    }
+    if Path::new(raw).is_absolute() {
+        return Err(invalid_resource_path(raw, "path must be relative"));
+    }
+
+    let mut components = Vec::new();
+    for part in raw.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(invalid_resource_path(
+                raw,
+                "path contains an unsafe component",
+            ));
+        }
+        if part.ends_with('.') {
+            return Err(invalid_resource_path(
+                raw,
+                "path component must not end with a dot",
+            ));
+        }
+        if part.ends_with(' ') {
+            return Err(invalid_resource_path(
+                raw,
+                "path component must not end with a space",
+            ));
+        }
+        if part.chars().any(|ch| {
+            ch.is_ascii_control() || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        }) {
+            return Err(invalid_resource_path(
+                raw,
+                "path component contains a Windows-illegal character",
+            ));
+        }
+        let reserved_prefix = part.split('.').next().unwrap_or(part);
+        if is_windows_reserved_basename(reserved_prefix) {
+            return Err(invalid_resource_path(
+                raw,
+                "path contains a reserved Windows device name",
+            ));
+        }
+        components.push(part.to_owned());
+    }
+
+    if components.len() < 2 {
+        return Err(invalid_resource_path(
+            raw,
+            "path must include a file under a resource directory",
+        ));
+    }
+    if !RESOURCE_DIRS.contains(&components[0].as_str()) {
+        return Err(invalid_resource_path(
+            raw,
+            "path must start with references, scripts, or assets",
+        ));
+    }
+    if components
+        .last()
+        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        return Err(invalid_resource_path(
+            raw,
+            "resource path must not target SKILL.md",
+        ));
+    }
+
+    let mut path = PathBuf::new();
+    for component in components {
+        path.push(component);
+    }
+    Ok(path)
+}
+
+fn invalid_resource_path(raw: &str, reason: &str) -> ToolError {
+    invalid_create_skill_input(format!("invalid resource path {raw:?}: {reason}"))
+}
+
 fn is_windows_reserved_basename(name: &str) -> bool {
     matches!(
-        name,
+        name.to_ascii_lowercase().as_str(),
         "con"
             | "prn"
             | "aux"
@@ -396,6 +641,104 @@ fn invalid_create_skill_input(message: String) -> ToolError {
     }
 }
 
+fn write_resource_file(skill_dir: &Path, resource: &ValidatedResource) -> io::Result<()> {
+    preflight_resource_file(skill_dir, resource)?;
+    let path = skill_dir.join(&resource.relative_path);
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("resource path has no parent directory: {}", path.display()),
+        )
+    })?;
+    let relative_parent = parent.strip_prefix(skill_dir).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "resource parent escapes skill directory: {}",
+                parent.display()
+            ),
+        )
+    })?;
+    ensure_safe_child_directory(skill_dir, relative_parent)?;
+    write_file_atomic(&path, resource.content.as_bytes())?;
+    apply_resource_executable(&path, resource.executable)
+}
+
+fn preflight_resource_file(skill_dir: &Path, resource: &ValidatedResource) -> io::Result<()> {
+    let path = skill_dir.join(&resource.relative_path);
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("resource path has no parent directory: {}", path.display()),
+        )
+    })?;
+    let relative_parent = parent.strip_prefix(skill_dir).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "resource parent escapes skill directory: {}",
+                parent.display()
+            ),
+        )
+    })?;
+    preflight_resource_parent(skill_dir, relative_parent)?;
+    reject_reparse_or_symlink_if_present(&path)?;
+    match stdfs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("resource target is a directory: {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn preflight_resource_parent(skill_dir: &Path, relative_parent: &Path) -> io::Result<()> {
+    validate_safe_directory(skill_dir)?;
+    let mut current = skill_dir.to_path_buf();
+    for component in relative_parent.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                current.push(part);
+                match stdfs::symlink_metadata(&current) {
+                    Ok(_) => validate_safe_directory(&current)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing unsafe resource parent: {}",
+                        relative_parent.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_resource_executable(path: &Path, executable: bool) -> io::Result<()> {
+    if !executable {
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = stdfs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    stdfs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn apply_resource_executable(_path: &Path, _executable: bool) -> io::Result<()> {
+    Ok(())
+}
+
 fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
@@ -405,32 +748,11 @@ fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     })?;
     ensure_existing_safe_directory_tree(parent)?;
     reject_reparse_or_symlink_if_present(path)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("skill");
-    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let write_result = write_temp_file(&temp_path, content)
-        .and_then(|()| replace_with_temp_file(&temp_path, path));
-    if write_result.is_err() {
-        let _ = stdfs::remove_file(&temp_path);
-    }
-    write_result
-}
-
-fn write_temp_file(path: &Path, content: &[u8]) -> io::Result<()> {
-    let mut file = stdfs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    let file = temp.as_file_mut();
     file.write_all(content)?;
-    file.sync_all()
-}
-
-fn replace_with_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    // Rust's cross-platform `rename` contract replaces an existing file in one
-    // filesystem operation, including on Windows, without a remove-first gap.
-    stdfs::rename(temp_path, path)
+    file.sync_all()?;
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
@@ -538,6 +860,7 @@ fn validate_regular_file(path: &Path) -> io::Result<()> {
 
 fn copy_file_safely(source: &Path, destination: &Path) -> io::Result<u64> {
     validate_regular_file(source)?;
+    let source_metadata = stdfs::metadata(source)?;
     reject_reparse_or_symlink_if_present(destination)?;
     ensure_path_absent(destination)?;
     let mut input = stdfs::File::open(source)?;
@@ -547,7 +870,22 @@ fn copy_file_safely(source: &Path, destination: &Path) -> io::Result<u64> {
         .open(destination)?;
     let bytes = io::copy(&mut input, &mut output)?;
     output.sync_all()?;
+    drop(output);
+    copy_file_permissions(&source_metadata, destination)?;
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn copy_file_permissions(source_metadata: &stdfs::Metadata, destination: &Path) -> io::Result<()> {
+    stdfs::set_permissions(destination, source_metadata.permissions())
+}
+
+#[cfg(not(unix))]
+fn copy_file_permissions(
+    _source_metadata: &stdfs::Metadata,
+    _destination: &Path,
+) -> io::Result<()> {
+    Ok(())
 }
 
 fn is_reparse_or_symlink(metadata: &stdfs::Metadata) -> bool {
@@ -693,8 +1031,8 @@ impl Tool for MoveSkillTool {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let backup_root = backup_home.join("backups").join("skills");
-            ensure_safe_directory(&backup_root)?;
+            let backup_child = PathBuf::from("backups").join("skills");
+            let backup_root = ensure_safe_home_subdirectory(&backup_home, &backup_child)?;
             let backup_dir =
                 ensure_safe_child_directory(&backup_root, Path::new(&format!("{timestamp}")))
                     .map_err(ToolError::Io)?;
@@ -879,6 +1217,88 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn list_skills_summarizes_non_empty_resource_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("resourceful");
+        fs::create_dir_all(skill_dir.join("assets"))
+            .await
+            .expect("mkdir assets");
+        fs::create_dir_all(skill_dir.join("references"))
+            .await
+            .expect("mkdir references");
+        fs::create_dir_all(skill_dir.join("scripts"))
+            .await
+            .expect("mkdir scripts");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: resourceful\ndescription: test\ntype: prompt\n---\n\nbody",
+        )
+        .await
+        .expect("write skill");
+        fs::write(skill_dir.join("assets").join("template.md"), "template")
+            .await
+            .expect("write asset");
+        fs::write(skill_dir.join("references").join("guide.md"), "guide")
+            .await
+            .expect("write reference");
+        fs::write(skill_dir.join("scripts").join("check.py"), "print('ok')\n")
+            .await
+            .expect("write script");
+
+        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains(&format!(
+            "  resourceful: {} [references,scripts,assets]",
+            skill_dir.display()
+        )));
+        assert!(!result.content.contains("guide.md"), "{}", result.content);
+        assert!(!result.content.contains("check.py"), "{}", result.content);
+        assert!(
+            !result.content.contains("template.md"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn list_skills_omits_empty_resource_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("quiet-skill");
+        fs::create_dir_all(skill_dir.join("references"))
+            .await
+            .expect("mkdir empty references");
+        fs::create_dir_all(skill_dir.join("scripts"))
+            .await
+            .expect("mkdir scripts");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: quiet-skill\ndescription: test\ntype: prompt\n---\n\nbody",
+        )
+        .await
+        .expect("write skill");
+        fs::write(skill_dir.join("scripts").join("check.py"), "print('ok')\n")
+            .await
+            .expect("write script");
+
+        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
+
+        assert!(!result.is_error);
+        assert!(
+            result
+                .content
+                .contains(&format!("  quiet-skill: {} [scripts]", skill_dir.display()))
+        );
+        assert!(
+            !result.content.contains("[references,scripts]"),
+            "{}",
+            result.content
+        );
+    }
+
     #[test]
     fn builtin_skills_include_create_skill() {
         let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
@@ -902,6 +1322,19 @@ mod tests {
             skill.body
         );
         assert!(skill.body.contains("## Verify"), "{}", skill.body);
+        assert!(
+            skill.body.contains("CreateSkill.resources"),
+            "{}",
+            skill.body
+        );
+        assert!(skill.body.contains("${NEO_SKILL_DIR}"), "{}", skill.body);
+        assert!(skill.body.contains("references/"), "{}", skill.body);
+        assert!(skill.body.contains("scripts/"), "{}", skill.body);
+        assert!(skill.body.contains("assets/"), "{}", skill.body);
+        assert!(
+            skill.manifest.disable_model_invocation,
+            "self-evo must require explicit user invocation"
+        );
     }
 
     #[test]
@@ -911,8 +1344,24 @@ mod tests {
             .iter()
             .find(|skill| skill.name == "create-skill")
             .expect("create-skill built-in");
+        assert!(
+            skill
+                .body
+                .contains("No-argument invocation is not a requirement"),
+            "{}",
+            skill.body
+        );
         assert!(skill.body.contains("## Verify"), "{}", skill.body);
         assert!(skill.body.contains("CreateSkill"), "{}", skill.body);
+        assert!(
+            skill.body.contains("CreateSkill.resources"),
+            "{}",
+            skill.body
+        );
+        assert!(skill.body.contains("${NEO_SKILL_DIR}"), "{}", skill.body);
+        assert!(skill.body.contains("references/"), "{}", skill.body);
+        assert!(skill.body.contains("scripts/"), "{}", skill.body);
+        assert!(skill.body.contains("assets/"), "{}", skill.body);
         assert!(
             skill.manifest.disable_model_invocation,
             "create-skill must require explicit user invocation"
@@ -976,6 +1425,213 @@ mod tests {
             ),
             "CreateSkill body is plain Markdown and must not be treated as a second frontmatter block"
         );
+    }
+
+    #[tokio::test]
+    async fn create_skill_writes_resource_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "resource-skill",
+                    "description": "Use when testing resource-backed skills.",
+                    "body": "# Resource Skill\n\nRead `${NEO_SKILL_DIR}/references/guide.md`.",
+                    "resources": [
+                        {
+                            "path": "references/guide.md",
+                            "content": "# Guide\n\nUse this reference."
+                        },
+                        {
+                            "path": "scripts/check.py",
+                            "content": "print('ok')\n",
+                            "executable": true
+                        },
+                        {
+                            "path": "assets/template.md",
+                            "content": "Name: {{name}}\n"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        let skill_dir = temp.path().join("skills").join("resource-skill");
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("references").join("guide.md"))
+                .await
+                .expect("read reference"),
+            "# Guide\n\nUse this reference."
+        );
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("scripts").join("check.py"))
+                .await
+                .expect("read script"),
+            "print('ok')\n"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("assets").join("template.md"))
+                .await
+                .expect("read asset"),
+            "Name: {{name}}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_resource_path_escape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "bad-resource",
+                    "description": "Bad resource",
+                    "body": "# Bad",
+                    "resources": [
+                        {
+                            "path": "references/../escaped.md",
+                            "content": "escaped"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("resource path escapes must fail");
+
+        assert!(error.to_string().contains("invalid resource path"));
+        assert!(
+            !temp
+                .path()
+                .join("skills")
+                .join("bad-resource")
+                .join("escaped.md")
+                .exists()
+        );
+        assert!(!temp.path().join("skills").join("bad-resource").exists());
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_resource_outside_canonical_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "bad-resource",
+                    "description": "Bad resource",
+                    "body": "# Bad",
+                    "resources": [
+                        {
+                            "path": "docs/guide.md",
+                            "content": "guide"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("unsupported resource dir must fail");
+
+        assert!(error.to_string().contains("references, scripts, or assets"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_absolute_resource_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let absolute_resource_path = outside.path().join("guide.md");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "bad-resource",
+                    "description": "Bad resource",
+                    "body": "# Bad",
+                    "resources": [
+                        {
+                            "path": absolute_resource_path.to_string_lossy(),
+                            "content": "guide"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("absolute resource path must fail");
+
+        assert!(error.to_string().contains("invalid resource path"));
+        assert!(!absolute_resource_path.exists());
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_skill_md_as_resource() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "bad-resource",
+                    "description": "Bad resource",
+                    "body": "# Bad",
+                    "resources": [
+                        {
+                            "path": "references/SKILL.md",
+                            "content": "not a nested skill"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("SKILL.md resources must fail");
+
+        assert!(error.to_string().contains("SKILL.md"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_windows_hostile_resource_path_components() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        for path in [
+            "references/bad:name.md",
+            "references/bad\tname.md",
+            "references/trailing-space.md ",
+            "references/trailing-space /guide.md",
+        ] {
+            let error = tool
+                .execute(
+                    &make_ctx(),
+                    json!({
+                        "name": "bad-resource",
+                        "description": "Bad resource",
+                        "body": "# Bad",
+                        "resources": [
+                            {
+                                "path": path,
+                                "content": "bad"
+                            }
+                        ]
+                    }),
+                )
+                .await
+                .expect_err("Windows-hostile resource path must fail");
+
+            assert!(
+                error.to_string().contains("invalid resource path"),
+                "{path}: {error}"
+            );
+        }
+        assert!(!temp.path().join("skills").join("bad-resource").exists());
     }
 
     #[tokio::test]
@@ -1066,6 +1722,47 @@ mod tests {
             .expect_err("symlinked skills root should be invalid input");
 
         assert!(error.to_string().contains("symlinked skill directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_backup_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let skill_dir = temp.path().join("skills").join("safe-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "old content")
+            .await
+            .expect("write old skill");
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("backups"))
+            .expect("symlink backup parent");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "safe-skill",
+                    "description": "A test skill",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect_err("symlinked backup parent should be invalid input");
+
+        assert!(error.to_string().contains("symlinked skill directory"));
+        assert!(
+            !outside.path().join("skills").exists(),
+            "backup must not follow a symlinked backup parent"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .await
+                .expect("read original skill"),
+            "old content"
+        );
     }
 
     #[cfg(unix)]
@@ -1228,39 +1925,83 @@ mod tests {
         assert!(!content.contains("old content"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn create_skill_rejects_symlinked_backup_file() {
+    async fn create_skill_backs_up_existing_resource_directory() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let outside = tempfile::tempdir().expect("outside tempdir");
         let skill_dir = temp.path().join("skills").join("existing-skill");
-        fs::create_dir_all(&skill_dir)
+        fs::create_dir_all(skill_dir.join("references"))
             .await
-            .expect("mkdir skill dir");
-        fs::write(skill_dir.join("SKILL.md"), "old content")
+            .expect("mkdir references");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
             .await
             .expect("write old skill");
-        let outside_file = outside.path().join("backup-target.md");
-        fs::write(&outside_file, "outside")
+        fs::write(skill_dir.join("references").join("old.md"), "old reference")
             .await
-            .expect("write outside");
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("timestamp")
-            .as_secs();
-        for offset in 0..=30 {
-            let backup_dir = temp
-                .path()
-                .join("backups")
-                .join("skills")
-                .join(format!("{}", timestamp + offset))
-                .join("existing-skill");
-            fs::create_dir_all(&backup_dir)
+            .expect("write old reference");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# Updated",
+                    "resources": [
+                        {
+                            "path": "references/new.md",
+                            "content": "new reference"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("references").join("old.md"))
                 .await
-                .expect("mkdir backup dir");
-            std::os::unix::fs::symlink(&outside_file, backup_dir.join("SKILL.md"))
-                .expect("symlink backup file");
-        }
+                .expect("read preserved resource"),
+            "old reference"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("references").join("new.md"))
+                .await
+                .expect("read new resource"),
+            "new reference"
+        );
+
+        let backup_root = temp.path().join("backups").join("skills");
+        let backup_skill = std::fs::read_dir(&backup_root)
+            .expect("read backups")
+            .map(|entry| entry.expect("backup entry").path().join("existing-skill"))
+            .find(|path| path.join("SKILL.md").is_file())
+            .expect("backup skill dir");
+        assert_eq!(
+            fs::read_to_string(backup_skill.join("SKILL.md"))
+                .await
+                .expect("read backup skill"),
+            "old skill"
+        );
+        assert_eq!(
+            fs::read_to_string(backup_skill.join("references").join("old.md"))
+                .await
+                .expect("read backup resource"),
+            "old reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_resource_directory_target_before_overwriting_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(skill_dir.join("references").join("guide.md"))
+            .await
+            .expect("mkdir resource target");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
+            .await
+            .expect("write old skill");
         let tool = CreateSkillTool::new(temp.path());
 
         let error = tool
@@ -1269,27 +2010,359 @@ mod tests {
                 json!({
                     "name": "existing-skill",
                     "description": "Updated skill",
-                    "body": "# New"
+                    "body": "# Updated",
+                    "resources": [
+                        {
+                            "path": "references/guide.md",
+                            "content": "new reference"
+                        }
+                    ]
                 }),
             )
             .await
-            .expect_err("symlinked backup file should fail");
+            .expect_err("directory resource target should fail");
+
+        assert!(error.to_string().contains("resource target is a directory"));
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .await
+                .expect("read original skill"),
+            "old skill"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_conflicting_resource_paths_before_overwriting_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
+            .await
+            .expect("write old skill");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# Updated",
+                    "resources": [
+                        {
+                            "path": "references/foo",
+                            "content": "file"
+                        },
+                        {
+                            "path": "references/foo/bar.md",
+                            "content": "nested file"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("conflicting resource paths should fail");
 
         assert!(
-            error.to_string().contains("symlinked skill file"),
-            "error should name symlink risk: {error}"
-        );
-        assert_eq!(
-            fs::read_to_string(&outside_file)
-                .await
-                .expect("read outside"),
-            "outside"
+            error
+                .to_string()
+                .contains("conflicts with another resource")
         );
         assert_eq!(
             fs::read_to_string(skill_dir.join("SKILL.md"))
                 .await
                 .expect("read original skill"),
-            "old content"
+            "old skill"
+        );
+        assert!(
+            !skill_dir.join("references").exists(),
+            "validation should fail before writing resources"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_case_insensitive_resource_path_conflicts() {
+        for (skill_name, first_path, second_path, expected_message) in [
+            (
+                "case-duplicate",
+                "references/Guide.md",
+                "references/guide.md",
+                "duplicates another resource",
+            ),
+            (
+                "case-ancestor",
+                "references/Foo",
+                "references/foo/bar.md",
+                "conflicts with another resource",
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let skill_dir = temp.path().join("skills").join(skill_name);
+            fs::create_dir_all(&skill_dir)
+                .await
+                .expect("mkdir skill dir");
+            fs::write(skill_dir.join("SKILL.md"), "old skill")
+                .await
+                .expect("write old skill");
+            let tool = CreateSkillTool::new(temp.path());
+
+            let error = tool
+                .execute(
+                    &make_ctx(),
+                    json!({
+                        "name": skill_name,
+                        "description": "Updated skill",
+                        "body": "# Updated",
+                        "resources": [
+                            {
+                                "path": first_path,
+                                "content": "first"
+                            },
+                            {
+                                "path": second_path,
+                                "content": "second"
+                            }
+                        ]
+                    }),
+                )
+                .await
+                .expect_err("case-insensitive resource path conflict should fail");
+
+            assert!(
+                error.to_string().contains(expected_message),
+                "{skill_name}: {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(skill_dir.join("SKILL.md"))
+                    .await
+                    .expect("read original skill"),
+                "old skill"
+            );
+            assert!(
+                !skill_dir.join("references").exists(),
+                "validation should fail before writing resources"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_resource_target_before_overwriting_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        let resource_dir = skill_dir.join("references");
+        fs::create_dir_all(&resource_dir)
+            .await
+            .expect("mkdir references");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
+            .await
+            .expect("write old skill");
+        let outside_file = outside.path().join("guide.md");
+        fs::write(&outside_file, "outside")
+            .await
+            .expect("write outside");
+        std::os::unix::fs::symlink(&outside_file, resource_dir.join("guide.md"))
+            .expect("symlink resource target");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let error = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# Updated",
+                    "resources": [
+                        {
+                            "path": "references/guide.md",
+                            "content": "new reference"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect_err("symlinked resource target should fail");
+
+        assert!(error.to_string().contains("symlinked skill file"));
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .await
+                .expect("read original skill"),
+            "old skill"
+        );
+        assert_eq!(
+            fs::read_to_string(outside_file)
+                .await
+                .expect("read outside file"),
+            "outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_backup_preserves_executable_resource_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        let script_path = skill_dir.join("scripts").join("check.py");
+        fs::create_dir_all(script_path.parent().expect("script parent"))
+            .await
+            .expect("mkdir scripts");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
+            .await
+            .expect("write old skill");
+        fs::write(&script_path, "print('old')\n")
+            .await
+            .expect("write script");
+        let mut permissions = stdfs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        stdfs::set_permissions(&script_path, permissions).expect("chmod script");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# Updated"
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        let backup_root = temp.path().join("backups").join("skills");
+        let backup_script = std::fs::read_dir(&backup_root)
+            .expect("read backups")
+            .map(|entry| {
+                entry
+                    .expect("backup entry")
+                    .path()
+                    .join("existing-skill")
+                    .join("scripts")
+                    .join("check.py")
+            })
+            .find(|path| path.is_file())
+            .expect("backup script");
+        let mode = stdfs::metadata(backup_script)
+            .expect("backup script metadata")
+            .permissions()
+            .mode();
+        assert_ne!(
+            mode & 0o100,
+            0,
+            "backup should preserve owner executable bit"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_preserves_unmentioned_existing_resources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(skill_dir.join("references"))
+            .await
+            .expect("mkdir references");
+        fs::write(skill_dir.join("SKILL.md"), "old skill")
+            .await
+            .expect("write old skill");
+        fs::write(skill_dir.join("references").join("keep.md"), "keep me")
+            .await
+            .expect("write kept reference");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Updated skill",
+                    "body": "# Updated"
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert_eq!(
+            fs::read_to_string(skill_dir.join("references").join("keep.md"))
+                .await
+                .expect("read kept reference"),
+            "keep me"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_creates_unique_backup_directories_for_rapid_overwrites() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("existing-skill");
+        fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "old content")
+            .await
+            .expect("write old skill");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let first = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "First update",
+                    "body": "# First"
+                }),
+            )
+            .await
+            .expect("first execute");
+        assert!(!first.is_error);
+
+        let second = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "existing-skill",
+                    "description": "Second update",
+                    "body": "# Second"
+                }),
+            )
+            .await
+            .expect("second execute");
+        assert!(!second.is_error);
+
+        let backup_root = temp.path().join("backups").join("skills");
+        let mut backup_contents = Vec::new();
+        for entry in std::fs::read_dir(&backup_root).expect("read backup root") {
+            let backup_skill = entry.expect("backup entry").path().join("existing-skill");
+            if backup_skill.join("SKILL.md").is_file() {
+                backup_contents.push(
+                    fs::read_to_string(backup_skill.join("SKILL.md"))
+                        .await
+                        .expect("read backup skill"),
+                );
+            }
+        }
+
+        assert_eq!(
+            backup_contents.len(),
+            2,
+            "rapid overwrites should create distinct backup directories"
+        );
+        assert!(
+            backup_contents
+                .iter()
+                .any(|content| content == "old content")
+        );
+        assert!(
+            backup_contents
+                .iter()
+                .any(|content| content.contains("# First"))
         );
     }
 

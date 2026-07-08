@@ -293,6 +293,92 @@ Brainstorm.
 }
 
 #[test]
+fn discover_skills_loads_package_root_once() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("SKILL.md"),
+        r"---
+name: package-root
+description: Package root
+---
+Root skill.
+",
+    );
+
+    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+
+    assert_eq!(names, vec!["package-root"]);
+}
+
+#[test]
+fn discover_skills_ignores_resource_dirs_under_skill_package() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("parent").join("SKILL.md"),
+        r"---
+name: parent
+description: Parent skill
+---
+Parent skill.
+",
+    );
+    for resource_dir in ["references", "scripts", "assets"] {
+        write(
+            dir.path()
+                .join("parent")
+                .join(resource_dir)
+                .join("SKILL.md"),
+            &format!(
+                r"---
+name: {resource_dir}
+description: Resource dir
+---
+Resource dir.
+"
+            ),
+        );
+    }
+
+    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+
+    assert_eq!(names, vec!["parent"]);
+}
+
+#[test]
+fn discover_skills_still_finds_children_under_skills_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("parent").join("SKILL.md"),
+        r"---
+name: parent
+description: Parent skill
+---
+Parent skill.
+",
+    );
+    write(
+        dir.path()
+            .join("parent")
+            .join("skills")
+            .join("child")
+            .join("SKILL.md"),
+        r"---
+name: child
+description: Child skill
+---
+Child skill.
+",
+    );
+
+    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+
+    assert_eq!(names, vec!["parent", "parent/child"]);
+}
+
+#[test]
 fn skill_store_tiers_override() {
     // With the project tier removed, skills load only from user/extra dirs.
     // A user skill is the sole source for a given name.

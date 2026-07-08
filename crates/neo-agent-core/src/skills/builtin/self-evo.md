@@ -26,15 +26,21 @@ No-argument invocation is not a scope. If the user invoked `/skill:self-evo` wit
 2. Summarize only the selected scope.
 3. Identify reusable patterns, decision rules, recovery workflows, or repeated procedures.
 4. Skip trivial facts, one-off context, and guidance that belongs in `AGENTS.md`.
-5. For each distinct pattern, draft one focused skill with:
+5. Decide whether the distilled skill needs resource files:
+   - Put reusable long docs, schemas, protocols, API notes, or rich examples in `references/`.
+   - Put deterministic helpers, validators, converters, or repeatable scripts in `scripts/`.
+   - Put templates, boilerplate, fixture text, or output assets in `assets/`.
+   - Keep one-off logs, transient conversation history, project-only facts, and unresolved scratch notes out of generated skills and resources.
+6. For each distinct pattern, draft one focused skill with:
    - `name`: short, lowercase, portable, and unique.
    - `description`: one sentence explaining when to use it.
    - `type`: `prompt` unless the user explicitly requested another supported type.
    - `body`: Markdown without YAML frontmatter.
-6. Include a `## Verify` section in every generated skill body. The section must explain how a future agent can check that the skill was applied correctly.
-7. Call `CreateSkill` to save each skill under `~/.neo/skills/<name>/SKILL.md`.
-8. Call `ListSkills` and verify every created skill is visible in the active skill store.
-9. If an existing skill was backed up and overwritten, report the overwritten skill and backup path.
+   - Resource-backed bodies must route concrete resource paths through `${NEO_SKILL_DIR}`, for example `${NEO_SKILL_DIR}/references/schema.md`, `${NEO_SKILL_DIR}/scripts/check.py`, or `${NEO_SKILL_DIR}/assets/template.md`.
+7. Include a `## Verify` section in every generated skill body. The section must explain how a future agent can check that the skill was applied correctly.
+8. Call `CreateSkill` to save each skill under `~/.neo/skills/<name>/SKILL.md`. Use `CreateSkill.resources` when resource files make the skill more reliable or reusable.
+9. Call `ListSkills` and verify every created skill is visible in the active skill store.
+10. If an existing skill was backed up and overwritten, report the overwritten skill and backup path.
 
 ## Rules
 
@@ -47,4 +53,4 @@ No-argument invocation is not a scope. If the user invoked `/skill:self-evo` wit
 
 ## Verify
 
-A successful self-evo run creates only focused skills, each generated skill body includes its own `## Verify` section, and `ListSkills` shows the created names without restarting Neo.
+A successful self-evo run creates only focused skills, each generated skill body includes its own `## Verify` section, resource-backed skills route to existing files through `${NEO_SKILL_DIR}`, and `ListSkills` shows the created names without restarting Neo.

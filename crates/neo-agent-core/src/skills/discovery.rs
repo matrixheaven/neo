@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use super::{LoadedSkill, SkillLoadError, load_skill_file};
 
+const RESOURCE_DIRS: &[&str] = &["references", "scripts", "assets"];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SkillSource {
     #[default]
@@ -17,10 +19,6 @@ pub fn discover_skills(
     let mut skills = Vec::new();
     if !root.is_dir() {
         return Ok(skills);
-    }
-
-    if root.join("SKILL.md").is_file() {
-        skills.push(load_skill_file(&root.join("SKILL.md"), source)?);
     }
 
     skills.extend(discover_recursive(root, source, "")?);
@@ -64,6 +62,15 @@ fn discover_recursive(
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
+            if own_skill_file.is_file()
+                && entry.file_name().to_str().is_some_and(|file_name| {
+                    RESOURCE_DIRS
+                        .iter()
+                        .any(|resource_dir| file_name == *resource_dir)
+                })
+            {
+                continue;
+            }
             skills.extend(discover_recursive(&path, source, &own_prefix)?);
         }
     }
