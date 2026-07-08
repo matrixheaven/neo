@@ -32,7 +32,10 @@ impl InteractiveController {
             let instruction = instruction.to_owned();
             self.clear_submitted_prompt();
             if self.permission_mode == super::PermissionMode::Auto {
-                self.open_init_preflight(&instruction);
+                self.open_interactive_preflight(
+                    super::interactive_preflight::init_preflight(),
+                    super::PendingInteractiveWorkflow::Init { instruction },
+                );
                 return true;
             }
             if let Err(error) = self.run_init_workflow(&instruction, false).await {
@@ -182,33 +185,26 @@ impl InteractiveController {
         Ok(())
     }
 
-    fn open_init_preflight(&mut self, instruction: &str) {
-        let preflight = super::init_command::init_preflight();
-        self.pending_init_instruction = Some(instruction.to_owned());
+    pub(super) fn open_interactive_preflight(
+        &mut self,
+        spec: super::InteractivePreflightSpec,
+        pending: super::PendingInteractiveWorkflow,
+    ) {
+        let items = spec.choice_items();
+        let page_size = items.len();
+        let initial_id = spec.initial_id();
+        let title = spec.title.clone();
+        self.pending_interactive_workflow = Some(pending);
+        self.pending_preflight = Some(spec);
         let theme = self.tui.chrome().theme();
         self.tui
             .chrome_mut()
             .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
-                title: preflight.title,
-                items: vec![
-                    neo_tui::dialogs::ChoiceItem::new(
-                        preflight.recommended_id,
-                        "Switch to Ask and start",
-                    )
-                    .with_description(preflight.body.clone()),
-                    neo_tui::dialogs::ChoiceItem::new(
-                        preflight.alternate_id,
-                        "Stay Auto and generate best effort",
-                    )
-                    .with_description(
-                        "Start /init without user questions. The agent will proceed with best-effort assumptions.",
-                    ),
-                    neo_tui::dialogs::ChoiceItem::new(preflight.cancel_id, "Cancel")
-                        .with_description("Do not start /init."),
-                ],
-                initial_id: Some("preflight:init:switch-ask".to_owned()),
+                title,
+                items,
+                initial_id: Some(initial_id),
                 theme,
-                page_size: 3,
+                page_size,
                 current_id: None,
             });
     }
@@ -219,8 +215,7 @@ impl InteractiveController {
             return true;
         }
         if let Some(directives) = parse_inline_skill_directives(prompt) {
-            self.handle_skill_slash_command(directives);
-            return true;
+            return self.handle_skill_slash_command(directives);
         }
         false
     }
@@ -274,19 +269,41 @@ impl InteractiveController {
         }
     }
 
-    fn handle_skill_slash_command(&mut self, directives: InlineSkillDirectives) {
-        if directives
-            .invocations
-            .iter()
-            .any(|invocation| invocation.name.is_empty())
-        {
-            self.push_status("Usage: /skill:<name> [args]");
-        } else {
-            match self.activate_skill_directives(directives) {
-                Ok(_) => self.clear_submitted_prompt(),
-                Err(err) => self.push_status(format!("Skill error: {err}")),
+    fn handle_skill_slash_command(&mut self, directives: InlineSkillDirectives) -> bool {
+        match super::interactive_preflight::skill_preflight_decision(
+            &directives,
+            self.permission_mode,
+        ) {
+            super::interactive_preflight::SkillPreflightDecision::Ready => {}
+            super::interactive_preflight::SkillPreflightDecision::InvalidUsage => {
+                self.push_status("Usage: /skill:<name> [args]");
+                return true;
+            }
+            super::interactive_preflight::SkillPreflightDecision::Open {
+                spec,
+                generated_prompt,
+            } => {
+                self.clear_submitted_prompt();
+                self.open_interactive_preflight(
+                    spec,
+                    super::PendingInteractiveWorkflow::Skill {
+                        directives,
+                        generated_prompt,
+                    },
+                );
+                return true;
+            }
+            super::interactive_preflight::SkillPreflightDecision::Blocked(message) => {
+                self.clear_submitted_prompt();
+                self.push_status(message);
+                return true;
             }
         }
+        match self.activate_skill_directives(directives) {
+            Ok(_) => self.clear_submitted_prompt(),
+            Err(err) => self.push_status(format!("Skill error: {err}")),
+        }
+        true
     }
 
     fn handle_plan_slash_command(&mut self, arg: &str) {

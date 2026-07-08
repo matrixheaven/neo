@@ -69,9 +69,14 @@ Neo ships with the following skills (source in `crates/neo-agent-core/src/skills
 | --- | --- | --- |
 | `mcp-config` | prompt | Configure MCP servers, handle OAuth login, edit `[[mcp.servers]]` |
 | `sub-skill` | prompt | Review, group, and reorganize the skill library into hierarchical sub-skill bundles |
-| `self-evo` | prompt | Summarize the current or recent sessions into a reusable skill |
+| `self-evo` | prompt | Summarize a concrete current, recent, session, or topic scope into reusable skills |
+| `create-skill` | prompt | Create a Neo skill from the user's requirements, including verification guidance |
 
-All built-in skills have `disableModelInvocation: true`, meaning they do not auto-trigger and require explicit user invocation. Deleting `~/.neo/skills/.builtin/` forces a fresh extraction.
+Workflow-authoring built-ins such as `self-evo` and `create-skill` have `disableModelInvocation: true`, meaning they require explicit user invocation. Neo refreshes shipped built-ins under `~/.neo/skills/.builtin/` from the current binary; put custom copies outside `.builtin/`.
+
+`/skill:self-evo` without arguments asks for a distillation scope before creating skills. In Auto permission mode, Neo opens an interactive preflight before the model turn so the workflow does not block unattended execution later.
+
+`/skill:create-skill` creates one focused skill through the `CreateSkill` tool. If no requirement is provided, it asks for the desired capability before drafting. Created skills include verification guidance and are reloaded into the active skill store when `CreateSkill` succeeds.
 
 ## Activation Methods
 

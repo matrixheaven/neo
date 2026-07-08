@@ -63,10 +63,12 @@ The permission mode decides whether Neo asks you to confirm each tool call. Swit
 | Mode | Flag | Behavior |
 | --- | --- | --- |
 | **Ask** (default) | — | Commands, edits, and other risky actions ask first; read-only/search tools run directly |
-| **Auto** | `--auto` | Fully non-interactive: tool actions are auto-approved and `AskUserQuestion` is skipped |
+| **Auto** | `--auto` | Unattended execution: tool actions are auto-approved and `AskUserQuestion` is unavailable during the running turn |
 | **YOLO** | `--yolo` | Auto-approves tool actions and plan transitions, but Neo may still actively ask you questions when needed |
 
 > `--auto` and `--yolo` are mutually exclusive. Auto is suited to scripted/headless flows; YOLO fits workflows where you want to let go but keep the option for interactive questions.
+
+For workflows that may need clarification, Neo can show an interactive preflight before the turn starts. Optional workflows may continue with best-effort assumptions; workflows missing required input ask you to switch to Ask mode or cancel before any work starts.
 
 Inside the TUI you can switch at any time with `/ask` `/auto` `/yolo`, or cycle development modes (Normal → Plan → Goal) with `Shift+Tab`.
 

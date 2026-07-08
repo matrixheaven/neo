@@ -69,9 +69,14 @@ Neo 自带以下技能（源码位于 `crates/neo-agent-core/src/skills/builtin/
 | --- | --- | --- |
 | `mcp-config` | prompt | 配置 MCP server、处理 OAuth 登录、编辑 `[[mcp.servers]]` |
 | `sub-skill` | prompt | 审视、分组、重组技能库为层级子技能包 |
-| `self-evo` | prompt | 把当前会话或近期会话总结成可复用技能 |
+| `self-evo` | prompt | 把明确的当前、近期、会话或主题范围总结成可复用技能 |
+| `create-skill` | prompt | 按用户需求创建 Neo skill，并包含验证说明 |
 
-内置技能都是 `disableModelInvocation: true`，即不会自动触发，需要用户显式调用。删除 `~/.neo/skills/.builtin/` 可强制重新解压。
+`self-evo` 和 `create-skill` 这类工作流创作型内置技能使用 `disableModelInvocation: true`，需要用户显式调用。Neo 会从当前二进制刷新 `~/.neo/skills/.builtin/` 下的内置技能；自定义副本应放在 `.builtin/` 之外。
+
+`/skill:self-evo` 不带参数时会先询问蒸馏范围，再创建技能。在 Auto 权限模式下，Neo 会在模型回合开始前打开交互预检，避免无人值守运行中途才停下来等待用户回答。
+
+`/skill:create-skill` 通过 `CreateSkill` 工具创建一个聚焦的 skill。如果没有提供需求，它会先询问要创建的能力再起草。创建出的 skill 会包含验证说明；`CreateSkill` 成功后会重新加载当前会话的 skill store。
 
 ## 激活方式
 

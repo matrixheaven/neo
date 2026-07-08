@@ -16,7 +16,7 @@
 | `/fork` | — | 为当前会话创建一个新的分支并跳转 |
 | `/init [instruction]` | — | 创建或刷新工作区 `AGENTS.md`；后续文本会作为自然语言指导传入 init 工作流。 |
 
-`/init` 仅支持 TUI 交互模式。在 Auto 权限模式下会先打开预检对话框，方便用户切换到 Ask 模式，以便工作流询问 reference 位置和长期项目偏好。
+`/init` 仅支持 TUI 交互模式。`/init`、`/skill:self-evo`、`/skill:create-skill` 等交互型工作流在 Auto 模式下可能会在开始前打开本地预检。Neo 会根据已解析的 slash command 机械触发该预检；模型不能自行决定切换权限模式。
 
 ## 模式控制
 

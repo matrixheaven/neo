@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::{
     ContextWindow, InputResult, InteractiveController, PermissionMode, SelectedModel,
-    dialog_result_may_close, init_command,
+    dialog_result_may_close,
 };
 
 impl InteractiveController {
@@ -225,7 +225,8 @@ impl InteractiveController {
                 self.handle_selected_choice_item(&item.id).await;
             }
             neo_tui::dialogs::ChoiceResult::Cancelled => {
-                self.pending_init_instruction = None;
+                self.pending_interactive_workflow = None;
+                self.pending_preflight = None;
             }
         }
     }
@@ -244,27 +245,103 @@ impl InteractiveController {
     }
 
     pub(super) async fn handle_preflight_choice_item(&mut self, id: &str) -> bool {
-        let Some(decision) = init_command::preflight_decision(id) else {
+        let Some(preflight) = self.pending_preflight.clone() else {
             return false;
         };
-        let instruction = self.pending_init_instruction.take().unwrap_or_default();
-        match decision {
-            init_command::PreflightDecision::SwitchPermissionMode(mode) => {
+        let Some(action) = preflight.action_for_choice(id) else {
+            return false;
+        };
+        let workflow = self.pending_interactive_workflow.take();
+        self.pending_preflight = None;
+        match action {
+            super::PreflightAction::SwitchPermissionMode(mode) => {
                 self.set_permission_mode(mode);
-                if let Err(error) = self.run_init_workflow(&instruction, false).await {
-                    self.push_status(format!("Failed to start /init: {error}"));
-                }
+                self.start_pending_interactive_workflow_if_present(workflow, false)
+                    .await;
             }
-            init_command::PreflightDecision::Continue => {
-                if let Err(error) = self.run_init_workflow(&instruction, true).await {
-                    self.push_status(format!("Failed to start /init: {error}"));
-                }
+            super::PreflightAction::ContinueAutoBestEffort => {
+                self.start_pending_interactive_workflow_if_present(workflow, true)
+                    .await;
             }
-            init_command::PreflightDecision::Cancel => {
-                self.push_status("/init cancelled");
+            super::PreflightAction::Cancel => {
+                self.push_status("Interactive workflow cancelled");
             }
         }
         true
+    }
+
+    async fn start_pending_interactive_workflow_if_present(
+        &mut self,
+        workflow: Option<super::PendingInteractiveWorkflow>,
+        auto_mode_best_effort: bool,
+    ) {
+        let Some(workflow) = workflow else {
+            return;
+        };
+        if let Err(error) = self
+            .start_pending_interactive_workflow(workflow, auto_mode_best_effort)
+            .await
+        {
+            self.push_status(format!("Failed to start interactive workflow: {error}"));
+        }
+    }
+
+    async fn start_pending_interactive_workflow(
+        &mut self,
+        workflow: super::PendingInteractiveWorkflow,
+        action_auto_mode_best_effort: bool,
+    ) -> Result<()> {
+        match workflow {
+            super::PendingInteractiveWorkflow::Init { instruction } => {
+                self.run_init_workflow(&instruction, action_auto_mode_best_effort)
+                    .await
+            }
+            super::PendingInteractiveWorkflow::Skill {
+                directives,
+                generated_prompt,
+            } => {
+                self.start_skill_workflow_from_directives(
+                    directives,
+                    generated_prompt,
+                    action_auto_mode_best_effort,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn start_skill_workflow_from_directives(
+        &mut self,
+        directives: super::InlineSkillDirectives,
+        generated_prompt: Option<String>,
+        auto_mode_best_effort: bool,
+    ) -> Result<()> {
+        let skill_names = directives
+            .invocations
+            .iter()
+            .map(|invocation| invocation.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (stripped_prompt, _display_body) = self.activate_skill_directives(directives)?;
+        let prompt = if let Some(generated_prompt) = generated_prompt {
+            format!("Run the activated skill workflow for {skill_names}.\n\n{generated_prompt}")
+        } else if stripped_prompt.trim().is_empty() {
+            "Run the activated skill workflow.".to_owned()
+        } else {
+            stripped_prompt
+        };
+        let prompt = if auto_mode_best_effort {
+            format!(
+                "{}\n\n{}",
+                super::interactive_preflight::auto_best_effort_note(),
+                prompt
+            )
+        } else {
+            prompt
+        };
+        self.start_generated_injection_turn_from_text(prompt, "skill", "/skill workflow")?;
+        self.wait_for_active_turn().await?;
+        self.start_pending_background_question_followups().await
     }
 
     pub(super) fn handle_builtin_choice_item(&mut self, id: &str) -> bool {

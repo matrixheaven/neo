@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use neo_agent_core::PermissionMode;
-
 pub(super) const REQUIRED_AGENTS_HEADINGS: &[&str] = &[
     "Reference",
     "Project Identity",
@@ -91,24 +89,6 @@ pub(super) struct InitPromptRequest<'a> {
     pub(super) auto_mode_best_effort: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InitPreflight {
-    pub(super) title: String,
-    pub(super) body: String,
-    pub(super) recommended_id: String,
-    pub(super) alternate_id: String,
-    pub(super) cancel_id: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PreflightDecision {
-    SwitchPermissionMode(PermissionMode),
-    Continue,
-    Cancel,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AgentsGuideIssueCode {
     MissingHeading,
@@ -189,29 +169,6 @@ Golden style example. Use this for structure, concision, and operational tone on
 #[allow(dead_code)]
 pub(super) fn wrap_init_system_reminder(prompt: &str) -> String {
     format!("<system-reminder>\n{}\n</system-reminder>", prompt.trim())
-}
-
-#[allow(dead_code)]
-pub(super) fn init_preflight() -> InitPreflight {
-    InitPreflight {
-        title: "Switch to Ask mode?".to_owned(),
-        body: "Generating a strong AGENTS.md usually requires asking about reference locations, project preferences, and durable workflow rules.".to_owned(),
-        recommended_id: "preflight:init:switch-ask".to_owned(),
-        alternate_id: "preflight:init:continue-auto".to_owned(),
-        cancel_id: "preflight:init:cancel".to_owned(),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn preflight_decision(id: &str) -> Option<PreflightDecision> {
-    match id {
-        "preflight:init:switch-ask" => {
-            Some(PreflightDecision::SwitchPermissionMode(PermissionMode::Ask))
-        }
-        "preflight:init:continue-auto" => Some(PreflightDecision::Continue),
-        "preflight:init:cancel" => Some(PreflightDecision::Cancel),
-        _ => None,
-    }
 }
 
 pub(super) fn validate_agents_guide(markdown: &str) -> Vec<AgentsGuideIssue> {

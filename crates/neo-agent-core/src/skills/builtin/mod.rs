@@ -8,8 +8,9 @@ use crate::skills::{LoadedSkill, SkillManifest, SkillSource};
 const SUB_SKILL: &str = include_str!("sub-skill.md");
 const SELF_EVO: &str = include_str!("self-evo.md");
 const MCP_CONFIG: &str = include_str!("mcp-config.md");
+const CREATE_SKILL: &str = include_str!("create-skill.md");
 
-const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO, MCP_CONFIG];
+const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO, MCP_CONFIG, CREATE_SKILL];
 const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
 #[derive(Debug, thiserror::Error)]
@@ -21,8 +22,8 @@ pub enum BuiltinSkillError {
 }
 
 /// Extract built-in skills from the binary into `~/.neo/skills/.builtin/`.
-/// Existing files are left untouched so user edits are preserved. To force a
-/// re-extract, the user can delete `~/.neo/skills/.builtin/`.
+/// `.builtin` is Neo-managed and refreshed from the current binary on each
+/// extraction. Users should customize skills by copying them outside `.builtin`.
 pub fn extract_builtin_skills(
     user_skills_dir: &Path,
 ) -> Result<Vec<LoadedSkill>, BuiltinSkillError> {
@@ -35,9 +36,7 @@ pub fn extract_builtin_skills(
         let skill_dir = builtin_dir.join(&skill.name);
         fs::create_dir_all(&skill_dir)?;
         let path = skill_dir.join("SKILL.md");
-        if !path.exists() {
-            fs::write(&path, source)?;
-        }
+        fs::write(&path, source)?;
     }
 
     // Discover extracted skills on disk. This is what the runtime will actually use.

@@ -75,6 +75,11 @@ use snapshot::render_transcript_snapshot;
 
 mod init_command;
 
+mod interactive_preflight;
+use interactive_preflight::{
+    InteractivePreflightSpec, PendingInteractiveWorkflow, PreflightAction,
+};
+
 mod prompt_completion;
 use prompt_completion::{
     longest_common_completion_prefix, prompt_completions, session_completion_items,
@@ -341,7 +346,8 @@ pub(crate) struct InteractiveController {
     /// Transport selected in the MCP add transport picker, kept while the
     /// single-page add form is open so submission can build the right input.
     pending_mcp_add_transport: Option<&'static str>,
-    pending_init_instruction: Option<String>,
+    pending_interactive_workflow: Option<PendingInteractiveWorkflow>,
+    pending_preflight: Option<InteractivePreflightSpec>,
     mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Kimi-style skill activation prompt waiting to be injected as context for
@@ -718,7 +724,8 @@ impl InteractiveController {
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
-            pending_init_instruction: None,
+            pending_interactive_workflow: None,
+            pending_preflight: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
             skill_store: None,
             pending_skill_context: None,
@@ -1320,13 +1327,32 @@ impl InteractiveController {
         }
 
         if let Some(directives) = parse_inline_skill_directives(&prompt) {
-            if directives
-                .invocations
-                .iter()
-                .any(|invocation| invocation.name.is_empty())
+            match interactive_preflight::skill_preflight_decision(&directives, self.permission_mode)
             {
-                self.push_status("Usage: /skill:<name> [args]");
-                return Ok(());
+                interactive_preflight::SkillPreflightDecision::Ready => {}
+                interactive_preflight::SkillPreflightDecision::InvalidUsage => {
+                    self.push_status("Usage: /skill:<name> [args]");
+                    return Ok(());
+                }
+                interactive_preflight::SkillPreflightDecision::Open {
+                    spec,
+                    generated_prompt,
+                } => {
+                    self.clear_submitted_prompt();
+                    self.open_interactive_preflight(
+                        spec,
+                        PendingInteractiveWorkflow::Skill {
+                            directives,
+                            generated_prompt,
+                        },
+                    );
+                    return Ok(());
+                }
+                interactive_preflight::SkillPreflightDecision::Blocked(message) => {
+                    self.clear_submitted_prompt();
+                    self.push_status(message);
+                    return Ok(());
+                }
             }
             let (stripped_prompt, display_body) = match self.activate_skill_directives(directives) {
                 Ok(pair) => pair,
@@ -1430,11 +1456,9 @@ impl InteractiveController {
             &self.paste_store,
             &self.image_attachment_store,
         );
-        let display_text = content_to_display_text(&content);
         self.tui
             .transcript_mut()
             .push_user_message(local_message.to_owned());
-        self.pending_local_user_message_to_suppress = Some(display_text);
         self.start_turn_with_prompt_origin(
             content,
             model_override,

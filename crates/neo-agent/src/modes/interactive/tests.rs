@@ -140,6 +140,46 @@ fn skill_store_with_two_prompt_skills() -> SkillStore {
     .expect("skill store")
 }
 
+fn skill_store_with_interactive_preflight_skills() -> SkillStore {
+    SkillStore::load(
+        &[],
+        &[],
+        vec![
+            LoadedSkill {
+                name: "self-evo".to_owned(),
+                root: PathBuf::from("builtin/self-evo"),
+                manifest: SkillManifest {
+                    name: "self-evo".to_owned(),
+                    description: "Distill session learning into reusable skills".to_owned(),
+                    skill_type: SkillType::Prompt,
+                    when_to_use: None,
+                    disable_model_invocation: true,
+                    arguments: Vec::new(),
+                    slash_commands: Vec::new(),
+                },
+                body: "SELF EVO: $ARGUMENTS".to_owned(),
+                source: SkillSource::Builtin,
+            },
+            LoadedSkill {
+                name: "create-skill".to_owned(),
+                root: PathBuf::from("builtin/create-skill"),
+                manifest: SkillManifest {
+                    name: "create-skill".to_owned(),
+                    description: "Create a reusable skill from instructions".to_owned(),
+                    skill_type: SkillType::Prompt,
+                    when_to_use: None,
+                    disable_model_invocation: true,
+                    arguments: Vec::new(),
+                    slash_commands: Vec::new(),
+                },
+                body: "CREATE SKILL: $ARGUMENTS".to_owned(),
+                source: SkillSource::Builtin,
+            },
+        ],
+    )
+    .expect("skill store")
+}
+
 fn pending_approval_response(
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
 ) -> PendingApprovalResponse {
@@ -8237,7 +8277,7 @@ async fn slash_init_is_not_persisted_to_prompt_history() {
 }
 
 #[tokio::test]
-async fn slash_init_in_auto_opens_preflight_without_starting_turn() {
+async fn slash_init_in_auto_opens_generic_preflight_without_starting_turn() {
     let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let turn_count_clone = std::sync::Arc::clone(&turn_count);
     let mut controller = InteractiveController::new_for_test(
@@ -8268,6 +8308,236 @@ async fn slash_init_in_auto_opens_preflight_without_starting_turn() {
         .expect("preflight overlay");
     assert!(matches!(overlay.kind, OverlayKind::ChoicePicker(_)));
     assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn slash_self_evo_without_args_in_auto_opens_required_preflight() {
+    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| {
+            let turn_count = std::sync::Arc::clone(&turn_count_clone);
+            async move {
+                turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:self-evo");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("self-evo preflight opens");
+
+    assert_eq!(turn_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let overlay = controller
+        .chrome()
+        .focused_overlay()
+        .expect("preflight overlay");
+    assert!(matches!(overlay.kind, OverlayKind::ChoicePicker(_)));
+    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn self_evo_preflight_switch_to_ask_starts_skill_workflow() {
+    let seen_prompt = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen_prompt_clone = std::sync::Arc::clone(&seen_prompt);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_prompt = std::sync::Arc::clone(&seen_prompt_clone);
+            async move {
+                *seen_prompt.lock().expect("prompt lock") = request
+                    .prompt
+                    .iter()
+                    .filter_map(Content::as_text)
+                    .collect::<Vec<_>>()
+                    .join("");
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:self-evo");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("preflight opens");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("confirm recommended option");
+
+    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
+    assert_eq!(controller.pending_local_user_message_to_suppress, None);
+    assert_eq!(controller.pending_skill_user_message_to_suppress, None);
+    let prompt = seen_prompt.lock().expect("prompt lock").clone();
+    assert!(prompt.contains("self-evo"), "{prompt}");
+    assert!(
+        prompt.contains("Ask me which session scope to distill"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn slash_self_evo_with_scope_in_auto_skips_preflight() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:self-evo 7");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("self-evo scope starts");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    assert!(controller.chrome().focused_overlay().is_none());
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(
+        skill_context.contains("<neo-skill-loaded name=\"self-evo\""),
+        "{skill_context}"
+    );
+    assert!(skill_context.contains("SELF EVO: 7"), "{skill_context}");
+}
+
+#[tokio::test]
+async fn slash_create_skill_without_instruction_in_auto_opens_required_preflight() {
+    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| {
+            let turn_count = std::sync::Arc::clone(&turn_count_clone);
+            async move {
+                turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:create-skill");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("create-skill preflight opens");
+
+    assert_eq!(turn_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(controller.chrome().focused_overlay().is_some());
+}
+
+#[tokio::test]
+async fn slash_create_skill_with_instruction_in_auto_skips_preflight() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:create-skill make a rust panic review skill");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("create-skill instruction starts");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    assert!(controller.chrome().focused_overlay().is_none());
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(
+        skill_context.contains("<neo-skill-loaded name=\"create-skill\""),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("CREATE SKILL: make a rust panic review skill"),
+        "{skill_context}"
+    );
+}
+
+#[tokio::test]
+async fn multiple_required_preflight_skills_return_status_without_turn() {
+    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| {
+            let turn_count = std::sync::Arc::clone(&turn_count_clone);
+            async move {
+                turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.set_permission_mode(PermissionMode::Auto);
+    controller.skill_store = Some(skill_store_with_interactive_preflight_skills());
+
+    controller.type_text("/skill:self-evo /skill:create-skill");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("slash handled");
+
+    assert_eq!(turn_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(transcript_has_status(
+        &controller,
+        "Run one interactive skill workflow at a time"
+    ));
 }
 
 #[tokio::test]
@@ -8393,7 +8663,7 @@ async fn init_preflight_dialog_cancel_starts_no_workflow() {
 
     assert_eq!(turn_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(controller.chrome().focused_overlay().is_none());
-    assert_eq!(controller.pending_init_instruction, None);
+    assert!(controller.active_turn.is_none());
 }
 
 #[tokio::test]

@@ -879,6 +879,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builtin_skills_include_create_skill() {
+        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
+        let names = skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"create-skill"), "built-ins: {names:?}");
+    }
+
+    #[test]
+    fn self_evo_builtin_requires_scope_and_verify_section() {
+        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "self-evo")
+            .expect("self-evo built-in");
+        assert!(
+            skill.body.contains("No-argument invocation is not a scope"),
+            "{}",
+            skill.body
+        );
+        assert!(skill.body.contains("## Verify"), "{}", skill.body);
+    }
+
+    #[test]
+    fn create_skill_builtin_requires_verify_and_create_skill_tool() {
+        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "create-skill")
+            .expect("create-skill built-in");
+        assert!(skill.body.contains("## Verify"), "{}", skill.body);
+        assert!(skill.body.contains("CreateSkill"), "{}", skill.body);
+        assert!(
+            skill.manifest.disable_model_invocation,
+            "create-skill must require explicit user invocation"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_builtin_skills_refreshes_stale_builtin_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let builtin_skill_dir = temp.path().join("skills").join(".builtin").join("self-evo");
+        fs::create_dir_all(&builtin_skill_dir)
+            .await
+            .expect("mkdir builtin skill dir");
+        let skill_path = builtin_skill_dir.join("SKILL.md");
+        fs::write(
+            &skill_path,
+            "---\nname: self-evo\ndescription: stale\ntype: prompt\n---\n\nSTALE_MARKER\n",
+        )
+        .await
+        .expect("write stale builtin");
+
+        crate::skills::builtin::extract_builtin_skills(&temp.path().join("skills"))
+            .expect("extract built-ins");
+
+        let content = fs::read_to_string(skill_path)
+            .await
+            .expect("read refreshed builtin");
+        assert!(content.contains("No-argument invocation is not a scope"));
+        assert!(!content.contains("STALE_MARKER"), "{content}");
+    }
+
     #[tokio::test]
     async fn create_skill_writes_file() {
         let temp = tempfile::tempdir().expect("tempdir");

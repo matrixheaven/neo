@@ -16,7 +16,7 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/fork` | — | Create a new branch from the current session and switch to it. |
 | `/init [instruction]` | — | Create or refresh the workspace `AGENTS.md`. Extra text is passed to the init workflow as natural-language guidance. |
 
-`/init` is TUI-only. In Auto permission mode it first opens a preflight dialog so the user can switch to Ask mode before the workflow asks for reference locations or durable project preferences.
+`/init` is TUI-only. Interactive workflows such as `/init`, `/skill:self-evo`, and `/skill:create-skill` may open a local preflight in Auto mode before starting. Neo does this mechanically from the parsed slash command; the model does not decide to switch permission modes.
 
 ## Mode Control
 
