@@ -991,7 +991,6 @@ pub fn highlight_code_lines(content: &str, path: &str, theme: &TuiTheme) -> Vec<
 
     let mut h = syntect::easy::HighlightLines::new(syntax, syntax_theme);
     content
-        .trim_end_matches('\n')
         .lines()
         .map(|line| match h.highlight_line(line, ss) {
             Ok(ranges) => ranges
@@ -1008,7 +1007,6 @@ pub fn highlight_code_lines(content: &str, path: &str, theme: &TuiTheme) -> Vec<
 
 fn plain_code_lines(content: &str, theme: &TuiTheme) -> Vec<Vec<Span>> {
     content
-        .trim_end_matches('\n')
         .lines()
         .map(|line| {
             vec![Span::styled(
@@ -1090,6 +1088,15 @@ mod highlight_tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].len(), 1);
         assert_eq!(lines[0][0].text(), "hello world");
+    }
+
+    #[test]
+    fn highlight_code_lines_preserves_trailing_blank_lines() {
+        let theme = TuiTheme::default();
+        let content = "---\nkey: value\n---\n\n# Title\n\n";
+        let lines = highlight_code_lines(content, "plan.md", &theme);
+
+        assert_eq!(lines.len(), content.lines().count());
     }
 }
 
