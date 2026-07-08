@@ -11,7 +11,8 @@ use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::notify::NotificationMode;
 
 use super::types::{
-    FileConfig, FileRuntimeConfig, FileTuiConfig, default_runtime_compaction_keep_recent_messages,
+    FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileTuiConfig,
+    default_runtime_compaction_keep_recent_messages,
     default_runtime_compaction_max_estimated_tokens,
 };
 use super::{
@@ -192,25 +193,31 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         tool_execution_mode: runtime
             .tool_execution_mode
             .unwrap_or(ToolExecutionMode::Parallel),
-        compaction: runtime
-            .compaction
-            .map(|compaction| RuntimeCompactionConfig {
-                enabled: compaction.enabled.unwrap_or(true),
-                max_estimated_tokens: compaction
-                    .max_estimated_tokens
-                    .unwrap_or_else(default_runtime_compaction_max_estimated_tokens),
-                keep_recent_messages: compaction
-                    .keep_recent_messages
-                    .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
-                trigger_ratio: compaction.trigger_ratio.unwrap_or(0.85),
-                reserved_context_tokens: compaction.reserved_context_tokens.unwrap_or(50_000),
-                max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
-                micro_enabled: compaction.micro_enabled.unwrap_or(false),
-                micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
-                max_rounds: compaction.max_rounds.unwrap_or(5),
-                max_retry_attempts: compaction.max_retry_attempts.unwrap_or(5),
-            }),
+        compaction: Some(runtime_compaction_from_file(runtime.compaction)),
     }
+}
+
+fn runtime_compaction_from_file(
+    compaction: Option<FileRuntimeCompactionConfig>,
+) -> RuntimeCompactionConfig {
+    compaction.map_or_else(RuntimeCompactionConfig::default, |compaction| {
+        RuntimeCompactionConfig {
+            enabled: compaction.enabled.unwrap_or(true),
+            max_estimated_tokens: compaction
+                .max_estimated_tokens
+                .unwrap_or_else(default_runtime_compaction_max_estimated_tokens),
+            keep_recent_messages: compaction
+                .keep_recent_messages
+                .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
+            trigger_ratio: compaction.trigger_ratio.unwrap_or(0.85),
+            reserved_context_tokens: compaction.reserved_context_tokens.unwrap_or(50_000),
+            max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
+            micro_enabled: compaction.micro_enabled.unwrap_or(false),
+            micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
+            max_rounds: compaction.max_rounds.unwrap_or(5),
+            max_retry_attempts: compaction.max_retry_attempts.unwrap_or(5),
+        }
+    })
 }
 
 fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
@@ -402,6 +409,26 @@ pub(crate) fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Res
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
     }
 
-    let content = toml::to_string_pretty(config)?;
+    let config = config_with_default_compaction(config);
+    let content = toml::to_string_pretty(&config)?;
     fs::write(path, content).with_context(|| format!("failed to write config {}", path.display()))
+}
+
+fn config_with_default_compaction(config: &FileConfig) -> FileConfig {
+    let mut config = config.clone();
+    let runtime = config
+        .runtime
+        .get_or_insert_with(FileRuntimeConfig::default);
+    runtime
+        .compaction
+        .get_or_insert_with(default_file_runtime_compaction);
+    config
+}
+
+fn default_file_runtime_compaction() -> FileRuntimeCompactionConfig {
+    FileRuntimeCompactionConfig {
+        enabled: Some(true),
+        keep_recent_messages: Some(default_runtime_compaction_keep_recent_messages()),
+        ..FileRuntimeCompactionConfig::default()
+    }
 }

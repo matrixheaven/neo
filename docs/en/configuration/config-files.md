@@ -114,7 +114,7 @@ reasoning_effort = "medium"
 
 ### `[runtime.compaction]` Sub-Table
 
-Context compaction strategy; all sub-fields are optional. When omitted, `enabled` defaults to `true`:
+Context compaction is enabled by default. Fresh config writes include this table; if the table is missing from an older config, Neo still uses the enabled defaults. Set `enabled = false` explicitly to disable it. All other sub-fields are optional:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |

@@ -430,7 +430,7 @@ mod tests {
     use neo_ai::{ApiType, catalog};
     use tempfile::TempDir;
 
-    use super::{add_provider_from_catalog_entry, list_providers, remove_provider};
+    use super::{add_provider, add_provider_from_catalog_entry, list_providers, remove_provider};
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig,
     };
@@ -519,6 +519,29 @@ model = "claude-sonnet-4"
         assert!(!written.contains("[models.\"openai/gpt-4.1\"]"));
         assert!(written.contains("[models.\"anthropic/sonnet\"]"));
         assert!(!written.contains("default_model"));
+    }
+
+    #[test]
+    fn first_config_write_includes_enabled_compaction_defaults() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join(".neo/config.toml");
+
+        add_provider(
+            &config_path,
+            "openai",
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponse),
+                base_url: Some("https://api.openai.test/v1".to_owned()),
+                api_key: None,
+                api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            },
+        )
+        .expect("add provider");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("[runtime.compaction]"));
+        assert!(written.contains("enabled = true"));
+        assert!(written.contains("keep_recent_messages = 20"));
     }
 
     #[test]

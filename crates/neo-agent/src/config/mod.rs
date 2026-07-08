@@ -165,7 +165,7 @@ impl Default for RuntimeConfig {
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
-            compaction: None,
+            compaction: Some(RuntimeCompactionConfig::default()),
         }
     }
 }
@@ -298,6 +298,29 @@ mod tests {
     #[test]
     fn runtime_compaction_default_disables_micro_projection() {
         assert!(!RuntimeCompactionConfig::default().micro_enabled);
+    }
+
+    #[test]
+    fn config_defaults_to_enabled_runtime_compaction() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
+        let compaction = config.runtime.compaction.expect("compaction default");
+        assert!(compaction.enabled);
+        assert_eq!(compaction.keep_recent_messages, 20);
+    }
+
+    #[test]
+    fn runtime_table_without_compaction_keeps_compaction_enabled() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r#"
+[runtime]
+temperature = 0.2
+"#,
+        );
+        let config = load_config(config_path, project_dir);
+        let compaction = config.runtime.compaction.expect("compaction default");
+        assert!(compaction.enabled);
+        assert_eq!(compaction.keep_recent_messages, 20);
     }
 
     #[test]
