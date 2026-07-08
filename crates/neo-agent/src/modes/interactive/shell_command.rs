@@ -287,12 +287,8 @@ impl InteractiveController {
                 .pending_input_mut()
                 .drain_next_follow_up()
         {
-            let PromptSubmission {
+            let prompt = resolve_submitted_prompt(
                 prompt,
-                model_override,
-            } = PromptSubmission::from_text(
-                prompt,
-                &self.model_items,
                 self.local_config.as_ref(),
                 &self.completion_root,
             )?;
@@ -300,9 +296,11 @@ impl InteractiveController {
                 &prompt,
                 &self.paste_store,
                 &self.image_attachment_store,
+                &self.file_reference_store,
+                &self.completion_root,
             );
             self.append_prompt_history(&content_to_display_text(&content));
-            self.start_turn_with_prompt(content, model_override);
+            self.start_turn_with_prompt(content);
         }
         Ok(())
     }

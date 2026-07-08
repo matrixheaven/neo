@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::prompt::templates::{
@@ -12,10 +13,12 @@ use crate::prompt::templates::{
 use neo_agent_core::skills::SkillStore;
 use neo_tui::shell::PickerItem;
 
+pub(super) const MAX_FILE_REFERENCE_COMPLETIONS: usize = 100;
+pub(super) const MAX_FILE_REFERENCE_INSPECTED_ENTRIES: usize = 2000;
+
 pub(super) fn prompt_completions(
     root: &Path,
     prefix: &str,
-    model_items: &[PickerItem],
     skill_store: Option<&SkillStore>,
     project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
@@ -31,7 +34,6 @@ pub(super) fn prompt_completions(
         slash_prompts,
         prompt_packages,
         session_commands: session_completion_items(skill_store),
-        model_items: model_items.to_vec(),
     };
     Ok(completion_source_candidates(root, prefix, &catalog)?
         .into_iter()
@@ -194,49 +196,20 @@ fn filesystem_completion_candidates(root: &Path, prefix: &str) -> Result<Vec<Com
     Ok(completions)
 }
 
-fn model_completion_candidates(
-    prefix: &str,
-    model_items: &[PickerItem],
-) -> Option<Vec<CompletionCandidate>> {
-    let model_prefix = prefix.strip_prefix('@')?;
-    if model_items.is_empty() {
-        return None;
-    }
-
-    let mut completions = model_items
-        .iter()
-        .filter(|item| item.value.starts_with(model_prefix))
-        .map(|item| {
-            let value = format!("@{}", item.value);
-            CompletionCandidate::new(
-                value.clone(),
-                value,
-                item.description.clone(),
-                CompletionSource::ProviderModel,
-            )
-        })
-        .collect::<Vec<_>>();
-    completions.sort_by(|left, right| left.value.cmp(&right.value));
-    completions.truncate(100);
-    Some(completions)
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct CompletionCatalog {
     pub(super) slash_prompts: Vec<PickerItem>,
     pub(super) prompt_packages: Vec<PickerItem>,
     pub(super) session_commands: Vec<PickerItem>,
-    pub(super) model_items: Vec<PickerItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(usize)]
 pub(super) enum CompletionSource {
     LocalFile,
+    FileReference,
     SlashPrompt,
     PromptPackage,
     SessionCommand,
-    ProviderModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,11 +259,13 @@ pub(super) fn completion_source_candidates(
         return Ok(candidates);
     }
 
-    let mut candidates = if prefix.starts_with('@') {
-        model_completion_candidates(prefix, &catalog.model_items).unwrap_or_default()
-    } else {
-        filesystem_completion_candidates(root, prefix)?
-    };
+    if prefix.starts_with('@') {
+        let mut candidates = file_reference_completion_candidates(root, prefix)?;
+        candidates.truncate(MAX_FILE_REFERENCE_COMPLETIONS);
+        return Ok(candidates);
+    }
+
+    let mut candidates = filesystem_completion_candidates(root, prefix)?;
     candidates.sort_by(|left, right| {
         completion_source_rank(left.source)
             .cmp(&completion_source_rank(right.source))
@@ -434,7 +409,228 @@ fn slash_key_segments(key: &str) -> Vec<&str> {
 }
 
 fn completion_source_rank(source: CompletionSource) -> u8 {
-    [0, 1, 2, 3, 4][source as usize]
+    match source {
+        CompletionSource::LocalFile => 0,
+        CompletionSource::FileReference => 1,
+        CompletionSource::SlashPrompt => 2,
+        CompletionSource::PromptPackage => 3,
+        CompletionSource::SessionCommand => 4,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileReferenceCandidate {
+    value: String,
+    label: String,
+    parent: String,
+    is_dir: bool,
+    score: FileReferenceScore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FileReferenceTier {
+    ExactBasename,
+    BasenamePrefix,
+    SegmentPrefix,
+    Fuzzy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileReferenceScore {
+    tier: FileReferenceTier,
+    skim_score: i64,
+    path_len: usize,
+}
+
+fn file_reference_completion_candidates(
+    root: &Path,
+    prefix: &str,
+) -> Result<Vec<CompletionCandidate>> {
+    file_reference_completion_candidates_with_limits(
+        root,
+        prefix,
+        MAX_FILE_REFERENCE_INSPECTED_ENTRIES,
+        MAX_FILE_REFERENCE_COMPLETIONS,
+    )
+}
+
+pub(super) fn file_reference_completion_candidates_with_limits(
+    root: &Path,
+    prefix: &str,
+    max_inspected_entries: usize,
+    max_completions: usize,
+) -> Result<Vec<CompletionCandidate>> {
+    let query = prefix.strip_prefix('@').unwrap_or(prefix).trim();
+    let query_segment = query.rsplit('/').next().unwrap_or(query);
+    let show_dotfiles = query_segment.starts_with('.');
+    let matcher = SkimMatcherV2::default().smart_case();
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .max_depth(Some(6))
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let Some(name) = entry.file_name().to_str() else {
+                return false;
+            };
+            !matches!(name, ".git" | ".neo") && (show_dotfiles || !name.starts_with('.'))
+        });
+
+    let mut candidates = Vec::new();
+    let mut inspected = 0;
+    for entry in builder.build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        let path = entry.path();
+        let Ok(relative_path) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(relative_text) = display_completion_path(relative_path) else {
+            continue;
+        };
+        if relative_text.is_empty() {
+            continue;
+        }
+
+        let Some(basename) = relative_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if inspected >= max_inspected_entries {
+            break;
+        }
+        inspected += 1;
+
+        let is_dir = entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir());
+        let Some(score) =
+            score_file_reference(query, query_segment, basename, &relative_text, &matcher)
+        else {
+            continue;
+        };
+
+        let label = if is_dir {
+            format!("{basename}/")
+        } else {
+            basename.to_owned()
+        };
+        let parent = relative_text
+            .rsplit_once('/')
+            .map_or_else(String::new, |(parent, _)| format!("{parent}/"));
+        candidates.push(FileReferenceCandidate {
+            value: format!("@{relative_text}"),
+            label,
+            parent,
+            is_dir,
+            score,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        left.score
+            .tier
+            .cmp(&right.score.tier)
+            .then_with(|| right.score.skim_score.cmp(&left.score.skim_score))
+            .then_with(|| left.is_dir.cmp(&right.is_dir))
+            .then_with(|| left.score.path_len.cmp(&right.score.path_len))
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    candidates.truncate(max_completions);
+    Ok(candidates
+        .into_iter()
+        .map(|candidate| {
+            CompletionCandidate::new(
+                candidate.value,
+                candidate.label,
+                (!candidate.parent.is_empty()).then_some(candidate.parent),
+                CompletionSource::FileReference,
+            )
+        })
+        .collect())
+}
+
+fn score_file_reference(
+    query: &str,
+    query_segment: &str,
+    basename: &str,
+    relative_text: &str,
+    matcher: &SkimMatcherV2,
+) -> Option<FileReferenceScore> {
+    let extensionless = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
+    let tier_and_score = if query.is_empty() {
+        Some((FileReferenceTier::ExactBasename, 0))
+    } else if basename == query_segment
+        || (!extensionless.is_empty() && extensionless == query_segment)
+    {
+        let score = [basename, extensionless]
+            .into_iter()
+            .filter_map(|key| matcher.fuzzy_match(key, query_segment))
+            .max()
+            .unwrap_or(0);
+        Some((FileReferenceTier::ExactBasename, score))
+    } else if basename.starts_with(query_segment)
+        || (!extensionless.is_empty() && extensionless.starts_with(query_segment))
+    {
+        let score = [basename, extensionless]
+            .into_iter()
+            .filter_map(|key| matcher.fuzzy_match(key, query_segment))
+            .max()
+            .unwrap_or(0);
+        Some((FileReferenceTier::BasenamePrefix, score))
+    } else if relative_text
+        .split('/')
+        .any(|segment| segment.starts_with(query_segment))
+    {
+        let score = relative_text
+            .split('/')
+            .filter(|segment| segment.starts_with(query_segment))
+            .filter_map(|segment| matcher.fuzzy_match(segment, query_segment))
+            .max()
+            .unwrap_or(0);
+        Some((FileReferenceTier::SegmentPrefix, score))
+    } else {
+        file_reference_fuzzy_keys(basename, extensionless, relative_text)
+            .into_iter()
+            .filter_map(|key| matcher.fuzzy_match(&key, query))
+            .max()
+            .map(|score| (FileReferenceTier::Fuzzy, score))
+    }?;
+
+    Some(FileReferenceScore {
+        tier: tier_and_score.0,
+        skim_score: tier_and_score.1,
+        path_len: relative_text.len(),
+    })
+}
+
+fn file_reference_fuzzy_keys(
+    basename: &str,
+    extensionless: &str,
+    relative_text: &str,
+) -> Vec<String> {
+    let mut keys = vec![basename.to_owned(), relative_text.to_owned()];
+    if !extensionless.is_empty() && extensionless != basename {
+        keys.push(extensionless.to_owned());
+    }
+    keys.push(relative_text.replace(['/', '-', '_', '.'], " "));
+    keys
+}
+
+fn display_completion_path(path: &Path) -> Option<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

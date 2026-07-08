@@ -1906,6 +1906,7 @@ dependencies = [
  "crossterm",
  "ed25519-dalek",
  "futures",
+ "ignore",
  "neo-agent-core",
  "neo-ai",
  "neo-tui",

@@ -337,44 +337,9 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
 /// cursor marker on the active line. Each returned string is the body text
 /// (without the ` > `/`    ` prefix, which is added by the caller).
 fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<String> {
-    let text = &prompt.text;
     let cursor = prompt.cursor.min(prompt.char_len());
 
-    // Highlight selected marker before inserting the cursor marker.
-    let styled_text = if let Some((start_byte, end_byte)) = prompt.selected_marker() {
-        let start_char = text[..start_byte].chars().count();
-        let end_char = text[..end_byte].chars().count();
-        let before = &text[..start_byte];
-        let selected = &text[start_byte..end_byte];
-        let after = &text[end_byte..];
-        let highlighted = paint(selected, Style::default().bg(Color::Rgb(60, 60, 60)));
-        let mut styled = String::with_capacity(text.len() + highlighted.len() - selected.len());
-        styled.push_str(before);
-        styled.push_str(&highlighted);
-        styled.push_str(after);
-
-        // Insert the cursor marker at the correct position in the styled text.
-        let cursor_byte = if cursor <= start_char {
-            prompt.byte_index(cursor)
-        } else if cursor >= end_char {
-            prompt.byte_index(cursor) + highlighted.len() - selected.len()
-        } else {
-            // Cursor inside the selected range: place it at the start of the
-            // highlighted region.
-            start_byte
-        };
-        let mut with_cursor = String::with_capacity(styled.len() + CURSOR_MARKER.len());
-        with_cursor.push_str(&styled[..cursor_byte]);
-        with_cursor.push_str(CURSOR_MARKER);
-        with_cursor.push_str(&styled[cursor_byte..]);
-        with_cursor
-    } else {
-        let chars: Vec<char> = text.chars().collect();
-        let before: String = chars[..cursor].iter().collect();
-        let after: String = chars[cursor..].iter().collect();
-        format!("{before}{CURSOR_MARKER}{after}")
-    };
-
+    let styled_text = prompt_text_with_atom_display(prompt, cursor);
     let marked = expand_prompt_tabs(&styled_text);
     let mut all_lines = Vec::new();
     for logical in marked.split('\n') {
@@ -395,6 +360,104 @@ fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<St
         .skip(scroll_offset)
         .take(MAX_PROMPT_VISIBLE_LINES)
         .collect()
+}
+
+fn prompt_text_with_atom_display(prompt: &PromptState, cursor: usize) -> String {
+    let text = &prompt.text;
+    let cursor_byte = prompt.byte_index(cursor);
+    let selected_marker = prompt.selected_marker();
+    let mut rendered = String::new();
+    let mut raw_cursor = 0;
+    let mut cursor_inserted = false;
+
+    for cap in crate::paste::marker_regex().captures_iter(text) {
+        let raw_marker = cap.get(0).expect("regex match has group 0");
+        let start = raw_marker.start();
+        let end = raw_marker.end();
+        let Some(marker) = marker_from_capture(&cap) else {
+            continue;
+        };
+        if start < raw_cursor || end > text.len() {
+            continue;
+        }
+
+        append_cursor_if_needed(
+            &mut rendered,
+            &text[raw_cursor..start],
+            raw_cursor,
+            cursor_byte,
+            &mut cursor_inserted,
+        );
+
+        let display = marker.as_chip();
+        let display = if selected_marker == Some((start, end)) {
+            paint(&display, Style::default().bg(Color::Rgb(60, 60, 60)))
+        } else {
+            display
+        };
+
+        if !cursor_inserted && cursor_byte >= start && cursor_byte < end {
+            rendered.push_str(CURSOR_MARKER);
+            cursor_inserted = true;
+        }
+        rendered.push_str(&display);
+        raw_cursor = end;
+    }
+
+    append_cursor_if_needed(
+        &mut rendered,
+        &text[raw_cursor..],
+        raw_cursor,
+        cursor_byte,
+        &mut cursor_inserted,
+    );
+    if !cursor_inserted {
+        rendered.push_str(CURSOR_MARKER);
+    }
+    rendered
+}
+
+fn marker_from_capture(cap: &regex::Captures<'_>) -> Option<crate::paste::Marker> {
+    if cap.get(1).is_some() {
+        let id = cap.get(2).and_then(|value| value.as_str().parse().ok())?;
+        let lines = cap.get(3).and_then(|value| value.as_str().parse().ok());
+        return Some(crate::paste::Marker::Paste { id, lines });
+    }
+    if cap.get(4).is_some() {
+        let id = cap.get(5).and_then(|value| value.as_str().parse().ok())?;
+        let width = cap.get(6).and_then(|value| value.as_str().parse().ok())?;
+        let height = cap.get(7).and_then(|value| value.as_str().parse().ok())?;
+        return Some(crate::paste::Marker::Image { id, width, height });
+    }
+    if cap.get(8).is_some() {
+        let id = cap.get(9).and_then(|value| value.as_str().parse().ok())?;
+        let display_name = cap.get(10)?.as_str().to_owned();
+        return Some(crate::paste::Marker::File { id, display_name });
+    }
+    None
+}
+
+fn append_cursor_if_needed(
+    rendered: &mut String,
+    raw_segment: &str,
+    raw_segment_start: usize,
+    cursor_byte: usize,
+    cursor_inserted: &mut bool,
+) {
+    if *cursor_inserted || cursor_byte < raw_segment_start {
+        rendered.push_str(raw_segment);
+        return;
+    }
+    let raw_segment_end = raw_segment_start + raw_segment.len();
+    if cursor_byte > raw_segment_end {
+        rendered.push_str(raw_segment);
+        return;
+    }
+    let local = cursor_byte - raw_segment_start;
+    rendered.push_str(&raw_segment[..local]);
+    rendered.push_str(CURSOR_MARKER);
+    rendered.push_str(&raw_segment[local..]);
+    *cursor_inserted = true;
 }
 
 fn scroll_indicator_top_border(width: usize, count: usize, style: Style) -> String {
@@ -661,6 +724,53 @@ mod tests {
         let stripped = crate::primitive::strip_ansi(&render.lines[dropdown_start]);
         assert!(stripped.starts_with('│'));
         assert!(stripped.ends_with('│'));
+    }
+
+    #[test]
+    fn prompt_renders_file_marker_as_reference_chip() {
+        let mut app = NeoChromeState::new("neo", "session", "model", "/tmp");
+        app.prompt_mut()
+            .set_text("read [file #1 prompt_completion.rs] now");
+
+        let (lines, _) = render_prompt_lines(&app, 80);
+        let visible = lines
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(visible.contains("@[prompt_completion.rs]"), "{visible}");
+        assert!(!visible.contains("[file #1"), "{visible}");
+    }
+
+    #[test]
+    fn prompt_cursor_after_file_marker_stays_after_chip() {
+        let mut prompt = PromptState::new("read [file #1 prompt_completion.rs]");
+        prompt.cursor = prompt.char_len();
+
+        let visible = prompt_text_with_atom_display(&prompt, prompt.cursor);
+
+        assert_eq!(
+            visible,
+            format!("read @[prompt_completion.rs]{CURSOR_MARKER}")
+        );
+    }
+
+    #[test]
+    fn prompt_renders_noncanonical_file_marker_without_suffix_artifacts() {
+        let mut app = NeoChromeState::new("neo", "session", "model", "/tmp");
+        app.prompt_mut().set_text("read [file #001 prompt.rs] now");
+
+        let (lines, _) = render_prompt_lines(&app, 80);
+        let visible = lines
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(visible.contains("read @[prompt.rs] now"), "{visible}");
+        assert!(!visible.contains("[file #001"), "{visible}");
+        assert!(!visible.contains("@[prompt.rs]s]"), "{visible}");
     }
 
     #[test]

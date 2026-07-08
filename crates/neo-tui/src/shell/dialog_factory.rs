@@ -101,7 +101,25 @@ impl NeoChromeState {
         completions.selected_item()
     }
 
+    #[must_use]
+    pub fn selected_prompt_completion_with_prefix(
+        &self,
+    ) -> Option<(PromptCompletionPrefix, PickerItem)> {
+        let OverlayKind::PromptCompletion(completions) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        Some((completions.prefix().clone(), completions.selected_item()?))
+    }
+
     pub fn confirm_prompt_completion(&mut self) -> Option<PickerItem> {
+        let item = self.selected_prompt_completion()?;
+        self.confirm_prompt_completion_with_replacement(&item.value)
+    }
+
+    pub fn confirm_prompt_completion_with_replacement(
+        &mut self,
+        replacement: &str,
+    ) -> Option<PickerItem> {
         let id = self.focused_overlay;
         let (prefix, item) = {
             let OverlayKind::PromptCompletion(completions) = &self.focused_overlay()?.kind else {
@@ -110,7 +128,7 @@ impl NeoChromeState {
             (completions.prefix().clone(), completions.confirm()?)
         };
         self.prompt
-            .replace_completion_prefix(&prefix, &item.value)?;
+            .replace_completion_prefix(&prefix, replacement)?;
         if let Some(id) = id {
             let _ = self.close_overlay(id);
         }

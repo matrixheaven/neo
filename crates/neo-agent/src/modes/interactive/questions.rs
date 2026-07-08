@@ -60,7 +60,7 @@ impl InteractiveController {
             let Some(prompt) = self.pending_background_question_followups.pop_front() else {
                 break;
             };
-            self.start_turn_with_prompt(vec![Content::text(prompt)], None);
+            self.start_turn_with_prompt(vec![Content::text(prompt)]);
             self.drain_active_turn().await?;
         }
         Ok(())

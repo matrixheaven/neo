@@ -578,6 +578,13 @@ impl PromptState {
         if start == cursor {
             return None;
         }
+        if let Some(at_start) = at_reference_prefix_start(&chars, start, cursor) {
+            return Some(PromptCompletionPrefix {
+                start: at_start,
+                end: cursor,
+                text: chars[at_start..cursor].iter().collect(),
+            });
+        }
         Some(PromptCompletionPrefix {
             start,
             end: cursor,
@@ -801,6 +808,12 @@ fn is_word_like(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+fn at_reference_prefix_start(chars: &[char], token_start: usize, cursor: usize) -> Option<usize> {
+    (token_start..cursor)
+        .rev()
+        .find(|index| chars[*index] == '@' && (*index == 0 || !is_word_like(chars[*index - 1])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,5 +842,24 @@ mod tests {
         let prefix = prompt.completion_prefix().expect("completion prefix");
 
         assert_eq!(prefix.text, "foo/sk");
+    }
+
+    #[test]
+    fn completion_prefix_after_punctuation_replaces_at_token() {
+        let prompt = PromptState::new("read(@tests");
+        let prefix = prompt.completion_prefix().expect("completion prefix");
+
+        assert_eq!(prefix.start, 5);
+        assert_eq!(prefix.end, 11);
+        assert_eq!(prefix.text, "@tests");
+    }
+
+    #[test]
+    fn completion_prefix_rejects_embedded_at_token() {
+        let prompt = PromptState::new("email@example.com");
+        let prefix = prompt.completion_prefix().expect("completion prefix");
+
+        assert_eq!(prefix.start, 0);
+        assert_eq!(prefix.text, "email@example.com");
     }
 }

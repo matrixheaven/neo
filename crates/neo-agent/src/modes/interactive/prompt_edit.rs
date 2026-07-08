@@ -1,9 +1,9 @@
-use std::fmt::Write as _;
+use std::{fmt::Write as _, path::Component};
 
 use anyhow::Result;
 
 use super::{
-    Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind,
+    Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind, PickerItem,
     PromptCompletionPrefix, PromptEdit, frame_content_width, longest_common_completion_prefix,
     prompt_completions, size,
 };
@@ -133,6 +133,21 @@ pub(super) fn expand_slash_skill(
     let expanded = neo_agent_core::skills::expand_skill_body(skill, &invocation)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok((expanded, invocation.raw_arguments))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileReferenceCompletionError {
+    OutsideWorkspace,
+    Missing,
+}
+
+impl FileReferenceCompletionError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::OutsideWorkspace => "File reference is outside the workspace",
+            Self::Missing => "File reference no longer exists",
+        }
+    }
 }
 
 pub(super) const fn prompt_edit_for_action(
@@ -433,7 +448,9 @@ impl InteractiveController {
     pub(super) fn complete_prompt_or_insert_tab(&mut self) {
         self.clear_pending_exit_confirmation();
         if self.tui.chrome_mut().selected_prompt_completion().is_some() {
-            let _ = self.tui.chrome_mut().confirm_prompt_completion();
+            if self.confirm_prompt_completion_or_file_reference() {
+                return;
+            }
             return;
         }
         let Some(prefix) = self.tui.chrome_mut().prompt().completion_prefix() else {
@@ -447,7 +464,6 @@ impl InteractiveController {
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
-            &self.model_items,
             self.skill_store.as_ref(),
             self.project_trusted(),
         ) {
@@ -463,6 +479,26 @@ impl InteractiveController {
                 .chrome_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Insert("\t"));
+            return;
+        }
+
+        if prefix.text.starts_with('@') {
+            if completions.len() == 1 {
+                match self.file_reference_marker_for_completion(&completions[0]) {
+                    Ok(marker) => {
+                        let _ = self
+                            .tui
+                            .chrome_mut()
+                            .prompt_mut()
+                            .replace_completion_prefix(&prefix, &marker);
+                    }
+                    Err(error) => self.push_status(error.message()),
+                }
+                return;
+            }
+            self.tui
+                .chrome_mut()
+                .open_prompt_completion_picker(prefix, completions);
             return;
         }
 
@@ -491,13 +527,85 @@ impl InteractiveController {
             .open_prompt_completion_picker(prefix, completions);
     }
 
+    pub(super) fn confirm_prompt_completion_or_file_reference(&mut self) -> bool {
+        let Some((prefix, item)) = self.tui.chrome().selected_prompt_completion_with_prefix()
+        else {
+            return false;
+        };
+        if prefix.text.starts_with('@') {
+            let marker = match self.file_reference_marker_for_completion(&item) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    self.close_inline_prompt_completion();
+                    self.push_status(error.message());
+                    return true;
+                }
+            };
+            let _ = self
+                .tui
+                .chrome_mut()
+                .confirm_prompt_completion_with_replacement(&marker);
+            return true;
+        }
+        let _ = self.tui.chrome_mut().confirm_prompt_completion();
+        true
+    }
+
+    fn file_reference_marker_for_completion(
+        &mut self,
+        item: &PickerItem,
+    ) -> Result<String, FileReferenceCompletionError> {
+        let relative = item
+            .value
+            .strip_prefix('@')
+            .ok_or(FileReferenceCompletionError::OutsideWorkspace)?;
+        let relative_path = std::path::PathBuf::from(relative);
+        if relative_path.as_os_str().is_empty()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(FileReferenceCompletionError::OutsideWorkspace);
+        }
+        let absolute = self.completion_root.join(&relative_path);
+        let metadata =
+            std::fs::metadata(&absolute).map_err(|_| FileReferenceCompletionError::Missing)?;
+        let kind = if metadata.is_dir() {
+            neo_tui::paste::FileReferenceKind::Directory
+        } else {
+            neo_tui::paste::FileReferenceKind::File
+        };
+        let display_name = item.label.trim_end_matches('/').to_owned();
+        let display_name = match kind {
+            neo_tui::paste::FileReferenceKind::File => display_name,
+            neo_tui::paste::FileReferenceKind::Directory => format!("{display_name}/"),
+        };
+        let display_name = neo_tui::paste::file_reference_chip_label(&display_name, kind, 32)
+            .trim_start_matches("@[")
+            .trim_end_matches(']')
+            .to_owned();
+        let id = self.file_reference_store.add(
+            "workspace".to_owned(),
+            relative_path,
+            kind,
+            display_name,
+        );
+        self.file_reference_store
+            .get(id)
+            .map(|reference| reference.as_marker().as_placeholder())
+            .ok_or(FileReferenceCompletionError::Missing)
+    }
+
     pub(super) fn sync_inline_prompt_completion(&mut self) {
         let Some(prefix) = self.tui.chrome_mut().prompt().completion_prefix() else {
             self.close_inline_prompt_completion();
             return;
         };
 
-        if !prefix.text.starts_with('/') {
+        if !prefix.text.starts_with('/') && !prefix.text.starts_with('@') {
             self.close_inline_prompt_completion();
             return;
         }
@@ -506,7 +614,6 @@ impl InteractiveController {
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
-            &self.model_items,
             self.skill_store.as_ref(),
             self.project_trusted(),
         ) {
@@ -562,7 +669,6 @@ impl InteractiveController {
         let completions = match prompt_completions(
             &self.completion_root,
             "/",
-            &self.model_items,
             self.skill_store.as_ref(),
             self.project_trusted(),
         ) {

@@ -15,18 +15,13 @@ use super::InteractiveController;
 use super::{RunningTurn, TurnChannels, TurnRequest};
 
 impl InteractiveController {
-    pub(super) fn start_turn_with_prompt(
-        &mut self,
-        prompt: Vec<Content>,
-        model_override: Option<super::SelectedModel>,
-    ) {
-        self.start_turn_with_prompt_origin(prompt, model_override, MessageOrigin::User);
+    pub(super) fn start_turn_with_prompt(&mut self, prompt: Vec<Content>) {
+        self.start_turn_with_prompt_origin(prompt, MessageOrigin::User);
     }
 
     pub(super) fn start_turn_with_prompt_origin(
         &mut self,
         prompt: Vec<Content>,
-        model_override: Option<super::SelectedModel>,
         prompt_origin: MessageOrigin,
     ) {
         if self.active_turn.is_some() {
@@ -50,7 +45,7 @@ impl InteractiveController {
         let mut request = TurnRequest::new(
             prompt,
             self.active_session_id.clone(),
-            model_override.or_else(|| self.active_model.clone()),
+            self.active_model.clone(),
             if self.current_thinking {
                 Some(neo_ai::ReasoningEffort::High)
             } else {

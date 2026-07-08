@@ -395,6 +395,38 @@ mod tests {
     }
 
     #[test]
+    fn backspace_selects_image_marker_first_then_deletes() {
+        let mut prompt = PromptState::new("look [image #1 (640x480)]");
+        prompt.cursor = prompt.char_len();
+
+        assert!(prompt.apply_edit(PromptEdit::Backspace).is_none());
+        assert_eq!(prompt.text, "look [image #1 (640x480)]");
+        assert!(prompt.selected_marker().is_some());
+
+        assert_eq!(
+            prompt.apply_edit(PromptEdit::Backspace).as_deref(),
+            Some("[image #1 (640x480)]")
+        );
+        assert_eq!(prompt.text, "look ");
+    }
+
+    #[test]
+    fn backspace_selects_file_marker_first_then_deletes() {
+        let mut prompt = PromptState::new("read [file #1 prompt_completion.rs]");
+        prompt.cursor = prompt.char_len();
+
+        assert!(prompt.apply_edit(PromptEdit::Backspace).is_none());
+        assert_eq!(prompt.text, "read [file #1 prompt_completion.rs]");
+        assert!(prompt.selected_marker().is_some());
+
+        assert_eq!(
+            prompt.apply_edit(PromptEdit::Backspace).as_deref(),
+            Some("[file #1 prompt_completion.rs]")
+        );
+        assert_eq!(prompt.text, "read ");
+    }
+
+    #[test]
     fn delete_selects_marker_first_then_deletes() {
         let mut prompt = PromptState::new("[paste #1 +5 lines] world");
         prompt.cursor = 0;

@@ -2578,8 +2578,7 @@ fn prompt_completions_merges_real_prompt_package_and_session_commands() {
     )
     .expect("write packaged prompt");
 
-    let completions =
-        prompt_completions(temp.path(), "/", &[], None, true).expect("slash completions");
+    let completions = prompt_completions(temp.path(), "/", None, true).expect("slash completions");
     let by_value = completions
         .iter()
         .map(|item| (item.value.as_str(), item))
@@ -2609,8 +2608,8 @@ fn prompt_completions_merges_real_prompt_package_and_session_commands() {
 
 #[test]
 fn slash_completion_descriptions_hide_internal_metadata() {
-    let completions = prompt_completions(&test_workspace_root(), "/ask", &[], None, true)
-        .expect("slash completions");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/ask", None, true).expect("slash completions");
     let ask = completions
         .iter()
         .find(|item| item.value == "/ask")
@@ -2627,14 +2626,9 @@ fn slash_completion_descriptions_hide_internal_metadata() {
 #[test]
 fn slash_completions_include_dynamic_skill_commands_without_metadata() {
     let skill_store = skill_store_with_refactor_skill();
-    let completions = prompt_completions(
-        &test_workspace_root(),
-        "/skill:",
-        &[],
-        Some(&skill_store),
-        true,
-    )
-    .expect("skill completions resolve");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/skill:", Some(&skill_store), true)
+            .expect("skill completions resolve");
     let skill = completions
         .iter()
         .find(|item| item.value == "/skill:refactor")
@@ -2653,8 +2647,8 @@ fn slash_completions_include_dynamic_skill_commands_without_metadata() {
 
 #[test]
 fn slash_completions_include_help_command() {
-    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
-        .expect("completions resolve");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/", None, true).expect("completions resolve");
     let help = completions
         .iter()
         .find(|item| item.value == "/help")
@@ -2666,8 +2660,8 @@ fn slash_completions_include_help_command() {
 
 #[test]
 fn slash_completions_include_init_command() {
-    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
-        .expect("slash completions");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/", None, true).expect("slash completions");
     let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
 
     assert!(values.contains(&"/init"), "missing /init: {values:?}");
@@ -2870,11 +2864,6 @@ fn completion_catalog_excludes_extension_commands() {
             "/review-session",
             Some("Session command"),
         )],
-        model_items: vec![PickerItem::new(
-            "anthropic/claude-sonnet",
-            "anthropic/claude-sonnet",
-            Some("Messages"),
-        )],
     };
 
     let files =
@@ -2900,11 +2889,129 @@ fn completion_catalog_excludes_extension_commands() {
             .is_none_or(|description| !description.contains("extension command"))
     }));
 
-    let models =
-        completion_source_candidates(temp.path(), "@anth", &catalog).expect("model completions");
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].value, "@anthropic/claude-sonnet");
-    assert_eq!(models[0].source, CompletionSource::ProviderModel);
+    let file_references =
+        completion_source_candidates(temp.path(), "@anth", &catalog).expect("file references");
+    assert!(
+        file_references
+            .iter()
+            .all(|candidate| candidate.value != "@anthropic/claude-sonnet")
+    );
+    assert!(
+        file_references
+            .iter()
+            .all(|candidate| candidate.source == CompletionSource::FileReference)
+    );
+}
+
+#[test]
+fn at_file_reference_completion_fuzzy_ranks_basename_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("crates/neo-agent/src/modes/interactive");
+    fs::create_dir_all(&src).expect("mkdir");
+    fs::write(src.join("prompt_completion.rs"), "").expect("write prompt completion");
+    fs::write(src.join("completion_prompt.rs"), "").expect("write weaker match");
+
+    let catalog = CompletionCatalog::default();
+    let candidates =
+        completion_source_candidates(temp.path(), "@prom", &catalog).expect("file references");
+
+    assert_eq!(
+        candidates[0].value,
+        "@crates/neo-agent/src/modes/interactive/prompt_completion.rs"
+    );
+    assert_eq!(candidates[0].label, "prompt_completion.rs");
+    assert_eq!(
+        candidates[0].description.as_deref(),
+        Some("crates/neo-agent/src/modes/interactive/")
+    );
+    assert_eq!(candidates[0].source, CompletionSource::FileReference);
+}
+
+#[test]
+fn at_file_reference_completion_preserves_match_ranking_over_value_sort() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("aaa")).expect("mkdir aaa");
+    fs::create_dir_all(temp.path().join("zzz")).expect("mkdir zzz");
+    fs::write(temp.path().join("aaa/not_prompt.rs"), "").expect("write weaker match");
+    fs::write(temp.path().join("zzz/prompt_completion.rs"), "").expect("write stronger match");
+
+    let catalog = CompletionCatalog::default();
+    let candidates =
+        completion_source_candidates(temp.path(), "@prom", &catalog).expect("file references");
+
+    assert_eq!(candidates[0].value, "@zzz/prompt_completion.rs");
+    assert_eq!(candidates[0].label, "prompt_completion.rs");
+    assert_eq!(candidates[0].source, CompletionSource::FileReference);
+}
+
+#[test]
+fn at_file_reference_completion_caps_large_walks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let inspected_cap = 7;
+    for index in 0..(inspected_cap + 5) {
+        fs::write(temp.path().join(format!("prompt_{index:04}.rs")), "").expect("write match");
+    }
+
+    let candidates = super::prompt_completion::file_reference_completion_candidates_with_limits(
+        temp.path(),
+        "@prompt",
+        inspected_cap,
+        super::prompt_completion::MAX_FILE_REFERENCE_COMPLETIONS,
+    )
+    .expect("file references");
+
+    assert_eq!(candidates.len(), inspected_cap);
+    assert!(candidates.iter().all(|candidate| {
+        candidate.value.starts_with("@prompt_")
+            && candidate.source == CompletionSource::FileReference
+    }));
+}
+
+#[test]
+fn at_file_reference_completion_hides_dotfiles_until_dot_query() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join(".env"), "secret").expect("write env");
+    fs::write(temp.path().join("Cargo.toml"), "").expect("write cargo");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir src");
+    fs::write(temp.path().join("src/.env"), "nested secret").expect("write nested env");
+
+    let catalog = CompletionCatalog::default();
+    let hidden = completion_source_candidates(temp.path(), "@e", &catalog).expect("hidden query");
+    assert!(hidden.iter().all(|candidate| candidate.label != ".env"));
+
+    let visible = completion_source_candidates(temp.path(), "@.e", &catalog).expect("dot query");
+    assert!(visible.iter().any(|candidate| candidate.label == ".env"));
+
+    let nested_visible =
+        completion_source_candidates(temp.path(), "@src/.e", &catalog).expect("nested dot query");
+    assert!(
+        nested_visible
+            .iter()
+            .any(|candidate| candidate.value == "@src/.env")
+    );
+}
+
+#[test]
+fn at_file_reference_completion_no_longer_returns_provider_models() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("docs")).expect("mkdir docs");
+    fs::write(temp.path().join("docs/anthology.md"), "notes\n").expect("write file");
+    let catalog = CompletionCatalog::default();
+
+    let candidates =
+        completion_source_candidates(temp.path(), "@anth", &catalog).expect("file references");
+
+    assert!(!candidates.is_empty());
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.value != "@anthropic/claude-sonnet")
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.source == CompletionSource::FileReference)
+    );
 }
 
 fn slash_test_catalog() -> CompletionCatalog {
@@ -2950,7 +3057,6 @@ fn slash_test_catalog() -> CompletionCatalog {
                 Some("Simplify and refine code"),
             ),
         ],
-        model_items: Vec::new(),
     }
 }
 
@@ -3182,8 +3288,7 @@ async fn slash_help_panel_includes_dynamic_skill_commands() {
 #[test]
 fn event_loop_slash_tree_absent() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let completions =
-        prompt_completions(temp.path(), "/", &[], None, true).expect("slash completions");
+    let completions = prompt_completions(temp.path(), "/", None, true).expect("slash completions");
     assert!(
         !completions.iter().any(|item| item.value == "/tree"),
         "/tree should not appear in slash completion items"
@@ -3191,12 +3296,16 @@ fn event_loop_slash_tree_absent() {
 }
 
 #[tokio::test]
-async fn event_loop_tab_completes_provider_model_prefix() {
+async fn event_loop_tab_inserts_file_reference_chip_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write file");
+
     let mut controller = InteractiveController::new_with_event_driver(
         "neo",
         "test-session",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        temp.path(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         PickerCatalogs {
             session_items: Vec::new(),
@@ -3219,29 +3328,177 @@ async fn event_loop_tab_completes_provider_model_prefix() {
         },
     );
 
-    controller.type_text("@anth");
+    controller.type_text("@main");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
-        .expect("tab completes provider/model prefix");
+        .expect("tab inserts file reference");
 
-    assert_eq!(
-        controller.chrome().prompt().text,
-        "@anthropic/claude-sonnet"
-    );
-    assert_eq!(controller.chrome().prompt().cursor, 24);
+    assert_eq!(controller.chrome().prompt().text, "[file #1 main.rs]");
     assert!(controller.chrome().focused_overlay().is_none());
 }
 
 #[tokio::test]
-async fn event_loop_inline_provider_model_prefix_overrides_submitted_turn() {
+async fn event_loop_rejects_parent_dir_file_reference_completion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("mkdir workspace");
+    fs::write(temp.path().join("outside.txt"), "outside\n").expect("write outside");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &workspace,
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    controller.type_text("@bad");
+    controller.tui.chrome_mut().open_prompt_completion_picker(
+        PromptCompletionPrefix {
+            start: 0,
+            end: 4,
+            text: "@bad".to_owned(),
+        },
+        [PickerItem::new(
+            "@../outside.txt",
+            "outside.txt",
+            None::<String>,
+        )],
+    );
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("tab rejects parent-dir file reference");
+
+    assert_eq!(controller.chrome().prompt().text, "@bad");
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(transcript_has_status(
+        &controller,
+        "File reference is outside the workspace"
+    ));
+}
+
+#[tokio::test]
+async fn event_loop_closes_stale_file_reference_picker_without_inserting_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    let main = temp.path().join("src/main.rs");
+    fs::write(&main, "fn main() {}\n").expect("write main");
+    fs::write(
+        temp.path().join("src/main_test.rs"),
+        "#[test]\nfn main_test() {}\n",
+    )
+    .expect("write second match");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    controller.type_text("@main");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("tab opens file reference picker");
+    assert!(controller.chrome().focused_overlay().is_some());
+
+    fs::remove_file(main).expect("remove selected completion");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("tab rejects stale file reference");
+
+    assert_eq!(controller.chrome().prompt().text, "@main");
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(transcript_has_status(
+        &controller,
+        "File reference no longer exists"
+    ));
+}
+
+#[tokio::test]
+async fn event_loop_submits_file_reference_content() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write file");
+
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_with_event_driver(
         "neo",
         "test-session",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        temp.path(),
+        move |request| {
+            let captured_requests = std::sync::Arc::clone(&captured_requests);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("record request")
+                    .push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+        PickerCatalogs::default(),
+        |session_id| async move {
+            Ok(LoadedSessionTranscript::new(
+                session_id,
+                Vec::new(),
+                Vec::new(),
+            ))
+        },
+    );
+
+    controller.type_text("review @main");
+    controller.tui.chrome_mut().open_prompt_completion_picker(
+        PromptCompletionPrefix {
+            start: 7,
+            end: 12,
+            text: "@main".to_owned(),
+        },
+        [PickerItem::new("@src/main.rs", "main.rs", None::<String>)],
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("insert file reference");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("submit turn");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    let requests = requests.lock().expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text(
+            "review <file path=\"src/main.rs\">\nfn main() {}\n</file>"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn event_loop_file_reference_marker_expands_in_submitted_turn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("crates/neo-agent/src/modes/interactive");
+    fs::create_dir_all(&src).expect("mkdir");
+    fs::write(src.join("prompt_completion.rs"), "").expect("write prompt completion");
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_with_event_driver(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
         move |request| {
             let captured_requests = std::sync::Arc::clone(&captured_requests);
             async move {
@@ -3256,7 +3513,7 @@ async fn event_loop_inline_provider_model_prefix_overrides_submitted_turn() {
                     },
                     AgentEvent::TextDelta {
                         turn: 1,
-                        text: "inline model selected".to_owned(),
+                        text: "file reference expanded".to_owned(),
                     },
                     AgentEvent::TurnFinished {
                         turn: 1,
@@ -3286,27 +3543,34 @@ async fn event_loop_inline_provider_model_prefix_overrides_submitted_turn() {
         },
     );
 
-    controller.type_text("@anth");
+    controller.type_text("@prom");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
-        .expect("tab completes provider/model prefix");
+        .expect("tab inserts file reference marker");
+    assert_eq!(
+        controller.chrome().prompt().text,
+        "[file #1 prompt_completion.rs]"
+    );
     controller.type_text(" explain this file");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
-        .expect("turn submits with inline model");
+        .expect("turn submits with file reference");
     controller
         .wait_for_active_turn()
         .await
-        .expect("inline model turn completes");
+        .expect("file reference turn completes");
 
     let requests = requests.lock().expect("recorded requests");
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].prompt, vec![Content::text("explain this file")]);
-    let selected = requests[0].model.as_ref().expect("inline model");
-    assert_eq!(selected.provider, "anthropic");
-    assert_eq!(selected.model, "claude-sonnet");
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text(
+            "<file path=\"crates/neo-agent/src/modes/interactive/prompt_completion.rs\">\n</file> explain this file"
+        )]
+    );
+    assert_eq!(requests[0].model, None);
 }
 
 #[tokio::test]
@@ -3365,7 +3629,62 @@ async fn event_loop_keeps_unknown_at_prefix_as_prompt_text() {
 }
 
 #[tokio::test]
-async fn event_loop_inline_model_token_without_prompt_does_not_override_model() {
+async fn event_loop_at_model_token_submits_as_plain_text() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_with_event_driver(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let captured_requests = std::sync::Arc::clone(&captured_requests);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("record request")
+                    .push(request);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+        PickerCatalogs {
+            session_items: Vec::new(),
+            session_error: None,
+            model_items: vec![PickerItem::new(
+                "anthropic/claude-sonnet",
+                "anthropic/claude-sonnet",
+                Some("Messages"),
+            )],
+        },
+        |session_id| async move {
+            Ok(LoadedSessionTranscript::new(
+                session_id,
+                Vec::new(),
+                Vec::new(),
+            ))
+        },
+    );
+
+    controller.type_text("@anthropic/claude-sonnet explain this file");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("turn submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    let requests = requests.lock().expect("recorded requests");
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text("@anthropic/claude-sonnet explain this file")]
+    );
+    assert_eq!(requests[0].model, None);
+}
+
+#[tokio::test]
+async fn event_loop_at_model_token_without_prompt_submits_as_plain_text() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_with_event_driver(
@@ -6946,8 +7265,8 @@ async fn permissions_picker_selects_auto_mode() {
 
 #[test]
 fn slash_completions_include_permission_commands() {
-    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
-        .expect("completions resolve");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/", None, true).expect("completions resolve");
     let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
     assert!(
         values.contains(&"/permissions"),
@@ -6960,16 +7279,16 @@ fn slash_completions_include_permission_commands() {
 
 #[test]
 fn slash_completions_include_compact_command() {
-    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
-        .expect("completions resolve");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/", None, true).expect("completions resolve");
     let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
     assert!(values.contains(&"/compact"), "missing /compact: {values:?}");
 }
 
 #[test]
 fn slash_completions_include_add_workspace_command() {
-    let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
-        .expect("completions resolve");
+    let completions =
+        prompt_completions(&test_workspace_root(), "/", None, true).expect("completions resolve");
     let add_workspace = completions
         .iter()
         .find(|item| item.value == "/add-workspace")

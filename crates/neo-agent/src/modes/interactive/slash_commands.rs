@@ -368,6 +368,8 @@ impl InteractiveController {
             &directives.body,
             &self.paste_store,
             &self.image_attachment_store,
+            &self.file_reference_store,
+            &self.completion_root,
         );
         let display_body = content_to_display_text(&expanded_content);
 

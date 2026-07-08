@@ -566,7 +566,7 @@ impl InteractiveController {
         } else if self.tui.chrome_mut().selected_model().is_some() {
             self.apply_selected_model();
         } else if self.tui.chrome_mut().selected_prompt_completion().is_some() {
-            let _ = self.tui.chrome_mut().confirm_prompt_completion();
+            let _ = self.confirm_prompt_completion_or_file_reference();
         } else if self.tui.chrome_mut().focused_overlay_id().is_none() {
             self.submit_current_prompt().await?;
         }

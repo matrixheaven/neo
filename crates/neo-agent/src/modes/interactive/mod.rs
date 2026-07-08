@@ -391,6 +391,8 @@ pub(crate) struct InteractiveController {
     next_paste_id: usize,
     /// Stored image attachments referenced by composer `[image #N ...]` placeholders.
     image_attachment_store: neo_tui::paste::ImageAttachmentStore,
+    /// Stored file references inserted by composer `[file #N display-name]` placeholders.
+    file_reference_store: neo_tui::paste::FileReferenceStore,
     /// Cached model capabilities for the active workspace/model scope.
     model_capabilities: std::collections::HashMap<String, neo_ai::ModelCapabilities>,
     /// Optional receiver for captured tracing WARN/ERROR events, surfaced as
@@ -746,6 +748,7 @@ impl InteractiveController {
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
             image_attachment_store: neo_tui::paste::ImageAttachmentStore::new(),
+            file_reference_store: neo_tui::paste::FileReferenceStore::new(),
             model_capabilities: std::collections::HashMap::new(),
             log_event_rx: None,
             completion_notification: neo_tui::notify::NotificationMode::Bell,
@@ -1397,26 +1400,21 @@ impl InteractiveController {
         prompt: String,
         render_local_user_message: bool,
     ) -> Result<()> {
-        let PromptSubmission {
-            prompt,
-            model_override,
-        } = PromptSubmission::from_text(
-            prompt,
-            &self.model_items,
-            self.local_config.as_ref(),
-            &self.completion_root,
-        )?;
+        let prompt =
+            resolve_submitted_prompt(prompt, self.local_config.as_ref(), &self.completion_root)?;
         let content = crate::prompt::parts::expand_prompt_markers(
             &prompt,
             &self.paste_store,
             &self.image_attachment_store,
+            &self.file_reference_store,
+            &self.completion_root,
         );
         let transcript_images = crate::prompt::parts::transcript_image_attachments(
             &prompt,
             &self.image_attachment_store,
         );
-        // Persist the resolved user prompt (after @model/prompt-template
-        // expansion) to the workspace history. Slash commands already returned
+        // Persist the resolved user prompt after prompt-template and attachment
+        // expansion to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
         let display_text = content_to_display_text(&content);
         self.append_prompt_history(&display_text);
@@ -1432,7 +1430,7 @@ impl InteractiveController {
             }
             self.pending_local_user_message_to_suppress = Some(display_text);
         }
-        self.start_turn_with_prompt(content, model_override);
+        self.start_turn_with_prompt(content);
         Ok(())
     }
 
@@ -1442,28 +1440,19 @@ impl InteractiveController {
         variant: &str,
         local_message: &str,
     ) -> Result<()> {
-        let PromptSubmission {
-            prompt,
-            model_override,
-        } = PromptSubmission::from_text(
-            prompt,
-            &self.model_items,
-            self.local_config.as_ref(),
-            &self.completion_root,
-        )?;
+        let prompt =
+            resolve_submitted_prompt(prompt, self.local_config.as_ref(), &self.completion_root)?;
         let content = crate::prompt::parts::expand_prompt_markers(
             &prompt,
             &self.paste_store,
             &self.image_attachment_store,
+            &self.file_reference_store,
+            &self.completion_root,
         );
         self.tui
             .transcript_mut()
             .push_user_message(local_message.to_owned());
-        self.start_turn_with_prompt_origin(
-            content,
-            model_override,
-            MessageOrigin::injection(variant.to_owned()),
-        );
+        self.start_turn_with_prompt_origin(content, MessageOrigin::injection(variant.to_owned()));
         Ok(())
     }
 
@@ -1485,6 +1474,8 @@ impl InteractiveController {
             prompt,
             &self.paste_store,
             &self.image_attachment_store,
+            &self.file_reference_store,
+            &self.completion_root,
         );
         let display_text = content_to_display_text(&content);
         let message = AgentMessage::user_content(content);
@@ -1541,6 +1532,8 @@ impl InteractiveController {
                 &text,
                 &self.paste_store,
                 &self.image_attachment_store,
+                &self.file_reference_store,
+                &self.completion_root,
             );
             let display_text = content_to_display_text(&content);
             let message = AgentMessage::user_content(content);
@@ -1840,50 +1833,12 @@ impl InteractiveController {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromptSubmission {
+fn resolve_submitted_prompt(
     prompt: String,
-    model_override: Option<SelectedModel>,
-}
-
-impl PromptSubmission {
-    fn from_text(
-        prompt: String,
-        model_items: &[PickerItem],
-        config: Option<&AppConfig>,
-        fallback_project_dir: &Path,
-    ) -> Result<Self> {
-        let Some((candidate, rest)) = split_first_prompt_token(&prompt) else {
-            return Ok(Self {
-                prompt,
-                model_override: None,
-            });
-        };
-        let Some(model_value) = candidate.strip_prefix('@') else {
-            return Ok(Self {
-                prompt: expand_interactive_prompt(&prompt, config, fallback_project_dir)?,
-                model_override: None,
-            });
-        };
-        if !model_items.iter().any(|item| item.value == model_value) {
-            return Ok(Self {
-                prompt: expand_interactive_prompt(&prompt, config, fallback_project_dir)?,
-                model_override: None,
-            });
-        }
-        let prompt_after_model = rest.trim_start();
-        if prompt_after_model.is_empty() {
-            return Ok(Self {
-                prompt,
-                model_override: None,
-            });
-        }
-
-        Ok(Self {
-            prompt: expand_interactive_prompt(prompt_after_model, config, fallback_project_dir)?,
-            model_override: Some(SelectedModel::from_alias(model_value, config, model_items)?),
-        })
-    }
+    config: Option<&AppConfig>,
+    fallback_project_dir: &Path,
+) -> Result<String> {
+    expand_interactive_prompt(&prompt, config, fallback_project_dir)
 }
 
 fn expand_interactive_prompt(
