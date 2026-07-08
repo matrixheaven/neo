@@ -57,9 +57,11 @@ impl NeoChromeState {
             | AgentEvent::ShellCommandFinished { .. }
             | AgentEvent::DelegateStarted { .. }
             | AgentEvent::DelegateUpdated { .. }
+            | AgentEvent::DelegateProgressUpdated { .. }
             | AgentEvent::DelegateFinished { .. }
             | AgentEvent::DelegateSwarmStarted { .. }
             | AgentEvent::DelegateSwarmUpdated { .. }
+            | AgentEvent::DelegateSwarmProgressUpdated { .. }
             | AgentEvent::DelegateSwarmFinished { .. }
             | AgentEvent::WorkflowStarted { .. }
             | AgentEvent::WorkflowUpdated { .. }

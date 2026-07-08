@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use std::path::PathBuf;
 
-use crate::multi_agent::{AgentSnapshot, SwarmSnapshot};
+use crate::multi_agent::{
+    AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
+    SwarmSnapshot,
+};
 use crate::{AgentMessage, AgentToolCall, PermissionOperation, ShellCommandOutcome, ToolResult};
 
 /// A preset revision suggestion offered during plan review.
@@ -315,6 +318,10 @@ pub enum AgentEvent {
         turn: u32,
         agent: AgentSnapshot,
     },
+    DelegateProgressUpdated {
+        turn: u32,
+        progress: AgentProgressSnapshot,
+    },
     DelegateFinished {
         turn: u32,
         agent: AgentSnapshot,
@@ -326,6 +333,13 @@ pub enum AgentEvent {
     DelegateSwarmUpdated {
         turn: u32,
         swarm: SwarmSnapshot,
+    },
+    DelegateSwarmProgressUpdated {
+        turn: u32,
+        swarm_id: String,
+        state: AgentLifecycleState,
+        aggregate: SwarmAggregate,
+        child_progress: SwarmChildProgress,
     },
     DelegateSwarmFinished {
         turn: u32,

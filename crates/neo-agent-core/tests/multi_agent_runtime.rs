@@ -3,7 +3,8 @@ use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, AgentPathKind, AgentRole, AgentRunMode,
     AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DEFAULT_AGENT_NAMES,
-    DisplayNamePool, MultiAgentRuntime, SwarmAggregate,
+    DisplayNamePool, MultiAgentRuntime, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
+    SwarmSnapshot,
 };
 use neo_agent_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use neo_agent_core::{
@@ -297,6 +298,154 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
         Some(AgentLifecycleState::Interrupted)
     );
     assert_eq!(resumed.state, AgentLifecycleState::Running);
+}
+
+#[test]
+fn compact_delegate_progress_restores_and_resumes() {
+    use neo_agent_core::multi_agent::{DelegateContext, DelegateRequest};
+
+    let runtime = MultiAgentRuntime::new();
+    let mut snapshot = runtime.start_foreground_delegate_for_test("audit compact progress");
+    let agent_id = snapshot.id.as_str().to_owned();
+    snapshot.state = AgentLifecycleState::Completed;
+    snapshot.terminal_reason = Some(AgentTerminalReason::Completed);
+    snapshot.outcome = Some(neo_agent_core::multi_agent::AgentTerminalOutcome {
+        summary: "compact resume ok".to_owned(),
+        is_error: false,
+    });
+    snapshot.latest_text = Some("finished compact audit".to_owned());
+    snapshot.tool_count = 2;
+    let progress = snapshot.progress_snapshot();
+    let events = [
+        AgentEvent::DelegateStarted {
+            turn: 4,
+            agent: runtime
+                .agent_snapshot(&agent_id)
+                .expect("started agent snapshot"),
+        },
+        AgentEvent::DelegateProgressUpdated { turn: 4, progress },
+    ];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let restored_snapshot = restored
+        .agent_snapshot(&agent_id)
+        .expect("restored compact agent");
+    assert_eq!(restored_snapshot.state, AgentLifecycleState::Completed);
+    assert_eq!(restored_snapshot.tool_count, 2);
+    assert_eq!(
+        restored_snapshot.latest_text.as_deref(),
+        Some("finished compact audit")
+    );
+
+    let request = DelegateRequest {
+        task: "continue compact audit".to_owned(),
+        resume: Some(agent_id.clone()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+    };
+    let resumed = restored
+        .start_resume_delegate(&agent_id, &request)
+        .expect("resume compact restored agent");
+
+    assert_eq!(resumed.run_count, 2);
+    assert_eq!(
+        resumed.previous_status,
+        Some(AgentLifecycleState::Completed)
+    );
+}
+
+#[test]
+fn compact_running_delegate_progress_restores_as_interrupted() {
+    let runtime = MultiAgentRuntime::new();
+    let mut snapshot = runtime.start_foreground_delegate_for_test("resume interrupted compact");
+    let agent_id = snapshot.id.as_str().to_owned();
+    snapshot.latest_text = Some("halfway done".to_owned());
+    let progress = snapshot.progress_snapshot();
+    let events = [
+        AgentEvent::DelegateStarted {
+            turn: 5,
+            agent: snapshot,
+        },
+        AgentEvent::DelegateProgressUpdated { turn: 5, progress },
+    ];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let lost = restored
+        .agent_snapshot(&agent_id)
+        .expect("restored compact running agent");
+    assert_eq!(lost.state, AgentLifecycleState::Interrupted);
+    assert_eq!(
+        lost.terminal_reason,
+        Some(AgentTerminalReason::ProcessExited)
+    );
+    assert_eq!(lost.latest_text.as_deref(), Some("halfway done"));
+}
+
+#[test]
+fn compact_swarm_child_progress_refreshes_aggregate_and_ordering() {
+    let runtime = MultiAgentRuntime::new();
+    let swarm_id = runtime.new_swarm_id();
+    let child = runtime.start_delegate(
+        "write docs",
+        Some("docs"),
+        AgentRole::Coder,
+        AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
+        AgentPathKind::SwarmChild(&swarm_id),
+    );
+    let mut completed = child.clone();
+    completed.state = AgentLifecycleState::Completed;
+    completed.terminal_reason = Some(AgentTerminalReason::Completed);
+    completed.tool_count = 4;
+    let started = SwarmSnapshot {
+        swarm_id: swarm_id.clone(),
+        description: "docs".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: AgentLifecycleState::Running,
+        max_concurrency: 1,
+        aggregate: SwarmAggregate::from_states([AgentLifecycleState::Running]),
+        children: vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "docs".to_owned(),
+            agent: child,
+        }],
+    };
+    let events = [
+        AgentEvent::DelegateSwarmStarted {
+            turn: 6,
+            swarm: started,
+        },
+        AgentEvent::DelegateSwarmProgressUpdated {
+            turn: 6,
+            swarm_id: swarm_id.clone(),
+            state: AgentLifecycleState::Completed,
+            aggregate: SwarmAggregate::from_states([AgentLifecycleState::Completed]),
+            child_progress: SwarmChildProgress {
+                item_index: 0,
+                item: "docs".to_owned(),
+                progress: completed.progress_snapshot(),
+            },
+        },
+    ];
+
+    let restored = MultiAgentRuntime::new();
+    restored.restore_from_replay(events.iter());
+
+    let swarm = restored.swarm_snapshot(&swarm_id).expect("restored swarm");
+    assert_eq!(swarm.state, AgentLifecycleState::Completed);
+    assert_eq!(swarm.children[0].item_index, 0);
+    assert_eq!(swarm.children[0].agent.tool_count, 4);
+    assert_eq!(
+        swarm.children[0].agent.state,
+        AgentLifecycleState::Completed
+    );
 }
 
 #[tokio::test]

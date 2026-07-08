@@ -9,7 +9,8 @@ use crate::transcript::{
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
 use neo_agent_core::multi_agent::{
-    AgentLifecycleState, AgentSnapshot, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
+    SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress, apply_swarm_child_progress,
 };
 use neo_agent_core::workflow::WorkflowSnapshot;
 
@@ -443,6 +444,35 @@ impl TranscriptStore {
         });
     }
 
+    pub fn upsert_delegate_progress(&mut self, turn: u32, progress: AgentProgressSnapshot) {
+        let id = progress.agent_id.as_str().to_owned();
+        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
+                Some(component)
+            }
+            _ => None,
+        }) {
+            let Some(mut snapshot) = group.snapshot(&id).cloned() else {
+                return;
+            };
+            let _ = apply_agent_progress(&mut snapshot, &progress);
+            group.upsert(snapshot);
+            self.invalidate_all_cache();
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
+            _ => None,
+        }) {
+            let mut snapshot = entry.snapshot().clone();
+            let _ = apply_agent_progress(&mut snapshot, &progress);
+            entry.update(snapshot);
+            self.invalidate_all_cache();
+            return;
+        }
+        let _ = turn;
+    }
+
     /// Upsert a swarm card by swarm ID. If a card for this swarm already
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate_swarm(&mut self, snapshot: SwarmSnapshot) {
@@ -462,6 +492,26 @@ impl TranscriptStore {
         self.push(TranscriptEntry::DelegateSwarm {
             component: SwarmCardComponent::new(snapshot),
         });
+    }
+
+    pub fn upsert_delegate_swarm_progress(
+        &mut self,
+        swarm_id: &str,
+        state: AgentLifecycleState,
+        aggregate: SwarmAggregate,
+        child_progress: SwarmChildProgress,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == swarm_id => {
+                Some(component)
+            }
+            _ => None,
+        }) {
+            let mut snapshot = entry.snapshot().clone();
+            apply_swarm_child_progress(&mut snapshot, &child_progress, aggregate, state);
+            entry.update(snapshot);
+            self.invalidate_all_cache();
+        }
     }
 
     /// Upsert a workflow card by workflow ID.

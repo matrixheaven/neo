@@ -123,13 +123,6 @@ pub enum SessionCommand {
         #[arg(long, default_value_t = 20)]
         keep_recent: usize,
     },
-    /// Slim bloated session JSONL by removing duplicate delegate progress state
-    Slim {
-        session_id: String,
-        /// Rewrite the session file. Without this flag, only reports the expected change.
-        #[arg(long)]
-        write: bool,
-    },
     /// Export a session as HTML
     ExportHtml { session_id: String },
     /// Export a session as JSON

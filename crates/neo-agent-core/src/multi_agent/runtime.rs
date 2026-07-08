@@ -24,6 +24,7 @@ use super::{
     DisplayNamePool, SwarmAggregate,
 };
 use super::{AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview};
+use super::{apply_agent_progress, apply_swarm_child_progress};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DelegateRequest {
@@ -470,6 +471,13 @@ impl MultiAgentRuntime {
                     restored_agent_ids.insert(agent.id.as_str().to_owned());
                     restore_agent_snapshot_locked(&mut state, agent.clone());
                 }
+                AgentEvent::DelegateProgressUpdated { progress, .. } => {
+                    let agent_id = progress.agent_id.as_str().to_owned();
+                    if let Some(agent) = state.agents.get_mut(&agent_id) {
+                        restored_agent_ids.insert(agent_id);
+                        let _ = apply_agent_progress(agent, progress);
+                    }
+                }
                 AgentEvent::DelegateSwarmStarted { swarm, .. }
                 | AgentEvent::DelegateSwarmUpdated { swarm, .. }
                 | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
@@ -481,6 +489,30 @@ impl MultiAgentRuntime {
                             .map(|child| child.agent.id.as_str().to_owned()),
                     );
                     restore_swarm_snapshot_locked(&mut state, swarm.clone());
+                }
+                AgentEvent::DelegateSwarmProgressUpdated {
+                    swarm_id,
+                    state: swarm_state,
+                    aggregate,
+                    child_progress,
+                    ..
+                } => {
+                    let restored_agent = state.swarms.get_mut(swarm_id).and_then(|swarm| {
+                        apply_swarm_child_progress(swarm, child_progress, *aggregate, *swarm_state)
+                    });
+                    if let Some(agent) = restored_agent {
+                        restored_swarm_ids.insert(swarm_id.clone());
+                        restored_agent_ids.insert(agent.id.as_str().to_owned());
+                        let restored = restore_agent_snapshot_locked(&mut state, agent);
+                        if let Some(swarm) = state.swarms.get_mut(swarm_id)
+                            && let Some(child) = swarm
+                                .children
+                                .iter_mut()
+                                .find(|child| child.agent.id.as_str() == restored.id.as_str())
+                        {
+                            child.agent = restored;
+                        }
+                    }
                 }
                 _ => {}
             }

@@ -220,9 +220,6 @@ async fn dispatch_session_command(
             session_id,
             keep_recent,
         } => modes::sessions::compact(&session_id, keep_recent, config).await,
-        SessionCommand::Slim { session_id, write } => {
-            modes::sessions::slim(&session_id, write, config).await
-        }
         SessionCommand::ExportHtml { session_id } => {
             modes::sessions::export_html(&session_id, config).await
         }

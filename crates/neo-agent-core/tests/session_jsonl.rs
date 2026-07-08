@@ -1,3 +1,7 @@
+use neo_agent_core::multi_agent::{
+    AgentId, AgentLifecycleState, AgentProgressSnapshot, AgentToolActivityPhase,
+    DelegateToolProgress, SwarmAggregate, SwarmChildProgress,
+};
 use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
 };
@@ -168,6 +172,137 @@ async fn jsonl_session_reads_concatenated_records_from_interrupted_append() {
     let events = JsonlSessionReader::read_all(&path).await.expect("read all");
 
     assert_eq!(events, vec![approval, continued]);
+}
+
+#[tokio::test]
+async fn jsonl_session_drops_torn_final_line_on_replay() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let valid = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("survives"),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{{\"MessageAppended\":{{\"message\"",
+            serde_json::to_string(&valid).expect("valid json")
+        ),
+    )
+    .expect("write torn session");
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+
+    assert_eq!(events, vec![valid]);
+}
+
+#[tokio::test]
+async fn jsonl_session_rejects_corrupt_middle_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let valid = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("survives"),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{{\"MessageAppended\":{{\"message\"\n{}\n",
+            serde_json::to_string(&valid).expect("valid json"),
+            serde_json::to_string(&valid).expect("valid json")
+        ),
+    )
+    .expect("write corrupt session");
+
+    let error = JsonlSessionReader::read_all(&path)
+        .await
+        .expect_err("middle corruption must fail");
+
+    assert!(matches!(
+        error,
+        neo_agent_core::session::SessionError::Json { line: 2, .. }
+    ));
+}
+
+#[test]
+fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
+    let progress = AgentProgressSnapshot {
+        agent_id: AgentId::from_suffix_for_test("compact"),
+        state: AgentLifecycleState::Running,
+        mode: neo_agent_core::multi_agent::AgentRunMode::Foreground,
+        detached_from_foreground: false,
+        updated_at_ms: 42,
+        terminal_at_ms: None,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        tool_count: 1,
+        token_count: 128,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed_ms: 500,
+        latest_text: Some("reading files".to_owned()),
+        last_tool: Some(DelegateToolProgress {
+            id: "tool-1".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("crates/neo-agent-core/src/session/mod.rs".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+        }),
+        outcome: None,
+    };
+    let event = AgentEvent::DelegateProgressUpdated {
+        turn: 9,
+        progress: progress.clone(),
+    };
+    let json = serde_json::to_string(&event).expect("serialize compact event");
+
+    let reparsed: AgentEvent = serde_json::from_str(&json).expect("deserialize compact event");
+    assert_eq!(reparsed, event);
+
+    let context = AgentContext::from_replay([reparsed].iter());
+    assert!(context.messages().is_empty());
+}
+
+#[test]
+fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
+    let event = AgentEvent::DelegateSwarmProgressUpdated {
+        turn: 3,
+        swarm_id: "swarm-test".to_owned(),
+        state: AgentLifecycleState::Running,
+        aggregate: SwarmAggregate {
+            total: 1,
+            running: 1,
+            ..SwarmAggregate::default()
+        },
+        child_progress: SwarmChildProgress {
+            item_index: 0,
+            item: "audit".to_owned(),
+            progress: AgentProgressSnapshot {
+                agent_id: AgentId::from_suffix_for_test("swarm-child"),
+                state: AgentLifecycleState::Running,
+                mode: neo_agent_core::multi_agent::AgentRunMode::Foreground,
+                detached_from_foreground: false,
+                updated_at_ms: 7,
+                terminal_at_ms: None,
+                terminal_reason: None,
+                run_count: 1,
+                live_messages_received: 0,
+                tool_count: 0,
+                token_count: 0,
+                cache_read_token_count: 0,
+                cache_write_token_count: 0,
+                elapsed_ms: 0,
+                latest_text: None,
+                last_tool: None,
+                outcome: None,
+            },
+        },
+    };
+    let json = serde_json::to_string(&event).expect("serialize compact swarm event");
+
+    let reparsed: AgentEvent = serde_json::from_str(&json).expect("deserialize compact event");
+    assert_eq!(reparsed, event);
+
+    let context = AgentContext::from_replay([reparsed].iter());
+    assert!(context.messages().is_empty());
 }
 
 #[test]

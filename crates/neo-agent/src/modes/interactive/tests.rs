@@ -5750,10 +5750,8 @@ async fn load_session_transcript_rejects_oversized_main_wire_before_replay() {
         .expect_err("oversized session should be rejected before replay");
     let message = error.to_string();
 
-    assert!(
-        message.contains("neo sessions slim") && message.contains("--write"),
-        "{message}"
-    );
+    assert!(message.contains("too large to resume safely"), "{message}");
+    assert!(!message.contains("neo sessions slim"), "{message}");
 }
 
 #[test]

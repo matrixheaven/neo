@@ -1979,9 +1979,11 @@ fn replay_session_into_transcript(
                 }
                 AgentEvent::DelegateStarted { .. }
                 | AgentEvent::DelegateUpdated { .. }
+                | AgentEvent::DelegateProgressUpdated { .. }
                 | AgentEvent::DelegateFinished { .. }
                 | AgentEvent::DelegateSwarmStarted { .. }
                 | AgentEvent::DelegateSwarmUpdated { .. }
+                | AgentEvent::DelegateSwarmProgressUpdated { .. }
                 | AgentEvent::DelegateSwarmFinished { .. } => {
                     transcript.apply_agent_event(event);
                 }
@@ -2021,10 +2023,18 @@ impl DelegateReplaySuppressor {
                 | AgentEvent::DelegateFinished { agent, .. } => {
                     suppressor.delegate_ids.insert(agent.id.as_str().to_owned());
                 }
+                AgentEvent::DelegateProgressUpdated { progress, .. } => {
+                    suppressor
+                        .delegate_ids
+                        .insert(progress.agent_id.as_str().to_owned());
+                }
                 AgentEvent::DelegateSwarmStarted { swarm, .. }
                 | AgentEvent::DelegateSwarmUpdated { swarm, .. }
                 | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
                     suppressor.swarm_ids.insert(swarm.swarm_id.clone());
+                }
+                AgentEvent::DelegateSwarmProgressUpdated { swarm_id, .. } => {
+                    suppressor.swarm_ids.insert(swarm_id.clone());
                 }
                 _ => {}
             }

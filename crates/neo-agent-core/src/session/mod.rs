@@ -134,21 +134,41 @@ pub struct JsonlSessionReader;
 impl JsonlSessionReader {
     pub async fn read_all(path: impl AsRef<Path>) -> Result<Vec<AgentEvent>, SessionError> {
         let file = File::open(path).await?;
-        let mut lines = BufReader::new(file).lines();
+        let mut reader = BufReader::new(file);
         let mut events = Vec::new();
         let mut line_number = 0;
+        let mut raw_line = Vec::new();
 
-        while let Some(line) = lines.next_line().await? {
+        loop {
+            raw_line.clear();
+            let bytes_read = reader.read_until(b'\n', &mut raw_line).await?;
+            if bytes_read == 0 {
+                break;
+            }
             line_number += 1;
-            if line.trim().is_empty() {
+            let terminated = raw_line.ends_with(b"\n");
+            while raw_line
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+            {
+                raw_line.pop();
+            }
+            if raw_line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            for value in serde_json::Deserializer::from_str(&line).into_iter::<serde_json::Value>()
+            for value in
+                serde_json::Deserializer::from_slice(&raw_line).into_iter::<serde_json::Value>()
             {
-                let value = value.map_err(|source| SessionError::Json {
-                    line: line_number,
-                    source,
-                })?;
+                let value = match value {
+                    Ok(value) => value,
+                    Err(_source) if !terminated => break,
+                    Err(source) => {
+                        return Err(SessionError::Json {
+                            line: line_number,
+                            source,
+                        });
+                    }
+                };
                 if read_session_metadata_value(&value, line_number)? {
                     continue;
                 }

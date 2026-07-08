@@ -164,6 +164,11 @@ impl AgentSnapshot {
     pub fn display_title(&self) -> String {
         self.task_title.clone()
     }
+
+    #[must_use]
+    pub fn progress_snapshot(&self) -> AgentProgressSnapshot {
+        AgentProgressSnapshot::from_agent(self)
+    }
 }
 
 pub(crate) fn derive_title(task: &str, provided: Option<&str>) -> String {
@@ -188,6 +193,138 @@ pub struct SwarmChildSnapshot {
     pub item_index: usize,
     pub item: String,
     pub agent: AgentSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DelegateToolProgress {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub phase: AgentToolActivityPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentProgressSnapshot {
+    pub agent_id: AgentId,
+    pub state: AgentLifecycleState,
+    pub mode: AgentRunMode,
+    pub detached_from_foreground: bool,
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<AgentTerminalReason>,
+    pub run_count: usize,
+    #[serde(default)]
+    pub live_messages_received: usize,
+    pub tool_count: usize,
+    pub token_count: usize,
+    #[serde(default)]
+    pub cache_read_token_count: usize,
+    #[serde(default)]
+    pub cache_write_token_count: usize,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool: Option<DelegateToolProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentTerminalOutcome>,
+}
+
+impl AgentProgressSnapshot {
+    #[must_use]
+    pub fn from_agent(agent: &AgentSnapshot) -> Self {
+        Self {
+            agent_id: agent.id.clone(),
+            state: agent.state,
+            mode: agent.mode,
+            detached_from_foreground: agent.detached_from_foreground,
+            updated_at_ms: agent.updated_at_ms,
+            terminal_at_ms: agent.terminal_at_ms,
+            terminal_reason: agent.terminal_reason,
+            run_count: agent.run_count,
+            live_messages_received: agent.live_messages_received,
+            tool_count: agent.tool_count,
+            token_count: agent.token_count,
+            cache_read_token_count: agent.cache_read_token_count,
+            cache_write_token_count: agent.cache_write_token_count,
+            elapsed_ms: duration_millis_u64(agent.elapsed),
+            latest_text: agent
+                .latest_text
+                .as_deref()
+                .map(|text| truncate_progress_text(text, MAX_PROGRESS_TEXT_CHARS)),
+            last_tool: agent
+                .activity
+                .iter()
+                .rev()
+                .find_map(|entry| match &entry.kind {
+                    AgentActivityKind::Tool {
+                        id,
+                        name,
+                        summary,
+                        phase,
+                        ..
+                    } => Some(DelegateToolProgress {
+                        id: id.clone(),
+                        name: name.clone(),
+                        summary: summary
+                            .as_deref()
+                            .map(|text| truncate_progress_text(text, MAX_TOOL_SUMMARY_CHARS)),
+                        phase: *phase,
+                    }),
+                    AgentActivityKind::Text { .. } => None,
+                }),
+            outcome: agent.outcome.as_ref().map(|outcome| AgentTerminalOutcome {
+                summary: truncate_progress_text(&outcome.summary, MAX_PROGRESS_TEXT_CHARS),
+                is_error: outcome.is_error,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn signature(&self) -> AgentProgressSignature {
+        AgentProgressSignature {
+            state: self.state,
+            mode: self.mode,
+            detached_from_foreground: self.detached_from_foreground,
+            terminal_reason: self.terminal_reason,
+            run_count: self.run_count,
+            live_messages_received: self.live_messages_received,
+            tool_count: self.tool_count,
+            token_count: self.token_count,
+            cache_read_token_count: self.cache_read_token_count,
+            cache_write_token_count: self.cache_write_token_count,
+            latest_text: self.latest_text.clone(),
+            last_tool: self.last_tool.clone(),
+            outcome: self.outcome.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProgressSignature {
+    pub state: AgentLifecycleState,
+    pub mode: AgentRunMode,
+    pub detached_from_foreground: bool,
+    pub terminal_reason: Option<AgentTerminalReason>,
+    pub run_count: usize,
+    pub live_messages_received: usize,
+    pub tool_count: usize,
+    pub token_count: usize,
+    pub cache_read_token_count: usize,
+    pub cache_write_token_count: usize,
+    pub latest_text: Option<String>,
+    pub last_tool: Option<DelegateToolProgress>,
+    pub outcome: Option<AgentTerminalOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SwarmChildProgress {
+    pub item_index: usize,
+    pub item: String,
+    pub progress: AgentProgressSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -252,4 +389,114 @@ pub struct SwarmSnapshot {
 
 fn default_swarm_max_concurrency() -> usize {
     1
+}
+
+const MAX_PROGRESS_TEXT_CHARS: usize = 512;
+const MAX_TOOL_SUMMARY_CHARS: usize = 256;
+
+#[must_use]
+pub fn apply_agent_progress(
+    snapshot: &mut AgentSnapshot,
+    progress: &AgentProgressSnapshot,
+) -> bool {
+    if snapshot.id != progress.agent_id {
+        return false;
+    }
+    snapshot.state = progress.state;
+    snapshot.mode = progress.mode;
+    snapshot.detached_from_foreground = progress.detached_from_foreground;
+    snapshot.updated_at_ms = snapshot.updated_at_ms.max(progress.updated_at_ms);
+    snapshot.terminal_at_ms = progress.terminal_at_ms;
+    snapshot.terminal_reason = progress.terminal_reason;
+    snapshot.run_count = progress.run_count;
+    snapshot.live_messages_received = progress.live_messages_received;
+    snapshot.tool_count = progress.tool_count;
+    snapshot.token_count = progress.token_count;
+    snapshot.cache_read_token_count = progress.cache_read_token_count;
+    snapshot.cache_write_token_count = progress.cache_write_token_count;
+    snapshot.elapsed = Duration::from_millis(progress.elapsed_ms);
+    snapshot.latest_text.clone_from(&progress.latest_text);
+    snapshot.outcome.clone_from(&progress.outcome);
+    if let Some(tool) = &progress.last_tool {
+        upsert_progress_tool(&mut snapshot.activity, tool);
+    }
+    if let Some(text) = &progress.latest_text {
+        upsert_progress_text(&mut snapshot.activity, text);
+    }
+    true
+}
+
+pub fn apply_swarm_child_progress(
+    swarm: &mut SwarmSnapshot,
+    child_progress: &SwarmChildProgress,
+    aggregate: SwarmAggregate,
+    state: AgentLifecycleState,
+) -> Option<AgentSnapshot> {
+    let child = swarm.children.iter_mut().find(|child| {
+        child.item_index == child_progress.item_index
+            || child.agent.id == child_progress.progress.agent_id
+    })?;
+    child.item_index = child_progress.item_index;
+    child.item.clone_from(&child_progress.item);
+    let _ = apply_agent_progress(&mut child.agent, &child_progress.progress);
+    swarm.aggregate = aggregate;
+    swarm.state = state;
+    Some(child.agent.clone())
+}
+
+fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateToolProgress) {
+    if let Some(existing) = activity.iter_mut().find_map(|entry| match &mut entry.kind {
+        AgentActivityKind::Tool { id, .. } if id == &tool.id => Some(entry),
+        _ => None,
+    }) {
+        existing.kind = AgentActivityKind::Tool {
+            id: tool.id.clone(),
+            name: tool.name.clone(),
+            summary: tool.summary.clone(),
+            phase: tool.phase,
+            output: None,
+        };
+        return;
+    }
+    activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: tool.id.clone(),
+            name: tool.name.clone(),
+            summary: tool.summary.clone(),
+            phase: tool.phase,
+            output: None,
+        },
+    });
+}
+
+fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if activity.iter().rev().any(|entry| {
+        matches!(&entry.kind, AgentActivityKind::Text { text, thinking: false } if text.trim() == trimmed)
+    }) {
+        return;
+    }
+    activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Text {
+            text: text.to_owned(),
+            thinking: false,
+        },
+    });
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn truncate_progress_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut truncated = text.chars().take(keep).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }

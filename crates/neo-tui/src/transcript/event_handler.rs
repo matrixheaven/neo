@@ -119,6 +119,18 @@ impl TranscriptPane {
                 self.mark_dirty();
                 true
             }
+            AgentEvent::DelegateProgressUpdated { turn, progress } => {
+                self.finish_active_text_blocks();
+                self.transcript
+                    .upsert_delegate_progress(*turn, progress.clone());
+                self.record_delegate_absorption_target(
+                    *turn,
+                    AbsorbedToolKind::Delegate,
+                    progress.agent_id.as_str(),
+                );
+                self.mark_dirty();
+                true
+            }
             AgentEvent::DelegateSwarmStarted { turn, swarm }
             | AgentEvent::DelegateSwarmUpdated { turn, swarm }
             | AgentEvent::DelegateSwarmFinished { turn, swarm } => {
@@ -128,6 +140,28 @@ impl TranscriptPane {
                     *turn,
                     AbsorbedToolKind::DelegateSwarm,
                     &swarm.swarm_id,
+                );
+                self.mark_dirty();
+                true
+            }
+            AgentEvent::DelegateSwarmProgressUpdated {
+                turn,
+                swarm_id,
+                state,
+                aggregate,
+                child_progress,
+            } => {
+                self.finish_active_text_blocks();
+                self.transcript.upsert_delegate_swarm_progress(
+                    swarm_id,
+                    *state,
+                    *aggregate,
+                    child_progress.clone(),
+                );
+                self.record_delegate_absorption_target(
+                    *turn,
+                    AbsorbedToolKind::DelegateSwarm,
+                    swarm_id,
                 );
                 self.mark_dirty();
                 true

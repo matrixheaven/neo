@@ -331,6 +331,51 @@ fn option_b_delegate_group_keeps_agent_names_visible() {
 }
 
 #[test]
+fn compact_delegate_progress_replays_as_delegate_card() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let mut started = option_b_delegate(
+        "compact",
+        "Compact",
+        AgentRole::Coder,
+        AgentLifecycleState::Running,
+        "compact progress replay",
+    );
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 11,
+        agent: started.clone(),
+    });
+
+    started.latest_text = Some("persisted compact progress".to_owned());
+    started.tool_count = 1;
+    started.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "read-compact".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("crates/neo-agent-core/src/events.rs".to_owned()),
+            phase: AgentToolActivityPhase::Done,
+            output: None,
+        },
+    });
+    pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
+        turn: 11,
+        progress: started.progress_snapshot(),
+    });
+    let _ = pane.render_frame(160, 30);
+
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Compact  [Coder]"), "{text}");
+    assert!(text.contains("1 tool"), "{text}");
+    assert!(text.contains("• Used Read"), "{text}");
+    assert!(text.contains("persisted compact progress"), "{text}");
+}
+
+#[test]
 fn delegate_group_styles_header_names_muted_tree_and_role_badges() {
     let theme = TuiTheme::default();
     let nova = option_b_running_delegate();

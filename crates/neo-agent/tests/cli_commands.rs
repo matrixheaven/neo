@@ -348,6 +348,19 @@ fn sessions_list_uses_workspace_session_bucket() {
 }
 
 #[test]
+fn sessions_help_does_not_expose_experimental_slim_command() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["sessions", "--help"]);
+
+    let stdout = run(command);
+
+    assert!(!stdout.contains("slim"), "{stdout}");
+}
+
+#[test]
 fn sessions_rename_and_fork_surface_flat_metadata_without_tree_command() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());

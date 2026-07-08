@@ -37,6 +37,11 @@ impl DelegateGroupComponent {
         self.agents.iter().any(|agent| agent.id.as_str() == id)
     }
 
+    #[must_use]
+    pub fn snapshot(&self, id: &str) -> Option<&AgentSnapshot> {
+        self.agents.iter().find(|agent| agent.id.as_str() == id)
+    }
+
     pub fn upsert(&mut self, snapshot: AgentSnapshot) {
         if let Some(existing) = self.agents.iter_mut().find(|agent| agent.id == snapshot.id) {
             *existing = merge_group_delegate_snapshot(existing, snapshot);
