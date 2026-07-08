@@ -373,4 +373,28 @@ mod tests {
         assert_eq!(chrome.focused_overlay_id(), Some(id));
         assert!(chrome.focused_overlay_is_rich_dialog());
     }
+
+    #[test]
+    fn workspace_manager_overlay_blocks_prompt_and_renders_empty_state() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        chrome.open_workspace_manager(&crate::dialogs::WorkspaceManagerOptions {
+            trusted: true,
+            rows: Vec::new(),
+            theme: crate::primitive::theme::TuiTheme::default(),
+        });
+
+        assert!(chrome.focused_overlay_blocks_prompt());
+        let visible = chrome
+            .focused_overlay_lines(80)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            visible.contains("No additional workspaces configured."),
+            "{visible}"
+        );
+        assert!(visible.contains("+ Add workspace directory"), "{visible}");
+    }
 }

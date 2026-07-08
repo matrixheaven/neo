@@ -9179,6 +9179,82 @@ async fn add_workspace_approved_persists_enabled_read_only_entry() {
 }
 
 #[tokio::test]
+async fn add_workspace_approval_returns_to_visible_manager_and_single_escape_closes_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    let added_dir = temp.path().join("added");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::create_dir_all(&added_dir).expect("create added");
+    let store = crate::workspaces::WorkspaceStore::new(temp.path().join("workspaces.json"));
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async { Ok(vec![]) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    config.project_trust = crate::trust::ProjectTrustState::Trusted {
+        target: project_dir.clone(),
+    };
+    controller.local_config = Some(config);
+    controller.set_workspace_store(store);
+
+    controller.type_text("/add-workspace");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("open workspace manager");
+    controller
+        .handle_input_event(InputEvent::Insert('A'))
+        .await
+        .expect("start add workspace");
+    controller
+        .handle_input_event(InputEvent::Paste(added_dir.display().to_string()))
+        .await
+        .expect("paste path");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit path");
+    controller
+        .handle_input_event(InputEvent::Insert('Y'))
+        .await
+        .expect("approve add");
+
+    assert!(
+        matches!(
+            controller
+                .chrome()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::WorkspaceManager(_))
+        ),
+        "approval should return focus to the workspace manager"
+    );
+    assert!(controller.chrome().focused_overlay_blocks_prompt());
+    let visible = controller
+        .chrome()
+        .focused_overlay_lines(80)
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains("[on ] [R ] [W-]"), "{visible}");
+    assert!(visible.contains("[read-only] · [active]"), "{visible}");
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectCancel))
+        .await
+        .expect("close workspace manager");
+    assert!(controller.chrome().focused_overlay().is_none());
+
+    controller.type_text("hello");
+    assert_eq!(controller.chrome().prompt().text, "hello");
+}
+
+#[tokio::test]
 async fn workspace_write_toggle_keeps_read_enabled() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("project");

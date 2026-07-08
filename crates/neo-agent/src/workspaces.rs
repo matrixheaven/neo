@@ -213,6 +213,12 @@ pub(crate) fn validate_new_workspace_entry(
     project: &WorkspaceProject,
     path: &Path,
 ) -> anyhow::Result<WorkspaceEntry> {
+    if path.as_os_str().is_empty() {
+        bail!("Workspace path is required");
+    }
+    if !path.exists() {
+        bail!("Workspace path does not exist: {}", path.display());
+    }
     let canonical_project = project_dir.canonicalize().with_context(|| {
         format!(
             "failed to canonicalize project directory {}",
@@ -223,7 +229,7 @@ pub(crate) fn validate_new_workspace_entry(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize workspace path {}", path.display()))?;
     if !canonical.is_dir() {
-        bail!("Path is not a directory");
+        bail!("Workspace path is not a directory: {}", canonical.display());
     }
     if canonical == canonical_project || canonical.starts_with(&canonical_project) {
         bail!("Directory is already inside the primary workspace");
@@ -333,6 +339,51 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_missing_path_with_clear_error() {
+        let root = tempfile::tempdir().expect("root");
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).expect("project");
+        let missing = root.path().join("missing");
+
+        let err = validate_new_workspace_entry(&project, &WorkspaceProject::default(), &missing)
+            .expect_err("reject missing");
+
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn validation_rejects_file_path_with_clear_error() {
+        let root = tempfile::tempdir().expect("root");
+        let project = root.path().join("project");
+        let file = root.path().join("file.txt");
+        fs::create_dir_all(&project).expect("project");
+        fs::write(&file, "not a directory").expect("file");
+
+        let err = validate_new_workspace_entry(&project, &WorkspaceProject::default(), &file)
+            .expect_err("reject file path");
+
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn validation_canonicalizes_symlink_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let project = root.path().join("project");
+        let target = root.path().join("target");
+        let link = root.path().join("link");
+        fs::create_dir_all(&project).expect("project");
+        fs::create_dir_all(&target).expect("target");
+        if !symlink_created(create_dir_symlink(&target, &link)) {
+            return;
+        }
+
+        let entry = validate_new_workspace_entry(&project, &WorkspaceProject::default(), &link)
+            .expect("symlink dir entry");
+
+        assert_eq!(entry.path, target.canonicalize().expect("canonical target"));
+    }
+
+    #[test]
     fn access_roots_skip_disabled_entries() {
         let root = tempfile::tempdir().expect("root");
         let added = root.path().join("added");
@@ -403,5 +454,19 @@ mod tests {
 
         assert!(loaded.entries.is_empty());
         assert!(path.with_extension("json.bak").exists());
+    }
+
+    fn symlink_created(result: std::io::Result<()>) -> bool {
+        result.is_ok()
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 }

@@ -164,9 +164,9 @@ impl WorkspaceManagerState {
         }
 
         for (index, row) in self.rows.iter().enumerate() {
-            let row_lines = render_row(row, index == self.selected_index, inner_width);
+            let row_lines = render_row(row, index == self.selected_index, inner_width, self.theme);
             for line in row_lines {
-                lines.push(box_line(&line, inner_width, Style::default(), border_style));
+                lines.push(box_line_raw(&line, inner_width, border_style));
             }
         }
 
@@ -314,40 +314,94 @@ fn build_rows(opts: &WorkspaceManagerOptions) -> Vec<Row> {
     rows
 }
 
-fn render_row(row: &Row, is_selected: bool, width: usize) -> Vec<String> {
+fn render_row(row: &Row, is_selected: bool, width: usize, theme: TuiTheme) -> Vec<String> {
     let pointer = if is_selected { "▸" } else { " " };
     match row {
-        Row::Add => vec![truncate_width(
-            &format!(" {pointer} + Add workspace directory"),
-            width,
-            "…",
-            false,
-        )],
+        Row::Add => {
+            let plain = truncate_width(
+                &format!(" {pointer} + Add workspace directory"),
+                width,
+                "…",
+                true,
+            );
+            if is_selected {
+                vec![paint(
+                    &plain,
+                    Style::default()
+                        .fg(theme.selected_fg)
+                        .bg(theme.selection_bg),
+                )]
+            } else {
+                vec![format!(
+                    " {}{}",
+                    paint(pointer, Style::default().fg(theme.text_muted)),
+                    paint(
+                        " + Add workspace directory",
+                        Style::default().fg(theme.brand)
+                    )
+                )]
+            }
+        }
         Row::Workspace(row) => {
             let enabled = if row.enabled { "[on ]" } else { "[off]" };
             let read = if row.read { "[R ]" } else { "[R-]" };
             let write = if row.write { "[W ]" } else { "[W-]" };
-            let summary = if row.missing {
-                "missing directory · ignored"
+            let (access, state) = if row.missing {
+                ("missing", "ignored")
             } else if !row.enabled {
-                "disabled"
+                ("disabled", "inactive")
             } else if row.write {
-                "read/write · active"
+                ("read/write", "active")
             } else if row.read {
-                "read-only · active"
+                ("read-only", "active")
             } else {
-                "no file access · inactive"
+                ("no access", "inactive")
+            };
+            let plain_badges = format!("  [{access}] · [{state}]");
+            let prefix = format!(" {pointer} {enabled} {read} {write} ");
+            let path_width = width
+                .saturating_sub(visible_width(&prefix))
+                .saturating_sub(visible_width(&plain_badges))
+                .max(1);
+            let path = truncate_width(&row.path, path_width, "…", false);
+            let plain = truncate_width(&format!("{prefix}{path}{plain_badges}"), width, "…", true);
+
+            if is_selected {
+                return vec![paint(
+                    &plain,
+                    Style::default()
+                        .fg(theme.selected_fg)
+                        .bg(theme.selection_bg),
+                )];
+            }
+
+            let flag_on = Style::default().fg(theme.status_ok);
+            let flag_off = Style::default().fg(theme.text_muted);
+            let muted = Style::default().fg(theme.text_muted);
+            let access_style = if row.missing {
+                Style::default().fg(theme.status_error)
+            } else if !row.enabled || !row.read {
+                Style::default().fg(theme.status_warn)
+            } else {
+                Style::default().fg(theme.brand)
+            };
+            let state_style = if row.enabled && row.read && !row.missing {
+                Style::default().fg(theme.status_ok)
+            } else {
+                Style::default().fg(theme.text_muted)
             };
 
-            vec![
-                truncate_width(
-                    &format!(" {pointer} {enabled} {read} {write} {}", row.path),
-                    width,
-                    "…",
-                    false,
-                ),
-                truncate_width(&format!("       {summary}"), width, "…", false),
-            ]
+            vec![format!(
+                " {} {} {} {} {}  {}{}{}",
+                paint(pointer, muted),
+                paint(enabled, if row.enabled { flag_on } else { flag_off }),
+                paint(read, if row.read { flag_on } else { flag_off }),
+                paint(write, if row.write { flag_on } else { flag_off }),
+                paint(&path, Style::default().fg(theme.prompt)),
+                paint(&format!("[{access}]"), access_style),
+                paint(" · ", muted),
+                paint(&format!("[{state}]"), state_style),
+            )]
         }
     }
 }
@@ -373,6 +427,20 @@ fn box_line(
         paint(&content, content_style),
         padding = " ".repeat(padding)
     )
+}
+
+fn box_line_raw(content: &str, content_width: usize, border_style: Style) -> String {
+    let visible = visible_width(&crate::primitive::strip_ansi(content));
+    let content = if visible > content_width {
+        truncate_width(content, content_width, "…", false)
+    } else {
+        content.to_owned()
+    };
+    let padding =
+        content_width.saturating_sub(visible_width(&crate::primitive::strip_ansi(&content)));
+    let left = paint("│", border_style);
+    let right = paint("│", border_style);
+    format!("{left}{content}{}{right}", " ".repeat(padding))
 }
 
 #[cfg(test)]
@@ -421,8 +489,21 @@ mod tests {
     fn renders_list_state_with_access_flags() {
         let state = manager(vec![row("/tmp/shared", true, true, false, false)]);
         let rendered = visible_lines(&state, 88).join("\n");
-        assert!(rendered.contains("[on ] [R ] [W-] /tmp/shared"));
-        assert!(rendered.contains("read-only"));
+        assert!(rendered.contains("[on ] [R ] [W-] /tmp/shared  [read-only] · [active]"));
+        assert!(
+            !rendered
+                .lines()
+                .any(|line| line.trim() == "read-only · active"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn selected_workspace_row_uses_selection_background() {
+        let state = manager(vec![row("/tmp/shared", true, true, false, false)]);
+        let rendered = state.render_lines(88).join("\n");
+
+        assert!(rendered.contains(&crate::primitive::bg_to_ansi(theme().selection_bg)));
     }
 
     #[test]

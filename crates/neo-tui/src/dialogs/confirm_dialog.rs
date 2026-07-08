@@ -1,6 +1,6 @@
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{InputResult, Style, paint, truncate_width};
+use crate::primitive::{InputResult, Style, paint, truncate_width, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmDialogOptions {
@@ -58,8 +58,7 @@ impl ConfirmDialogState {
 
         let inner_width = width.saturating_sub(2).max(1);
         let border_style = Style::default().fg(self.theme.overlay_border);
-        let title_style = Style::default().fg(self.theme.text_primary).bold();
-        let hint_style = Style::default().fg(self.theme.text_muted);
+        let title_style = Style::default().fg(self.theme.brand).bold();
 
         lines.push(paint(
             &format!("┌{}┐", "─".repeat(inner_width)),
@@ -71,16 +70,19 @@ impl ConfirmDialogState {
             title_style,
             border_style,
         ));
-        lines.push(box_line(
-            &format!(" {}", self.hint),
+        lines.push(box_line_raw(
+            &format!(" {}", render_hint(&self.hint, self.theme)),
             inner_width,
-            hint_style,
             border_style,
         ));
         lines.push(box_line("", inner_width, Style::default(), border_style));
 
         for line in &self.lines {
-            lines.push(box_line(line, inner_width, Style::default(), border_style));
+            lines.push(box_line_raw(
+                &render_body_line(line, self.theme),
+                inner_width,
+                border_style,
+            ));
         }
 
         lines.push(box_line("", inner_width, Style::default(), border_style));
@@ -132,6 +134,70 @@ fn box_line(
     format!("{left}{styled_content}{right}")
 }
 
+fn box_line_raw(content: &str, content_width: usize, border_style: Style) -> String {
+    let visible = visible_width(&crate::primitive::strip_ansi(content));
+    let content = if visible > content_width {
+        truncate_width(content, content_width, "…", false)
+    } else {
+        content.to_owned()
+    };
+    let padding =
+        content_width.saturating_sub(visible_width(&crate::primitive::strip_ansi(&content)));
+    let left = paint("│", border_style);
+    let right = paint("│", border_style);
+    format!("{left}{content}{}{right}", " ".repeat(padding))
+}
+
+fn render_hint(hint: &str, theme: TuiTheme) -> String {
+    let mut rendered = Vec::new();
+    for part in hint.split(" · ") {
+        let Some((key, rest)) = part.split_once(' ') else {
+            rendered.push(paint(part, Style::default().fg(theme.text_muted)));
+            continue;
+        };
+        let key = paint(
+            key,
+            Style::default()
+                .fg(theme.selected_fg)
+                .bg(theme.selection_bg)
+                .bold(),
+        );
+        let rest = paint(&format!(" {rest}"), Style::default().fg(theme.text_muted));
+        rendered.push(format!("{key}{rest}"));
+    }
+    rendered.join(&paint(" · ", Style::default().fg(theme.text_muted)))
+}
+
+fn render_body_line(line: &str, theme: TuiTheme) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let indent = line
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .collect::<String>();
+    let style = if matches!(trimmed, "Directory" | "Access") {
+        Style::default().fg(theme.brand).bold()
+    } else if is_pathish(trimmed) {
+        Style::default().fg(theme.prompt).bold()
+    } else if line.starts_with("   ") {
+        Style::default().fg(theme.text_muted)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    format!("{indent}{}", paint(trimmed, style))
+}
+
+fn is_pathish(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("~/")
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +233,16 @@ mod tests {
         );
         assert!(joined.contains("Y approve"), "hint missing: {joined}");
         assert!(joined.contains("/tmp/shared"), "body missing: {joined}");
+    }
+
+    #[test]
+    fn renders_colored_action_hint_and_body_accents() {
+        let rendered = state().render_lines(80).join("\n");
+        let theme = TuiTheme::default();
+
+        assert!(rendered.contains(&crate::primitive::bg_to_ansi(theme.selection_bg)));
+        assert!(rendered.contains(&crate::primitive::fg_to_ansi(theme.brand)));
+        assert!(rendered.contains(&crate::primitive::fg_to_ansi(theme.prompt)));
     }
 
     #[test]

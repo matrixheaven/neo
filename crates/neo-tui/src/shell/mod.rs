@@ -345,6 +345,8 @@ impl NeoChromeState {
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
                 | OverlayKind::McpManager(_)
+                | OverlayKind::WorkspaceManager(_)
+                | OverlayKind::ConfirmDialog(_)
                 | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
@@ -489,6 +491,9 @@ mod tests {
 
         assert_eq!(chrome.focused_overlay_id(), Some(id));
         assert!(chrome.focused_overlay_is_rich_dialog());
+        assert!(chrome.focused_overlay_blocks_prompt());
+        let lines = chrome.focused_overlay_lines(80).join("\n");
+        assert!(lines.contains("Confirm Write Access"), "{lines}");
         assert_eq!(
             chrome.handle_focused_dialog_input(crate::input::InputEvent::Insert('Y')),
             crate::primitive::InputResult::Submitted
