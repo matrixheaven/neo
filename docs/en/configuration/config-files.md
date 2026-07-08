@@ -124,7 +124,7 @@ Context compaction strategy; all sub-fields are optional. When omitted, `enabled
 | `trigger_ratio` | f64 | `0.85` | Context occupancy threshold that triggers compaction |
 | `reserved_context_tokens` | usize | `50000` | Reserved trailing token margin |
 | `max_recent_messages` | usize | `4` | Number of very recent messages preserved during automatic compaction |
-| `micro_enabled` | bool | `true` | Whether micro compaction (truncation of old tool results) is enabled |
+| `micro_enabled` | bool | `false` | Whether micro compaction (truncation of old tool results) is enabled |
 | `micro_keep_recent` | usize | `20` | Number of recent messages exempt from micro compaction |
 | `max_rounds` | usize | `5` | Maximum rounds in a single compaction |
 | `max_retry_attempts` | u32 | `5` | Maximum retry attempts for empty/truncated summaries |

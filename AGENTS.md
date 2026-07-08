@@ -1,12 +1,12 @@
 # Neo — Agent Guide
 
-Neo is a Rust-native, local-only AI coding agent (CLI + TUI). Cargo workspace, edition 2024, min Rust 1.96.1. Vendored dirs (`claude-code`, `codex`, `kimi-code`, `opencode`, `pi`) under `docs/` are reference-only, not part of the workspace.
+Neo is a Rust-native, local-only AI coding agent (CLI + TUI). Cargo workspace, edition 2024, min Rust 1.96.1. Vendored dirs (`claude-code`, `codex`, `kimi-code`, `opencode`, `pi`) under `.references/` are reference-only, not part of the workspace.
 
-Read [CX.md](../../.neo/CX.md) and [RTK.md](../../.neo/RTK.md). Use `cx`/`rtk` CLIs to save tokens. Parallelize substantial work across ≥3 subagents when slices are independent.
+Read [CX.md](./CX.md) and [RTK.md](./RTK.md). Use `cx`/`rtk` CLIs to save tokens. Parallelize substantial work across ≥3 subagents when slices are independent.
 
 ## Critical rules
 
-> **This guide constrains _you_ (the AI collaborator), not Neo.** Nothing here is a product specification or feature requirement. Rules describe working conventions for agents operating in this codebase — do not mistake them for Neo's design, architecture decisions, or user-facing behavior. If a rule says "don't do X", that limits what _you_ do while coding, not what Neo as a tool must support.
+> **This guide constrains _you_ (the AI collaborator), not Neo User.** Nothing here is a product specification or feature requirement. Rules describe working conventions for agents operating in this codebase — do not mistake them for Neo's design, architecture decisions, or user-facing behavior. If a rule says "don't do X", that limits what _you_ do while coding, not what Neo as a tool must support.
 
 1. **Stay in scope.** Don't fix unrelated failures or clean up other agents' work. The worktree is shared and concurrent.
 2. **Never revert worktree files** to make tests pass. If another agent's in-progress work breaks your build, skip those tests and report it.

@@ -193,7 +193,7 @@ impl Default for RuntimeCompactionConfig {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: true,
+            micro_enabled: false,
             micro_keep_recent: 20,
             max_rounds: 5,
             max_retry_attempts: 5,
@@ -235,7 +235,9 @@ mod tests {
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
     use tempfile::TempDir;
 
-    use crate::config::{AppConfig, ConfigOverrides, PermissionMode, TuiConfig};
+    use crate::config::{
+        AppConfig, ConfigOverrides, PermissionMode, RuntimeCompactionConfig, TuiConfig,
+    };
     use crate::trust::{ProjectTrustState, ProjectTrustStore};
 
     fn temp_project_config(content: &str) -> (TempDir, PathBuf, PathBuf) {
@@ -291,6 +293,25 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::All);
+    }
+
+    #[test]
+    fn runtime_compaction_default_disables_micro_projection() {
+        assert!(!RuntimeCompactionConfig::default().micro_enabled);
+    }
+
+    #[test]
+    fn config_partial_compaction_disables_micro_projection_by_default() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r#"
+[runtime.compaction]
+enabled = true
+"#,
+        );
+
+        let config = load_config(config_path, project_dir);
+
+        assert!(!config.runtime.compaction.expect("compaction").micro_enabled);
     }
 
     #[test]

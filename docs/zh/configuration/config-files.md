@@ -124,7 +124,7 @@ reasoning_effort = "medium"
 | `trigger_ratio` | f64 | `0.85` | 触发压缩的上下文占比阈值 |
 | `reserved_context_tokens` | usize | `50000` | 预留的尾部 token 余量 |
 | `max_recent_messages` | usize | `4` | 自动压缩保留的极近消息数 |
-| `micro_enabled` | bool | `true` | 是否启用 micro compaction（旧 tool-result 截断） |
+| `micro_enabled` | bool | `false` | 是否启用 micro compaction（旧 tool-result 截断） |
 | `micro_keep_recent` | usize | `20` | micro compaction 豁免的最近消息数 |
 | `max_rounds` | usize | `5` | 单次压缩最大轮数 |
 | `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
