@@ -1,19 +1,16 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write as _,
+    fs,
     path::{Path, PathBuf},
-    thread,
-    time::Duration,
 };
 
 use anyhow::{Context as _, bail};
 use neo_agent_core::{WorkspaceAccessRoot, WorkspaceAccessRootKind};
 use serde::{Deserialize, Serialize};
 
+use crate::{json_store, path_key::project_key};
+
 const WORKSPACES_FILE: &str = "workspaces.json";
-const LOCK_RETRY_ATTEMPTS: usize = 50;
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkspaceStoreData {
@@ -90,121 +87,14 @@ impl WorkspaceStore {
         project_dir: &Path,
         project: WorkspaceProject,
     ) -> anyhow::Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .context("workspace store has no parent")?;
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create workspace store directory {}",
-                parent.display()
-            )
-        })?;
-        let _lock = WorkspaceStoreLock::acquire(&self.path)?;
-        let mut data = self.read()?;
-        data.projects.insert(project_key(project_dir)?, project);
-        self.write(&data)
+        let key = project_key(project_dir)?;
+        json_store::update(&self.path, "workspace", |data: &mut WorkspaceStoreData| {
+            data.projects.insert(key, project);
+        })
     }
 
     fn read(&self) -> anyhow::Result<WorkspaceStoreData> {
-        if !self.path.exists() {
-            return Ok(WorkspaceStoreData::default());
-        }
-        let content = fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read workspace store {}", self.path.display()))?;
-        if content.trim().is_empty() {
-            return Ok(WorkspaceStoreData::default());
-        }
-        match serde_json::from_str::<WorkspaceStoreData>(&content) {
-            Ok(data) => Ok(data),
-            Err(err) => {
-                let backup = self.path.with_extension("json.bak");
-                if backup.exists() {
-                    fs::remove_file(&backup).with_context(|| {
-                        format!(
-                            "failed to remove old workspace store backup {}",
-                            backup.display()
-                        )
-                    })?;
-                }
-                fs::rename(&self.path, &backup).with_context(|| {
-                    format!(
-                        "failed to back up corrupted workspace store to {}",
-                        backup.display()
-                    )
-                })?;
-                tracing::warn!(
-                    "workspace store {} was corrupted ({err}); backed up to {}. Starting fresh.",
-                    self.path.display(),
-                    backup.display()
-                );
-                Ok(WorkspaceStoreData::default())
-            }
-        }
-    }
-
-    fn write(&self, data: &WorkspaceStoreData) -> anyhow::Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .context("workspace store has no parent")?;
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create workspace store directory {}",
-                parent.display()
-            )
-        })?;
-        let content = serde_json::to_string_pretty(data).context("serialize workspace store")?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)
-            .context("create temporary workspace store file")?;
-        temp.write_all(content.as_bytes())
-            .context("write temporary workspace store file")?;
-        temp.persist(&self.path)
-            .map_err(|err| anyhow::anyhow!("failed to persist workspace store: {err}"))?;
-        Ok(())
-    }
-}
-
-struct WorkspaceStoreLock {
-    path: PathBuf,
-}
-
-impl WorkspaceStoreLock {
-    fn acquire(store_path: &Path) -> anyhow::Result<Self> {
-        let lock_path = store_path.with_extension("json.lock");
-        for attempt in 0..LOCK_RETRY_ATTEMPTS {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Self { path: lock_path }),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if attempt + 1 == LOCK_RETRY_ATTEMPTS {
-                        break;
-                    }
-                    thread::sleep(LOCK_RETRY_DELAY);
-                }
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "failed to create workspace store lock {}",
-                            lock_path.display()
-                        )
-                    });
-                }
-            }
-        }
-        bail!(
-            "timed out waiting for workspace store lock {}",
-            lock_path.display()
-        );
-    }
-}
-
-impl Drop for WorkspaceStoreLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        json_store::read_or_default(&self.path, "workspace")
     }
 }
 
@@ -269,19 +159,6 @@ pub(crate) fn access_roots_from_project(project: &WorkspaceProject) -> Vec<Works
         .collect()
 }
 
-fn project_key(project_dir: &Path) -> anyhow::Result<String> {
-    let canonical = project_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize project dir {}",
-            project_dir.display()
-        )
-    })?;
-    let Some(key) = canonical.to_str() else {
-        bail!("project dir is not valid UTF-8: {}", canonical.display());
-    };
-    Ok(key.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +184,35 @@ mod tests {
 
         let loaded = store.read_project(&project).expect("read project");
         assert_eq!(loaded.entries, vec![entry]);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn store_keys_non_utf8_project_paths_without_rejecting_them() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let project_name = std::ffi::OsString::from_vec(b"project-\xFF".to_vec());
+        let project = root.path().join(project_name);
+        let added = root.path().join("added");
+        fs::create_dir_all(&project).expect("project");
+        fs::create_dir_all(&added).expect("added");
+        let store = WorkspaceStore::new(root.path().join("workspaces.json"));
+        let entry = WorkspaceEntry::read_only(added.canonicalize().expect("canonical added"));
+
+        store
+            .write_project(
+                &project,
+                WorkspaceProject {
+                    entries: vec![entry.clone()],
+                },
+            )
+            .expect("write project");
+
+        assert_eq!(
+            store.read_project(&project).expect("read project").entries,
+            vec![entry]
+        );
     }
 
     #[test]
@@ -442,7 +348,38 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_store_is_backed_up_and_treated_as_empty() {
+    fn write_project_backs_up_corrupted_store_before_replacing_it() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("workspaces.json");
+        fs::write(&path, "not json").expect("write corrupted");
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).expect("project");
+        let store = WorkspaceStore::new(path.clone());
+        let added = root.path().join("added");
+        fs::create_dir_all(&added).expect("added");
+        let entry = WorkspaceEntry::read_only(added.canonicalize().expect("canonical added"));
+
+        store
+            .write_project(
+                &project,
+                WorkspaceProject {
+                    entries: vec![entry.clone()],
+                },
+            )
+            .expect("replace corrupted");
+
+        assert_eq!(
+            store
+                .read_project(&project)
+                .expect("read after repair")
+                .entries,
+            vec![entry]
+        );
+        assert!(path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn read_project_does_not_mutate_corrupted_store() {
         let root = tempfile::tempdir().expect("root");
         let path = root.path().join("workspaces.json");
         fs::write(&path, "not json").expect("write corrupted");
@@ -453,7 +390,8 @@ mod tests {
         let loaded = store.read_project(&project).expect("read after corruption");
 
         assert!(loaded.entries.is_empty());
-        assert!(path.with_extension("json.bak").exists());
+        assert!(path.exists());
+        assert!(!path.with_extension("json.bak").exists());
     }
 
     fn symlink_created(result: std::io::Result<()>) -> bool {

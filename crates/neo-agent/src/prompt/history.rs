@@ -16,6 +16,7 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,7 @@ struct PromptHistoryRecord {
 pub(crate) struct PromptHistoryStore {
     path: PathBuf,
     max_entries: usize,
+    recent: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 impl PromptHistoryStore {
@@ -56,6 +58,7 @@ impl PromptHistoryStore {
         Self {
             path: dir.as_ref().join(HISTORY_FILE_NAME),
             max_entries: DEFAULT_MAX_ENTRIES,
+            recent: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -77,8 +80,10 @@ impl PromptHistoryStore {
     /// Malformed lines are skipped so a single corrupt record is non-fatal.
     pub(crate) fn load_recent(&self) -> anyhow::Result<Vec<String>> {
         let Some(entries) = self.load_records()? else {
+            self.replace_recent(Vec::new());
             return Ok(Vec::new());
         };
+        self.replace_recent(entries.clone());
         Ok(entries)
     }
 
@@ -138,13 +143,7 @@ impl PromptHistoryStore {
         if text.is_empty() {
             return Ok(false);
         }
-        // Deduplicate against the most recent persisted prompt so the file does
-        // not grow with back-to-back repeats. Non-consecutive repeats survive.
-        if self
-            .load_recent()?
-            .last()
-            .is_some_and(|last: &String| last == text)
-        {
+        if self.last_recent_prompt()?.is_some_and(|last| last == text) {
             return Ok(false);
         }
 
@@ -170,7 +169,34 @@ impl PromptHistoryStore {
             .write_all(b"\n")
             .context("failed to write prompt history newline")?;
         writer.flush().context("failed to flush prompt history")?;
+        self.push_recent(text.to_owned());
         Ok(true)
+    }
+
+    fn last_recent_prompt(&self) -> anyhow::Result<Option<String>> {
+        {
+            let recent = self.recent.lock().expect("prompt history cache poisoned");
+            if let Some(entries) = recent.as_ref() {
+                return Ok(entries.last().cloned());
+            }
+        }
+        Ok(self
+            .load_records()?
+            .and_then(|entries| entries.last().cloned()))
+    }
+
+    fn replace_recent(&self, entries: Vec<String>) {
+        *self.recent.lock().expect("prompt history cache poisoned") = Some(entries);
+    }
+
+    fn push_recent(&self, text: String) {
+        let mut recent = self.recent.lock().expect("prompt history cache poisoned");
+        let entries = recent.get_or_insert_with(Vec::new);
+        entries.push(text);
+        if entries.len() > self.max_entries {
+            let start = entries.len() - self.max_entries;
+            entries.drain(..start);
+        }
     }
 }
 
@@ -288,6 +314,17 @@ mod tests {
             store.load_recent().unwrap(),
             vec!["rerun me", "other", "rerun me"]
         );
+    }
+
+    #[test]
+    fn prompt_history_append_uses_loaded_recent_prompt_without_rescanning_history() {
+        let (_keep, store) = tmp_store(500);
+        store.append(None, "cached prompt").unwrap();
+        assert_eq!(store.load_recent().unwrap(), vec!["cached prompt"]);
+        fs::write(store.path(), b"{not json}\n").expect("corrupt history");
+
+        assert!(!store.append(None, "cached prompt").unwrap());
+        assert_eq!(store.load_recent().unwrap(), Vec::<String>::new());
     }
 
     #[test]

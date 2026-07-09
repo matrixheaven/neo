@@ -695,6 +695,7 @@ fn child_process_group(child: &Child) -> Option<Pid> {
 
 async fn kill_child(process: &mut ManagedChild) -> ShellTermination {
     kill_process_group_if_available(process);
+    kill_windows_process_tree_if_available(process).await;
     let _ = process.child.start_kill();
     process.child.wait().await.ok().map_or(
         ShellTermination {
@@ -718,6 +719,33 @@ fn kill_process_group_if_available(_process: &ManagedChild) {
             .or_else(|err| if err == Errno::SRCH { Ok(()) } else { Err(err) });
     }
 }
+
+#[cfg(any(test, windows))]
+fn windows_taskkill_args(pid: u32) -> [String; 4] {
+    [
+        "/T".to_owned(),
+        "/F".to_owned(),
+        "/PID".to_owned(),
+        pid.to_string(),
+    ]
+}
+
+#[cfg(windows)]
+async fn kill_windows_process_tree_if_available(process: &ManagedChild) {
+    let Some(pid) = process.child.id() else {
+        return;
+    };
+    let taskkill = Command::new("taskkill")
+        .args(windows_taskkill_args(pid))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = tokio::time::timeout(Duration::from_secs(5), taskkill).await;
+}
+
+#[cfg(not(windows))]
+async fn kill_windows_process_tree_if_available(_process: &ManagedChild) {}
 
 async fn start_background_command(
     ctx: &ToolContext,
@@ -979,5 +1007,12 @@ mod tests {
         }
 
         assert_eq!(output.as_deref(), Some("persisted-output\n"));
+    }
+
+    #[test]
+    fn windows_process_tree_kill_uses_taskkill_tree_force_args() {
+        let args = windows_taskkill_args(42);
+
+        assert_eq!(args, ["/T", "/F", "/PID", "42"].map(str::to_owned));
     }
 }

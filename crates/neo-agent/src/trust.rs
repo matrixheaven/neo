@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
+
+use crate::{json_store, path_key::project_key};
 
 const TRUST_FILE: &str = "trust.json";
 
@@ -122,13 +123,15 @@ impl ProjectTrustStore {
     /// and `None` removes any stored decision.
     pub(crate) fn set(&self, project_dir: &Path, value: Option<bool>) -> anyhow::Result<()> {
         let key = project_key(project_dir)?;
-        let mut data = self.read()?;
         if let Some(value) = value {
-            data.insert(key, value);
+            json_store::update(&self.path, "trust", |data: &mut BTreeMap<String, bool>| {
+                data.insert(key, value);
+            })
         } else {
-            data.remove(&key);
+            json_store::update(&self.path, "trust", |data: &mut BTreeMap<String, bool>| {
+                data.remove(&key);
+            })
         }
-        self.write(&data)
     }
 
     pub(crate) fn get(&self, project_dir: &Path) -> anyhow::Result<Option<bool>> {
@@ -136,59 +139,8 @@ impl ProjectTrustStore {
         Ok(data.get(&project_key(project_dir)?).copied())
     }
 
-    fn write(&self, data: &BTreeMap<String, bool>) -> anyhow::Result<()> {
-        let parent = self.path.parent().context("trust store has no parent")?;
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create trust store directory {}",
-                parent.display()
-            )
-        })?;
-        let content = serde_json::to_string_pretty(&data).context("serialize trust store")?;
-        let mut temp =
-            tempfile::NamedTempFile::new_in(parent).context("create temporary trust store file")?;
-        temp.write_all(content.as_bytes())
-            .context("write temporary trust store file")?;
-        temp.persist(&self.path)
-            .map_err(|err| anyhow::anyhow!("failed to persist trust store: {err}"))?;
-        Ok(())
-    }
-
     fn read(&self) -> anyhow::Result<BTreeMap<String, bool>> {
-        if !self.path.exists() {
-            return Ok(BTreeMap::new());
-        }
-        let content = fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read trust store {}", self.path.display()))?;
-        if content.trim().is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        match serde_json::from_str::<BTreeMap<String, bool>>(&content) {
-            Ok(data) => Ok(data),
-            Err(err) => {
-                let backup = self.path.with_extension("json.bak");
-                if backup.exists() {
-                    fs::remove_file(&backup).with_context(|| {
-                        format!(
-                            "failed to remove old trust store backup {}",
-                            backup.display()
-                        )
-                    })?;
-                }
-                fs::rename(&self.path, &backup).with_context(|| {
-                    format!(
-                        "failed to back up corrupted trust store to {}",
-                        backup.display()
-                    )
-                })?;
-                tracing::warn!(
-                    "trust store {} was corrupted ({err}); backed up to {}. Starting fresh.",
-                    self.path.display(),
-                    backup.display()
-                );
-                Ok(BTreeMap::new())
-            }
-        }
+        json_store::read_or_default(&self.path, "trust")
     }
 }
 
@@ -363,19 +315,6 @@ fn inputs_in_dir(directory: &Path) -> Vec<(PathBuf, TrustInputKind)> {
     result
 }
 
-fn project_key(project_dir: &Path) -> anyhow::Result<String> {
-    let canonical = project_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize project dir {}",
-            project_dir.display()
-        )
-    })?;
-    let Some(key) = canonical.to_str() else {
-        bail!("project dir is not valid UTF-8: {}", canonical.display());
-    };
-    Ok(key.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,12 +332,24 @@ mod tests {
         store.set(&beta, Some(false)).expect("set beta");
         store.set(&alpha, Some(true)).expect("set alpha");
 
-        let content = fs::read_to_string(root.path().join("trust.json")).expect("read trust");
-        let alpha_index = content.find("alpha").expect("alpha in trust");
-        let beta_index = content.find("beta").expect("beta in trust");
-        assert!(alpha_index < beta_index, "trust keys should be sorted");
         assert_eq!(store.get(&alpha).expect("get alpha"), Some(true));
         assert_eq!(store.get(&beta).expect("get beta"), Some(false));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn trust_store_keys_non_utf8_project_paths_without_rejecting_them() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = TempDir::new().expect("tempdir");
+        let store = ProjectTrustStore::new(root.path().join("trust.json"));
+        let project_name = std::ffi::OsString::from_vec(b"project-\xFF".to_vec());
+        let project = root.path().join(project_name);
+        fs::create_dir_all(&project).expect("create project");
+
+        store.set(&project, Some(true)).expect("set trust");
+
+        assert_eq!(store.get(&project).expect("get trust"), Some(true));
     }
 
     #[test]
@@ -415,17 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_trust_store_is_backed_up_and_treated_as_empty() {
+    fn set_backs_up_corrupted_trust_store_before_replacing_it() {
         let root = TempDir::new().expect("tempdir");
         let store = ProjectTrustStore::new(root.path().join("trust.json"));
-        fs::create_dir_all(root.path()).expect("create root");
         fs::write(&store.path, "not json").expect("write corrupted trust");
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
 
+        store.set(&project, Some(true)).expect("replace corrupted");
+
+        assert_eq!(store.get(&project).expect("read after repair"), Some(true));
+        assert!(store.path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn get_does_not_mutate_corrupted_trust_store() {
+        let root = TempDir::new().expect("tempdir");
+        let store = ProjectTrustStore::new(root.path().join("trust.json"));
+        fs::write(&store.path, "not json").expect("write corrupted trust");
         let project = root.path().join("project");
         fs::create_dir_all(&project).expect("create project");
 
         assert_eq!(store.get(&project).expect("read after corruption"), None);
-        assert!(store.path.with_extension("json.bak").exists());
+        assert!(store.path.exists());
+        assert!(!store.path.with_extension("json.bak").exists());
     }
 
     #[test]

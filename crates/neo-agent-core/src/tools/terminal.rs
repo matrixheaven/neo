@@ -432,7 +432,7 @@ async fn read_terminal(
             .output
             .lock()
             .expect("terminal output lock poisoned");
-        let read = output.read_since(read_offset_before);
+        let read = output.read_since_limited(read_offset_before, max_output_bytes);
         session.read_offset = read.next_offset;
         (
             read.output,
@@ -442,10 +442,10 @@ async fn read_terminal(
             read.discarded_bytes,
         )
     };
-    let (output_capped, output_truncated) = cap_terminal_output(&output, max_output_bytes);
-    let output_details = cap_output_details(&output, max_output_bytes);
+    let output_truncated = unread_bytes_after > 0;
+    let output_details = output.clone();
     let truncated = output_truncated || discarded_bytes_before_read > 0;
-    let output_content = format_terminal_output(&output_capped, truncated);
+    let output_content = format_terminal_output(&output, truncated);
     if let Some(callback) = ctx.tool_update.as_ref() {
         callback(&output_content);
     }
@@ -676,20 +676,23 @@ impl TerminalOutputBuffer {
         }
     }
 
+    #[cfg(test)]
     fn read_since(&self, offset: usize) -> TerminalOutputRead {
+        self.read_since_limited(offset, usize::MAX)
+    }
+
+    fn read_since_limited(&self, offset: usize, max_bytes: usize) -> TerminalOutputRead {
         let effective_offset = offset.max(self.start_offset).min(self.total_bytes);
         let start_index = effective_offset.saturating_sub(self.start_offset);
-        let output = self
-            .bytes
-            .get(start_index..)
-            .map(String::from_utf8_lossy)
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or_default();
+        let available = self.bytes.get(start_index..).unwrap_or_default();
+        let end_index = available.len().min(max_bytes);
+        let output = String::from_utf8_lossy(&available[..end_index]).into_owned();
+        let next_offset = effective_offset.saturating_add(end_index);
         TerminalOutputRead {
             output,
-            next_offset: self.total_bytes,
+            next_offset,
             total_bytes: self.total_bytes,
-            unread_bytes_after: 0,
+            unread_bytes_after: self.total_bytes.saturating_sub(next_offset),
             discarded_bytes: self.start_offset.saturating_sub(offset),
         }
     }
@@ -812,6 +815,20 @@ mod tests {
         assert_eq!(second.output, "de");
         assert_eq!(second.discarded_bytes, 0);
         assert_eq!(second.next_offset, 5);
+    }
+
+    #[test]
+    fn terminal_output_limited_read_advances_only_returned_bytes() {
+        let mut buffer = TerminalOutputBuffer::new(32);
+
+        buffer.push(b"abcdef");
+        let read = buffer.read_since_limited(0, 4);
+
+        assert_eq!(read.output, "abcd");
+        assert_eq!(read.next_offset, 4);
+        assert_eq!(read.total_bytes, 6);
+        assert_eq!(read.unread_bytes_after, 2);
+        assert_eq!(read.discarded_bytes, 0);
     }
 
     #[test]
