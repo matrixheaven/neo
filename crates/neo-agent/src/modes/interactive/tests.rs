@@ -6153,6 +6153,32 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
 }
 
 #[tokio::test]
+async fn load_session_at_startup_sets_terminal_title_from_loaded_title() {
+    let mut controller = InteractiveController::new_with_event_driver(
+        "neo",
+        "new",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        PickerCatalogs::default(),
+        |session_id| async move {
+            Ok(
+                LoadedSessionTranscript::new(session_id, Vec::new(), Vec::new())
+                    .with_terminal_title("Resume Title"),
+            )
+        },
+    );
+
+    controller
+        .load_session_at_startup(SESSION_A)
+        .await
+        .expect("session loads at startup");
+
+    assert_eq!(controller.chrome().session_label(), SESSION_A);
+    assert_eq!(controller.chrome().terminal_title(), "Resume Title");
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -7010,6 +7036,7 @@ async fn session_catalog_and_loader_use_real_local_session_store() {
         .await
         .expect("load session transcript");
     assert_eq!(loaded.label, SESSION_A);
+    assert_eq!(loaded.terminal_title.as_deref(), Some("Alpha Session"));
     assert_eq!(
         loaded.notices,
         vec!["branch summary: Local branch summary".to_owned()]

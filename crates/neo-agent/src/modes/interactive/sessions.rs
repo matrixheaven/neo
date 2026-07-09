@@ -24,6 +24,7 @@ impl InteractiveController {
             self.tui
                 .chrome_mut()
                 .set_session_label(loaded.label.clone());
+            self.set_terminal_title_from_loaded_session(&loaded);
             self.rebuild_transcript_from_session(&loaded);
             self.active_session_id = Some(session.id);
             return Ok(());
@@ -99,6 +100,7 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
+        self.set_terminal_title_from_loaded_session(&forked.transcript);
         self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id.clone());
         self.push_status(format!("fork from session {}", parent.id));
@@ -117,6 +119,7 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
+        self.set_terminal_title_from_loaded_session(&forked.transcript);
         self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id.clone());
         self.push_status(format!("fork from session {parent_id}"));
@@ -188,6 +191,8 @@ impl InteractiveController {
         self.goal_manager = None;
         self.active_session_id = None;
         self.tui.chrome_mut().set_session_label("new");
+        let terminal_title = self.tui.chrome().title().to_owned();
+        self.tui.chrome_mut().set_terminal_title(terminal_title);
         self.rebuild_empty_welcome_transcript();
     }
 

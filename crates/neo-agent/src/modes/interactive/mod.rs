@@ -579,6 +579,7 @@ impl SelectedModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedSessionTranscript {
     label: String,
+    terminal_title: Option<String>,
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
     events: Vec<AgentEvent>,
@@ -594,6 +595,7 @@ impl LoadedSessionTranscript {
     ) -> Self {
         Self {
             label: label.into(),
+            terminal_title: None,
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
             events: Vec::new(),
@@ -604,6 +606,12 @@ impl LoadedSessionTranscript {
     #[must_use]
     pub(crate) fn with_events(mut self, events: impl IntoIterator<Item = AgentEvent>) -> Self {
         self.events = events.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_terminal_title(mut self, title: impl Into<String>) -> Self {
+        self.terminal_title = Some(title.into());
         self
     }
 
@@ -1561,6 +1569,34 @@ impl InteractiveController {
         self.tui.chrome_mut().set_session_label(session_id);
     }
 
+    fn set_terminal_title_from_loaded_session(&mut self, loaded: &LoadedSessionTranscript) {
+        let title = loaded
+            .terminal_title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&loaded.label);
+        self.tui.chrome_mut().set_terminal_title(title);
+    }
+
+    fn refresh_terminal_title_for_session(&mut self, session_id: &str) {
+        let title = self
+            .local_config
+            .as_ref()
+            .and_then(|config| {
+                SessionMetadataStore::new(workspace_sessions_dir(config))
+                    .list()
+                    .ok()
+            })
+            .and_then(|sessions| {
+                sessions
+                    .into_iter()
+                    .find(|session| session.id == session_id)
+                    .and_then(|session| session.title)
+            })
+            .unwrap_or_else(|| session_id.to_owned());
+        self.tui.chrome_mut().set_terminal_title(title);
+    }
+
     fn active_session_id(&self) -> Option<&str> {
         self.active_session_id.as_deref()
     }
@@ -1910,22 +1946,29 @@ async fn load_session_transcript(
     if let Some(summary) = context.compaction_summary() {
         notices.push(format!("compaction: {}", summary.summary));
     }
-    if let Some(summary) = SessionMetadataStore::new(workspace_sessions_dir(config))
+    let session_summary = SessionMetadataStore::new(workspace_sessions_dir(config))
         .list()
         .ok()
         .and_then(|sessions| {
             sessions
                 .into_iter()
                 .find(|session| session.id == session_id)
-                .and_then(|session| session.summary)
-        })
+        });
+    if let Some(summary) = session_summary
+        .as_ref()
+        .and_then(|session| session.summary.clone())
     {
         notices.push(format!("branch summary: {summary}"));
     }
+    let loaded = LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
+        .with_events(events)
+        .with_main_agent_token_usage(main_agent_token_usage);
     Ok(
-        LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
-            .with_events(events)
-            .with_main_agent_token_usage(main_agent_token_usage),
+        if let Some(title) = session_summary.and_then(|session| session.title) {
+            loaded.with_terminal_title(title)
+        } else {
+            loaded
+        },
     )
 }
 

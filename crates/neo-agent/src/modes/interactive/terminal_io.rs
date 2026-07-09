@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{ErrorKind, IsTerminal, Read};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -148,6 +148,7 @@ pub(super) fn input_events(keybindings: KeybindingsManager) -> impl TerminalEven
 }
 pub(super) struct NeoTerminal {
     tui: TuiRenderer,
+    title: Option<String>,
 }
 
 impl NeoTerminal {
@@ -157,10 +158,11 @@ impl NeoTerminal {
             std::io::stdout().is_terminal(),
         );
         let tui = TuiRenderer::enter(capabilities)?;
-        Ok(Self { tui })
+        Ok(Self { tui, title: None })
     }
 
     pub(super) fn draw_tui(&mut self, tui: &mut neo_tui::NeoTui) -> Result<()> {
+        self.sync_title(tui.chrome().terminal_title())?;
         let (cols, rows) = size()?;
         if cols == 0 || rows == 0 {
             return Ok(());
@@ -173,12 +175,43 @@ impl NeoTerminal {
         Ok(())
     }
 
+    fn sync_title(&mut self, title: &str) -> Result<()> {
+        let sanitized = sanitize_terminal_title(title);
+        if self.title.as_deref() == Some(sanitized.as_str()) {
+            return Ok(());
+        }
+        std::io::stdout().write_all(terminal_title_sequence(&sanitized).as_bytes())?;
+        self.title = Some(sanitized);
+        Ok(())
+    }
+
     pub(super) fn reenter(&mut self) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
         self.tui.suspend_resume()?;
         Ok(())
     }
+}
+
+const MAX_TERMINAL_TITLE_CHARS: usize = 32;
+
+fn terminal_title_sequence(title: &str) -> String {
+    format!("\x1b]0;{}\x07", sanitize_terminal_title(title))
+}
+
+fn sanitize_terminal_title(title: &str) -> String {
+    let mut sanitized = String::new();
+    for character in title.trim().chars() {
+        if sanitized.chars().count() >= MAX_TERMINAL_TITLE_CHARS {
+            break;
+        }
+        sanitized.push(if character.is_control() {
+            ' '
+        } else {
+            character
+        });
+    }
+    sanitized.trim().to_owned()
 }
 
 /// Compose the full frame (body + chrome) as ANSI strings, without writing to
@@ -236,5 +269,13 @@ mod tests {
         });
 
         assert_eq!(chunks, vec![b"hi".to_vec()]);
+    }
+
+    #[test]
+    fn terminal_title_sequence_sanitizes_control_bytes_and_truncates() {
+        let title = format!("build\x1b]0;bad\x07{}", "x".repeat(80));
+        let sequence = terminal_title_sequence(&title);
+
+        assert_eq!(sequence, "\x1b]0;build ]0;bad xxxxxxxxxxxxxxxxxxx\x07");
     }
 }

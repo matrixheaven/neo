@@ -21,6 +21,7 @@ use super::prompt::PromptState;
 #[allow(clippy::struct_excessive_bools)]
 pub struct NeoChromeState {
     pub(super) title: String,
+    pub(super) terminal_title: String,
     pub(super) session_label: String,
     pub(super) model_label: String,
     pub(super) workspace_root: PathBuf,
@@ -70,8 +71,10 @@ impl NeoChromeState {
         model_label: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
     ) -> Self {
+        let title = title.into();
         Self {
-            title: title.into(),
+            terminal_title: title.clone(),
+            title,
             session_label: session_label.into(),
             model_label: model_label.into(),
             workspace_root: workspace_root.into(),
@@ -108,6 +111,15 @@ impl NeoChromeState {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    #[must_use]
+    pub fn terminal_title(&self) -> &str {
+        &self.terminal_title
+    }
+
+    pub fn set_terminal_title(&mut self, title: impl Into<String>) {
+        self.terminal_title = title.into();
     }
 
     #[must_use]

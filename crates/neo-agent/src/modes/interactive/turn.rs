@@ -178,7 +178,8 @@ impl InteractiveController {
             match turn_result {
                 Ok(outcome) => {
                     if let Some(session_id) = outcome.session_id {
-                        self.set_active_session_id(session_id);
+                        self.set_active_session_id(session_id.clone());
+                        self.refresh_terminal_title_for_session(&session_id);
                     }
                 }
                 Err(error) => {
