@@ -121,6 +121,73 @@ pub fn add_provider_from_catalog_entry(
     ))
 }
 
+/// Add or replace a custom endpoint provider and its reviewed model configs.
+pub fn add_custom_endpoint_provider(
+    config_path: &Path,
+    provider_id: &str,
+    provider_config: ProviderConfig,
+    models: Vec<(String, ModelConfig)>,
+    default_model: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut file_config = read_file_config(config_path)?;
+    let supplied_aliases = models
+        .iter()
+        .map(|(alias, _)| alias.as_str())
+        .collect::<Vec<_>>();
+    if let Some(default_alias) = default_model {
+        anyhow::ensure!(
+            supplied_aliases.contains(&default_alias),
+            "default model '{default_alias}' is not one of the supplied model aliases"
+        );
+    }
+    clear_provider_default(&mut file_config, provider_id);
+    let should_set_default = file_config
+        .default_model
+        .as_deref()
+        .is_none_or(str::is_empty);
+    remove_provider_entry(file_config.providers.as_mut(), provider_id);
+    remove_provider_models(file_config.models.as_mut(), provider_id);
+
+    let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
+    providers.insert(provider_id.to_owned(), provider_config);
+
+    let first_alias = models.first().map(|(alias, _)| alias.clone());
+    {
+        let model_table = file_config.models.get_or_insert_with(BTreeMap::new);
+        for (alias, model) in models {
+            anyhow::ensure!(
+                model.provider == provider_id,
+                "model '{alias}' references provider '{}', expected '{provider_id}'",
+                model.provider
+            );
+            model_table.insert(alias, model);
+        }
+    }
+
+    if let Some(default_alias) = default_model.map(str::to_owned).or_else(|| {
+        if should_set_default {
+            first_alias
+        } else {
+            None
+        }
+    }) {
+        file_config.default_model = Some(default_alias);
+        file_config.default_provider = Some(provider_id.to_owned());
+    }
+
+    let count = file_config.models.as_ref().map_or(0, |models| {
+        models
+            .values()
+            .filter(|model| model.provider == provider_id)
+            .count()
+    });
+    write_file_config(config_path, &file_config)?;
+    Ok(format!(
+        "added provider '{provider_id}' with {count} model{}\n",
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
 /// List configured providers as a formatted string or JSON.
 ///
 /// Uses the merged `AppConfig` so providers from both user-global and project
@@ -239,6 +306,7 @@ fn clear_provider_default(file_config: &mut FileConfig, provider_id: &str) {
         || provider_owns_default(provider_id, default_model)
     {
         file_config.default_model = None;
+        file_config.default_provider = None;
     }
 }
 
@@ -520,6 +588,288 @@ model = "claude-sonnet-4"
         assert!(!written.contains("[models.\"openai/gpt-4.1\"]"));
         assert!(written.contains("[models.\"anthropic/sonnet\"]"));
         assert!(!written.contains("default_model"));
+    }
+
+    #[test]
+    fn add_custom_endpoint_provider_writes_provider_models_and_first_default_when_empty() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join(".neo/config.toml");
+
+        let message = super::add_custom_endpoint_provider(
+            &config_path,
+            "acme",
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAi),
+                base_url: Some("https://gateway.example.com/v1".to_owned()),
+                api_key: None,
+                api_key_env: Some("ACME_API_KEY".to_owned()),
+            },
+            vec![(
+                "acme/qwen2.5-coder-32b-instruct".to_owned(),
+                ModelConfig {
+                    provider: "acme".to_owned(),
+                    model: "qwen2.5-coder-32b-instruct".to_owned(),
+                    max_context_tokens: Some(128_000),
+                    max_output_tokens: Some(8_192),
+                    capabilities: vec![
+                        "streaming".to_owned(),
+                        "tools".to_owned(),
+                        "reasoning".to_owned(),
+                    ],
+                    reasoning: neo_ai::ReasoningCapability::Effort {
+                        values: vec![
+                            neo_ai::ReasoningEffort::Low,
+                            neo_ai::ReasoningEffort::Medium,
+                            neo_ai::ReasoningEffort::High,
+                        ],
+                        disable_supported: true,
+                    },
+                    display_name: Some("Qwen 2.5 Coder 32B".to_owned()),
+                },
+            )],
+            None,
+        )
+        .expect("add custom endpoint provider");
+
+        assert_eq!(message, "added provider 'acme' with 1 model\n");
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("[providers.acme]"), "{written}");
+        assert!(written.contains("type = \"openai\""), "{written}");
+        assert!(
+            written.contains("api_key_env = \"ACME_API_KEY\""),
+            "{written}"
+        );
+        assert!(
+            written.contains("[models.\"acme/qwen2.5-coder-32b-instruct\"]"),
+            "{written}"
+        );
+        assert!(written.contains("max_context_tokens = 128000"), "{written}");
+        assert!(written.contains("max_output_tokens = 8192"), "{written}");
+        assert!(written.contains("type = \"effort\""), "{written}");
+        assert!(
+            written.contains("default_model = \"acme/qwen2.5-coder-32b-instruct\""),
+            "{written}"
+        );
+        assert!(written.contains("default_provider = \"acme\""), "{written}");
+    }
+
+    #[test]
+    fn add_custom_endpoint_provider_replaces_existing_provider_models_only() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "other/keep"
+
+[providers.acme]
+type = "openai"
+base_url = "https://old.example.com/v1"
+
+[providers.other]
+type = "openai_response"
+base_url = "https://api.openai.com/v1"
+
+[models."acme/old"]
+provider = "acme"
+model = "old"
+
+[models."other/keep"]
+provider = "other"
+model = "keep"
+"#,
+        );
+
+        super::add_custom_endpoint_provider(
+            &config_path,
+            "acme",
+            ProviderConfig {
+                provider_type: Some(ApiType::Google),
+                base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
+                api_key: Some("local".to_owned()),
+                api_key_env: None,
+            },
+            vec![(
+                "acme/gemini-custom".to_owned(),
+                ModelConfig {
+                    provider: "acme".to_owned(),
+                    model: "models/gemini-custom".to_owned(),
+                    capabilities: vec!["streaming".to_owned()],
+                    ..ModelConfig::default()
+                },
+            )],
+            None,
+        )
+        .expect("replace custom endpoint provider");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(
+            written.contains("default_model = \"other/keep\""),
+            "{written}"
+        );
+        assert!(written.contains("[providers.acme]"), "{written}");
+        assert!(written.contains("type = \"google\""), "{written}");
+        assert!(!written.contains("[models.\"acme/old\"]"), "{written}");
+        assert!(
+            written.contains("[models.\"acme/gemini-custom\"]"),
+            "{written}"
+        );
+        assert!(written.contains("[models.\"other/keep\"]"), "{written}");
+    }
+
+    #[test]
+    fn add_custom_endpoint_provider_accepts_empty_models_and_does_not_invent_default() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+[providers.acme]
+type = "openai"
+base_url = "https://old.example.com/v1"
+
+[providers.other]
+type = "openai_response"
+base_url = "https://api.openai.com/v1"
+
+[models."acme/old"]
+provider = "acme"
+model = "old"
+
+[models."other/keep"]
+provider = "other"
+model = "keep"
+"#,
+        );
+
+        let message = super::add_custom_endpoint_provider(
+            &config_path,
+            "acme",
+            ProviderConfig {
+                provider_type: Some(ApiType::Google),
+                base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
+                api_key: Some("local".to_owned()),
+                api_key_env: None,
+            },
+            Vec::new(),
+            None,
+        )
+        .expect("replace custom endpoint provider without models");
+
+        assert_eq!(message, "added provider 'acme' with 0 models\n");
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("[providers.acme]"), "{written}");
+        assert!(written.contains("type = \"google\""), "{written}");
+        assert!(!written.contains("[models.\"acme/old\"]"), "{written}");
+        assert!(written.contains("[models.\"other/keep\"]"), "{written}");
+        assert!(!written.contains("default_model"), "{written}");
+        assert!(!written.contains("default_provider"), "{written}");
+    }
+
+    #[test]
+    fn add_custom_endpoint_provider_rejects_explicit_default_outside_supplied_aliases() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+[providers.other]
+type = "openai_response"
+base_url = "https://api.openai.com/v1"
+
+[models."other/keep"]
+provider = "other"
+model = "keep"
+"#,
+        );
+
+        let err = super::add_custom_endpoint_provider(
+            &config_path,
+            "acme",
+            ProviderConfig {
+                provider_type: Some(ApiType::Google),
+                base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
+                api_key: Some("local".to_owned()),
+                api_key_env: None,
+            },
+            vec![(
+                "acme/gemini-custom".to_owned(),
+                ModelConfig {
+                    provider: "acme".to_owned(),
+                    model: "models/gemini-custom".to_owned(),
+                    capabilities: vec!["streaming".to_owned()],
+                    ..ModelConfig::default()
+                },
+            )],
+            Some("acme/missing"),
+        )
+        .expect_err("invalid explicit default should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("default model 'acme/missing' is not one of the supplied model aliases"),
+            "{err}"
+        );
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(!written.contains("[providers.acme]"), "{written}");
+        assert!(
+            !written.contains("[models.\"acme/gemini-custom\"]"),
+            "{written}"
+        );
+        assert!(!written.contains("default_model"), "{written}");
+        assert!(written.contains("[providers.other]"), "{written}");
+        assert!(written.contains("[models.\"other/keep\"]"), "{written}");
+    }
+
+    #[test]
+    fn add_custom_endpoint_provider_invalidated_provider_default_uses_first_alias() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "acme/old"
+default_provider = "acme"
+
+[providers.acme]
+type = "openai"
+base_url = "https://old.example.com/v1"
+
+[models."acme/old"]
+provider = "acme"
+model = "old"
+"#,
+        );
+
+        super::add_custom_endpoint_provider(
+            &config_path,
+            "acme",
+            ProviderConfig {
+                provider_type: Some(ApiType::Google),
+                base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
+                api_key: Some("local".to_owned()),
+                api_key_env: None,
+            },
+            vec![(
+                "acme/gemini-custom".to_owned(),
+                ModelConfig {
+                    provider: "acme".to_owned(),
+                    model: "models/gemini-custom".to_owned(),
+                    capabilities: vec!["streaming".to_owned()],
+                    ..ModelConfig::default()
+                },
+            )],
+            None,
+        )
+        .expect("replace custom endpoint provider");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(
+            written.contains("default_model = \"acme/gemini-custom\""),
+            "{written}"
+        );
+        assert!(written.contains("default_provider = \"acme\""), "{written}");
+        assert!(!written.contains("[models.\"acme/old\"]"), "{written}");
+        assert!(
+            written.contains("[models.\"acme/gemini-custom\"]"),
+            "{written}"
+        );
     }
 
     #[test]

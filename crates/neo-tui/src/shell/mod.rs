@@ -351,6 +351,7 @@ impl NeoChromeState {
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
+                | OverlayKind::CustomEndpointWizard(_)
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::Approval(_)

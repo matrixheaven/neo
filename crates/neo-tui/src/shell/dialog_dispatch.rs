@@ -1,9 +1,9 @@
 use super::overlay::OverlayKind;
 
 use crate::dialogs::{
-    ApiKeyInputState, ChoicePickerState, ConfirmDialogState, CustomRegistryImportState,
-    McpAddFormState, McpManagerState, ModelSelectorState, ProviderManagerState,
-    TabbedModelSelectorState, TextInputState, WorkspaceManagerState,
+    ApiKeyInputState, ChoicePickerState, ConfirmDialogState, CustomEndpointWizardState,
+    CustomRegistryImportState, McpAddFormState, McpManagerState, ModelSelectorState,
+    ProviderManagerState, TabbedModelSelectorState, TextInputState, WorkspaceManagerState,
 };
 use crate::input::{InputEvent, KeybindingAction};
 
@@ -46,6 +46,7 @@ fn handle_input_dialog_selection(kind: &mut OverlayKind, input: InputEvent) {
     match kind {
         OverlayKind::ApiKeyInput(state) => handle_input_ref(state, &input),
         OverlayKind::ConfirmDialog(state) => handle_input_ref(state, &input),
+        OverlayKind::CustomEndpointWizard(state) => handle_input_ref(state, &input),
         OverlayKind::CustomRegistryImport(state) => handle_input_owned(state, input),
         OverlayKind::McpAddForm(state) => handle_input_owned(state, input),
         _ => {}
@@ -117,6 +118,12 @@ impl DialogInputRef for ConfirmDialogState {
 }
 
 impl DialogInputRef for TextInputState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for CustomEndpointWizardState {
     fn handle_dialog_input(&mut self, input: &InputEvent) {
         let _ = self.handle_input(input);
     }

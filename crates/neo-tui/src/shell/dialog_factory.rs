@@ -261,6 +261,17 @@ impl NeoChromeState {
         ))
     }
 
+    pub fn open_custom_endpoint_wizard(
+        &mut self,
+        opts: crate::dialogs::CustomEndpointWizardOptions,
+    ) -> OverlayId {
+        let state = crate::dialogs::CustomEndpointWizardState::new(opts);
+        self.push_overlay(Overlay::new(
+            "custom-endpoint",
+            OverlayKind::CustomEndpointWizard(state),
+        ))
+    }
+
     pub fn open_mcp_add_form(&mut self, opts: crate::dialogs::McpAddFormOptions) -> OverlayId {
         let state = crate::dialogs::McpAddFormState::new(opts, self.theme);
         self.push_overlay(Overlay::new("mcp-add", OverlayKind::McpAddForm(state)))
@@ -348,6 +359,7 @@ impl NeoChromeState {
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
+                | OverlayKind::CustomEndpointWizard(_)
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::TrustDialog(_)
@@ -396,5 +408,24 @@ mod tests {
             "{visible}"
         );
         assert!(visible.contains("+ Add workspace directory"), "{visible}");
+    }
+
+    #[test]
+    fn custom_endpoint_wizard_overlay_is_rich_dialog_and_blocks_prompt() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        let id = chrome.open_custom_endpoint_wizard(crate::dialogs::CustomEndpointWizardOptions {
+            theme: crate::primitive::theme::TuiTheme::default(),
+        });
+
+        assert_eq!(chrome.focused_overlay_id(), Some(id));
+        assert!(chrome.focused_overlay_is_rich_dialog());
+        assert!(chrome.focused_overlay_blocks_prompt());
+        let visible = chrome
+            .focused_overlay_lines(80)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("Custom Endpoint 1/4"), "{visible}");
     }
 }

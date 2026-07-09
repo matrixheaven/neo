@@ -7899,6 +7899,85 @@ fn composed_frame_lines_do_not_exceed_content_width() {
     }
 }
 
+#[tokio::test]
+async fn add_provider_picker_includes_custom_endpoint() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(test_config(temp.path(), sessions_dir));
+
+    controller.open_add_provider_picker();
+
+    let visible = controller
+        .tui
+        .chrome()
+        .focused_overlay_lines(80)
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains("Known third-party provider"), "{visible}");
+    assert!(visible.contains("Custom endpoint"), "{visible}");
+    assert!(visible.contains("Custom registry (api.json)"), "{visible}");
+    let known = visible
+        .find("Known third-party provider")
+        .expect("known provider row");
+    let custom_endpoint = visible
+        .find("Custom endpoint")
+        .expect("custom endpoint row");
+    let custom_registry = visible
+        .find("Custom registry (api.json)")
+        .expect("custom registry row");
+    assert!(known < custom_endpoint, "{visible}");
+    assert!(custom_endpoint < custom_registry, "{visible}");
+}
+
+#[tokio::test]
+async fn add_provider_custom_endpoint_choice_opens_wizard() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(test_config(temp.path(), sessions_dir));
+
+    controller.open_add_provider_picker();
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("select custom endpoint row");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("open custom endpoint wizard");
+
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::CustomEndpointWizard(_))
+    ));
+    let visible = controller
+        .chrome()
+        .focused_overlay_lines(80)
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains("Custom Endpoint 1/4"), "{visible}");
+}
+
 fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
     AppConfig {
         default_model: "gpt-4.1".to_owned(),

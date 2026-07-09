@@ -47,6 +47,8 @@ impl InteractiveController {
             if let Some(result) = self.tui.chrome_mut().take_confirm_dialog_result() {
                 self.handle_workspace_confirm_result(result);
             }
+        } else if self.tui.chrome().custom_endpoint_wizard_action().is_some() {
+            self.handle_custom_endpoint_wizard_action();
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result().await;
         } else if self.tui.chrome_mut().text_input_result().is_some() {
@@ -189,6 +191,8 @@ impl InteractiveController {
                 items: vec![
                     neo_tui::dialogs::ChoiceItem::new("known", "Known third-party provider")
                         .with_description("Import from models.dev catalog"),
+                    neo_tui::dialogs::ChoiceItem::new("custom-endpoint", "Custom endpoint")
+                        .with_description("Configure a base URL and models"),
                     neo_tui::dialogs::ChoiceItem::new("custom", "Custom registry (api.json)")
                         .with_description("Import from a custom registry URL"),
                 ],
@@ -234,6 +238,9 @@ impl InteractiveController {
             return;
         }
         if self.handle_permission_choice_item(id) {
+            return;
+        }
+        if self.handle_custom_endpoint_choice_item(id) {
             return;
         }
         if self.handle_catalog_choice_item(id) {

@@ -1,6 +1,7 @@
 pub mod api_key_input;
 pub mod choice_picker;
 pub mod confirm_dialog;
+pub mod custom_endpoint_wizard;
 pub mod custom_registry_import;
 pub mod help_panel;
 pub mod mcp_add_form;
@@ -16,6 +17,11 @@ pub mod workspace_manager;
 pub use api_key_input::{ApiKeyInputOptions, ApiKeyInputResult, ApiKeyInputState};
 pub use choice_picker::{ChoiceItem, ChoicePickerOptions, ChoicePickerState, ChoiceResult};
 pub use confirm_dialog::{ConfirmDialogOptions, ConfirmDialogResult, ConfirmDialogState};
+pub use custom_endpoint_wizard::{
+    CustomEndpointAuthDraft, CustomEndpointFetchedModel, CustomEndpointModelDraft,
+    CustomEndpointModelSource, CustomEndpointProviderDraft, CustomEndpointWizardAction,
+    CustomEndpointWizardOptions, CustomEndpointWizardState,
+};
 pub use custom_registry_import::{
     CustomRegistryImportOptions, CustomRegistryImportResult, CustomRegistryImportState,
     CustomRegistrySource,

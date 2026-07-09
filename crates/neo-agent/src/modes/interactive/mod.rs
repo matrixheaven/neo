@@ -108,6 +108,7 @@ mod workspace_manager;
 
 mod catalog_fetch;
 use catalog_fetch::{PendingCatalogFetch, PendingCustomRegistry};
+mod custom_endpoint_provider;
 
 mod questions;
 
@@ -340,6 +341,8 @@ pub(crate) struct InteractiveController {
     pending_exit_confirmation: Option<ExitConfirmation>,
     suspend_requested: bool,
     pending_custom_registry: Option<PendingCustomRegistry>,
+    pending_custom_endpoint_fetch: Option<custom_endpoint_provider::PendingCustomEndpointFetch>,
+    pending_custom_endpoint_test: Option<custom_endpoint_provider::PendingCustomEndpointTest>,
     pending_catalog_provider_id: Option<String>,
     pending_catalog_fetch: Option<PendingCatalogFetch>,
     pending_mcp_probe: Option<PendingMcpProbe>,
@@ -730,6 +733,8 @@ impl InteractiveController {
             pending_exit_confirmation: None,
             suspend_requested: false,
             pending_custom_registry: None,
+            pending_custom_endpoint_fetch: None,
+            pending_custom_endpoint_test: None,
             pending_catalog_provider_id: None,
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
@@ -1129,6 +1134,8 @@ impl InteractiveController {
             }
             self.maybe_refresh_task_browser().await;
             self.poll_pending_catalog_fetch().await;
+            self.poll_pending_custom_endpoint_fetch().await;
+            self.poll_pending_custom_endpoint_test().await;
             self.poll_pending_mcp_probe().await;
             self.tui.chrome_mut().advance_activity_frame();
             // Throttle rendering during streaming to avoid O(n) re-render

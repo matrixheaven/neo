@@ -28,6 +28,7 @@ impl NeoChromeState {
             OverlayKind::ChoicePicker(state) => state.handle_input(&input),
             OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
             OverlayKind::TextInput(state) => state.handle_input(&input),
+            OverlayKind::CustomEndpointWizard(state) => state.handle_input(&input),
             OverlayKind::CustomRegistryImport(state) => state.handle_input(input),
             OverlayKind::McpAddForm(state) => state.handle_input(input),
             OverlayKind::QuestionDialog(state) => {
@@ -194,6 +195,60 @@ impl NeoChromeState {
             return None;
         };
         state.result()
+    }
+
+    #[must_use]
+    pub fn custom_endpoint_wizard_action(
+        &self,
+    ) -> Option<&crate::dialogs::CustomEndpointWizardAction> {
+        let OverlayKind::CustomEndpointWizard(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.action()
+    }
+
+    pub fn take_custom_endpoint_wizard_action(
+        &mut self,
+    ) -> Option<crate::dialogs::CustomEndpointWizardAction> {
+        let OverlayKind::CustomEndpointWizard(state) = &mut self.focused_overlay_mut()?.kind else {
+            return None;
+        };
+        state.take_action()
+    }
+
+    #[must_use]
+    pub fn current_custom_endpoint_provider_draft(
+        &self,
+    ) -> Option<crate::dialogs::CustomEndpointProviderDraft> {
+        let OverlayKind::CustomEndpointWizard(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        Some(state.current_draft())
+    }
+
+    pub fn apply_custom_endpoint_fetched_models(
+        &mut self,
+        models: Vec<crate::dialogs::CustomEndpointFetchedModel>,
+    ) -> bool {
+        let Some(overlay) = self.focused_overlay_mut() else {
+            return false;
+        };
+        let OverlayKind::CustomEndpointWizard(state) = &mut overlay.kind else {
+            return false;
+        };
+        state.apply_fetched_models(models);
+        true
+    }
+
+    pub fn apply_custom_endpoint_test_result(&mut self, result: Result<(), String>) -> bool {
+        let Some(overlay) = self.focused_overlay_mut() else {
+            return false;
+        };
+        let OverlayKind::CustomEndpointWizard(state) = &mut overlay.kind else {
+            return false;
+        };
+        state.apply_test_result(result);
+        true
     }
 
     #[must_use]
