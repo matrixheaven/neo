@@ -311,7 +311,7 @@ pub(crate) struct InteractiveController {
     active_session_id: Option<String>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
-    current_thinking: bool,
+    current_reasoning: neo_ai::ReasoningSelection,
     active_turn: Option<RunningTurn>,
     shell_driver: ShellDriver,
     active_shell_command: Option<RunningShellCommand>,
@@ -447,7 +447,7 @@ pub(crate) struct TurnRequest {
     pub prompt_origin: MessageOrigin,
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
-    pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
+    pub reasoning: neo_ai::ReasoningSelection,
     /// Expanded skill body to inject as context before the user prompt.
     pub skill_context: Option<String>,
     /// Permission mode to use for this turn.
@@ -485,14 +485,14 @@ impl TurnRequest {
         prompt: Vec<Content>,
         session_id: Option<String>,
         model: Option<SelectedModel>,
-        reasoning_effort: Option<neo_ai::ReasoningEffort>,
+        reasoning: neo_ai::ReasoningSelection,
     ) -> Self {
         Self {
             prompt,
             prompt_origin: MessageOrigin::User,
             session_id,
             model,
-            reasoning_effort,
+            reasoning,
             skill_context: None,
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
@@ -698,7 +698,7 @@ impl InteractiveController {
             active_session_id: None,
             local_config: None,
             active_model: None,
-            current_thinking: false,
+            current_reasoning: neo_ai::ReasoningSelection::Off,
             active_turn: None,
             shell_driver,
             active_shell_command: None,
@@ -754,6 +754,12 @@ impl InteractiveController {
             completion_notification: neo_tui::notify::NotificationMode::Bell,
             question_notification: neo_tui::notify::NotificationMode::None,
         }
+    }
+
+    fn set_current_reasoning(&mut self, reasoning: neo_ai::ReasoningSelection) {
+        let thinking_enabled = reasoning.is_enabled();
+        self.current_reasoning = reasoning;
+        self.tui.chrome_mut().set_thinking_enabled(thinking_enabled);
     }
 
     /// Fire a notification for the given event based on the controller's
@@ -1784,7 +1790,7 @@ impl InteractiveController {
                 Vec::new(),
                 self.active_session_id.clone(),
                 self.active_model.clone(),
-                None,
+                neo_ai::ReasoningSelection::Off,
             );
             request.permission_mode = self.permission_mode;
             request.live_permission_mode = Arc::clone(&self.live_permission_mode);

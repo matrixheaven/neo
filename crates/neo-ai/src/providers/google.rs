@@ -10,7 +10,7 @@ use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
-    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -137,14 +137,35 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         generation_config.insert("maxOutputTokens".to_owned(), json!(max_tokens));
     }
-    if let Some(reasoning_effort) = request.options.reasoning_effort {
-        generation_config.insert(
-            "thinkingConfig".to_owned(),
-            json!({
-                "includeThoughts": true,
-                "thinkingBudget": thinking_budget_tokens(reasoning_effort),
-            }),
-        );
+    match &request.options.reasoning {
+        ReasoningSelection::Off => {}
+        ReasoningSelection::On => {
+            generation_config.insert(
+                "thinkingConfig".to_owned(),
+                json!({
+                    "includeThoughts": true,
+                    "thinkingBudget": 8192,
+                }),
+            );
+        }
+        ReasoningSelection::Effort { effort } => {
+            generation_config.insert(
+                "thinkingConfig".to_owned(),
+                json!({
+                    "includeThoughts": true,
+                    "thinkingBudget": thinking_budget_tokens(*effort),
+                }),
+            );
+        }
+        ReasoningSelection::BudgetTokens { budget_tokens } => {
+            generation_config.insert(
+                "thinkingConfig".to_owned(),
+                json!({
+                    "includeThoughts": true,
+                    "thinkingBudget": budget_tokens,
+                }),
+            );
+        }
     }
     if !generation_config.is_empty() {
         body["generationConfig"] = Value::Object(generation_config);
@@ -159,6 +180,7 @@ const fn thinking_budget_tokens(effort: ReasoningEffort) -> i32 {
         ReasoningEffort::Medium => 2_048,
         ReasoningEffort::High => 8_192,
         ReasoningEffort::XHigh => 16_384,
+        ReasoningEffort::Max => 32_768,
     }
 }
 

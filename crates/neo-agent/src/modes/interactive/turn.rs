@@ -46,11 +46,7 @@ impl InteractiveController {
             prompt,
             self.active_session_id.clone(),
             self.active_model.clone(),
-            if self.current_thinking {
-                Some(neo_ai::ReasoningEffort::High)
-            } else {
-                None
-            },
+            self.current_reasoning.clone(),
         );
         request.prompt_origin = prompt_origin;
         request.permission_mode = self.permission_mode;

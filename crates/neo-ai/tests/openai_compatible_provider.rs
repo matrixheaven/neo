@@ -9,8 +9,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
-    RequestOptions, StopReason, ToolSpec, providers::openai::compatible::OpenAiCompatibleClient,
+    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
+    RequestMetadata, RequestOptions, StopReason, ToolSpec,
+    providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
 
@@ -216,7 +217,9 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
         max_tokens: Some(128),
         headers,
         timeout: Some(Duration::from_secs(5)),
-        reasoning_effort: Some(ReasoningEffort::Medium),
+        reasoning: ReasoningSelection::Effort {
+            effort: ReasoningEffort::Medium,
+        },
         replay_reasoning: true,
         retries: Some(0),
         cache: CacheRetention::Long,
@@ -345,14 +348,14 @@ async fn openai_serializes_assistant_thinking_as_reasoning_content() {
 }
 
 #[tokio::test]
-async fn openai_does_not_infer_reasoning_effort_when_replaying_thinking() {
+async fn openai_omits_reasoning_effort_when_reasoning_is_off() {
     let server = MockServer::start(vec![sse_response(&[json!({
         "id": "chatcmpl-reasoning-effort",
         "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
     })])]);
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
     let mut request = request(RequestOptions::default());
-    request.options.reasoning_effort = None;
+    request.options.reasoning = ReasoningSelection::Off;
     request.messages = vec![ChatMessage::Assistant {
         content: vec![ContentPart::Thinking {
             text: "plan privately".to_owned(),
@@ -525,12 +528,14 @@ async fn openai_http_status_error_includes_body_excerpt() {
 }
 
 #[tokio::test]
-async fn openai_rejects_unsupported_reasoning_effort_without_posting() {
+async fn openai_rejects_unsupported_reasoning_selection_without_posting() {
     let server = MockServer::start(Vec::new());
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
     let err = client
         .stream_chat(request(RequestOptions {
-            reasoning_effort: Some(ReasoningEffort::Minimal),
+            reasoning: ReasoningSelection::Effort {
+                effort: ReasoningEffort::Minimal,
+            },
             retries: Some(0),
             ..RequestOptions::default()
         }))
@@ -543,6 +548,32 @@ async fn openai_rejects_unsupported_reasoning_effort_without_posting() {
     let message = err.to_string();
     assert!(message.contains("low, medium, or high"), "{message}");
     assert!(message.contains("minimal"), "{message}");
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn openai_rejects_budget_reasoning_selection_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let err = client
+        .stream_chat(request(RequestOptions {
+            reasoning: ReasoningSelection::BudgetTokens {
+                budget_tokens: 8_192,
+            },
+            retries: Some(0),
+            ..RequestOptions::default()
+        }))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("does not support budget reasoning selections"),
+        "{message}"
+    );
     assert!(server.requests().is_empty());
 }
 

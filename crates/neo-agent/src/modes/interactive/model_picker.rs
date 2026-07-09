@@ -110,6 +110,7 @@ pub(super) fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dial
                     display_name: model.display_name.clone().unwrap_or_else(|| alias.clone()),
                     model_id: model.model.clone(),
                     capabilities,
+                    reasoning: model.reasoning.clone(),
                     max_context_tokens: model.max_context_tokens,
                 }
             })
@@ -136,7 +137,7 @@ fn capabilities_from_model_capabilities(capabilities: &neo_ai::ModelCapabilities
     if capabilities.images {
         caps.push("images".to_owned());
     }
-    if capabilities.reasoning {
+    if capabilities.supports_reasoning() {
         caps.push("reasoning".to_owned());
     }
     if capabilities.embeddings {
@@ -160,6 +161,7 @@ fn model_spec_to_model_entry(model: &neo_ai::ModelSpec) -> neo_tui::dialogs::Mod
         display_name: alias,
         model_id: model.model.clone(),
         capabilities,
+        reasoning: model.capabilities.reasoning.clone(),
         max_context_tokens: model.capabilities.max_context_tokens,
     }
 }
@@ -203,7 +205,7 @@ impl InteractiveController {
                 models: entries,
                 current_alias,
                 selected_alias: None,
-                current_thinking: self.current_thinking,
+                current_reasoning: self.current_reasoning.clone(),
                 initial_tab_id: None,
                 theme,
             },
@@ -232,7 +234,7 @@ impl InteractiveController {
                 models: entries,
                 current_alias,
                 selected_alias: Some(alias.to_owned()),
-                current_thinking: self.current_thinking,
+                current_reasoning: self.current_reasoning.clone(),
                 initial_tab_id,
                 theme,
             },

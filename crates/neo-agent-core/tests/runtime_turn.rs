@@ -11,7 +11,7 @@ use neo_agent_core::{
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
-    ProviderId, ReasoningEffort, ToolSpec,
+    ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ToolSpec,
 };
 use serde_json::json;
 use std::{
@@ -660,13 +660,15 @@ async fn runtime_rejects_image_content_when_model_lacks_images_before_request() 
 }
 
 #[tokio::test]
-async fn runtime_rejects_reasoning_effort_when_model_lacks_reasoning_before_request() {
+async fn runtime_rejects_reasoning_selection_when_model_lacks_reasoning_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
     let mut config = AgentConfig::for_model(harness.model());
-    config.reasoning_effort = Some(ReasoningEffort::Low);
+    config.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::Low,
+    };
 
     assert_runtime_rejects_unsupported_capability(
         config,
@@ -679,16 +681,71 @@ async fn runtime_rejects_reasoning_effort_when_model_lacks_reasoning_before_requ
 }
 
 #[tokio::test]
-async fn runtime_passes_reasoning_effort_into_chat_request_options() {
+async fn runtime_rejects_unsupported_reasoning_selection_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
     let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
-        reasoning: true,
+        reasoning: ReasoningCapability::Effort {
+            values: vec![ReasoningEffort::High],
+            disable_supported: true,
+        },
         ..ModelCapabilities::tool_chat()
     }));
-    config.reasoning_effort = Some(ReasoningEffort::Low);
+    config.reasoning = ReasoningSelection::BudgetTokens {
+        budget_tokens: 8192,
+    };
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    let error = runtime
+        .run_turn(&mut context, AgentMessage::user_text("think with a budget"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("unsupported reasoning selection should fail before provider request");
+    let message = error.to_string();
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration { message: _ })
+    ));
+    assert!(
+        message.contains("model capability-test/capability-test-model"),
+        "error should identify the active provider/model: {message}"
+    );
+    assert!(
+        message.contains("BudgetTokens"),
+        "error should include the unsupported selection: {message}"
+    );
+    assert!(
+        message.contains("Effort"),
+        "error should include the model reasoning capability: {message}"
+    );
+    assert!(
+        harness.requests().is_empty(),
+        "request should not reach provider"
+    );
+}
+
+#[tokio::test]
+async fn runtime_passes_reasoning_selection_into_chat_request_options() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
+        reasoning: ReasoningCapability::Effort {
+            values: vec![ReasoningEffort::Low],
+            disable_supported: true,
+        },
+        ..ModelCapabilities::tool_chat()
+    }));
+    config.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::Low,
+    };
     let runtime = AgentRuntime::new(config, harness.client());
     let mut context = AgentContext::new();
 
@@ -701,8 +758,10 @@ async fn runtime_passes_reasoning_effort_into_chat_request_options() {
         .expect("turn should succeed");
 
     assert_eq!(
-        harness.requests()[0].options.reasoning_effort,
-        Some(ReasoningEffort::Low)
+        harness.requests()[0].options.reasoning,
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::Low,
+        }
     );
 }
 
@@ -6890,7 +6949,7 @@ impl DelayedHarness {
                     streaming: true,
                     tools: true,
                     images: false,
-                    reasoning: false,
+                    reasoning: ReasoningCapability::None,
                     embeddings: false,
                     max_context_tokens: None,
                     max_output_tokens: None,

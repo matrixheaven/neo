@@ -72,6 +72,9 @@ pub struct ModelConfig {
     /// Capability tags: `"streaming"`, `"tools"`, `"images"`, `"reasoning"`.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Typed reasoning capability; capability tags are only display/fallback input.
+    #[serde(default)]
+    pub reasoning: neo_ai::ReasoningCapability,
     /// Human-readable display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -184,6 +187,9 @@ pub(crate) struct FileRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning: Option<neo_ai::ReasoningSelection>,
+    // Legacy config migration input only; runtime uses `reasoning`.
+    #[serde(default, skip_serializing)]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replay_reasoning: Option<bool>,

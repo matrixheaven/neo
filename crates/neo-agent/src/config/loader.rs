@@ -186,7 +186,13 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
     RuntimeConfig {
         temperature: runtime.temperature,
         max_tokens: runtime.max_tokens,
-        reasoning_effort: runtime.reasoning_effort,
+        reasoning: runtime.reasoning.unwrap_or_else(|| {
+            runtime
+                .reasoning_effort
+                .map_or(neo_ai::ReasoningSelection::Off, |effort| {
+                    neo_ai::ReasoningSelection::Effort { effort }
+                })
+        }),
         replay_reasoning: runtime.replay_reasoning.unwrap_or(true),
         steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
         follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
@@ -195,6 +201,13 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
             .unwrap_or(ToolExecutionMode::Parallel),
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_from_file_for_tests(
+    runtime: Option<crate::config::types::FileRuntimeConfig>,
+) -> RuntimeConfig {
+    runtime_from_file(runtime)
 }
 
 fn runtime_compaction_from_file(

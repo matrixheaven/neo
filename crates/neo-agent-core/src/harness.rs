@@ -103,7 +103,7 @@ pub fn fake_model() -> ModelSpec {
             streaming: true,
             tools: true,
             images: false,
-            reasoning: false,
+            reasoning: neo_ai::ReasoningCapability::None,
             embeddings: false,
             max_context_tokens: None,
             max_output_tokens: None,

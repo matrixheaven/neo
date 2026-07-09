@@ -10,7 +10,7 @@ use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, To
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -108,9 +108,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         body["max_output_tokens"] = json!(max_tokens);
     }
-    if let Some(reasoning_effort) = request.options.reasoning_effort {
+    if let Some(effort) = openai_responses_reasoning(&request.options.reasoning)? {
         body["reasoning"] = json!({
-            "effort": reasoning_effort.as_str(),
+            "effort": effort.as_str(),
             "summary": "auto",
         });
         body["include"] = json!(["reasoning.encrypted_content"]);
@@ -132,6 +132,19 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     }
 
     Ok(body)
+}
+
+fn openai_responses_reasoning(
+    selection: &ReasoningSelection,
+) -> Result<Option<ReasoningEffort>, ProviderError> {
+    match selection {
+        ReasoningSelection::Off => Ok(None),
+        ReasoningSelection::On => Ok(Some(ReasoningEffort::High)),
+        ReasoningSelection::Effort { effort } => Ok(Some(*effort)),
+        ReasoningSelection::BudgetTokens { .. } => Err(ProviderError::Unsupported(
+            "OpenAI Responses provider does not support budget reasoning selections".to_owned(),
+        )),
+    }
 }
 
 fn request_input(

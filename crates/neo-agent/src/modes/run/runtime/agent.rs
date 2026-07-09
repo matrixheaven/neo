@@ -46,7 +46,7 @@ pub(crate) fn agent_config_for_app(
         .runtime
         .max_tokens
         .or(agent_config.model.capabilities.max_output_tokens);
-    agent_config.reasoning_effort = config.runtime.reasoning_effort;
+    agent_config.reasoning = config.runtime.reasoning.clone();
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
     if let Some(system_prompt) = resources::load_system_prompt(
         &config.project_dir,

@@ -23,6 +23,8 @@ pub enum ReasoningEffort {
     High,
     #[serde(rename = "xhigh", alias = "XHigh")]
     XHigh,
+    #[serde(rename = "max", alias = "Max")]
+    Max,
 }
 
 impl ReasoningEffort {
@@ -34,6 +36,153 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ReasoningSelection {
+    Off,
+    On,
+    Effort { effort: ReasoningEffort },
+    BudgetTokens { budget_tokens: u32 },
+}
+
+impl Default for ReasoningSelection {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl ReasoningSelection {
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    #[must_use]
+    pub const fn effort(&self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Effort { effort } => Some(*effort),
+            Self::Off | Self::On | Self::BudgetTokens { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReasoningBudget {
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+}
+
+impl ReasoningBudget {
+    #[must_use]
+    pub const fn contains(&self, budget_tokens: u32) -> bool {
+        if let Some(min) = self.min {
+            if budget_tokens < min {
+                return false;
+            }
+        }
+        if let Some(max) = self.max {
+            if budget_tokens > max {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningCapability {
+    None,
+    Toggle {
+        disable_supported: bool,
+    },
+    Effort {
+        values: Vec<ReasoningEffort>,
+        disable_supported: bool,
+    },
+    BudgetTokens {
+        min: Option<u32>,
+        max: Option<u32>,
+        disable_supported: bool,
+    },
+    Combined {
+        toggle: bool,
+        effort: Vec<ReasoningEffort>,
+        budget: Option<ReasoningBudget>,
+        disable_supported: bool,
+    },
+}
+
+impl Default for ReasoningCapability {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ReasoningCapability {
+    #[must_use]
+    pub fn supports_reasoning(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Toggle { .. } | Self::BudgetTokens { .. } => true,
+            Self::Effort { values, .. } => !values.is_empty(),
+            Self::Combined {
+                toggle,
+                effort,
+                budget,
+                ..
+            } => *toggle || !effort.is_empty() || budget.is_some(),
+        }
+    }
+
+    #[must_use]
+    pub fn supports(&self, selection: &ReasoningSelection) -> bool {
+        match selection {
+            ReasoningSelection::Off => matches!(self, Self::None) || self.disable_supported(),
+            ReasoningSelection::On => match self {
+                Self::Toggle { .. } => true,
+                Self::Combined { toggle, .. } => *toggle,
+                Self::None | Self::Effort { .. } | Self::BudgetTokens { .. } => false,
+            },
+            ReasoningSelection::Effort { effort } => match self {
+                Self::Effort { values, .. } | Self::Combined { effort: values, .. } => {
+                    values.contains(effort)
+                }
+                Self::None | Self::Toggle { .. } | Self::BudgetTokens { .. } => false,
+            },
+            ReasoningSelection::BudgetTokens { budget_tokens } => match self {
+                Self::BudgetTokens { min, max, .. } => ReasoningBudget {
+                    min: *min,
+                    max: *max,
+                }
+                .contains(*budget_tokens),
+                Self::Combined { budget, .. } => budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.contains(*budget_tokens)),
+                Self::None | Self::Toggle { .. } | Self::Effort { .. } => false,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn disable_supported(&self) -> bool {
+        match self {
+            Self::None => true,
+            Self::Toggle { disable_supported }
+            | Self::Effort {
+                disable_supported, ..
+            }
+            | Self::BudgetTokens {
+                disable_supported, ..
+            }
+            | Self::Combined {
+                disable_supported, ..
+            } => *disable_supported,
         }
     }
 }
@@ -77,7 +226,7 @@ pub struct RequestOptions {
     pub headers: BTreeMap<String, String>,
     #[schemars(skip)]
     pub timeout: Option<Duration>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning: ReasoningSelection,
     pub replay_reasoning: bool,
     pub retries: Option<u32>,
     pub cache: CacheRetention,
@@ -97,7 +246,7 @@ impl Default for RequestOptions {
             max_tokens: None,
             headers: BTreeMap::new(),
             timeout: None,
-            reasoning_effort: None,
+            reasoning: ReasoningSelection::Off,
             replay_reasoning: true,
             retries: Some(2),
             cache: CacheRetention::Short,

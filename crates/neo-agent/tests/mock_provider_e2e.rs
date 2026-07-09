@@ -437,8 +437,9 @@ model = "reasoning-model"
 max_context_tokens = 128000
 capabilities = ["streaming", "tools", "reasoning"]
 
-[runtime]
-reasoning_effort = "high"
+[runtime.reasoning]
+mode = "effort"
+effort = "high"
 
 [defaults]
 mode = "json"

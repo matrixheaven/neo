@@ -8,7 +8,7 @@ use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 const EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE: &str =
@@ -120,8 +120,8 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         body["max_tokens"] = json!(max_tokens);
     }
-    if let Some(reasoning_effort) = request.options.reasoning_effort {
-        body["reasoning_effort"] = json!(openai_reasoning_effort(reasoning_effort)?);
+    if let Some(effort) = openai_reasoning_selection(&request.options.reasoning)? {
+        body["reasoning_effort"] = json!(effort);
     }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
@@ -188,17 +188,27 @@ fn assistant_message_body(
     Ok(body)
 }
 
-fn openai_reasoning_effort(effort: ReasoningEffort) -> Result<&'static str, ProviderError> {
-    match effort {
-        ReasoningEffort::Low => Ok("low"),
-        ReasoningEffort::Medium => Ok("medium"),
-        ReasoningEffort::High => Ok("high"),
-        ReasoningEffort::Minimal | ReasoningEffort::XHigh => {
-            Err(ProviderError::Unsupported(format!(
-                "OpenAI-compatible provider type 'openai' supports reasoning_effort low, medium, or high; got {}",
-                effort.as_str()
-            )))
-        }
+fn openai_reasoning_selection(
+    selection: &ReasoningSelection,
+) -> Result<Option<&'static str>, ProviderError> {
+    match selection {
+        ReasoningSelection::Off => Ok(None),
+        ReasoningSelection::On => Ok(Some("high")),
+        ReasoningSelection::Effort { effort } => match effort {
+            ReasoningEffort::Low => Ok(Some("low")),
+            ReasoningEffort::Medium => Ok(Some("medium")),
+            ReasoningEffort::High => Ok(Some("high")),
+            ReasoningEffort::Minimal | ReasoningEffort::XHigh | ReasoningEffort::Max => {
+                Err(ProviderError::Unsupported(format!(
+                    "OpenAI-compatible provider type 'openai' supports reasoning effort low, medium, or high without an explicit model mapping; got {}",
+                    effort.as_str()
+                )))
+            }
+        },
+        ReasoningSelection::BudgetTokens { .. } => Err(ProviderError::Unsupported(
+            "OpenAI-compatible provider type 'openai' does not support budget reasoning selections"
+                .to_owned(),
+        )),
     }
 }
 

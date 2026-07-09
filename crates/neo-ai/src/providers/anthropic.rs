@@ -10,7 +10,7 @@ use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
-    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -144,14 +144,33 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         }
         body["tools"] = Value::Array(tools);
     }
-    if let Some(reasoning_effort) = request.options.reasoning_effort {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": thinking_budget_tokens(reasoning_effort),
-            "display": "summarized",
-        });
-    } else if let Some(temperature) = request.options.temperature {
-        body["temperature"] = json!(rounded_f64(temperature));
+    match &request.options.reasoning {
+        ReasoningSelection::Off => {
+            if let Some(temperature) = request.options.temperature {
+                body["temperature"] = json!(rounded_f64(temperature));
+            }
+        }
+        ReasoningSelection::On => {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": 8192,
+                "display": "summarized",
+            });
+        }
+        ReasoningSelection::Effort { effort } => {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": thinking_budget_tokens(*effort),
+                "display": "summarized",
+            });
+        }
+        ReasoningSelection::BudgetTokens { budget_tokens } => {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+                "display": "summarized",
+            });
+        }
     }
     if let Some(user_id) = request
         .options
@@ -170,6 +189,7 @@ const fn thinking_budget_tokens(effort: ReasoningEffort) -> u32 {
         ReasoningEffort::Medium => 2_048,
         ReasoningEffort::High => 8_192,
         ReasoningEffort::XHigh => 16_384,
+        ReasoningEffort::Max => 32_768,
     }
 }
 

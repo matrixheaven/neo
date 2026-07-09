@@ -52,7 +52,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                 effective_config.default_provider = model.provider;
                 effective_config.default_model = model.alias;
             }
-            effective_config.runtime.reasoning_effort = request.reasoning_effort;
+            effective_config.runtime.reasoning = request.reasoning;
             effective_config.permission_mode = request.permission_mode;
             effective_config.live_permission_mode = Arc::clone(&request.live_permission_mode);
             effective_config.workspace_policy = Arc::clone(&request.workspace_policy);
@@ -149,11 +149,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .tui
         .chrome_mut()
         .set_context_window(default_context_window);
-    controller.current_thinking = config.runtime.reasoning_effort.is_some();
-    controller
-        .tui
-        .chrome_mut()
-        .set_thinking_enabled(controller.current_thinking);
+    controller.set_current_reasoning(config.runtime.reasoning.clone());
     controller.local_config = Some(config.clone());
     let skill_store = resources::load_skill_store(
         neo_home().as_deref(),

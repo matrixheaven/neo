@@ -16,7 +16,7 @@ fn model_capabilities_default_to_text_chat_streaming() {
     assert!(capabilities.streaming);
     assert!(!capabilities.tools);
     assert!(!capabilities.images);
-    assert!(!capabilities.reasoning);
+    assert!(!capabilities.supports_reasoning());
     assert!(!capabilities.embeddings);
     assert_eq!(capabilities.max_context_tokens, None);
 }

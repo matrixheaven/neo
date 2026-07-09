@@ -99,7 +99,7 @@ display_name = "GPT-4.1"
 | --- | --- | --- | --- |
 | `temperature` | f64 | — | 采样温度，必须为有限且非负的数 |
 | `max_tokens` | u32 | — | 最大输出 token，必须 > 0 |
-| `reasoning_effort` | `minimal`\|`low`\|`medium`\|`high`\|`xhigh` | — | 推理深度（仅对支持 reasoning 的模型生效） |
+| `reasoning` | table | `mode = "off"` | 结构化 reasoning 控制（仅对支持 reasoning 的模型生效） |
 | `replay_reasoning` | bool | `true` | 回放历史时是否包含 reasoning 片段 |
 | `steering_queue_mode` | `all`\|`one_at_a_time` | `all` | Steering 消息队列模式 |
 | `follow_up_queue_mode` | `all`\|`one_at_a_time` | `all` | Follow-up 消息队列模式 |
@@ -109,8 +109,15 @@ display_name = "GPT-4.1"
 [runtime]
 temperature = 0.2
 max_tokens = 4096
-reasoning_effort = "medium"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "high"
 ```
+
+### `[runtime.reasoning]` 子表
+
+`mode = "off"` 关闭 reasoning（默认），`mode = "on"` 启用 provider/model 默认 reasoning，`mode = "effort"` 在支持时发送显式 `effort`（`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`mode = "budget_tokens"` 在支持时发送显式 `budget_tokens` 数量。
 
 ### `[runtime.compaction]` 子表
 

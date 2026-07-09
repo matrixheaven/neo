@@ -109,6 +109,7 @@ fn model_config_to_spec(
     // Parse capabilities from string list
     let capabilities = parse_model_capabilities(
         &cfg.capabilities,
+        cfg.reasoning.clone(),
         cfg.max_context_tokens,
         cfg.max_output_tokens,
     );
@@ -124,6 +125,7 @@ fn model_config_to_spec(
 /// Parse a capability string list into `ModelCapabilities`.
 fn parse_model_capabilities(
     caps: &[String],
+    reasoning: neo_ai::ReasoningCapability,
     max_context_tokens: Option<u32>,
     max_output_tokens: Option<u32>,
 ) -> neo_ai::ModelCapabilities {
@@ -131,14 +133,18 @@ fn parse_model_capabilities(
     mc.streaming = false;
     mc.tools = false;
     mc.images = false;
-    mc.reasoning = false;
+    mc.reasoning = reasoning;
     mc.embeddings = false;
     for cap in caps {
         match cap.trim().to_ascii_lowercase().as_str() {
             "streaming" => mc.streaming = true,
             "tools" | "tool_use" => mc.tools = true,
             "images" | "image_in" | "vision" => mc.images = true,
-            "reasoning" | "thinking" => mc.reasoning = true,
+            "reasoning" | "thinking" if !mc.reasoning.supports_reasoning() => {
+                mc.reasoning = neo_ai::ReasoningCapability::Toggle {
+                    disable_supported: true,
+                };
+            }
             "embeddings" | "embedding" => mc.embeddings = true,
             _ => {}
         }

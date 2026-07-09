@@ -2,7 +2,7 @@ use futures::stream::BoxStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{AiError, RequestOptions};
+use crate::{AiError, ReasoningCapability, RequestOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderId(pub String);
@@ -161,7 +161,8 @@ pub struct ModelCapabilities {
     pub streaming: bool,
     pub tools: bool,
     pub images: bool,
-    pub reasoning: bool,
+    #[serde(default)]
+    pub reasoning: ReasoningCapability,
     pub embeddings: bool,
     pub max_context_tokens: Option<u32>,
     /// Maximum output tokens the model can emit in a single response.
@@ -179,12 +180,12 @@ impl Default for ModelCapabilities {
 
 impl ModelCapabilities {
     #[must_use]
-    pub const fn chat() -> Self {
+    pub fn chat() -> Self {
         Self {
             streaming: true,
             tools: false,
             images: false,
-            reasoning: false,
+            reasoning: ReasoningCapability::None,
             embeddings: false,
             max_context_tokens: None,
             max_output_tokens: None,
@@ -192,7 +193,7 @@ impl ModelCapabilities {
     }
 
     #[must_use]
-    pub const fn tool_chat() -> Self {
+    pub fn tool_chat() -> Self {
         Self {
             tools: true,
             ..Self::chat()
@@ -200,7 +201,7 @@ impl ModelCapabilities {
     }
 
     #[must_use]
-    pub const fn vision_chat() -> Self {
+    pub fn vision_chat() -> Self {
         Self {
             images: true,
             ..Self::chat()
@@ -208,20 +209,22 @@ impl ModelCapabilities {
     }
 
     #[must_use]
-    pub const fn reasoning_chat() -> Self {
+    pub fn reasoning_chat() -> Self {
         Self {
-            reasoning: true,
+            reasoning: ReasoningCapability::Toggle {
+                disable_supported: true,
+            },
             ..Self::chat()
         }
     }
 
     #[must_use]
-    pub const fn embedding() -> Self {
+    pub fn embedding() -> Self {
         Self {
             streaming: false,
             tools: false,
             images: false,
-            reasoning: false,
+            reasoning: ReasoningCapability::None,
             embeddings: true,
             max_context_tokens: None,
             max_output_tokens: None,
@@ -229,15 +232,20 @@ impl ModelCapabilities {
     }
 
     #[must_use]
-    pub const fn with_max_context_tokens(mut self, max_context_tokens: u32) -> Self {
+    pub fn with_max_context_tokens(mut self, max_context_tokens: u32) -> Self {
         self.max_context_tokens = Some(max_context_tokens);
         self
     }
 
     #[must_use]
-    pub const fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
         self.max_output_tokens = Some(max_output_tokens);
         self
+    }
+
+    #[must_use]
+    pub fn supports_reasoning(&self) -> bool {
+        self.reasoning.supports_reasoning()
     }
 }
 

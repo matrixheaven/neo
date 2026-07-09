@@ -45,7 +45,7 @@ pub(super) async fn chat_request(
         options: RequestOptions {
             temperature: config.temperature,
             max_tokens: config.max_tokens,
-            reasoning_effort: config.reasoning_effort,
+            reasoning: config.reasoning.clone(),
             replay_reasoning: config.replay_reasoning,
             session_id: prompt_cache_key(config),
             ..RequestOptions::default()
@@ -121,11 +121,14 @@ pub(super) fn validate_model_capabilities(request: &ChatRequest) -> Result<(), A
             ),
         });
     }
-    if request.options.reasoning_effort.is_some() && !capabilities.reasoning {
+    if !capabilities.reasoning.supports(&request.options.reasoning) {
         return Err(AiError::Configuration {
             message: format!(
-                "model {}/{} does not support reasoning",
-                request.model.provider.0, request.model.model
+                "model {}/{} does not support reasoning selection {:?}; capability is {:?}",
+                request.model.provider.0,
+                request.model.model,
+                request.options.reasoning,
+                capabilities.reasoning
             ),
         });
     }

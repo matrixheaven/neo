@@ -6675,6 +6675,187 @@ fn controller_for_config_exposes_default_model_context_window() {
     );
 }
 
+async fn capture_configured_interactive_turn_reasoning(
+    reasoning: neo_ai::ReasoningSelection,
+) -> neo_ai::ReasoningSelection {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.runtime.reasoning = reasoning;
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured_request = std::sync::Arc::clone(&captured);
+    let mut controller = controller_for_config(&config);
+    controller.run_turn = Arc::new(move |request, _channels| {
+        let captured_request = std::sync::Arc::clone(&captured_request);
+        Box::pin(async move {
+            *captured_request.lock().expect("capture request") = Some(request);
+            Ok(TurnOutcome::default())
+        })
+    });
+
+    controller.type_text("hello");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    captured
+        .lock()
+        .expect("captured request")
+        .take()
+        .expect("turn request captured")
+        .reasoning
+}
+
+#[tokio::test]
+async fn configured_low_reasoning_reaches_interactive_turn_unchanged() {
+    let expected = neo_ai::ReasoningSelection::Effort {
+        effort: neo_ai::ReasoningEffort::Low,
+    };
+
+    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
+
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn configured_max_reasoning_reaches_interactive_turn_unchanged() {
+    let expected = neo_ai::ReasoningSelection::Effort {
+        effort: neo_ai::ReasoningEffort::Max,
+    };
+
+    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
+
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn configured_budget_reasoning_reaches_interactive_turn_unchanged() {
+    let expected = neo_ai::ReasoningSelection::BudgetTokens {
+        budget_tokens: 12_000,
+    };
+
+    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn model_selection_with_thinking_preserves_current_structured_reasoning() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let expected = neo_ai::ReasoningSelection::BudgetTokens {
+        budget_tokens: 12_000,
+    };
+    config.runtime.reasoning = expected.clone();
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(config);
+    controller.set_current_reasoning(expected.clone());
+
+    controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {
+        alias: "openai/gpt-4.1".to_owned(),
+        thinking: true,
+        reasoning: expected.clone(),
+    });
+
+    assert_eq!(
+        controller
+            .local_config
+            .as_ref()
+            .expect("local config")
+            .runtime
+            .reasoning,
+        expected
+    );
+}
+
+#[test]
+fn model_selection_applies_structured_reasoning_from_selection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.runtime.reasoning = neo_ai::ReasoningSelection::Off;
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(config);
+    controller.set_current_reasoning(neo_ai::ReasoningSelection::Off);
+
+    controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {
+        alias: "openai/gpt-4.1".to_owned(),
+        thinking: true,
+        reasoning: neo_ai::ReasoningSelection::Effort {
+            effort: neo_ai::ReasoningEffort::Medium,
+        },
+    });
+
+    assert_eq!(
+        controller
+            .local_config
+            .as_ref()
+            .expect("local config")
+            .runtime
+            .reasoning,
+        neo_ai::ReasoningSelection::Effort {
+            effort: neo_ai::ReasoningEffort::Medium,
+        }
+    );
+    assert_eq!(
+        controller.current_reasoning,
+        neo_ai::ReasoningSelection::Effort {
+            effort: neo_ai::ReasoningEffort::Medium,
+        }
+    );
+}
+
+#[test]
+fn model_selection_without_thinking_sets_reasoning_off() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.runtime.reasoning = neo_ai::ReasoningSelection::Effort {
+        effort: neo_ai::ReasoningEffort::Max,
+    };
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(config);
+    controller.set_current_reasoning(neo_ai::ReasoningSelection::Effort {
+        effort: neo_ai::ReasoningEffort::Max,
+    });
+
+    controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {
+        alias: "openai/gpt-4.1".to_owned(),
+        thinking: false,
+        reasoning: neo_ai::ReasoningSelection::Off,
+    });
+
+    assert_eq!(
+        controller
+            .local_config
+            .as_ref()
+            .expect("local config")
+            .runtime
+            .reasoning,
+        neo_ai::ReasoningSelection::Off
+    );
+}
+
 #[test]
 fn controller_for_config_loads_builtin_skills() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -7976,12 +8157,11 @@ async fn slash_new_does_not_enter_streaming_mode() {
 }
 
 #[tokio::test]
-async fn slash_new_preserves_model_permission_thinking_and_plan_mode() {
+async fn slash_new_preserves_model_permission_reasoning_and_plan_mode() {
     let (mut controller, _requests) = controller_with_session_for_new_tests();
     // Configure preserved state.
     controller.set_permission_mode(PermissionMode::Yolo);
-    controller.current_thinking = true;
-    controller.tui.chrome_mut().set_thinking_enabled(true);
+    controller.set_current_reasoning(neo_ai::ReasoningSelection::On);
     controller.set_plan_mode_from_user(true);
 
     controller.type_text("/new");
@@ -7991,6 +8171,11 @@ async fn slash_new_preserves_model_permission_thinking_and_plan_mode() {
         .expect("/new submits");
 
     assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+    assert_eq!(
+        controller.current_reasoning,
+        neo_ai::ReasoningSelection::On,
+        "structured reasoning selection is preserved across /new"
+    );
     assert!(controller.chrome().thinking_enabled());
     assert_eq!(controller.chrome().model_label(), "openai/gpt-4.1");
     assert!(

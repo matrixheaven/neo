@@ -93,4 +93,7 @@ permission_mode = "ask"
 [runtime]
 temperature = 0.2
 max_tokens = 4096
-reasoning_effort = "medium"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "medium"

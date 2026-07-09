@@ -100,16 +100,10 @@ impl InteractiveController {
             .chrome_mut()
             .set_context_window(max_ctx.map(ContextWindow::new));
         self.active_model = selected_model;
-        self.current_thinking = selection.thinking;
-        self.tui
-            .chrome_mut()
-            .set_thinking_enabled(selection.thinking);
+        let next_reasoning = selection.reasoning.clone();
+        self.set_current_reasoning(next_reasoning.clone());
         if let Some(config) = self.local_config.as_mut() {
-            config.runtime.reasoning_effort = if selection.thinking {
-                Some(neo_ai::ReasoningEffort::High)
-            } else {
-                None
-            };
+            config.runtime.reasoning = next_reasoning;
             // Keep the in-memory config in sync so subsequent turns and the next
             // startup resolve the same model.
             config.default_model.clone_from(&selection.alias);
@@ -125,8 +119,12 @@ impl InteractiveController {
         {
             tracing::warn!("failed to persist default model: {error}");
         }
-        let notice = if selection.thinking {
-            format!("Switched to {} (thinking: on)", selection.alias)
+        let notice = if selection.reasoning.is_enabled() {
+            format!(
+                "Switched to {} (reasoning: {})",
+                selection.alias,
+                reasoning_label(&selection.reasoning)
+            )
         } else {
             format!("Switched to {}", selection.alias)
         };
@@ -390,6 +388,17 @@ impl InteractiveController {
         match result {
             neo_tui::dialogs::TextInputResult::Submitted(_value) => {}
             neo_tui::dialogs::TextInputResult::Cancelled => {}
+        }
+    }
+}
+
+fn reasoning_label(selection: &neo_ai::ReasoningSelection) -> String {
+    match selection {
+        neo_ai::ReasoningSelection::Off => "off".to_owned(),
+        neo_ai::ReasoningSelection::On => "on".to_owned(),
+        neo_ai::ReasoningSelection::Effort { effort } => effort.as_str().to_owned(),
+        neo_ai::ReasoningSelection::BudgetTokens { budget_tokens } => {
+            format!("{budget_tokens} tokens")
         }
     }
 }

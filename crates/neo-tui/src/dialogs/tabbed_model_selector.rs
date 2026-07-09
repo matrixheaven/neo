@@ -8,13 +8,14 @@ use crate::dialogs::model_selector::{
 use crate::input::InputEvent;
 use crate::primitive::InputResult;
 use crate::primitive::theme::TuiTheme;
+use neo_ai::ReasoningSelection;
 
 /// Options for the tabbed model selector.
 pub struct TabbedModelSelectorOptions {
     pub models: Vec<ModelEntry>,
     pub current_alias: String,
     pub selected_alias: Option<String>,
-    pub current_thinking: bool,
+    pub current_reasoning: ReasoningSelection,
     pub initial_tab_id: Option<String>,
     pub theme: TuiTheme,
 }
@@ -30,7 +31,8 @@ pub struct TabbedModelSelectorState {
     all_models: Vec<ModelEntry>,
     current_alias: String,
     selected_alias: Option<String>,
-    current_thinking: bool,
+    current_reasoning: ReasoningSelection,
+    reasoning_drafts: std::collections::BTreeMap<String, ReasoningSelection>,
     theme: TuiTheme,
     result: Option<ModelSelectorResult>,
 }
@@ -56,7 +58,7 @@ impl TabbedModelSelectorState {
 
         let current_alias = opts.current_alias.clone();
         let selected_alias = opts.selected_alias.clone();
-        let current_thinking = opts.current_thinking;
+        let current_reasoning = opts.current_reasoning.clone();
         let theme = opts.theme;
 
         // Filter models for the active tab
@@ -66,7 +68,7 @@ impl TabbedModelSelectorState {
             models: filtered,
             current_alias: current_alias.clone(),
             selected_alias: selected_alias.clone(),
-            current_thinking,
+            current_reasoning: current_reasoning.clone(),
             theme,
         });
 
@@ -77,7 +79,8 @@ impl TabbedModelSelectorState {
             all_models: opts.models,
             current_alias,
             selected_alias,
-            current_thinking,
+            current_reasoning,
+            reasoning_drafts: std::collections::BTreeMap::new(),
             theme,
             result: None,
         }
@@ -88,6 +91,7 @@ impl TabbedModelSelectorState {
         if n <= 1 {
             return;
         }
+        self.sync_selected_reasoning_draft();
         self.active_tab = if forward {
             (self.active_tab + 1) % n
         } else if self.active_tab == 0 {
@@ -104,9 +108,17 @@ impl TabbedModelSelectorState {
             models: filtered,
             current_alias: self.current_alias.clone(),
             selected_alias: self.selected_alias.clone(),
-            current_thinking: self.current_thinking,
+            current_reasoning: self.current_reasoning.clone(),
             theme: self.theme,
         });
+        self.inner.apply_reasoning_drafts(&self.reasoning_drafts);
+    }
+
+    fn sync_selected_reasoning_draft(&mut self) {
+        let Some((alias, selection)) = self.inner.selected_reasoning_draft() else {
+            return;
+        };
+        self.reasoning_drafts.insert(alias, selection);
     }
 
     #[must_use]
@@ -176,6 +188,7 @@ impl TabbedModelSelectorState {
 
         // Forward to inner
         let res = self.inner.handle_input(input);
+        self.sync_selected_reasoning_draft();
 
         // Check if inner produced a result
         if let Some(inner_result) = self.inner.take_result() {
@@ -239,6 +252,7 @@ fn rgb(c: crate::primitive::Color) -> String {
 mod tests {
     use super::*;
     use crate::dialogs::model_selector::ModelEntry;
+    use neo_ai::ReasoningCapability;
 
     fn theme() -> TuiTheme {
         TuiTheme::default()
@@ -252,6 +266,9 @@ mod tests {
                 display_name: "GPT-4o".into(),
                 model_id: "gpt-4o".into(),
                 capabilities: vec!["thinking".into()],
+                reasoning: ReasoningCapability::Toggle {
+                    disable_supported: true,
+                },
                 max_context_tokens: Some(128_000),
             },
             ModelEntry {
@@ -260,6 +277,7 @@ mod tests {
                 display_name: "GPT-4o Mini".into(),
                 model_id: "gpt-4o-mini".into(),
                 capabilities: vec![],
+                reasoning: ReasoningCapability::None,
                 max_context_tokens: Some(128_000),
             },
             ModelEntry {
@@ -268,6 +286,9 @@ mod tests {
                 display_name: "Claude Sonnet".into(),
                 model_id: "claude-sonnet".into(),
                 capabilities: vec!["always_thinking".into()],
+                reasoning: ReasoningCapability::Toggle {
+                    disable_supported: false,
+                },
                 max_context_tokens: Some(200_000),
             },
         ]
@@ -279,7 +300,7 @@ mod tests {
             models: models(),
             current_alias: "openai/gpt-4o".into(),
             selected_alias: None,
-            current_thinking: false,
+            current_reasoning: ReasoningSelection::Off,
             initial_tab_id: None,
             theme: theme(),
         });
@@ -292,7 +313,7 @@ mod tests {
             models: models(),
             current_alias: "openai/gpt-4o".into(),
             selected_alias: None,
-            current_thinking: false,
+            current_reasoning: ReasoningSelection::Off,
             initial_tab_id: None,
             theme: theme(),
         });
@@ -319,7 +340,7 @@ mod tests {
             models: models(),
             current_alias: "openai/gpt-4o".into(),
             selected_alias: None,
-            current_thinking: false,
+            current_reasoning: ReasoningSelection::Off,
             initial_tab_id: Some("openai".into()),
             theme: theme(),
         });
@@ -335,7 +356,7 @@ mod tests {
             models: models(),
             current_alias: "openai/gpt-4o".into(),
             selected_alias: None,
-            current_thinking: false,
+            current_reasoning: ReasoningSelection::Off,
             initial_tab_id: None,
             theme: theme(),
         });
@@ -350,12 +371,63 @@ mod tests {
     }
 
     #[test]
+    fn tab_switch_preserves_model_reasoning_draft() {
+        let mut state = TabbedModelSelectorState::new(TabbedModelSelectorOptions {
+            models: vec![
+                ModelEntry {
+                    alias: "openai/gpt-reasoner".into(),
+                    provider_id: "openai".into(),
+                    display_name: "GPT Reasoner".into(),
+                    model_id: "gpt-reasoner".into(),
+                    capabilities: vec!["reasoning".into()],
+                    reasoning: ReasoningCapability::Effort {
+                        values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                        disable_supported: true,
+                    },
+                    max_context_tokens: Some(128_000),
+                },
+                ModelEntry {
+                    alias: "anthropic/claude-plain".into(),
+                    provider_id: "anthropic".into(),
+                    display_name: "Claude Plain".into(),
+                    model_id: "claude-plain".into(),
+                    capabilities: vec![],
+                    reasoning: ReasoningCapability::None,
+                    max_context_tokens: Some(200_000),
+                },
+            ],
+            current_alias: "openai/gpt-reasoner".into(),
+            selected_alias: None,
+            current_reasoning: ReasoningSelection::Off,
+            initial_tab_id: None,
+            theme: theme(),
+        });
+
+        state.handle_input(&InputEvent::MoveRight);
+        state.handle_input(&InputEvent::Insert('\t'));
+        state.handle_input(&InputEvent::Submit);
+
+        assert_eq!(
+            state.take_result(),
+            Some(ModelSelectorResult::Selected(
+                crate::dialogs::model_selector::ModelSelection {
+                    alias: "openai/gpt-reasoner".to_owned(),
+                    thinking: true,
+                    reasoning: ReasoningSelection::Effort {
+                        effort: neo_ai::ReasoningEffort::Low,
+                    },
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn initial_tab_id_respected() {
         let state = TabbedModelSelectorState::new(TabbedModelSelectorOptions {
             models: models(),
             current_alias: "openai/gpt-4o".into(),
             selected_alias: None,
-            current_thinking: false,
+            current_reasoning: ReasoningSelection::Off,
             initial_tab_id: Some("anthropic".into()),
             theme: theme(),
         });

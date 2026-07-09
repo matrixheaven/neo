@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_json::Value;
 
-use crate::ApiType;
+use crate::{ApiType, ReasoningBudget, ReasoningCapability, ReasoningEffort};
 
 /// Public catalog endpoint.
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
@@ -50,6 +51,8 @@ pub struct CatalogModel {
     #[serde(default)]
     pub reasoning: Option<bool>,
     #[serde(default)]
+    pub reasoning_options: Vec<Value>,
+    #[serde(default)]
     pub interleaved: Option<InterleavedHint>,
     #[serde(default)]
     pub modalities: Option<CatalogModalities>,
@@ -89,6 +92,7 @@ pub struct CatalogModelInfo {
     pub max_context_tokens: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub capabilities: Vec<String>,
+    pub reasoning: ReasoningCapability,
 }
 
 /// Result of applying a catalog provider: the config-level provider definition
@@ -191,6 +195,7 @@ pub fn catalog_provider_models(entry: &CatalogEntry) -> Vec<CatalogModelInfo> {
             max_context_tokens: m.limit.as_ref().and_then(|l| l.context),
             max_output_tokens: m.limit.as_ref().and_then(|l| l.output),
             capabilities: catalog_model_capabilities(m),
+            reasoning: catalog_model_reasoning(m),
         })
         .collect()
 }
@@ -201,7 +206,7 @@ fn catalog_model_capabilities(model: &CatalogModel) -> Vec<String> {
     if catalog_model_supports_tools(model) {
         caps.push("tools".to_owned());
     }
-    if catalog_model_supports_reasoning(model) {
+    if catalog_model_reasoning(model).supports_reasoning() {
         caps.push("reasoning".to_owned());
     }
     if catalog_model_accepts_images(model) {
@@ -214,15 +219,107 @@ fn catalog_model_supports_tools(model: &CatalogModel) -> bool {
     model.tool_call.unwrap_or(true)
 }
 
-fn catalog_model_supports_reasoning(model: &CatalogModel) -> bool {
-    model.reasoning.unwrap_or(false)
-}
-
 fn catalog_model_accepts_images(model: &CatalogModel) -> bool {
     model
         .modalities
         .as_ref()
         .is_some_and(|modalities| modalities.input.iter().any(|m| m == "image"))
+}
+
+fn catalog_model_reasoning(model: &CatalogModel) -> ReasoningCapability {
+    if !model.reasoning.unwrap_or(false) {
+        return ReasoningCapability::None;
+    }
+
+    let has_toggle = model
+        .reasoning_options
+        .iter()
+        .any(|option| reasoning_option_type(option) == Some("toggle"));
+
+    let effort = model
+        .reasoning_options
+        .iter()
+        .filter(|option| reasoning_option_type(option) == Some("effort"))
+        .filter_map(catalog_effort_reasoning_option)
+        .find(|(values, _)| !values.is_empty());
+
+    let budget = model
+        .reasoning_options
+        .iter()
+        .find(|option| reasoning_option_type(option) == Some("budget_tokens"))
+        .map(catalog_reasoning_budget_option);
+
+    let family_count =
+        usize::from(has_toggle) + usize::from(effort.is_some()) + usize::from(budget.is_some());
+    if family_count > 1 {
+        let (effort_values, effort_disable_supported) = effort.unwrap_or_default();
+        let (budget, budget_disable_supported) = budget
+            .map(|(min, max)| (Some(ReasoningBudget { min, max }), min == Some(0)))
+            .unwrap_or((None, false));
+        return ReasoningCapability::Combined {
+            toggle: has_toggle,
+            effort: effort_values,
+            budget,
+            disable_supported: has_toggle || effort_disable_supported || budget_disable_supported,
+        };
+    }
+
+    if let Some((values, disable_supported)) = effort {
+        return ReasoningCapability::Effort {
+            values,
+            disable_supported,
+        };
+    }
+
+    if let Some((min, max)) = budget {
+        return ReasoningCapability::BudgetTokens {
+            min,
+            max,
+            disable_supported: min == Some(0),
+        };
+    }
+
+    ReasoningCapability::Toggle {
+        disable_supported: true,
+    }
+}
+
+fn reasoning_option_type(option: &Value) -> Option<&str> {
+    option.get("type").and_then(Value::as_str)
+}
+
+fn catalog_effort_reasoning_option(option: &Value) -> Option<(Vec<ReasoningEffort>, bool)> {
+    let values = option.get("values")?.as_array()?;
+    let mut disable_supported = false;
+    let mut efforts = Vec::new();
+
+    for value in values.iter().filter_map(Value::as_str) {
+        match value {
+            "none" => disable_supported = true,
+            "minimal" => efforts.push(ReasoningEffort::Minimal),
+            "low" => efforts.push(ReasoningEffort::Low),
+            "medium" => efforts.push(ReasoningEffort::Medium),
+            "high" => efforts.push(ReasoningEffort::High),
+            "xhigh" => efforts.push(ReasoningEffort::XHigh),
+            "max" => efforts.push(ReasoningEffort::Max),
+            _ => {}
+        }
+    }
+
+    Some((efforts, disable_supported))
+}
+
+fn catalog_reasoning_budget_option(option: &Value) -> (Option<u32>, Option<u32>) {
+    (
+        option
+            .get("min")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        option
+            .get("max")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+    )
 }
 
 /// Convert a catalog entry to the config-level structures.
@@ -253,6 +350,7 @@ pub fn catalog_to_provider_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ReasoningBudget, ReasoningCapability, ReasoningEffort};
 
     #[test]
     fn test_infer_api_type_anthropic() {
@@ -305,6 +403,7 @@ mod tests {
             limit: None,
             tool_call: None,
             reasoning: None,
+            reasoning_options: Vec::new(),
             interleaved: None,
             modalities: None,
         };
@@ -321,6 +420,7 @@ mod tests {
             limit: None,
             tool_call: Some(false),
             reasoning: Some(true),
+            reasoning_options: Vec::new(),
             interleaved: None,
             modalities: Some(CatalogModalities {
                 input: vec!["text".to_owned(), "image".to_owned()],
@@ -331,6 +431,120 @@ mod tests {
         assert_eq!(
             catalog_model_capabilities(&model),
             ["streaming", "reasoning", "images"]
+        );
+    }
+
+    #[test]
+    fn catalog_model_capability_reads_effort_reasoning_options() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "gpt-test",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "effort", "values": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] }
+            ]
+        }))
+        .expect("catalog model");
+
+        assert_eq!(
+            catalog_model_reasoning(&model),
+            ReasoningCapability::Effort {
+                values: vec![
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                    ReasoningEffort::Max,
+                ],
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn catalog_model_capability_allows_disable_when_toggle_accompanies_effort() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "toggle-effort-test",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "toggle" },
+                { "type": "effort", "values": ["low", "high"] }
+            ]
+        }))
+        .expect("catalog model");
+
+        assert_eq!(
+            catalog_model_reasoning(&model),
+            ReasoningCapability::Combined {
+                toggle: true,
+                effort: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                budget: None,
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn catalog_model_capability_reads_budget_reasoning_options() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "gemini-test",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "budget_tokens", "min": 0, "max": 24576 }
+            ]
+        }))
+        .expect("catalog model");
+
+        assert_eq!(
+            catalog_model_reasoning(&model),
+            ReasoningCapability::BudgetTokens {
+                min: Some(0),
+                max: Some(24_576),
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn catalog_model_capability_preserves_effort_and_budget_reasoning_options() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "combined-test",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "toggle" },
+                { "type": "effort", "values": ["low", "high"] },
+                { "type": "budget_tokens", "min": 128, "max": 24576 }
+            ]
+        }))
+        .expect("catalog model");
+
+        assert_eq!(
+            catalog_model_reasoning(&model),
+            ReasoningCapability::Combined {
+                toggle: true,
+                effort: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                budget: Some(ReasoningBudget {
+                    min: Some(128),
+                    max: Some(24_576),
+                }),
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn catalog_model_capability_falls_back_for_unknown_reasoning_metadata() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "unknown-reasoner",
+            "reasoning": true
+        }))
+        .expect("catalog model");
+
+        assert_eq!(
+            catalog_model_reasoning(&model),
+            ReasoningCapability::Toggle {
+                disable_supported: true,
+            }
         );
     }
 }

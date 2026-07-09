@@ -99,7 +99,7 @@ Controls inference request parameters:
 | --- | --- | --- | --- |
 | `temperature` | f64 | — | Sampling temperature, must be a finite non-negative number |
 | `max_tokens` | u32 | — | Maximum output tokens, must be > 0 |
-| `reasoning_effort` | `minimal`\|`low`\|`medium`\|`high`\|`xhigh` | — | Reasoning depth (only effective for models that support reasoning) |
+| `reasoning` | table | `mode = "off"` | Structured reasoning control (only effective for models that support reasoning) |
 | `replay_reasoning` | bool | `true` | Whether to include reasoning fragments when replaying history |
 | `steering_queue_mode` | `all`\|`one_at_a_time` | `all` | Steering message queue mode |
 | `follow_up_queue_mode` | `all`\|`one_at_a_time` | `all` | Follow-up message queue mode |
@@ -109,8 +109,15 @@ Controls inference request parameters:
 [runtime]
 temperature = 0.2
 max_tokens = 4096
-reasoning_effort = "medium"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "high"
 ```
+
+### `[runtime.reasoning]` Sub-Table
+
+`mode = "off"` disables reasoning (default), `mode = "on"` enables the provider/model default, `mode = "effort"` sends an explicit `effort` (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) when supported, and `mode = "budget_tokens"` sends an explicit `budget_tokens` count when supported.
 
 ### `[runtime.compaction]` Sub-Table
 

@@ -7,7 +7,6 @@ use std::{
 use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_agent_core::{BackgroundTaskManager, WorkspaceAccessPolicy};
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
-use neo_ai::ReasoningEffort;
 use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
 use serde::{Deserialize, Serialize};
@@ -147,7 +146,7 @@ pub struct Defaults {
 pub struct RuntimeConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning: neo_ai::ReasoningSelection,
     pub replay_reasoning: bool,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
@@ -160,7 +159,7 @@ impl Default for RuntimeConfig {
         Self {
             temperature: None,
             max_tokens: None,
-            reasoning_effort: None,
+            reasoning: neo_ai::ReasoningSelection::Off,
             replay_reasoning: true,
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
@@ -307,6 +306,26 @@ mod tests {
         let compaction = config.runtime.compaction.expect("compaction default");
         assert!(compaction.enabled);
         assert_eq!(compaction.keep_recent_messages, 20);
+    }
+
+    #[test]
+    fn runtime_reasoning_uses_structured_config_and_migrates_legacy_effort() {
+        let parsed: crate::config::types::FileConfig = toml::from_str(
+            r#"
+            [runtime]
+            reasoning_effort = "high"
+            replay_reasoning = true
+            "#,
+        )
+        .expect("parse legacy config");
+
+        let runtime = super::loader::runtime_from_file_for_tests(parsed.runtime);
+        assert_eq!(
+            runtime.reasoning,
+            neo_ai::ReasoningSelection::Effort {
+                effort: neo_ai::ReasoningEffort::High,
+            }
+        );
     }
 
     #[test]

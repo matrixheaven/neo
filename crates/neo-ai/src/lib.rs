@@ -21,7 +21,10 @@ pub use image_generation::{
     ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponse,
     ImageGenerationResponseImage,
 };
-pub use options::{CacheRetention, ReasoningEffort, RequestMetadata, RequestOptions};
+pub use options::{
+    CacheRetention, ReasoningBudget, ReasoningCapability, ReasoningEffort, ReasoningSelection,
+    RequestMetadata, RequestOptions,
+};
 pub use reasoning::{ReasoningContinuation, ReasoningPolicy, sanitize_reasoning_continuation};
 pub use registry::{
     ModelRegistry, ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec,

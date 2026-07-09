@@ -8,8 +8,8 @@ use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage, ModelCapabilities,
-    ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata, RequestOptions,
-    StopReason, ToolCall, ToolSpec,
+    ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection, RequestMetadata,
+    RequestOptions, StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::images::OpenAiImagesClient,
@@ -606,7 +606,9 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
         temperature: Some(0.4),
         max_tokens: Some(128),
         headers,
-        reasoning_effort: Some(ReasoningEffort::Medium),
+        reasoning: ReasoningSelection::Effort {
+            effort: ReasoningEffort::Medium,
+        },
         retries: Some(0),
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
@@ -686,7 +688,7 @@ async fn openai_responses_client_retries_retryable_http_responses() {
 }
 
 #[tokio::test]
-async fn openai_responses_client_serializes_reasoning_effort_with_encrypted_handoff() {
+async fn openai_responses_client_serializes_reasoning_selection_with_encrypted_handoff() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-reasoning" } }),
         json!({
@@ -696,7 +698,9 @@ async fn openai_responses_client_serializes_reasoning_effort_with_encrypted_hand
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
     let mut request = request(ApiKind::OpenAiResponse);
-    request.options.reasoning_effort = Some(ReasoningEffort::High);
+    request.options.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::High,
+    };
 
     client
         .stream_chat(request)
@@ -710,6 +714,32 @@ async fn openai_responses_client_serializes_reasoning_effort_with_encrypted_hand
     assert_eq!(sent.body["reasoning"]["effort"], "high");
     assert_eq!(sent.body["reasoning"]["summary"], "auto");
     assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[tokio::test]
+async fn openai_responses_client_rejects_budget_reasoning_selection_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponse);
+    request.options.reasoning = ReasoningSelection::BudgetTokens {
+        budget_tokens: 8_192,
+    };
+    request.options.retries = Some(0);
+
+    let err = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("does not support budget reasoning selections"),
+        "{message}"
+    );
+    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1792,7 +1822,7 @@ async fn anthropic_messages_client_groups_consecutive_tool_results_in_one_user_m
 }
 
 #[tokio::test]
-async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinking() {
+async fn anthropic_messages_client_serializes_reasoning_selection_as_budget_thinking() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-thinking" } }),
         json!({ "type": "message_stop" }),
@@ -1800,7 +1830,9 @@ async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinkin
     let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
     let mut request = request(ApiKind::AnthropicMessages);
     request.options.temperature = Some(0.4);
-    request.options.reasoning_effort = Some(ReasoningEffort::High);
+    request.options.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::High,
+    };
 
     client
         .stream_chat(request)
@@ -1821,6 +1853,37 @@ async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinkin
     assert!(
         sent.body.get("output_config").is_none(),
         "Neo does not opt into adaptive Anthropic thinking without explicit model compat"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_messages_client_serializes_budget_reasoning_selection() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-thinking-budget" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.temperature = Some(0.4);
+    request.options.reasoning = ReasoningSelection::BudgetTokens {
+        budget_tokens: 12_288,
+    };
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["thinking"]["type"], "enabled");
+    assert_eq!(sent.body["thinking"]["budget_tokens"], 12_288);
+    assert_eq!(sent.body["thinking"]["display"], "summarized");
+    assert!(
+        sent.body.get("temperature").is_none(),
+        "Anthropic temperature is incompatible with extended thinking"
     );
 }
 
@@ -2132,7 +2195,7 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
         sent.body["generationConfig"]
             .get("thinkingConfig")
             .is_none(),
-        "thinkingConfig must be omitted unless reasoning_effort is requested"
+        "thinkingConfig must be omitted unless reasoning is requested"
     );
 }
 
@@ -2202,7 +2265,7 @@ async fn google_generative_ai_client_serializes_tool_result_errors() {
 }
 
 #[tokio::test]
-async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_config() {
+async fn google_generative_ai_client_serializes_reasoning_selection_as_thinking_config() {
     let server = MockServer::start(vec![sse_response(&[json!({
         "candidates": [{
             "content": {
@@ -2214,7 +2277,9 @@ async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_con
     })])]);
     let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
     let mut request = request(ApiKind::GoogleGenerativeAi);
-    request.options.reasoning_effort = Some(ReasoningEffort::Medium);
+    request.options.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::Medium,
+    };
 
     client
         .stream_chat(request)
@@ -2232,6 +2297,36 @@ async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_con
     assert_eq!(
         sent.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         2048
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_serializes_budget_reasoning_selection() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": { "role": "model", "parts": [{ "text": "done" }] },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.reasoning = ReasoningSelection::BudgetTokens {
+        budget_tokens: 8_192,
+    };
+
+    let events = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(!events.is_empty());
+    let sent = server.requests().pop().expect("request");
+    assert_eq!(
+        sent.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        8_192
     );
 }
 

@@ -309,6 +309,7 @@ fn catalog_model_config(
         max_context_tokens: model_info.max_context_tokens,
         max_output_tokens: model_info.max_output_tokens,
         capabilities: model_info.capabilities.clone(),
+        reasoning: model_info.reasoning.clone(),
         display_name: model_info.name.clone(),
     }
 }
@@ -545,6 +546,58 @@ model = "claude-sonnet-4"
     }
 
     #[test]
+    fn config_write_drops_legacy_reasoning_effort_and_keeps_structured_reasoning() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+[runtime]
+reasoning_effort = "low"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "high"
+"#,
+        );
+
+        add_provider(
+            &config_path,
+            "openai",
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponse),
+                base_url: Some("https://api.openai.test/v1".to_owned()),
+                api_key: None,
+                api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            },
+        )
+        .expect("add provider");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        let value: toml::Value = toml::from_str(&written).expect("parse written config");
+        let runtime = value
+            .get("runtime")
+            .and_then(toml::Value::as_table)
+            .expect("runtime table");
+        assert!(!runtime.contains_key("reasoning_effort"));
+        assert_eq!(
+            runtime
+                .get("reasoning")
+                .and_then(toml::Value::as_table)
+                .and_then(|reasoning| reasoning.get("mode"))
+                .and_then(toml::Value::as_str),
+            Some("effort")
+        );
+        assert_eq!(
+            runtime
+                .get("reasoning")
+                .and_then(toml::Value::as_table)
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(toml::Value::as_str),
+            Some("high")
+        );
+    }
+
+    #[test]
     fn remove_provider_clears_unqualified_default_alias_owned_by_provider() {
         let temp = TempDir::new().expect("temp dir");
         let config_path = write_project_config(
@@ -614,6 +667,53 @@ model = "stays"
         assert!(written.contains("api_key = \"inline-key\""));
         assert!(written.contains("[models.\"openai/gpt-small\"]"));
         assert!(written.contains("[models.\"openai/gpt-large\"]"));
+        let written_toml: toml::Value = toml::from_str(&written).expect("parse written config");
+        let reasoning = written_toml
+            .get("models")
+            .and_then(toml::Value::as_table)
+            .and_then(|models| models.get("openai/gpt-large"))
+            .and_then(toml::Value::as_table)
+            .and_then(|model| model.get("reasoning"))
+            .and_then(toml::Value::as_table)
+            .expect("typed model reasoning");
+        assert_eq!(
+            reasoning.get("type").and_then(toml::Value::as_str),
+            Some("combined")
+        );
+        assert_eq!(
+            reasoning
+                .get("effort")
+                .and_then(toml::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec!["low", "medium", "high"])
+        );
+        assert_eq!(
+            reasoning.get("toggle").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        let budget = reasoning
+            .get("budget")
+            .and_then(toml::Value::as_table)
+            .expect("typed combined budget");
+        assert_eq!(
+            budget.get("min").and_then(toml::Value::as_integer),
+            Some(128)
+        );
+        assert_eq!(
+            budget.get("max").and_then(toml::Value::as_integer),
+            Some(24_576)
+        );
+        assert_eq!(
+            reasoning
+                .get("disable_supported")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
         assert!(written.contains("[models.\"other/stays\"]"));
         assert!(!written.contains("[models.\"openai/old\"]"));
         assert!(!written.contains("OPENAI_API_KEY"));
@@ -700,6 +800,7 @@ model = "old"
                         }),
                         tool_call: Some(true),
                         reasoning: Some(false),
+                        reasoning_options: Vec::new(),
                         interleaved: None,
                         modalities: None,
                     },
@@ -716,6 +817,18 @@ model = "old"
                         }),
                         tool_call: Some(true),
                         reasoning: Some(true),
+                        reasoning_options: vec![
+                            serde_json::json!({ "type": "toggle" }),
+                            serde_json::json!({
+                                "type": "effort",
+                                "values": ["low", "medium", "high"]
+                            }),
+                            serde_json::json!({
+                                "type": "budget_tokens",
+                                "min": 128,
+                                "max": 24576
+                            }),
+                        ],
                         interleaved: None,
                         modalities: Some(catalog::CatalogModalities {
                             input: vec!["text".to_owned(), "image".to_owned()],

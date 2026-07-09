@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
+    ReasoningCapability,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::responses::OpenAiResponsesClient,
@@ -284,13 +285,13 @@ fn builtin_models() -> Vec<ModelSpec> {
             "openai",
             "gpt-5.4",
             ApiKind::OpenAiResponse,
-            ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
+            reasoning_tool_chat(400_000),
         ),
         builtin_model(
             "openai",
             "gpt-5-mini",
             ApiKind::OpenAiResponse,
-            ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
+            reasoning_tool_chat(400_000),
         ),
         builtin_model(
             "openai",
@@ -308,15 +309,24 @@ fn builtin_models() -> Vec<ModelSpec> {
             "anthropic",
             "claude-sonnet-4-5",
             ApiKind::AnthropicMessages,
-            ModelCapabilities::tool_chat().with_max_context_tokens(200_000),
+            reasoning_tool_chat(200_000),
         ),
         builtin_model(
             "google",
             "gemini-2.5-pro",
             ApiKind::GoogleGenerativeAi,
-            ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
+            reasoning_tool_chat(1_000_000),
         ),
     ]
+}
+
+fn reasoning_tool_chat(max_context_tokens: u32) -> ModelCapabilities {
+    let mut capabilities =
+        ModelCapabilities::tool_chat().with_max_context_tokens(max_context_tokens);
+    capabilities.reasoning = ReasoningCapability::Toggle {
+        disable_supported: true,
+    };
+    capabilities
 }
 
 fn builtin_model(

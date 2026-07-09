@@ -992,7 +992,9 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: Some(0.35),
                 max_tokens: Some(512),
-                reasoning_effort: Some(neo_ai::ReasoningEffort::High),
+                reasoning: neo_ai::ReasoningSelection::Effort {
+                    effort: neo_ai::ReasoningEffort::High,
+                },
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
@@ -1039,8 +1041,10 @@ mod tests {
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
         assert_eq!(
-            agent_config.reasoning_effort,
-            Some(neo_ai::ReasoningEffort::High)
+            agent_config.reasoning,
+            neo_ai::ReasoningSelection::Effort {
+                effort: neo_ai::ReasoningEffort::High,
+            }
         );
         assert_eq!(agent_config.steering_queue_mode, QueueMode::OneAtATime);
         assert_eq!(agent_config.follow_up_queue_mode, QueueMode::OneAtATime);
@@ -1088,7 +1092,7 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: None,
                 max_tokens: None,
-                reasoning_effort: None,
+                reasoning: neo_ai::ReasoningSelection::Off,
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
@@ -1344,7 +1348,7 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: None,
                 max_tokens: None,
-                reasoning_effort: None,
+                reasoning: neo_ai::ReasoningSelection::Off,
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::All,
                 follow_up_queue_mode: QueueMode::All,
@@ -1427,7 +1431,7 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: None,
                 max_tokens: None,
-                reasoning_effort: None,
+                reasoning: neo_ai::ReasoningSelection::Off,
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::All,
                 follow_up_queue_mode: QueueMode::All,
@@ -1977,6 +1981,49 @@ mod tests {
 
         assert_eq!(model.provider.0, "openai");
         assert_eq!(model.model, "gpt-large");
+    }
+
+    #[test]
+    fn configured_model_registry_uses_typed_reasoning_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "reasoner".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponse),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.insert(
+            "reasoner".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-reasoner".to_owned(),
+                capabilities: vec![
+                    "streaming".to_owned(),
+                    "tools".to_owned(),
+                    "reasoning".to_owned(),
+                ],
+                reasoning: neo_ai::ReasoningCapability::Effort {
+                    values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                    disable_supported: true,
+                },
+                ..ModelConfig::default()
+            },
+        );
+
+        let registry = model_registry_for_config(&config).expect("registry");
+        let model = select_config_model(&registry, &config).expect("model resolves");
+
+        assert_eq!(
+            model.capabilities.reasoning,
+            neo_ai::ReasoningCapability::Effort {
+                values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                disable_supported: true,
+            }
+        );
     }
 
     #[test]

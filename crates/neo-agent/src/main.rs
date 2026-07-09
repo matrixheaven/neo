@@ -248,6 +248,7 @@ fn dispatch_model_command(config: &AppConfig, command: ModelCommand) -> anyhow::
                 max_context_tokens,
                 max_output_tokens: None,
                 capabilities: default_model_capabilities(capabilities),
+                reasoning: neo_ai::ReasoningCapability::None,
                 display_name,
             },
         ),
@@ -646,7 +647,9 @@ fn catalog_models_json(models: &[neo_ai::catalog::CatalogModelInfo]) -> Vec<serd
                 "id": model.id,
                 "name": model.name,
                 "max_context_tokens": model.max_context_tokens,
+                "max_output_tokens": model.max_output_tokens,
                 "capabilities": model.capabilities,
+                "reasoning": model.reasoning,
             })
         })
         .collect()
@@ -656,12 +659,29 @@ fn catalog_model_text(model: &neo_ai::catalog::CatalogModelInfo) -> String {
     let ctx = model
         .max_context_tokens
         .map_or("?".to_owned(), |n| n.to_string());
-    let caps = model.capabilities.join(",");
+    let out = model
+        .max_output_tokens
+        .map_or("?".to_owned(), |n| n.to_string());
+    let mut capabilities = model.capabilities.clone();
+    if let Some(label) = reasoning_capability_label(&model.reasoning) {
+        capabilities.push(label.to_owned());
+    }
+    let caps = capabilities.join(",");
     let display = model.name.as_deref().unwrap_or(&model.id);
     format!(
-        "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]",
+        "  {id:<40} {display:<30} ctx={ctx:<10} out={out:<10} [{caps}]",
         id = model.id
     )
+}
+
+fn reasoning_capability_label(reasoning: &neo_ai::ReasoningCapability) -> Option<&'static str> {
+    match reasoning {
+        neo_ai::ReasoningCapability::None => None,
+        neo_ai::ReasoningCapability::Toggle { .. } => Some("reasoning:toggle"),
+        neo_ai::ReasoningCapability::Effort { .. } => Some("reasoning:effort"),
+        neo_ai::ReasoningCapability::BudgetTokens { .. } => Some("reasoning:budget"),
+        neo_ai::ReasoningCapability::Combined { .. } => Some("reasoning:combined"),
+    }
 }
 
 fn catalog_provider_list_json(entry: &neo_ai::catalog::CatalogEntry) -> Option<serde_json::Value> {
@@ -753,7 +773,29 @@ mod tests {
         assert!(output.contains("gpt-4.1"));
         assert!(output.contains("GPT 4.1"));
         assert!(output.contains("ctx=1000000"));
-        assert!(output.contains("[streaming,tools,reasoning,images]"));
+        assert!(output.contains("out=32000"));
+        assert!(output.contains("[streaming,tools,reasoning,images,reasoning:combined]"));
+    }
+
+    #[test]
+    fn catalog_provider_detail_json_includes_model_reasoning_metadata() {
+        let entry = catalog_entry("openai", Some("OpenAI"), true);
+
+        let output = super::format_catalog_provider_detail("openai", &entry, true)
+            .expect("json catalog detail");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+
+        assert_eq!(
+            value["models"][0]["reasoning"],
+            serde_json::json!({
+                "type": "combined",
+                "toggle": true,
+                "effort": ["low", "high"],
+                "budget": null,
+                "disable_supported": true,
+            })
+        );
+        assert_eq!(value["models"][0]["max_output_tokens"], 32_000);
     }
 
     fn catalog_entry(id: &str, name: Option<&str>, supported: bool) -> catalog::CatalogEntry {
@@ -776,6 +818,10 @@ mod tests {
                     }),
                     tool_call: Some(true),
                     reasoning: Some(true),
+                    reasoning_options: vec![
+                        serde_json::json!({ "type": "toggle" }),
+                        serde_json::json!({ "type": "effort", "values": ["low", "high"] }),
+                    ],
                     interleaved: None,
                     modalities: Some(catalog::CatalogModalities {
                         input: vec!["text".to_owned(), "image".to_owned()],

@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures::{FutureExt, future::BoxFuture};
-use neo_ai::{ModelSpec, ReasoningEffort, ToolSpec};
+use neo_ai::{ModelSpec, ReasoningSelection, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -60,7 +60,7 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning: ReasoningSelection,
     pub replay_reasoning: bool,
     pub tools: Vec<ToolSpec>,
     pub steering_queue_mode: QueueMode,
@@ -189,7 +189,7 @@ impl AgentConfig {
             system_prompt: None,
             temperature: None,
             max_tokens: None,
-            reasoning_effort: None,
+            reasoning: ReasoningSelection::Off,
             replay_reasoning: true,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,

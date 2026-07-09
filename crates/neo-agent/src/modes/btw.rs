@@ -313,7 +313,7 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: None,
                 max_tokens: None,
-                reasoning_effort: None,
+                reasoning: neo_ai::ReasoningSelection::Off,
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::All,
                 follow_up_queue_mode: QueueMode::All,

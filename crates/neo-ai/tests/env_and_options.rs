@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use neo_ai::{
     ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
-    ReasoningContinuation, ReasoningEffort, ReasoningPolicy, env_api_key_from, find_env_keys_from,
-    sanitize_reasoning_continuation,
+    ReasoningCapability, ReasoningContinuation, ReasoningEffort, ReasoningPolicy,
+    ReasoningSelection, env_api_key_from, find_env_keys_from, sanitize_reasoning_continuation,
 };
 
 #[test]
@@ -49,12 +49,186 @@ fn reasoning_effort_serializes_as_stable_snake_case_values() {
 }
 
 #[test]
-fn reasoning_policy_auto_is_deterministic_and_model_capability_aware() {
-    let reasoning_model = ModelSpec {
+fn reasoning_effort_serializes_max_and_stable_names() {
+    assert_eq!(
+        serde_json::to_value(ReasoningEffort::Max).expect("serialize max"),
+        serde_json::json!("max")
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningEffort>(serde_json::json!("max"))
+            .expect("deserialize lowercase max"),
+        ReasoningEffort::Max
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningEffort>(serde_json::json!("Max"))
+            .expect("deserialize uppercase max"),
+        ReasoningEffort::Max
+    );
+}
+
+#[test]
+fn reasoning_selection_round_trips_structured_modes() {
+    let effort = ReasoningSelection::Effort {
+        effort: ReasoningEffort::High,
+    };
+    let encoded = serde_json::to_value(&effort).expect("serialize effort selection");
+    assert_eq!(
+        encoded,
+        serde_json::json!({ "mode": "effort", "effort": "high" })
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningSelection>(encoded).expect("deserialize effort"),
+        effort
+    );
+
+    let budget = ReasoningSelection::BudgetTokens {
+        budget_tokens: 8192,
+    };
+    let encoded = serde_json::to_value(&budget).expect("serialize budget selection");
+    assert_eq!(
+        encoded,
+        serde_json::json!({ "mode": "budget_tokens", "budget_tokens": 8192 })
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningSelection>(encoded).expect("deserialize budget"),
+        budget
+    );
+
+    assert_eq!(
+        serde_json::to_value(ReasoningSelection::Off).expect("serialize off"),
+        serde_json::json!({ "mode": "off" })
+    );
+}
+
+#[test]
+fn reasoning_capability_validates_supported_selection() {
+    let capability = ReasoningCapability::Effort {
+        values: vec![ReasoningEffort::Low, ReasoningEffort::High],
+        disable_supported: true,
+    };
+    assert!(capability.supports(&ReasoningSelection::Off));
+    assert!(capability.supports(&ReasoningSelection::Effort {
+        effort: ReasoningEffort::High,
+    }));
+    assert!(!capability.supports(&ReasoningSelection::Effort {
+        effort: ReasoningEffort::Medium,
+    }));
+    assert!(!capability.supports(&ReasoningSelection::BudgetTokens {
+        budget_tokens: 1024,
+    }));
+}
+
+#[test]
+fn reasoning_capability_serializes_stable_shape() {
+    let effort = ReasoningCapability::Effort {
+        values: vec![ReasoningEffort::Low, ReasoningEffort::High],
+        disable_supported: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&effort).expect("serialize effort capability"),
+        serde_json::json!({
+            "type": "effort",
+            "values": ["low", "high"],
+            "disable_supported": true
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningCapability>(serde_json::json!({
+            "type": "effort",
+            "values": ["low", "high"],
+            "disable_supported": true
+        }))
+        .expect("deserialize effort capability"),
+        effort
+    );
+
+    let budget = ReasoningCapability::BudgetTokens {
+        min: Some(512),
+        max: Some(24_576),
+        disable_supported: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&budget).expect("serialize budget capability"),
+        serde_json::json!({
+            "type": "budget_tokens",
+            "min": 512,
+            "max": 24576,
+            "disable_supported": false
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningCapability>(serde_json::json!({
+            "type": "budget_tokens",
+            "min": 512,
+            "max": 24576,
+            "disable_supported": false
+        }))
+        .expect("deserialize budget capability"),
+        budget
+    );
+}
+
+#[test]
+fn reasoning_budget_bounds_accept_only_range_values() {
+    let capability = ReasoningCapability::BudgetTokens {
+        min: Some(512),
+        max: Some(24_576),
+        disable_supported: true,
+    };
+    assert!(capability.supports(&ReasoningSelection::BudgetTokens { budget_tokens: 512 }));
+    assert!(capability.supports(&ReasoningSelection::BudgetTokens {
+        budget_tokens: 8192,
+    }));
+    assert!(!capability.supports(&ReasoningSelection::BudgetTokens { budget_tokens: 128 }));
+    assert!(!capability.supports(&ReasoningSelection::BudgetTokens {
+        budget_tokens: 32_000,
+    }));
+}
+
+#[test]
+fn reasoning_policy_auto_respects_model_capability() {
+    let effort_model = ModelSpec {
         provider: ProviderId("openai".to_owned()),
-        model: "gpt-reasoning".to_owned(),
+        model: "gpt-effort".to_owned(),
+        api: ApiKind::OpenAiResponse,
+        capabilities: ModelCapabilities {
+            reasoning: ReasoningCapability::Effort {
+                values: vec![ReasoningEffort::Low, ReasoningEffort::Medium],
+                disable_supported: true,
+            },
+            ..ModelCapabilities::tool_chat()
+        },
+    };
+    let toggle_model = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-toggle".to_owned(),
         api: ApiKind::OpenAiResponse,
         capabilities: ModelCapabilities::reasoning_chat(),
+    };
+    let budget_model = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-budget".to_owned(),
+        api: ApiKind::OpenAiResponse,
+        capabilities: ModelCapabilities {
+            reasoning: ReasoningCapability::BudgetTokens {
+                min: Some(512),
+                max: Some(24_576),
+                disable_supported: true,
+            },
+            ..ModelCapabilities::tool_chat()
+        },
+    };
+    let empty_effort_model = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-empty-effort".to_owned(),
+        api: ApiKind::OpenAiResponse,
+        capabilities: ModelCapabilities {
+            reasoning: ReasoningCapability::Effort {
+                values: Vec::new(),
+                disable_supported: true,
+            },
+            ..ModelCapabilities::tool_chat()
+        },
     };
     let plain_model = ModelSpec {
         provider: ProviderId("openai".to_owned()),
@@ -64,17 +238,42 @@ fn reasoning_policy_auto_is_deterministic_and_model_capability_aware() {
     };
 
     assert_eq!(
-        ReasoningPolicy::Auto.resolve_for_model(&reasoning_model),
-        Some(ReasoningEffort::Medium)
-    );
-    assert_eq!(ReasoningPolicy::Auto.resolve_for_model(&plain_model), None);
-    assert_eq!(
-        ReasoningPolicy::Off.resolve_for_model(&reasoning_model),
-        None
+        ReasoningPolicy::Auto.resolve_for_model(&effort_model),
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::Medium
+        }
     );
     assert_eq!(
-        ReasoningPolicy::XHigh.resolve_for_model(&reasoning_model),
-        Some(ReasoningEffort::XHigh)
+        ReasoningPolicy::Auto.resolve_for_model(&toggle_model),
+        ReasoningSelection::On
+    );
+    assert_eq!(
+        ReasoningPolicy::Auto.resolve_for_model(&budget_model),
+        ReasoningSelection::BudgetTokens { budget_tokens: 512 }
+    );
+    assert_eq!(
+        ReasoningPolicy::Auto.resolve_for_model(&empty_effort_model),
+        ReasoningSelection::Off
+    );
+    assert_eq!(
+        ReasoningPolicy::Auto.resolve_for_model(&plain_model),
+        ReasoningSelection::Off
+    );
+    assert_eq!(
+        ReasoningPolicy::Off.resolve_for_model(&toggle_model),
+        ReasoningSelection::Off
+    );
+    assert_eq!(
+        ReasoningPolicy::XHigh.resolve_for_model(&effort_model),
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::XHigh
+        }
+    );
+    assert_eq!(
+        ReasoningPolicy::Max.resolve_for_model(&effort_model),
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::Max
+        }
     );
     assert_eq!(
         serde_json::from_value::<ReasoningPolicy>(serde_json::json!("auto"))

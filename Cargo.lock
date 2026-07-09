@@ -1993,6 +1993,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "neo-agent-core",
+ "neo-ai",
  "pulldown-cmark",
  "regex",
  "serde",
