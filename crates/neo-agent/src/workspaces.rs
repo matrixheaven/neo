@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -162,6 +161,7 @@ pub(crate) fn access_roots_from_project(project: &WorkspaceProject) -> Vec<Works
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn store_writes_project_entries_under_canonical_key() {

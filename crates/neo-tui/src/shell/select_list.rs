@@ -183,7 +183,7 @@ fn render_select_item(item: &SelectItem, selected: bool, width: usize, theme: &T
         Style::default().fg(theme.text_muted)
     };
     let description_style = if selected {
-        Style::default().fg(theme.text_muted).bg(theme.selected_bg)
+        Style::default().fg(theme.selected_fg).bg(theme.selected_bg)
     } else {
         Style::default().fg(theme.text_muted)
     };
@@ -266,7 +266,7 @@ mod tests {
         );
         let selected_description = paint(
             "ask permission mode",
-            Style::default().fg(theme.text_muted).bg(theme.selected_bg),
+            Style::default().fg(theme.selected_fg).bg(theme.selected_bg),
         );
         assert!(
             line.contains(&selected_label),
@@ -274,7 +274,7 @@ mod tests {
         );
         assert!(
             line.contains(&selected_description),
-            "expected muted selected description styling in {line:?}"
+            "expected high-contrast selected description styling in {line:?}"
         );
         let plain = crate::primitive::strip_ansi(&line);
         assert!(plain.starts_with("> /ask"), "{plain}");
