@@ -225,6 +225,9 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
         let existing = registry.get(provider_id).cloned();
         let provider = if let Some(mut p) = existing {
             // Override existing built-in provider fields
+            if let Some(display_name) = &provider_config.display_name {
+                p.display_name = display_name.clone();
+            }
             if let Some(t) = &provider_config.provider_type {
                 p.provider_type = Some(*t);
             }
@@ -247,7 +250,10 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
             let default_api = provider_type.to_api_kind();
             ProviderSpec {
                 id: provider_id.clone(),
-                display_name: provider_id.clone(),
+                display_name: provider_config
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| provider_id.clone()),
                 api: default_api,
                 supported_apis: vec![default_api],
                 base_url: provider_config.base_url.clone(),

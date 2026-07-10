@@ -41,6 +41,9 @@ where
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Human-readable display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<neo_ai::ApiType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

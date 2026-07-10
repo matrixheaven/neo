@@ -316,6 +316,7 @@ fn add_provider(
         &config.config_path,
         provider_id,
         config::ProviderConfig {
+            display_name: None,
             provider_type,
             base_url,
             api_key,

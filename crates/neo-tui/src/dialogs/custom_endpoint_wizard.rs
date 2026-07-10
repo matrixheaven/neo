@@ -1,4 +1,4 @@
-use neo_ai::{ApiType, ReasoningCapability};
+use neo_ai::{ApiType, ReasoningBudget, ReasoningCapability, ReasoningEffort};
 
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::theme::TuiTheme;
@@ -348,7 +348,37 @@ impl CustomEndpointWizardState {
                 )),
                 _ => None,
             },
+            WizardStep::ReasoningBudget => match self.selected {
+                0 | 1 => Some(self.edit_reasoning_budget_value(edit)),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+
+    fn edit_reasoning_budget_value(&mut self, edit: TextEdit<'_>) -> InputResult {
+        let selected = self.selected;
+        match &mut self.draft_model.reasoning {
+            ReasoningCapability::BudgetTokens { min, max, .. } => {
+                apply_u32_edit(if selected == 0 { min } else { max }, edit)
+            }
+            ReasoningCapability::Combined { budget, .. } => {
+                let budget = budget.get_or_insert(ReasoningBudget {
+                    min: None,
+                    max: None,
+                });
+                apply_u32_edit(
+                    if selected == 0 {
+                        &mut budget.min
+                    } else {
+                        &mut budget.max
+                    },
+                    edit,
+                )
+            }
+            ReasoningCapability::None
+            | ReasoningCapability::Toggle { .. }
+            | ReasoningCapability::Effort { .. } => InputResult::Ignored,
         }
     }
 
@@ -742,30 +772,51 @@ impl CustomEndpointWizardState {
     }
 
     fn render_reasoning_effort(&self, width: usize) -> Vec<String> {
+        let values = reasoning_effort_values(&self.draft_model.reasoning);
         self.render_box(
             width,
             "Reasoning Effort",
-            vec![
-                format!("{} [ ] minimal", self.selection_marker(0)),
-                format!("{} [x] low", self.selection_marker(1)),
-                format!("{} [x] medium", self.selection_marker(2)),
-                format!("{} [x] high", self.selection_marker(3)),
-                format!("{} [ ] xhigh", self.selection_marker(4)),
-                format!("{} [ ] max", self.selection_marker(5)),
-                String::new(),
-                "↑/↓ select · Space toggle · Enter choose · Esc back".to_owned(),
-            ],
+            all_reasoning_efforts()
+                .iter()
+                .enumerate()
+                .map(|(index, effort)| {
+                    format!(
+                        "{} [{}] {}",
+                        self.selection_marker(index),
+                        mark(values.contains(effort)),
+                        effort.as_str()
+                    )
+                })
+                .chain([
+                    String::new(),
+                    "↑/↓ select · Space toggle · Enter choose · Esc back".to_owned(),
+                ])
+                .collect(),
         )
     }
 
     fn render_reasoning_budget(&self, width: usize) -> Vec<String> {
+        let budget = reasoning_budget(&self.draft_model.reasoning);
+        let disable_supported = reasoning_disable_supported(&self.draft_model.reasoning);
         self.render_box(
             width,
             "Reasoning Budget",
             vec![
-                format!("{} Minimum tokens     -", self.selection_marker(0)),
-                format!("{} Maximum tokens     -", self.selection_marker(1)),
-                format!("{} Disable supported  yes", self.selection_marker(2)),
+                format!(
+                    "{} Minimum tokens     {}",
+                    self.selection_marker(0),
+                    optional_u32_input_value(budget.as_ref().and_then(|budget| budget.min))
+                ),
+                format!(
+                    "{} Maximum tokens     {}",
+                    self.selection_marker(1),
+                    optional_u32_input_value(budget.as_ref().and_then(|budget| budget.max))
+                ),
+                format!(
+                    "{} Disable supported  {}",
+                    self.selection_marker(2),
+                    yes_no(disable_supported)
+                ),
                 String::new(),
                 "↑/↓ select · Tab field · Enter choose · Esc back".to_owned(),
             ],
@@ -773,14 +824,41 @@ impl CustomEndpointWizardState {
     }
 
     fn render_reasoning_combined(&self, width: usize) -> Vec<String> {
+        let (toggle, effort_enabled, budget_enabled, disable_supported) =
+            match &self.draft_model.reasoning {
+                ReasoningCapability::Combined {
+                    toggle,
+                    effort,
+                    budget,
+                    disable_supported,
+                } => (
+                    *toggle,
+                    !effort.is_empty(),
+                    budget.is_some(),
+                    *disable_supported,
+                ),
+                _ => (true, false, false, true),
+            };
         self.render_box(
             width,
             "Reasoning Combined",
             vec![
-                format!("{} [x] toggle", self.selection_marker(0)),
-                format!("{} [x] effort values", self.selection_marker(1)),
-                format!("{} [ ] budget range", self.selection_marker(2)),
-                format!("{} Disable supported  yes", self.selection_marker(3)),
+                format!("{} [{}] toggle", self.selection_marker(0), mark(toggle)),
+                format!(
+                    "{} [{}] effort values  ›",
+                    self.selection_marker(1),
+                    mark(effort_enabled)
+                ),
+                format!(
+                    "{} [{}] budget range   ›",
+                    self.selection_marker(2),
+                    mark(budget_enabled)
+                ),
+                format!(
+                    "{} Disable supported  {}",
+                    self.selection_marker(3),
+                    yes_no(disable_supported)
+                ),
                 String::new(),
                 "↑/↓ select · Space toggle · Enter choose · Esc back".to_owned(),
             ],
@@ -1086,6 +1164,16 @@ impl CustomEndpointWizardState {
                     InputResult::Ignored
                 }
             }
+            WizardStep::ReasoningEffort => self.toggle_reasoning_effort(),
+            WizardStep::ReasoningBudget => {
+                if self.selected == 2 {
+                    self.toggle_reasoning_disable_supported();
+                    InputResult::Handled
+                } else {
+                    InputResult::Ignored
+                }
+            }
+            WizardStep::ReasoningCombined => self.toggle_reasoning_combined(),
             WizardStep::ModelCapabilities => {
                 match self.selected {
                     0 => self.draft_model.streaming = !self.draft_model.streaming,
@@ -1115,13 +1203,9 @@ impl CustomEndpointWizardState {
             WizardStep::ModelIdentity => self.submit_model_identity(),
             WizardStep::ModelCapabilities => self.submit_model_capabilities(),
             WizardStep::ReasoningType => self.submit_reasoning_type(),
-            WizardStep::ReasoningEffort
-            | WizardStep::ReasoningBudget
-            | WizardStep::ReasoningCombined => {
-                self.step = WizardStep::ModelCapabilities;
-                self.selected = 4;
-                InputResult::Handled
-            }
+            WizardStep::ReasoningEffort => self.submit_reasoning_effort(),
+            WizardStep::ReasoningBudget => self.submit_reasoning_budget(),
+            WizardStep::ReasoningCombined => self.submit_reasoning_combined(),
             WizardStep::AddedModels => {
                 self.step = WizardStep::Review;
                 self.selected = 0;
@@ -1248,39 +1332,187 @@ impl CustomEndpointWizardState {
     }
 
     fn submit_reasoning_type(&mut self) -> InputResult {
-        self.draft_model.reasoning = match self.selected {
-            0 => ReasoningCapability::None,
-            1 => ReasoningCapability::Toggle {
-                disable_supported: true,
-            },
-            2 => ReasoningCapability::Effort {
-                values: vec![
-                    neo_ai::ReasoningEffort::Low,
-                    neo_ai::ReasoningEffort::Medium,
-                    neo_ai::ReasoningEffort::High,
-                ],
-                disable_supported: true,
-            },
-            3 => ReasoningCapability::BudgetTokens {
+        match self.selected {
+            0 => {
+                self.draft_model.reasoning = ReasoningCapability::None;
+                self.step = WizardStep::ModelCapabilities;
+            }
+            1 => {
+                self.draft_model.reasoning = ReasoningCapability::Toggle {
+                    disable_supported: true,
+                };
+                self.step = WizardStep::ModelCapabilities;
+            }
+            2 => {
+                self.draft_model.reasoning = ReasoningCapability::Effort {
+                    values: default_reasoning_efforts(),
+                    disable_supported: true,
+                };
+                self.step = WizardStep::ReasoningEffort;
+            }
+            3 => {
+                self.draft_model.reasoning = ReasoningCapability::BudgetTokens {
+                    min: None,
+                    max: None,
+                    disable_supported: true,
+                };
+                self.step = WizardStep::ReasoningBudget;
+            }
+            4 => {
+                self.draft_model.reasoning = ReasoningCapability::Combined {
+                    toggle: true,
+                    effort: default_reasoning_efforts(),
+                    budget: None,
+                    disable_supported: true,
+                };
+                self.step = WizardStep::ReasoningCombined;
+            }
+            _ => return InputResult::Ignored,
+        }
+        self.selected = 0;
+        InputResult::Handled
+    }
+
+    fn submit_reasoning_effort(&mut self) -> InputResult {
+        if let Some(error) = Self::model_step_error(&self.draft_model) {
+            return self.validation_error(error);
+        }
+        self.return_from_reasoning_detail(WizardStep::ReasoningEffort)
+    }
+
+    fn submit_reasoning_budget(&mut self) -> InputResult {
+        self.return_from_reasoning_detail(WizardStep::ReasoningBudget)
+    }
+
+    fn submit_reasoning_combined(&mut self) -> InputResult {
+        match self.selected {
+            1 => {
+                self.ensure_combined_effort();
+                self.step = WizardStep::ReasoningEffort;
+                self.selected = 0;
+            }
+            2 => {
+                self.ensure_combined_budget();
+                self.step = WizardStep::ReasoningBudget;
+                self.selected = 0;
+            }
+            _ => {
+                self.step = WizardStep::ModelCapabilities;
+                self.selected = 4;
+            }
+        }
+        InputResult::Handled
+    }
+
+    fn return_from_reasoning_detail(&mut self, detail_step: WizardStep) -> InputResult {
+        if matches!(
+            self.draft_model.reasoning,
+            ReasoningCapability::Combined { .. }
+        ) {
+            self.step = WizardStep::ReasoningCombined;
+            self.selected = match detail_step {
+                WizardStep::ReasoningEffort => 1,
+                WizardStep::ReasoningBudget => 2,
+                _ => 0,
+            };
+        } else {
+            self.step = WizardStep::ModelCapabilities;
+            self.selected = 4;
+        }
+        InputResult::Handled
+    }
+
+    fn toggle_reasoning_effort(&mut self) -> InputResult {
+        let Some(effort) = all_reasoning_efforts().get(self.selected).copied() else {
+            return InputResult::Ignored;
+        };
+        match &mut self.draft_model.reasoning {
+            ReasoningCapability::Effort { values, .. }
+            | ReasoningCapability::Combined { effort: values, .. } => {
+                if let Some(index) = values.iter().position(|value| *value == effort) {
+                    values.remove(index);
+                } else {
+                    values.push(effort);
+                    sort_reasoning_efforts(values);
+                }
+                InputResult::Handled
+            }
+            ReasoningCapability::None
+            | ReasoningCapability::Toggle { .. }
+            | ReasoningCapability::BudgetTokens { .. } => InputResult::Ignored,
+        }
+    }
+
+    fn toggle_reasoning_disable_supported(&mut self) {
+        match &mut self.draft_model.reasoning {
+            ReasoningCapability::Toggle { disable_supported }
+            | ReasoningCapability::Effort {
+                disable_supported, ..
+            }
+            | ReasoningCapability::BudgetTokens {
+                disable_supported, ..
+            }
+            | ReasoningCapability::Combined {
+                disable_supported, ..
+            } => *disable_supported = !*disable_supported,
+            ReasoningCapability::None => {}
+        }
+    }
+
+    fn toggle_reasoning_combined(&mut self) -> InputResult {
+        match &mut self.draft_model.reasoning {
+            ReasoningCapability::Combined {
+                toggle,
+                effort,
+                budget,
+                disable_supported,
+            } => {
+                match self.selected {
+                    0 => *toggle = !*toggle,
+                    1 => {
+                        if effort.is_empty() {
+                            *effort = default_reasoning_efforts();
+                        } else {
+                            effort.clear();
+                        }
+                    }
+                    2 => {
+                        *budget = if budget.is_some() {
+                            None
+                        } else {
+                            Some(ReasoningBudget {
+                                min: None,
+                                max: None,
+                            })
+                        };
+                    }
+                    3 => *disable_supported = !*disable_supported,
+                    _ => return InputResult::Ignored,
+                }
+                InputResult::Handled
+            }
+            ReasoningCapability::None
+            | ReasoningCapability::Toggle { .. }
+            | ReasoningCapability::Effort { .. }
+            | ReasoningCapability::BudgetTokens { .. } => InputResult::Ignored,
+        }
+    }
+
+    fn ensure_combined_effort(&mut self) {
+        if let ReasoningCapability::Combined { effort, .. } = &mut self.draft_model.reasoning
+            && effort.is_empty()
+        {
+            *effort = default_reasoning_efforts();
+        }
+    }
+
+    fn ensure_combined_budget(&mut self) {
+        if let ReasoningCapability::Combined { budget, .. } = &mut self.draft_model.reasoning {
+            budget.get_or_insert(ReasoningBudget {
                 min: None,
                 max: None,
-                disable_supported: true,
-            },
-            4 => ReasoningCapability::Combined {
-                toggle: true,
-                effort: vec![
-                    neo_ai::ReasoningEffort::Low,
-                    neo_ai::ReasoningEffort::Medium,
-                    neo_ai::ReasoningEffort::High,
-                ],
-                budget: None,
-                disable_supported: true,
-            },
-            _ => return InputResult::Ignored,
-        };
-        self.step = WizardStep::ModelCapabilities;
-        self.selected = 4;
-        InputResult::Handled
+            });
+        }
     }
 
     fn submit_review_choice(&mut self) -> InputResult {
@@ -1493,6 +1725,77 @@ fn reasoning_label(reasoning: &ReasoningCapability) -> &'static str {
         ReasoningCapability::BudgetTokens { .. } => "Budget tokens",
         ReasoningCapability::Combined { .. } => "Combined",
     }
+}
+
+fn all_reasoning_efforts() -> [ReasoningEffort; 6] {
+    [
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+    ]
+}
+
+fn default_reasoning_efforts() -> Vec<ReasoningEffort> {
+    vec![
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ]
+}
+
+fn sort_reasoning_efforts(values: &mut Vec<ReasoningEffort>) {
+    values.sort_by_key(|value| {
+        all_reasoning_efforts()
+            .iter()
+            .position(|effort| effort == value)
+            .unwrap_or(usize::MAX)
+    });
+}
+
+fn reasoning_effort_values(reasoning: &ReasoningCapability) -> &[ReasoningEffort] {
+    match reasoning {
+        ReasoningCapability::Effort { values, .. } => values,
+        ReasoningCapability::Combined { effort, .. } => effort,
+        ReasoningCapability::None
+        | ReasoningCapability::Toggle { .. }
+        | ReasoningCapability::BudgetTokens { .. } => &[],
+    }
+}
+
+fn reasoning_budget(reasoning: &ReasoningCapability) -> Option<ReasoningBudget> {
+    match reasoning {
+        ReasoningCapability::BudgetTokens { min, max, .. } => Some(ReasoningBudget {
+            min: *min,
+            max: *max,
+        }),
+        ReasoningCapability::Combined { budget, .. } => budget.clone(),
+        ReasoningCapability::None
+        | ReasoningCapability::Toggle { .. }
+        | ReasoningCapability::Effort { .. } => None,
+    }
+}
+
+fn reasoning_disable_supported(reasoning: &ReasoningCapability) -> bool {
+    match reasoning {
+        ReasoningCapability::None => false,
+        ReasoningCapability::Toggle { disable_supported }
+        | ReasoningCapability::Effort {
+            disable_supported, ..
+        }
+        | ReasoningCapability::BudgetTokens {
+            disable_supported, ..
+        }
+        | ReasoningCapability::Combined {
+            disable_supported, ..
+        } => *disable_supported,
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 #[cfg(test)]
@@ -1979,5 +2282,116 @@ mod tests {
         assert_eq!(draft.provider_id, "acme");
         assert_eq!(draft.api_type, ApiType::OpenAi);
         assert_eq!(draft.models[0].alias, "acme/qwen2.5-coder-32b-instruct");
+    }
+
+    #[test]
+    fn effort_reasoning_page_edits_selected_values_before_saving_model() {
+        let mut state = state();
+        state.provider_id = "acme".to_owned();
+        state.draft_model = CustomEndpointWizardState::empty_model(&state.provider_id, "reasoner");
+        state.step = WizardStep::ReasoningType;
+        state.selected = 2;
+
+        assert_eq!(state.submit_reasoning_type(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningEffort);
+
+        assert_eq!(
+            state.handle_input(&InputEvent::Insert(' ')),
+            InputResult::Handled
+        );
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        assert_eq!(
+            state.handle_input(&InputEvent::Insert(' ')),
+            InputResult::Handled
+        );
+        assert_eq!(state.submit_step(), InputResult::Handled);
+
+        assert_eq!(
+            state.draft_model.reasoning,
+            ReasoningCapability::Effort {
+                values: vec![
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ],
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn budget_reasoning_page_edits_token_limits_before_saving_model() {
+        let mut state = state();
+        state.provider_id = "acme".to_owned();
+        state.draft_model = CustomEndpointWizardState::empty_model(&state.provider_id, "reasoner");
+        state.step = WizardStep::ReasoningType;
+        state.selected = 3;
+
+        assert_eq!(state.submit_reasoning_type(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningBudget);
+
+        assert_eq!(
+            state.handle_input(&InputEvent::Paste("1024".to_owned())),
+            InputResult::Handled
+        );
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        assert_eq!(
+            state.handle_input(&InputEvent::Paste("8192".to_owned())),
+            InputResult::Handled
+        );
+        assert_eq!(state.submit_step(), InputResult::Handled);
+
+        assert_eq!(
+            state.draft_model.reasoning,
+            ReasoningCapability::BudgetTokens {
+                min: Some(1024),
+                max: Some(8192),
+                disable_supported: true,
+            }
+        );
+    }
+
+    #[test]
+    fn combined_reasoning_page_reaches_effort_and_budget_detail_pages() {
+        let mut state = state();
+        state.provider_id = "acme".to_owned();
+        state.draft_model = CustomEndpointWizardState::empty_model(&state.provider_id, "reasoner");
+        state.step = WizardStep::ReasoningType;
+        state.selected = 4;
+
+        assert_eq!(state.submit_reasoning_type(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningCombined);
+
+        state.selected = 1;
+        assert_eq!(state.submit_step(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningEffort);
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Insert(' '));
+        assert_eq!(state.submit_step(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningCombined);
+
+        state.selected = 2;
+        assert_eq!(state.submit_step(), InputResult::Handled);
+        assert_eq!(state.step, WizardStep::ReasoningBudget);
+        assert_eq!(
+            state.handle_input(&InputEvent::Paste("4096".to_owned())),
+            InputResult::Handled
+        );
+        assert_eq!(state.submit_step(), InputResult::Handled);
+
+        assert_eq!(
+            state.draft_model.reasoning,
+            ReasoningCapability::Combined {
+                toggle: true,
+                effort: vec![ReasoningEffort::Low, ReasoningEffort::Medium],
+                budget: Some(neo_ai::ReasoningBudget {
+                    min: Some(4096),
+                    max: None,
+                }),
+                disable_supported: true,
+            }
+        );
     }
 }

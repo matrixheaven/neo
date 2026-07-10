@@ -345,6 +345,7 @@ fn insert_catalog_provider(
     providers.insert(
         provider_id.to_owned(),
         ProviderConfig {
+            display_name: None,
             provider_type: Some(provider_config.provider_type),
             base_url: provider_config.base_url.clone(),
             api_key: api_key.map(str::to_owned),
@@ -512,6 +513,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 base_url: Some("https://api.openai.test/v1".to_owned()),
                 api_key: Some("secret".to_owned()),
@@ -599,6 +601,7 @@ model = "claude-sonnet-4"
             &config_path,
             "acme",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAi),
                 base_url: Some("https://gateway.example.com/v1".to_owned()),
                 api_key: None,
@@ -683,6 +686,7 @@ model = "keep"
             &config_path,
             "acme",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::Google),
                 base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
                 api_key: Some("local".to_owned()),
@@ -744,6 +748,7 @@ model = "keep"
             &config_path,
             "acme",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::Google),
                 base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
                 api_key: Some("local".to_owned()),
@@ -784,6 +789,7 @@ model = "keep"
             &config_path,
             "acme",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::Google),
                 base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
                 api_key: Some("local".to_owned()),
@@ -841,6 +847,7 @@ model = "old"
             &config_path,
             "acme",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::Google),
                 base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_owned()),
                 api_key: Some("local".to_owned()),
@@ -881,6 +888,7 @@ model = "old"
             &config_path,
             "openai",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 base_url: Some("https://api.openai.test/v1".to_owned()),
                 api_key: None,
@@ -914,6 +922,7 @@ effort = "high"
             &config_path,
             "openai",
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 base_url: Some("https://api.openai.test/v1".to_owned()),
                 api_key: None,

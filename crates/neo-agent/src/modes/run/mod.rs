@@ -1579,6 +1579,7 @@ mod tests {
         config.providers.insert(
             "test-provider".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 base_url: Some("https://example.test/v1".to_owned()),
                 api_key: Some("test-key".to_owned()),
@@ -1870,6 +1871,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
@@ -1916,6 +1918,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
@@ -1962,6 +1965,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
@@ -1992,6 +1996,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },
@@ -2035,6 +2040,7 @@ mod tests {
         config.providers.insert(
             "openai".to_owned(),
             ProviderConfig {
+                display_name: None,
                 provider_type: Some(ApiType::OpenAiResponse),
                 ..ProviderConfig::default()
             },

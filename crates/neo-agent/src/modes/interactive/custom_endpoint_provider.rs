@@ -439,6 +439,7 @@ fn provider_config_from_draft(
     draft: &CustomEndpointProviderDraft,
 ) -> crate::config::ProviderConfig {
     let mut config = crate::config::ProviderConfig {
+        display_name: Some(draft.display_name.trim().to_owned()),
         provider_type: Some(draft.api_type),
         base_url: Some(draft.base_url.trim().to_owned()),
         api_key: None,
@@ -721,10 +722,15 @@ mod tests {
         let written =
             fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
         assert!(written.contains("[providers.acme]"), "{written}");
+        assert!(
+            written.contains("display_name = \"Acme Gateway\""),
+            "{written}"
+        );
         assert!(written.contains("[models.\"acme/reasoner\"]"), "{written}");
         let config = controller.local_config.as_ref().expect("refreshed config");
         let provider = config.providers.get("acme").expect("provider");
         assert_eq!(provider.provider_type, Some(neo_ai::ApiType::OpenAi));
+        assert_eq!(provider.display_name.as_deref(), Some("Acme Gateway"));
         assert_eq!(
             provider.base_url.as_deref(),
             Some("https://gateway.example.com/v1")
