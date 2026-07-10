@@ -67,6 +67,20 @@ pub fn set_default_model(config_path: &Path, alias: &str) -> anyhow::Result<Stri
     Ok(format!("default model set to '{alias}'\n"))
 }
 
+/// Persist the model, provider, and reasoning selected in the TUI.
+pub fn set_model_selection(
+    config_path: &Path,
+    alias: &str,
+    provider_id: &str,
+    reasoning: &neo_ai::ReasoningSelection,
+) -> anyhow::Result<()> {
+    let mut file_config = read_file_config(config_path)?;
+    file_config.default_model = Some(alias.to_owned());
+    file_config.default_provider = Some(provider_id.to_owned());
+    file_config.runtime.get_or_insert_default().reasoning = Some(reasoning.clone());
+    write_file_config(config_path, &file_config)
+}
+
 /// Import a provider from the models.dev catalog into config.toml.
 ///
 /// Fetches the catalog, finds the provider, infers its type, and writes

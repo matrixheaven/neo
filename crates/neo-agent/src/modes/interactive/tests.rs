@@ -6805,10 +6805,14 @@ fn model_selection_with_thinking_preserves_current_structured_reasoning() {
 }
 
 #[test]
-fn model_selection_applies_structured_reasoning_from_selection() {
+fn model_selection_persists_reasoning_and_provider_across_reload() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let config_path = config.config_path.clone();
     config.runtime.reasoning = neo_ai::ReasoningSelection::Off;
+    let expected_reasoning = neo_ai::ReasoningSelection::Effort {
+        effort: neo_ai::ReasoningEffort::Medium,
+    };
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -6820,11 +6824,9 @@ fn model_selection_applies_structured_reasoning_from_selection() {
     controller.set_current_reasoning(neo_ai::ReasoningSelection::Off);
 
     controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {
-        alias: "openai/gpt-4.1".to_owned(),
+        alias: "anthropic/claude-sonnet-4".to_owned(),
         thinking: true,
-        reasoning: neo_ai::ReasoningSelection::Effort {
-            effort: neo_ai::ReasoningEffort::Medium,
-        },
+        reasoning: expected_reasoning.clone(),
     });
 
     assert_eq!(
@@ -6834,16 +6836,18 @@ fn model_selection_applies_structured_reasoning_from_selection() {
             .expect("local config")
             .runtime
             .reasoning,
-        neo_ai::ReasoningSelection::Effort {
-            effort: neo_ai::ReasoningEffort::Medium,
-        }
+        expected_reasoning
     );
-    assert_eq!(
-        controller.current_reasoning,
-        neo_ai::ReasoningSelection::Effort {
-            effort: neo_ai::ReasoningEffort::Medium,
-        }
-    );
+
+    let reloaded = crate::config::AppConfig::load(crate::config::ConfigOverrides {
+        config_path: Some(config_path),
+        project_dir: Some(temp.path().to_path_buf()),
+        ..crate::config::ConfigOverrides::default()
+    })
+    .expect("reload config");
+    assert_eq!(reloaded.runtime.reasoning, expected_reasoning);
+    assert_eq!(reloaded.default_model, "anthropic/claude-sonnet-4");
+    assert_eq!(reloaded.default_provider, "anthropic");
 }
 
 #[test]

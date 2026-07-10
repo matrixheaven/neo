@@ -78,7 +78,7 @@ impl InteractiveController {
     }
 
     /// Apply a model selection, updating the active model, context window,
-    /// thinking state, and footer indicator.
+    /// reasoning state, and footer indicator.
     pub(super) fn apply_model_selection(&mut self, selection: &neo_tui::dialogs::ModelSelection) {
         self.tui
             .chrome_mut()
@@ -113,13 +113,18 @@ impl InteractiveController {
                 config.default_provider.clone_from(&model.provider);
             }
         }
-        // Persist the selection to disk so the next session opens on the same
-        // model the user chose, instead of reverting to a stale default.
+        // Persist the complete selection so startup cannot combine the new
+        // model with a stale provider or reasoning setting.
         if let Some(config_path) = self.config_path()
-            && let Err(error) =
-                crate::config::mutations::set_default_model(&config_path, &selection.alias)
+            && let Some(model) = &self.active_model
+            && let Err(error) = crate::config::mutations::set_model_selection(
+                &config_path,
+                &selection.alias,
+                &model.provider,
+                &selection.reasoning,
+            )
         {
-            tracing::warn!("failed to persist default model: {error}");
+            tracing::warn!("failed to persist model selection: {error}");
         }
         let notice = if selection.reasoning.is_enabled() {
             format!(
