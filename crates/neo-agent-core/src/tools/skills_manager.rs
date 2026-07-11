@@ -215,16 +215,10 @@ fn skill_resource_summary(skill_root: &Path) -> Option<String> {
 }
 
 fn resource_dir_has_entries(path: &Path) -> bool {
-    let Ok(entries) = stdfs::read_dir(path) else {
+    let Ok(mut entries) = stdfs::read_dir(path) else {
         return false;
     };
-    for entry in entries {
-        match entry {
-            Ok(_) => return true,
-            Err(_) => return false,
-        }
-    }
-    false
+    entries.next().is_some_and(|entry| entry.is_ok())
 }
 
 pub struct CreateSkillTool {

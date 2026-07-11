@@ -63,11 +63,10 @@ fn discover_recursive(
         let path = entry.path();
         if path.is_dir() {
             if own_skill_file.is_file()
-                && entry.file_name().to_str().is_some_and(|file_name| {
-                    RESOURCE_DIRS
-                        .iter()
-                        .any(|resource_dir| file_name == *resource_dir)
-                })
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|file_name| RESOURCE_DIRS.contains(&file_name))
             {
                 continue;
             }

@@ -1,6 +1,146 @@
 use neo_agent_core::{ProcessSupervisor, ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_stop_terminates_descendant_processes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor);
+    let pid_path = pid_file.path().display();
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": format!("sleep 60 & echo $! > '{pid_path}'; wait"),
+            }),
+        )
+        .await
+        .expect("terminal start");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let descendant = loop {
+        if let Ok(pid) = std::fs::read_to_string(pid_file.path())
+            && let Ok(pid) = pid.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let output = registry
+                .run(
+                    "Terminal",
+                    &context,
+                    json!({ "mode": "read", "handle": handle }),
+                )
+                .await
+                .expect("terminal output");
+            panic!("descendant PID was not written: {}", output.content);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop");
+
+    for _ in 0..50 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &descendant.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("descendant process {descendant} survived terminal stop");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn terminal_stop_terminates_descendant_processes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor);
+    let pid_path = pid_file.path().display().to_string().replace('\'', "''");
+    let command = format!(
+        "powershell.exe -NoProfile -Command \"\\$child = Start-Process cmd.exe -ArgumentList '/c ping -t 127.0.0.1' -PassThru; Set-Content -LiteralPath '{pid_path}' -Value \\$child.Id; Wait-Process -Id \\$child.Id\""
+    );
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": command }),
+        )
+        .await
+        .expect("terminal start");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let descendant = loop {
+        if let Ok(pid) = std::fs::read_to_string(pid_file.path())
+            && let Ok(pid) = pid.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let output = registry
+                .run(
+                    "Terminal",
+                    &context,
+                    json!({ "mode": "read", "handle": handle }),
+                )
+                .await
+                .expect("terminal output");
+            panic!("descendant PID was not written: {}", output.content);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop");
+    for _ in 0..50 {
+        let listing = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {descendant}"), "/NH"])
+            .output()
+            .expect("tasklist");
+        if !String::from_utf8_lossy(&listing.stdout).contains(&descendant.to_string()) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("descendant process {descendant} survived terminal stop");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
     let workspace = tempfile::tempdir().expect("workspace");
