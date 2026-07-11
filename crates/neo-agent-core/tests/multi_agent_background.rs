@@ -49,6 +49,113 @@ fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
 }
 
 #[tokio::test]
+async fn swarm_text_deltas_are_bounded_and_background_updates_stay_ordered() {
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "a".repeat(20_000),
+        },
+        AiStreamEvent::TextDelta {
+            text: "latest".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    ]]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_callback = Arc::clone(&events);
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path())
+        .unwrap()
+        .with_access(ToolAccess::all())
+        .with_child_runtime(
+            AgentConfig::for_model(harness.model())
+                .with_permission_mode(PermissionMode::Yolo)
+                .with_tool_execution_mode(ToolExecutionMode::Sequential),
+            harness.client(),
+            Arc::new(ToolRegistry::new()),
+            1,
+        )
+        .with_tool_event(Arc::new(move |event| {
+            events_for_callback
+                .lock()
+                .expect("event capture poisoned")
+                .push(event);
+        }));
+    let registry = ToolRegistry::with_builtin_tools();
+    let started = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "bounded progress",
+                "items": [{"title": "agent-1", "value": "agent-1"}],
+                "prompt_template": "Process {{item}}",
+                "mode": "background",
+                "max_concurrency": 1
+            }),
+        )
+        .await
+        .expect("background swarm should start");
+    let task_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details.get("task_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("background task id")
+        .to_owned();
+
+    let waited = registry
+        .run(
+            "WaitDelegate",
+            &ctx,
+            serde_json::json!({ "id": task_id, "timeout_ms": 5_000 }),
+        )
+        .await
+        .expect("background swarm should complete");
+    assert!(
+        waited.content.contains("status: completed"),
+        "{}",
+        waited.content
+    );
+
+    {
+        let events = events.lock().expect("event capture poisoned");
+        assert!(
+            events
+                .iter()
+                .all(|event| serde_json::to_vec(event).unwrap().len() < 8 * 1024),
+            "swarm progress events must remain bounded: {events:#?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::DelegateSwarmProgressUpdated { .. })),
+            "child updates must use bounded progress events: {events:#?}"
+        );
+    }
+
+    let snapshot = ctx
+        .background_tasks
+        .snapshot(&task_id)
+        .await
+        .expect("background snapshot");
+    let swarm = snapshot.swarm.expect("swarm snapshot");
+    let child = swarm.children.first().expect("swarm child");
+    assert!(
+        child
+            .agent
+            .latest_text
+            .as_deref()
+            .is_some_and(|text| text.ends_with("latest"))
+    );
+    assert!(child.agent.state.is_terminal());
+}
+
+#[tokio::test]
 async fn background_manager_lists_delegate_tasks() {
     let runtime = MultiAgentRuntime::new();
     let agent = runtime.start_foreground_delegate_for_test("inspect task browser");

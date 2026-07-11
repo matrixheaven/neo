@@ -274,7 +274,6 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
         },
         child_progress: SwarmChildProgress {
             item_index: 0,
-            item: "audit".to_owned(),
             progress: AgentProgressSnapshot {
                 agent_id: AgentId::from_suffix_for_test("swarm-child"),
                 state: AgentLifecycleState::Running,

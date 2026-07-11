@@ -3,9 +3,9 @@ use std::time::Duration;
 use neo_agent_core::AgentEvent;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, AgentTerminalReason,
-    AgentToolActivityPhase, AgentToolOutputPreview, DelegateContext, SwarmAggregate,
-    SwarmChildSnapshot, SwarmSnapshot,
+    AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DelegateContext,
+    SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
@@ -2299,6 +2299,43 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
             })
             .collect(),
     }
+}
+
+#[test]
+fn swarm_progress_applies_text_delta() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let started = swarm_with_child_states(vec![AgentLifecycleState::Queued]);
+    let child = started.children[0].clone();
+    let mut updated = child.agent.clone();
+    updated.state = AgentLifecycleState::Running;
+    updated.updated_at_ms += 1;
+    updated.latest_text = Some("latest".to_owned());
+    let aggregate = SwarmAggregate::from_states([AgentLifecycleState::Running]);
+
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 1,
+        swarm: started,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmProgressUpdated {
+        turn: 1,
+        swarm_id: "swarm_test".to_owned(),
+        state: AgentLifecycleState::Running,
+        aggregate,
+        child_progress: SwarmChildProgress {
+            item_index: child.item_index,
+            progress: AgentProgressSnapshot::from_agent(&updated),
+        },
+    });
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("latest"), "{text}");
+    assert!(text.contains("running"), "{text}");
 }
 
 fn terminal_reason_for_state(state: AgentLifecycleState) -> Option<AgentTerminalReason> {

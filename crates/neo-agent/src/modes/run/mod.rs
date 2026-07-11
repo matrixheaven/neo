@@ -837,7 +837,6 @@ impl SessionEventPersistence {
                             aggregate: swarm.aggregate,
                             child_progress: neo_agent_core::multi_agent::SwarmChildProgress {
                                 item_index: child.item_index,
-                                item: child.item.clone(),
                                 progress,
                             },
                         });

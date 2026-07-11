@@ -458,6 +458,27 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Apply one ordered, bounded child-progress update to a running swarm.
+    pub async fn update_delegate_swarm_progress(
+        &self,
+        task_id: &str,
+        child_progress: crate::multi_agent::SwarmChildProgress,
+        aggregate: crate::multi_agent::SwarmAggregate,
+        state: crate::multi_agent::AgentLifecycleState,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && let BackgroundTaskState::DelegateSwarmRunning { snapshot } = &mut record.state
+        {
+            crate::multi_agent::apply_swarm_child_progress(
+                snapshot,
+                &child_progress,
+                aggregate,
+                state,
+            );
+        }
+    }
+
     /// Mark a running delegate swarm as completed.
     pub async fn complete_delegate_swarm(
         &self,

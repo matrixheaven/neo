@@ -429,7 +429,6 @@ fn compact_swarm_child_progress_refreshes_aggregate_and_ordering() {
             aggregate: SwarmAggregate::from_states([AgentLifecycleState::Completed]),
             child_progress: SwarmChildProgress {
                 item_index: 0,
-                item: "docs".to_owned(),
                 progress: completed.progress_snapshot(),
             },
         },
@@ -1641,7 +1640,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
     );
     let started_at = std::time::Instant::now();
 
-    let started = runtime
+    runtime
         .apply_child_event(
             &snapshot.id,
             started_at,
@@ -1653,6 +1652,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
             },
         )
         .expect("started update");
+    let started = runtime.snapshot(&snapshot.id).expect("started snapshot");
 
     let tool = started
         .activity
@@ -1672,7 +1672,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
     assert_eq!(tool.1.as_deref(), Some("cargo nextest run -p neo-tui"));
     assert!(tool.2.is_none());
 
-    let updated = runtime
+    runtime
         .apply_child_event(
             &snapshot.id,
             started_at,
@@ -1684,11 +1684,12 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
             },
         )
         .expect("live output update");
+    let updated = runtime.snapshot(&snapshot.id).expect("updated snapshot");
     let output = latest_tool_output(&updated, "call_bash").expect("output preview");
     assert!(output.text.contains("Compiling neo-tui"));
     assert!(output.tail);
 
-    let finished = runtime
+    runtime
         .apply_child_event(
             &snapshot.id,
             started_at,
@@ -1700,6 +1701,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
             },
         )
         .expect("finished update");
+    let finished = runtime.snapshot(&snapshot.id).expect("finished snapshot");
     assert_eq!(
         latest_tool_phase(&finished, "call_bash"),
         Some(AgentToolActivityPhase::Done)
@@ -1858,24 +1860,25 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
     let updates = events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::DelegateSwarmUpdated { turn, swarm } => Some((*turn, swarm)),
+            AgentEvent::DelegateSwarmProgressUpdated {
+                turn,
+                child_progress,
+                ..
+            } => Some((*turn, child_progress)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(
         updates.len() >= 6,
-        "updates should stream child start/text/finish progress, got {}",
+        "progress updates should stream child start/text/finish, got {}",
         updates.len()
     );
     assert_eq!(updates[0].0, 1);
     assert!(
-        updates.iter().any(|(_, swarm)| {
-            swarm
-                .children
-                .iter()
-                .any(|child| child.agent.latest_text.as_deref() == Some("api ok"))
-        }),
-        "updates should expose child text before final swarm: {updates:#?}"
+        updates
+            .iter()
+            .any(|(_, child)| { child.progress.latest_text.as_deref() == Some("api ok") }),
+        "progress updates should expose child text before final swarm: {updates:#?}"
     );
     let names = finished_swarm
         .1

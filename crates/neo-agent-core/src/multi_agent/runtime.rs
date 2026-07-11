@@ -20,8 +20,8 @@ use crate::{
 use super::state::derive_title;
 use super::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DelegateContext,
-    DisplayNamePool, SwarmAggregate,
+    AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
+    DelegateContext, DisplayNamePool, SwarmAggregate,
 };
 use super::{AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview};
 use super::{apply_agent_progress, apply_swarm_child_progress};
@@ -318,14 +318,14 @@ impl MultiAgentRuntime {
         snapshot.cache_read_token_count = update.cache_read_token_count;
         snapshot.cache_write_token_count = update.cache_write_token_count;
         snapshot.elapsed = update.elapsed;
-        snapshot.latest_text.clone_from(&update.latest_text);
+        snapshot.latest_text = update.latest_text.as_deref().map(bounded_latest_text);
         snapshot.activity = update.activity;
         snapshot.prior_messages = messages.to_vec();
         snapshot.terminal_at_ms.get_or_insert(now);
         snapshot.updated_at_ms = now;
         snapshot.terminal_reason = Some(terminal_reason_for_state(AgentLifecycleState::Completed));
         snapshot.outcome = Some(AgentTerminalOutcome {
-            summary: update.summary,
+            summary: bounded_latest_text(&update.summary),
             is_error: false,
         });
         snapshot.clone()
@@ -355,9 +355,9 @@ impl MultiAgentRuntime {
         snapshot.terminal_at_ms.get_or_insert(now);
         snapshot.updated_at_ms = now;
         if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-            snapshot.latest_text = Some(message.clone());
+            snapshot.latest_text = Some(bounded_latest_text(&message));
             snapshot.outcome = Some(AgentTerminalOutcome {
-                summary: message,
+                summary: bounded_latest_text(&message),
                 is_error: state != AgentLifecycleState::Completed,
             });
         }
@@ -1303,7 +1303,11 @@ impl MultiAgentRuntime {
             agent_id.as_str().to_owned(),
             child_wire_path,
             |event| {
-                if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
+                if runtime
+                    .apply_child_event(&agent_id, started_at, event)
+                    .is_some()
+                    && let Some(updated) = runtime.agent_snapshot(agent_id.as_str())
+                {
                     on_update(updated);
                 }
             },
@@ -1352,11 +1356,11 @@ impl MultiAgentRuntime {
         mut on_update: F,
     ) -> ChildRunOutput
     where
-        F: FnMut(AgentSnapshot) + Send,
+        F: FnMut(AgentProgressSnapshot) + Send,
     {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
-        on_update(snapshot.clone());
+        on_update(snapshot.progress_snapshot());
         // Short-circuit if the child was already cancelled before this turn
         // started (e.g. queued swarm child cancelled by cancel_swarm).
         if snapshot.state.is_terminal() {
@@ -1405,7 +1409,7 @@ impl MultiAgentRuntime {
         id: &AgentId,
         started_at: Instant,
         event: &AgentEvent,
-    ) -> Option<AgentSnapshot> {
+    ) -> Option<AgentProgressSnapshot> {
         let mut locked = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = locked.agents.get_mut(id.as_str())?;
         // Ignore late buffered events after the agent has reached a terminal
@@ -1487,7 +1491,7 @@ impl MultiAgentRuntime {
                 let text = content_text(content);
                 if !text.trim().is_empty() {
                     changed = true;
-                    snapshot.latest_text = Some(text.clone());
+                    snapshot.latest_text = Some(bounded_latest_text(&text));
                     if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
                         != Some(text.trim())
                     {
@@ -1509,10 +1513,10 @@ impl MultiAgentRuntime {
             }
             AgentEvent::Error { message, .. } => {
                 changed = true;
-                snapshot.latest_text = Some(message.clone());
+                snapshot.latest_text = Some(bounded_latest_text(message));
                 snapshot.activity.push(AgentActivityEntry {
                     kind: AgentActivityKind::Text {
-                        text: message.clone(),
+                        text: bounded_latest_text(message),
                         thinking: false,
                     },
                 });
@@ -1523,7 +1527,7 @@ impl MultiAgentRuntime {
             return None;
         }
         trim_activity(&mut snapshot.activity);
-        Some(snapshot.clone())
+        Some(snapshot.progress_snapshot())
     }
 
     fn finish_child_run(
@@ -1889,7 +1893,7 @@ fn block_forbidden_subagent_tool_call(
 }
 
 fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunUpdate {
-    let latest_text = latest_assistant_text(events);
+    let latest_text = latest_assistant_text(events).map(|text| bounded_latest_text(&text));
     let summary = latest_text
         .clone()
         .filter(|text| !text.trim().is_empty())
@@ -2055,12 +2059,12 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
 }
 
 fn push_text_activity(snapshot: &mut AgentSnapshot, text: &str, thinking: bool) {
-    let Some(accumulated) = append_text_activity(&mut snapshot.activity, text, thinking) else {
+    if !append_text_activity(&mut snapshot.activity, text, thinking) {
         return;
-    };
+    }
 
     if !thinking {
-        snapshot.latest_text = Some(accumulated);
+        snapshot.latest_text = Some(bounded_latest_text(text));
     }
 }
 
@@ -2068,9 +2072,9 @@ fn append_text_activity(
     activity: &mut Vec<AgentActivityEntry>,
     text: &str,
     thinking: bool,
-) -> Option<String> {
+) -> bool {
     if text.trim().is_empty() {
-        return None;
+        return false;
     }
     if let Some(AgentActivityEntry {
         kind:
@@ -2081,17 +2085,33 @@ fn append_text_activity(
     }) = activity.last_mut()
         && *previous_thinking == thinking
     {
-        previous.push_str(text);
-        return Some(previous.trim().to_owned());
+        previous.push_str(&bounded_latest_text(text));
+        *previous = bounded_latest_text(previous);
+        return true;
     }
 
     activity.push(AgentActivityEntry {
         kind: AgentActivityKind::Text {
-            text: text.to_owned(),
+            text: bounded_latest_text(text),
             thinking,
         },
     });
-    Some(text.trim().to_owned())
+    true
+}
+
+const MAX_LATEST_MODEL_TEXT_CHARS: usize = 512;
+
+fn bounded_latest_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_LATEST_MODEL_TEXT_CHARS {
+        return trimmed.to_owned();
+    }
+    let keep = MAX_LATEST_MODEL_TEXT_CHARS.saturating_sub(3);
+    let start = trimmed
+        .char_indices()
+        .nth(trimmed.chars().count().saturating_sub(keep))
+        .map_or(0, |(index, _)| index);
+    format!("...{}", &trimmed[start..])
 }
 
 fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
@@ -2205,7 +2225,7 @@ fn summarize_tool_result(name: &str, result: &crate::ToolResult) -> Option<Strin
     }
 }
 
-const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 50_000;
+const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 512;
 
 fn tool_output_preview(
     name: &str,
@@ -2263,38 +2283,8 @@ fn compact_line(text: &str) -> String {
 
 fn trim_activity(activity: &mut Vec<AgentActivityEntry>) {
     const MAX_AGENT_ACTIVITY: usize = 24;
-    if activity.len() <= MAX_AGENT_ACTIVITY {
-        return;
-    }
-    let mut keep = vec![false; activity.len()];
-    for (index, entry) in activity.iter().enumerate().rev() {
-        if matches!(
-            entry.kind,
-            AgentActivityKind::Tool {
-                phase: AgentToolActivityPhase::Ongoing,
-                ..
-            }
-        ) {
-            keep[index] = true;
-        }
-    }
-    let ongoing_count = keep.iter().filter(|value| **value).count();
-    let mut remaining = MAX_AGENT_ACTIVITY.saturating_sub(ongoing_count);
-    for index in (0..activity.len()).rev() {
-        if keep[index] {
-            continue;
-        }
-        if remaining > 0 {
-            keep[index] = true;
-            remaining -= 1;
-        }
-    }
-    let mut index = 0usize;
-    activity.retain(|_| {
-        let retain = keep[index];
-        index += 1;
-        retain
-    });
+    let excess = activity.len().saturating_sub(MAX_AGENT_ACTIVITY);
+    activity.drain(..excess);
 }
 
 fn child_prompt(task: &str, context: DelegateContext, role: AgentRole) -> String {
