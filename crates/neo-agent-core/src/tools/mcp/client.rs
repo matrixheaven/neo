@@ -8,7 +8,7 @@ use rmcp::{
         CallToolRequest, CallToolRequestParams, ClientRequest, ListResourcesRequest,
         ListToolsRequest, ReadResourceRequest, ReadResourceRequestParams, ServerResult,
     },
-    service::{RoleClient, RunningService},
+    service::{Peer, RoleClient, RunningService},
 };
 use serde_json::Value;
 use tokio::{sync::Mutex, time::timeout};
@@ -30,6 +30,7 @@ pub trait McpClient: Send + Sync {
 
 #[derive(Debug)]
 pub struct RmcpClient {
+    peer: Peer<RoleClient>,
     service: Mutex<Option<RunningService<RoleClient, ()>>>,
     request_timeout: Option<Duration>,
 }
@@ -37,6 +38,7 @@ pub struct RmcpClient {
 impl RmcpClient {
     pub fn new(service: RunningService<RoleClient, ()>, request_timeout: Option<Duration>) -> Self {
         Self {
+            peer: service.peer().clone(),
             service: Mutex::new(Some(service)),
             request_timeout,
         }
@@ -54,18 +56,24 @@ impl RmcpClient {
             None => fut.await.map_err(|e| McpError::protocol(e.to_string())),
         }
     }
+
+    async fn ensure_running(&self) -> Result<(), McpError> {
+        let is_running = self.service.lock().await.is_some();
+        if is_running {
+            Ok(())
+        } else {
+            Err(McpError::protocol("MCP client already shut down"))
+        }
+    }
 }
 
 #[async_trait]
 impl McpClient for RmcpClient {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
         let request = ClientRequest::from(ListToolsRequest::default());
-        let service = self.service.lock().await;
-        let service = service
-            .as_ref()
-            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
+        self.ensure_running().await?;
         let result = self
-            .with_request_timeout(service.peer().send_request(request))
+            .with_request_timeout(self.peer.send_request(request))
             .await?;
         match result {
             ServerResult::ListToolsResult(result) => {
@@ -84,12 +92,9 @@ impl McpClient for RmcpClient {
         };
         let params = CallToolRequestParams::new(name.to_owned()).with_arguments(args);
         let request = ClientRequest::from(CallToolRequest::new(params));
-        let service = self.service.lock().await;
-        let service = service
-            .as_ref()
-            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
+        self.ensure_running().await?;
         let result = self
-            .with_request_timeout(service.peer().send_request(request))
+            .with_request_timeout(self.peer.send_request(request))
             .await?;
         match result {
             ServerResult::CallToolResult(result) => Ok(result.into()),
@@ -101,12 +106,9 @@ impl McpClient for RmcpClient {
 
     async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
         let request = ClientRequest::from(ListResourcesRequest::default());
-        let service = self.service.lock().await;
-        let service = service
-            .as_ref()
-            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
+        self.ensure_running().await?;
         let result = self
-            .with_request_timeout(service.peer().send_request(request))
+            .with_request_timeout(self.peer.send_request(request))
             .await?;
         match result {
             ServerResult::ListResourcesResult(result) => {
@@ -122,12 +124,9 @@ impl McpClient for RmcpClient {
         let request = ClientRequest::from(ReadResourceRequest::new(
             ReadResourceRequestParams::new(uri),
         ));
-        let service = self.service.lock().await;
-        let service = service
-            .as_ref()
-            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
+        self.ensure_running().await?;
         let result = self
-            .with_request_timeout(service.peer().send_request(request))
+            .with_request_timeout(self.peer.send_request(request))
             .await?;
         match result {
             ServerResult::ReadResourceResult(result) => Ok(result.into()),
@@ -150,5 +149,92 @@ impl McpClient for RmcpClient {
                 .map_err(|e| McpError::protocol(e.to_string()))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use rmcp::{
+        ServerHandler, ServiceExt,
+        model::{CallToolRequestParams, CallToolResult},
+        service::{RequestContext, RoleServer},
+    };
+    use tokio::sync::Notify;
+
+    use super::{McpClient, RmcpClient};
+
+    #[derive(Clone)]
+    struct HangingServer {
+        request_started: Arc<Notify>,
+    }
+
+    impl ServerHandler for HangingServer {
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, rmcp::ErrorData> {
+            self.request_started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_request_does_not_hold_shutdown_ownership_lock() {
+        let request_started = Arc::new(Notify::new());
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server = HangingServer {
+            request_started: Arc::clone(&request_started),
+        };
+        let mut server_task = tokio::spawn(async move {
+            let service = server.serve(server_transport).await.expect("server starts");
+            service.waiting().await.expect("server task joins");
+        });
+        let service = ().serve(client_transport).await.expect("client starts");
+        let client = Arc::new(RmcpClient::new(service, None));
+
+        let pending_client = Arc::clone(&client);
+        let pending_call = tokio::spawn(async move {
+            pending_client
+                .call_tool("hang", serde_json::json!({}))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), request_started.notified())
+            .await
+            .expect("server must receive the pending request");
+
+        tokio::time::timeout(Duration::from_millis(200), client.shutdown())
+            .await
+            .expect("shutdown must acquire service ownership while a request is pending")
+            .expect("shutdown succeeds");
+        assert!(
+            pending_call.await.expect("call task joins").is_err(),
+            "cancelling the service must fail the pending request"
+        );
+        let post_shutdown_error = client
+            .list_tools()
+            .await
+            .expect_err("requests after shutdown must fail");
+        assert_eq!(
+            post_shutdown_error.to_string(),
+            "MCP client already shut down"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut server_task)
+                .await
+                .is_err(),
+            "rmcp keeps the server alive while draining the hanging handler"
+        );
+        server_task.abort();
+        assert!(
+            server_task
+                .await
+                .expect_err("server task was aborted")
+                .is_cancelled(),
+            "server task must finish through cancellation"
+        );
     }
 }
