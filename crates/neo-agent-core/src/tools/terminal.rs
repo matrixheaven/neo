@@ -33,6 +33,53 @@ const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERMINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 const TERMINAL_OUTPUT_BUFFER_CAP: usize = 1024 * 1024;
 
+#[derive(Default)]
+struct TerminalUtf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl TerminalUtf8Decoder {
+    fn push(&mut self, chunk: &[u8]) -> String {
+        self.pending.extend_from_slice(chunk);
+        let (output, consumed) = decode_utf8_prefix(&self.pending);
+        self.pending.drain(..consumed);
+        output
+    }
+
+    fn finish(&mut self) -> String {
+        let output = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        output
+    }
+}
+
+fn decode_utf8_prefix(bytes: &[u8]) -> (String, usize) {
+    let mut output = String::new();
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(text) => {
+                output.push_str(text);
+                consumed = bytes.len();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(
+                    std::str::from_utf8(&bytes[consumed..consumed + valid])
+                        .expect("UTF-8 error valid prefix must be valid UTF-8"),
+                );
+                consumed += valid;
+                let Some(invalid_len) = error.error_len() else {
+                    break;
+                };
+                output.push('\u{FFFD}');
+                consumed += invalid_len;
+            }
+        }
+    }
+    (output, consumed)
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TerminalInput {
@@ -310,6 +357,7 @@ fn spawn_reader_thread(
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
     let handle = std::thread::spawn(move || {
         let mut local = [0_u8; 8192];
+        let mut decoder = TerminalUtf8Decoder::default();
         loop {
             match reader.read(&mut local) {
                 Ok(0) | Err(_) => break,
@@ -334,10 +382,23 @@ fn spawn_reader_thread(
                             .expect("stream callback lock poisoned")
                             .as_ref()
                         {
-                            callback(&String::from_utf8_lossy(streamed_chunk));
+                            let text = decoder.push(streamed_chunk);
+                            if !text.is_empty() {
+                                callback(&text);
+                            }
                         }
                     }
                 }
+            }
+        }
+        if let Some(callback) = stream_callback
+            .lock()
+            .expect("stream callback lock poisoned")
+            .as_ref()
+        {
+            let text = decoder.finish();
+            if !text.is_empty() {
+                callback(&text);
             }
         }
         // Best-effort completion signal; the consumer uses a timeout so a
@@ -699,8 +760,8 @@ impl TerminalOutputBuffer {
         let start_index = effective_offset.saturating_sub(self.start_offset);
         let available = self.bytes.get(start_index..).unwrap_or_default();
         let end_index = available.len().min(max_bytes);
-        let output = String::from_utf8_lossy(&available[..end_index]).into_owned();
-        let next_offset = effective_offset.saturating_add(end_index);
+        let (output, consumed) = decode_utf8_prefix(&available[..end_index]);
+        let next_offset = effective_offset.saturating_add(consumed);
         TerminalOutputRead {
             output,
             next_offset,
@@ -800,6 +861,36 @@ fn pty_error(operation: &str, err: impl std::fmt::Display) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_decoder_preserves_utf8_split_across_chunks() {
+        let mut decoder = TerminalUtf8Decoder::default();
+
+        assert_eq!(decoder.push(&[0xE4, 0xBD]), "");
+        assert_eq!(decoder.push(&[0xA0, b'!']), "你!");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn terminal_decoder_replaces_invalid_sequences_without_consuming_incomplete_suffix() {
+        let mut decoder = TerminalUtf8Decoder::default();
+        let invalid = vec![0xFF; 8 * 1024];
+
+        assert_eq!(decoder.push(&invalid), "\u{FFFD}".repeat(invalid.len()));
+        assert_eq!(decoder.push(&[b'!', 0xE4, 0xBD]), "!");
+        assert_eq!(decoder.push(&[0xA0]), "你");
+    }
+
+    #[test]
+    fn limited_read_does_not_advance_past_incomplete_utf8() {
+        let mut buffer = TerminalOutputBuffer::new(64);
+        buffer.push("你".as_bytes());
+
+        let first = buffer.read_since_limited(0, 2);
+        assert_eq!(first.output, "");
+        assert_eq!(first.next_offset, 0);
+        assert_eq!(buffer.read_since_limited(first.next_offset, 3).output, "你");
+    }
 
     #[test]
     fn terminal_output_buffer_discards_old_bytes_without_growing_unbounded() {
