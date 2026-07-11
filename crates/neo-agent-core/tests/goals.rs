@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use neo_agent_core::{
     AgentContext, AgentMessage,
-    goal::{Goal, GoalManager, GoalStatus, load_goal_store, save_goal},
+    goal::{Goal, GoalManager, GoalStatus, load_goal_store},
 };
 
 #[tokio::test]
@@ -47,10 +49,228 @@ async fn goal_manager_lifecycle() {
 }
 
 #[tokio::test]
+async fn start_rejects_an_active_goal_without_replacing_durable_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+
+    manager.start(Goal::new("first")).await.unwrap();
+    let first_id = manager.active().expect("first active goal").id;
+    let second = Goal::new("second");
+    let second_id = second.id.clone();
+
+    let error = manager
+        .start(second)
+        .await
+        .expect_err("an active goal must require explicit replacement");
+
+    assert!(error.to_string().contains("active goal"));
+    assert_eq!(
+        manager.active().expect("first goal remains active").id,
+        first_id
+    );
+    assert!(temp.path().join("agents/main/goals/active.json").is_file());
+    assert!(
+        !temp
+            .path()
+            .join("agents/main/goals/runs")
+            .join(second_id)
+            .exists()
+    );
+
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert_eq!(reloaded.active().expect("first goal restored").id, first_id);
+}
+
+#[tokio::test]
+async fn concurrent_starts_install_exactly_one_goal() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Arc::new(GoalManager::load(temp.path().to_path_buf()).await.unwrap());
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let first = Goal::new("first");
+    let first_id = first.id.clone();
+    let second = Goal::new("second");
+    let second_id = second.id.clone();
+
+    let spawn_start = |goal: Goal| {
+        let manager = Arc::clone(&manager);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            let id = goal.id.clone();
+            (id, manager.start(goal).await)
+        })
+    };
+    let first_start = spawn_start(first);
+    let second_start = spawn_start(second);
+    barrier.wait().await;
+
+    let (first_result, second_result) = tokio::join!(first_start, second_start);
+    let results = [first_result.unwrap(), second_result.unwrap()];
+    let winner = results
+        .iter()
+        .find_map(|(id, result)| result.is_ok().then_some(id))
+        .expect("one start succeeds");
+    let loser = if winner == &first_id {
+        &second_id
+    } else {
+        &first_id
+    };
+
+    assert_eq!(
+        results.iter().filter(|(_, result)| result.is_ok()).count(),
+        1
+    );
+    assert!(results.iter().any(|(_, result)| {
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("active goal"))
+    }));
+    assert_eq!(manager.active().expect("winner remains active").id, *winner);
+    assert!(
+        !temp
+            .path()
+            .join("agents/main/goals/runs")
+            .join(loser)
+            .exists()
+    );
+
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert_eq!(reloaded.active().expect("winner restored").id, *winner);
+}
+
+#[tokio::test]
+async fn independently_loaded_managers_share_one_serialized_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    let second_manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let first = tokio::spawn({
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            first_manager.start(Goal::new("first")).await
+        }
+    });
+    let second = tokio::spawn({
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            second_manager.start(Goal::new("second")).await
+        }
+    });
+    barrier.wait().await;
+
+    let (first, second) = tokio::join!(first, second);
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results.iter().any(|result| {
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("active goal"))
+    }));
+
+    let store = load_goal_store(temp.path()).await.unwrap();
+    assert!(store.active().is_some());
+    assert!(store.queue().is_empty());
+}
+
+#[tokio::test]
+async fn failed_start_save_does_not_install_active_goal() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    let goal = Goal::new("cannot persist");
+    let goal_path = temp.path().join("agents/main/goals").join("active.json");
+    std::fs::create_dir_all(&goal_path).unwrap();
+
+    manager
+        .start(goal)
+        .await
+        .expect_err("a goal whose JSON cannot be written must fail");
+
+    assert!(manager.active().is_none());
+}
+
+#[tokio::test]
+async fn failed_start_never_deletes_caller_supplied_artifact_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("keep.txt");
+    std::fs::write(&marker, "keep").unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    let mut goal = Goal::new("cannot persist");
+    goal.artifact_dir = Some(outside.path().to_path_buf());
+    let active_path = temp.path().join("agents/main/goals/active.json");
+    std::fs::create_dir_all(&active_path).unwrap();
+
+    manager
+        .start(goal)
+        .await
+        .expect_err("an unwritable goal store must fail");
+
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep");
+}
+
+#[tokio::test]
+async fn replacement_cannot_overwrite_existing_goal_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("first")).await.unwrap();
+    let active = manager.active().expect("active goal");
+    let marker = active
+        .artifact_dir
+        .as_ref()
+        .expect("artifact directory")
+        .join("GOAL.md");
+    let original = std::fs::read_to_string(&marker).unwrap();
+    let mut replacement = Goal::new("replacement");
+    replacement.id = active.id.clone();
+
+    manager
+        .replace(replacement)
+        .await
+        .expect_err("an existing goal id must not reuse its artifact directory");
+
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), original);
+    assert_eq!(
+        manager.active().expect("original remains active").id,
+        active.id
+    );
+}
+
+#[tokio::test]
+async fn failed_replace_save_preserves_previous_goal() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("first")).await.unwrap();
+    let first = manager.active().expect("first active goal");
+    let active_path = temp.path().join("agents/main/goals/active.json");
+    let first_store = std::fs::read(&active_path).unwrap();
+    std::fs::remove_file(&active_path).unwrap();
+    let replacement = Goal::new("cannot persist");
+    std::fs::create_dir(&active_path).unwrap();
+
+    manager
+        .replace(replacement)
+        .await
+        .expect_err("an unwritable replacement must fail");
+
+    assert_eq!(
+        manager.active().expect("first goal remains active").id,
+        first.id
+    );
+    std::fs::remove_dir(&active_path).unwrap();
+    std::fs::write(&active_path, first_store).unwrap();
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert_eq!(reloaded.active().expect("first goal restored").id, first.id);
+}
+
+#[tokio::test]
 async fn goal_persists_to_disk() {
     let temp = tempfile::tempdir().unwrap();
     let goal = Goal::new("persist me").with_completion_criterion("tests pass");
-    save_goal(temp.path(), &goal).await.unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(goal).await.unwrap();
 
     let store = load_goal_store(temp.path()).await.unwrap();
     let active = store.active().unwrap();
@@ -59,34 +279,66 @@ async fn goal_persists_to_disk() {
     assert!(
         temp.path()
             .join("agents/main/goals")
-            .join(format!("{}.json", active.id))
+            .join("active.json")
             .is_file()
     );
-    assert!(
-        !temp
-            .path()
-            .join("goals")
-            .join(format!("{}.json", active.id))
-            .exists()
-    );
+    assert!(!temp.path().join("goals").join("active.json").exists());
+}
+
+#[tokio::test]
+async fn goal_store_uses_one_authoritative_active_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("first")).await.unwrap();
+    manager.queue_next(Goal::new("second")).await.unwrap();
+
+    let goals_dir = temp.path().join("agents/main/goals");
+    let json_files = std::fs::read_dir(&goals_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert_eq!(json_files, vec![goals_dir.join("active.json")]);
+
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert_eq!(reloaded.active().unwrap().objective, "first");
+    assert_eq!(reloaded.queue().len(), 1);
+    assert_eq!(reloaded.queue()[0].objective, "second");
+}
+
+#[tokio::test]
+async fn stale_legacy_goal_json_is_never_loaded() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("authoritative")).await.unwrap();
+    let authoritative_id = manager.active().unwrap().id;
+    let stale = Goal::new("stale legacy");
+    let stale_path = temp
+        .path()
+        .join("agents/main/goals")
+        .join(format!("{}.json", stale.id));
+    std::fs::write(&stale_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert_eq!(reloaded.active().unwrap().id, authoritative_id);
+    assert!(reloaded.queue().is_empty());
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn save_goal_rejects_symlinked_goal_json() {
+async fn goal_store_rejects_symlinked_active_json() {
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let goal = Goal::new("do not follow links");
-    let goal_path = temp
-        .path()
-        .join("agents/main/goals")
-        .join(format!("{}.json", goal.id));
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    let goal_path = temp.path().join("agents/main/goals").join("active.json");
     let outside_goal = outside.path().join("goal.json");
     std::fs::create_dir_all(goal_path.parent().expect("goal parent")).unwrap();
     std::fs::write(&outside_goal, "outside").unwrap();
     std::os::unix::fs::symlink(&outside_goal, &goal_path).unwrap();
 
-    let error = save_goal(temp.path(), &goal)
+    let error = manager
+        .start(goal)
         .await
         .expect_err("goal save should reject symlinked target");
 
@@ -95,6 +347,61 @@ async fn save_goal_rejects_symlinked_goal_json() {
         "error should name symlink risk: {error}"
     );
     assert_eq!(std::fs::read_to_string(&outside_goal).unwrap(), "outside");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_store_load_rejects_symlinked_active_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let goals_dir = temp.path().join("agents/main/goals");
+    let active_path = goals_dir.join("active.json");
+    let outside_store = outside.path().join("goal.json");
+    std::fs::create_dir_all(&goals_dir).unwrap();
+    std::fs::write(&outside_store, r#"{"active":null,"queue":[]}"#).unwrap();
+    std::os::unix::fs::symlink(&outside_store, &active_path).unwrap();
+
+    let error = GoalManager::load(temp.path().to_path_buf())
+        .await
+        .expect_err("goal load should reject a symlinked authority file");
+
+    assert!(error.to_string().contains("symlink"), "{error:#}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_store_load_rejects_symlinked_artifact_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("authoritative")).await.unwrap();
+    let artifact_dir = manager
+        .active()
+        .expect("active goal")
+        .artifact_dir
+        .expect("artifact directory");
+    std::fs::remove_dir_all(&artifact_dir).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &artifact_dir).unwrap();
+
+    let error = load_goal_store(temp.path())
+        .await
+        .expect_err("goal load should reject a symlinked artifact directory");
+
+    assert!(error.to_string().contains("symlink"), "{error:#}");
+}
+
+#[tokio::test]
+async fn goal_store_supports_repeated_atomic_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+    manager.start(Goal::new("first")).await.unwrap();
+    manager.pause().await.unwrap();
+
+    let reloaded = load_goal_store(temp.path()).await.unwrap();
+    assert!(matches!(
+        reloaded.active().expect("active goal").status,
+        GoalStatus::Paused
+    ));
 }
 
 #[tokio::test]
