@@ -40,6 +40,7 @@ pub(crate) fn build_command(config: &StdioConfig) -> Command {
 
 pub async fn build_stdio_client(
     server_id: &str,
+    attempt_id: u64,
     config: StdioConfig,
     supervisor: &ProcessSupervisor,
 ) -> Result<Arc<dyn McpClient>, McpError> {
@@ -67,18 +68,32 @@ pub async fn build_stdio_client(
     let client: Arc<dyn McpClient> =
         Arc::new(super::client::RmcpClient::new(service, request_timeout));
 
-    let handle = format!("mcp_stdio_{server_id}");
+    let handle = process_handle(server_id, attempt_id);
+    let cleanup_server_id = server_id.to_owned();
     let client_for_cleanup = Arc::clone(&client);
     supervisor
-        .register(handle, move |_handle| {
+        .register(handle, move |handle| {
             let client = Arc::clone(&client_for_cleanup);
+            let server_id = cleanup_server_id.clone();
             Box::pin(async move {
-                let _ = client.shutdown().await;
+                if let Err(error) = client.shutdown().await {
+                    tracing::warn!(
+                        %server_id,
+                        attempt_id,
+                        %handle,
+                        error = %error.message(),
+                        "failed to shut down supervised stdio MCP client"
+                    );
+                }
             })
         })
         .await;
 
     Ok(client)
+}
+
+pub(crate) fn process_handle(server_id: &str, attempt_id: u64) -> String {
+    format!("mcp_stdio_{server_id}_{attempt_id}")
 }
 
 async fn drain_stderr<R>(stderr: R)

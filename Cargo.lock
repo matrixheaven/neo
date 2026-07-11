@@ -1965,6 +1965,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
  "uuid",
  "winapi",
  "windows-acl",

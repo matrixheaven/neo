@@ -39,6 +39,13 @@ impl ProcessSupervisor {
         self.processes.lock().await.remove(handle);
     }
 
+    pub async fn remove_and_cleanup(&self, handle: &str) {
+        let process = self.processes.lock().await.remove(handle);
+        if let Some(process) = process {
+            (process.cleanup)(handle.to_owned()).await;
+        }
+    }
+
     pub async fn active_count(&self) -> usize {
         self.processes.lock().await.len()
     }
@@ -53,5 +60,21 @@ impl ProcessSupervisor {
         for (handle, process) in processes {
             (process.cleanup)(handle).await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_immediately<F>(&self, handle: String, cleanup: F)
+    where
+        F: Fn(String) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    {
+        self.processes
+            .try_lock()
+            .expect("supervisor lock available")
+            .insert(
+                handle,
+                SupervisedProcess {
+                    cleanup: Arc::new(cleanup),
+                },
+            );
     }
 }

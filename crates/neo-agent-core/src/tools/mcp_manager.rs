@@ -152,8 +152,15 @@ struct ManagedMcpEntry {
     error: Option<McpDiagnostic>,
     reconnect_attempt: u32,
     next_retry_ms: Option<u64>,
-    reconnect_task: Option<JoinHandle<Result<ConnectOutcome, McpError>>>,
-    connect_task: Option<JoinHandle<Result<ConnectOutcome, McpError>>>,
+    reconnect_task: Option<ManagedConnectTask>,
+    connect_task: Option<ManagedConnectTask>,
+}
+
+struct ManagedConnectTask {
+    attempt_id: u64,
+    expected_status: McpServerStatus,
+    cleanup_handle: Option<String>,
+    handle: JoinHandle<Result<ConnectOutcome, McpError>>,
 }
 
 struct McpConnectionManagerState {
@@ -161,6 +168,14 @@ struct McpConnectionManagerState {
     entries: BTreeMap<String, ManagedMcpEntry>,
     next_attempt_id: u64,
     oauth_service: McpOAuthService,
+    #[cfg(test)]
+    poll_phase_hook: Option<Arc<PollPhaseHook>>,
+}
+
+#[cfg(test)]
+struct PollPhaseHook {
+    observed_finished: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    continue_poll: tokio::sync::Notify,
 }
 
 /// Owns configured MCP server state and exposes snapshots, resource operations,
@@ -179,6 +194,8 @@ impl McpConnectionManager {
                 entries: BTreeMap::new(),
                 next_attempt_id: 1,
                 oauth_service: McpOAuthService::new(McpOAuthServiceConfig { neo_home: None }),
+                #[cfg(test)]
+                poll_phase_hook: None,
             })),
         }
     }
@@ -194,6 +211,8 @@ impl McpConnectionManager {
                 entries: BTreeMap::new(),
                 next_attempt_id: 1,
                 oauth_service,
+                #[cfg(test)]
+                poll_phase_hook: None,
             })),
         }
     }
@@ -211,6 +230,7 @@ impl McpConnectionManager {
         servers: Vec<ManagedMcpServerConfig>,
     ) -> Vec<McpServerSnapshot> {
         let mut state = self.inner.write().await;
+        let mut retirement = ConnectionRetirement::default();
 
         // Remove entries no longer present.
         let new_ids: BTreeSet<String> = servers.iter().map(|s| s.id.clone()).collect();
@@ -218,7 +238,7 @@ impl McpConnectionManager {
             if new_ids.contains(&entry.config.id) {
                 return true;
             }
-            abort_tasks(entry);
+            retirement.collect_entry(entry);
             false
         });
 
@@ -233,7 +253,7 @@ impl McpConnectionManager {
                     state.entries.insert(server.id.clone(), existing);
                     continue;
                 }
-                abort_tasks(&mut existing);
+                retirement.collect_entry(&mut existing);
                 existing.config = server.clone();
                 existing.attempt_id = attempt_id;
                 existing.status = McpServerStatus::Pending;
@@ -269,15 +289,24 @@ impl McpConnectionManager {
 
             if server.enabled {
                 let oauth_service = state.oauth_service.clone();
-                let handle = spawn_connect(server.clone(), state.supervisor.clone(), oauth_service);
-                entry.connect_task = Some(handle);
+                entry.connect_task = Some(spawn_connect(
+                    server.clone(),
+                    state.supervisor.clone(),
+                    oauth_service,
+                    attempt_id,
+                    McpServerStatus::Pending,
+                ));
             } else {
                 entry.status = McpServerStatus::Disabled;
             }
             state.entries.insert(server.id.clone(), entry);
         }
 
-        state.entries.values().map(snapshot_for_entry).collect()
+        let supervisor = state.supervisor.clone();
+        let snapshots = state.entries.values().map(snapshot_for_entry).collect();
+        drop(state);
+        retirement.retire(&supervisor).await;
+        snapshots
     }
 
     /// Add or update a single server.
@@ -307,13 +336,17 @@ impl McpConnectionManager {
         let Some(mut entry) = state.entries.remove(id) else {
             return false;
         };
-        abort_tasks(&mut entry);
+        let mut retirement = ConnectionRetirement::default();
+        retirement.collect_entry(&mut entry);
+        let supervisor = state.supervisor.clone();
+        drop(state);
+        retirement.retire(&supervisor).await;
         true
     }
 
     /// Force an immediate reconnect for the given server.
     pub async fn reconnect_now(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (config, supervisor, oauth_service) = {
+        let (config, supervisor, oauth_service, attempt_id, retirement) = {
             let mut state = self.inner.write().await;
             let Some(mut entry) = state.entries.remove(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
@@ -322,7 +355,8 @@ impl McpConnectionManager {
                 state.entries.insert(id.to_owned(), entry);
                 anyhow::bail!("MCP server '{id}' is disabled");
             }
-            abort_tasks(&mut entry);
+            let mut retirement = ConnectionRetirement::default();
+            retirement.collect_entry(&mut entry);
             let attempt_id = state.next_attempt_id;
             state.next_attempt_id += 1;
             entry.attempt_id = attempt_id;
@@ -338,15 +372,33 @@ impl McpConnectionManager {
             let oauth_service = state.oauth_service.clone();
             let config = entry.config.clone();
             state.entries.insert(id.to_owned(), entry);
-            (config, supervisor, oauth_service)
+            (config, supervisor, oauth_service, attempt_id, retirement)
         };
 
-        let handle = spawn_connect(config.clone(), supervisor, oauth_service);
-        {
+        retirement.retire(&supervisor).await;
+        let task = spawn_connect(
+            config.clone(),
+            supervisor.clone(),
+            oauth_service,
+            attempt_id,
+            McpServerStatus::Pending,
+        );
+        let rejected_task = {
             let mut state = self.inner.write().await;
-            if let Some(entry) = state.entries.get_mut(id) {
-                entry.connect_task = Some(handle);
+            if let Some(entry) = state.entries.get_mut(id)
+                && entry.attempt_id == attempt_id
+                && entry.status == McpServerStatus::Pending
+            {
+                entry.connect_task = Some(task);
+                None
+            } else {
+                Some(task)
             }
+        };
+        if let Some(task) = rejected_task {
+            let mut retirement = ConnectionRetirement::default();
+            retirement.push_task(task);
+            retirement.retire(&supervisor).await;
         }
 
         // Wait briefly for a fast connection; otherwise return pending snapshot.
@@ -359,25 +411,57 @@ impl McpConnectionManager {
 
     /// Refresh the tool list for a connected server.
     pub async fn refresh_tools(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (client, config) = {
+        let (client, config, attempt_id, supervisor) = {
             let mut state = self.inner.write().await;
+            let supervisor = state.supervisor.clone();
             let Some(entry) = state.entries.get_mut(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
             };
+            if entry.status != McpServerStatus::Connected {
+                anyhow::bail!("MCP server '{id}' is not connected");
+            }
             let Some(client) = entry.client.clone() else {
                 anyhow::bail!("MCP server '{id}' is not connected");
             };
+            let attempt_id = entry.attempt_id;
             entry.status = McpServerStatus::Pending;
-            (client, entry.config.clone())
+            (client, entry.config.clone(), attempt_id, supervisor)
         };
 
         let result = discover_tools(&client, &config).await;
 
-        let (snapshot, need_reconnect) = {
+        let (snapshot, need_reconnect, refresh_failed) = {
             let mut state = self.inner.write().await;
             let Some(entry) = state.entries.get_mut(id) else {
+                drop(state);
+                let mut retirement = ConnectionRetirement::default();
+                if matches!(config.transport, ManagedMcpTransport::Stdio { .. }) {
+                    retirement.push_cleanup(stdio_cleanup_handle_for_config(&config, attempt_id));
+                } else {
+                    retirement.push_client(config.id.clone(), client);
+                }
+                retirement.retire(&supervisor).await;
                 anyhow::bail!("MCP server '{id}' disappeared during refresh");
             };
+            if entry.attempt_id != attempt_id
+                || entry.status != McpServerStatus::Pending
+                || !entry
+                    .client
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+            {
+                let snapshot = snapshot_for_entry(entry);
+                drop(state);
+                let mut retirement = ConnectionRetirement::default();
+                if matches!(config.transport, ManagedMcpTransport::Stdio { .. }) {
+                    retirement.push_cleanup(stdio_cleanup_handle_for_config(&config, attempt_id));
+                } else {
+                    retirement.push_client(config.id.clone(), client);
+                }
+                retirement.retire(&supervisor).await;
+                return Ok(snapshot);
+            }
+            let refresh_failed = result.is_err();
             let need_reconnect = match result {
                 Ok((tools, resources)) => {
                     entry.status = McpServerStatus::Connected;
@@ -398,9 +482,18 @@ impl McpConnectionManager {
                     }
                 }
             };
-            (snapshot_for_entry(entry), need_reconnect)
+            (snapshot_for_entry(entry), need_reconnect, refresh_failed)
         };
 
+        if refresh_failed {
+            let mut retirement = ConnectionRetirement::default();
+            if matches!(config.transport, ManagedMcpTransport::Stdio { .. }) {
+                retirement.push_cleanup(stdio_cleanup_handle_for_config(&config, attempt_id));
+            } else {
+                retirement.push_client(config.id.clone(), client);
+            }
+            retirement.retire(&supervisor).await;
+        }
         if need_reconnect {
             self.schedule_reconnect(id).await;
         }
@@ -616,13 +709,16 @@ impl McpConnectionManager {
     /// Shut down all managed servers and cancel pending tasks.
     pub async fn shutdown(&self) {
         let mut state = self.inner.write().await;
+        let mut retirement = ConnectionRetirement::default();
         for entry in state.entries.values_mut() {
-            abort_tasks(entry);
-            entry.client = None;
+            retirement.collect_entry(entry);
             entry.oauth_identity = None;
             entry.status = McpServerStatus::Disabled;
         }
-        state.supervisor.cleanup_all().await;
+        let supervisor = state.supervisor.clone();
+        drop(state);
+        retirement.retire(&supervisor).await;
+        supervisor.cleanup_all().await;
     }
 
     /// Schedule a background reconnect task for a server in `Reconnecting`
@@ -630,36 +726,69 @@ impl McpConnectionManager {
     /// `connect_one`. Its result is later consumed by
     /// [`poll_finished_connections`].
     async fn schedule_reconnect(&self, id: &str) {
-        let (config, supervisor, oauth_service, delay_ms) = {
-            let state = self.inner.read().await;
-            let Some(entry) = state.entries.get(id) else {
+        let (config, supervisor, oauth_service, delay_ms, attempt_id, retirement) = {
+            let mut state = self.inner.write().await;
+            let supervisor = state.supervisor.clone();
+            let oauth_service = state.oauth_service.clone();
+            let Some(mut entry) = state.entries.remove(id) else {
                 return;
             };
             if !matches!(entry.status, McpServerStatus::Reconnecting) {
+                state.entries.insert(id.to_owned(), entry);
                 return;
             }
             let Some(delay_ms) = entry.next_retry_ms else {
+                state.entries.insert(id.to_owned(), entry);
                 return;
             };
+            let mut retirement = ConnectionRetirement::default();
+            retirement.collect_entry(&mut entry);
+            let attempt_id = state.next_attempt_id;
+            state.next_attempt_id += 1;
+            entry.attempt_id = attempt_id;
+            let config = entry.config.clone();
+            state.entries.insert(id.to_owned(), entry);
             (
-                entry.config.clone(),
-                state.supervisor.clone(),
-                state.oauth_service.clone(),
+                config,
+                supervisor,
+                oauth_service,
                 delay_ms,
+                attempt_id,
+                retirement,
             )
         };
+        retirement.retire(&supervisor).await;
 
+        let cleanup_handle = stdio_cleanup_handle_for_config(&config, attempt_id);
+        let task_supervisor = supervisor.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            connect_one(config, supervisor, oauth_service).await
+            connect_one(config, task_supervisor, oauth_service, attempt_id).await
         });
+        let task = ManagedConnectTask {
+            attempt_id,
+            expected_status: McpServerStatus::Reconnecting,
+            cleanup_handle,
+            handle,
+        };
 
-        let mut state = self.inner.write().await;
-        if let Some(entry) = state.entries.get_mut(id) {
-            if let Some(old) = entry.reconnect_task.take() {
-                old.abort();
+        let rejected_task = {
+            let mut state = self.inner.write().await;
+            if let Some(entry) = state.entries.get_mut(id)
+                && entry.attempt_id == attempt_id
+                && entry.status == McpServerStatus::Reconnecting
+                && entry.reconnect_task.is_none()
+            {
+                entry.reconnect_task = Some(task);
+                None
+            } else {
+                Some(task)
             }
-            entry.reconnect_task = Some(handle);
+        };
+        if let Some(task) = rejected_task {
+            let mut retirement = ConnectionRetirement::default();
+            retirement.push_task(task);
+            retirement.retire(&supervisor).await;
         }
     }
 
@@ -671,57 +800,73 @@ impl McpConnectionManager {
         {
             let mut state = self.inner.write().await;
             for (id, entry) in &mut state.entries {
-                if let Some(task) = &mut entry.connect_task
-                    && task.is_finished()
+                if let Some(task) = &entry.connect_task
+                    && task.handle.is_finished()
                 {
-                    completed_connects.push((id.clone(), entry.attempt_id));
+                    completed_connects.push((
+                        id.clone(),
+                        entry.connect_task.take().expect("finished task exists"),
+                    ));
                 }
-                if let Some(task) = &mut entry.reconnect_task
-                    && task.is_finished()
+                if let Some(task) = &entry.reconnect_task
+                    && task.handle.is_finished()
                 {
-                    completed_reconnects.push((id.clone(), entry.attempt_id));
+                    completed_reconnects.push((
+                        id.clone(),
+                        entry.reconnect_task.take().expect("finished task exists"),
+                    ));
                 }
             }
         }
 
+        #[cfg(test)]
+        let poll_phase_hook = {
+            let state = self.inner.read().await;
+            state.poll_phase_hook.clone()
+        };
+        #[cfg(test)]
+        if let Some(hook) = poll_phase_hook {
+            let observed = hook
+                .observed_finished
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(observed_finished) = observed {
+                let _ = observed_finished.send(());
+                hook.continue_poll.notified().await;
+            }
+        }
+
         let mut need_reconnect = Vec::new();
+        let mut cleanup_handles = Vec::new();
+        let supervisor = self.inner.read().await.supervisor.clone();
 
         // Process finished connect tasks.
-        for (id, attempt_id) in completed_connects {
-            let handle = {
-                let mut state = self.inner.write().await;
-                let Some(entry) = state.entries.get_mut(&id) else {
-                    continue;
-                };
-                entry.connect_task.take()
-            };
-            let Some(handle) = handle else {
-                continue;
-            };
-            match handle.await {
+        for (id, task) in completed_connects {
+            let attempt_id = task.attempt_id;
+            let expected_status = task.expected_status;
+            let cleanup_handle = task.cleanup_handle;
+            match task.handle.await {
                 Ok(Ok(outcome)) => {
                     let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id {
-                        continue;
+                    let accepted = install_connect_outcome(
+                        state.entries.get_mut(&id),
+                        attempt_id,
+                        &expected_status,
+                        &outcome,
+                    );
+                    drop(state);
+                    if !accepted {
+                        retire_rejected_outcome(&id, outcome, cleanup_handle, &supervisor).await;
                     }
-                    entry.client = Some(outcome.client);
-                    entry.oauth_identity = outcome.oauth_identity;
-                    entry.tools = outcome.tools;
-                    entry.resources = outcome.resources;
-                    entry.status = McpServerStatus::Connected;
-                    entry.error = None;
-                    entry.reconnect_attempt = 0;
-                    entry.next_retry_ms = None;
                 }
                 Ok(Err(err)) => {
+                    cleanup_handles.extend(cleanup_handle);
                     let mut state = self.inner.write().await;
                     let Some(entry) = state.entries.get_mut(&id) else {
                         continue;
                     };
-                    if entry.attempt_id != attempt_id {
+                    if entry.attempt_id != attempt_id || entry.status != expected_status {
                         continue;
                     }
                     if apply_connect_error(entry, &err) {
@@ -729,11 +874,12 @@ impl McpConnectionManager {
                     }
                 }
                 Err(join_err) => {
+                    cleanup_handles.extend(cleanup_handle);
                     let mut state = self.inner.write().await;
                     let Some(entry) = state.entries.get_mut(&id) else {
                         continue;
                     };
-                    if entry.attempt_id != attempt_id {
+                    if entry.attempt_id != attempt_id || entry.status != expected_status {
                         continue;
                     }
                     let diagnostic = McpDiagnostic {
@@ -751,41 +897,31 @@ impl McpConnectionManager {
         }
 
         // Process finished reconnect tasks.
-        for (id, attempt_id) in completed_reconnects {
-            let handle = {
-                let mut state = self.inner.write().await;
-                let Some(entry) = state.entries.get_mut(&id) else {
-                    continue;
-                };
-                entry.reconnect_task.take()
-            };
-            let Some(handle) = handle else {
-                continue;
-            };
-            match handle.await {
+        for (id, task) in completed_reconnects {
+            let attempt_id = task.attempt_id;
+            let expected_status = task.expected_status;
+            let cleanup_handle = task.cleanup_handle;
+            match task.handle.await {
                 Ok(Ok(outcome)) => {
                     let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id {
-                        continue;
+                    let accepted = install_connect_outcome(
+                        state.entries.get_mut(&id),
+                        attempt_id,
+                        &expected_status,
+                        &outcome,
+                    );
+                    drop(state);
+                    if !accepted {
+                        retire_rejected_outcome(&id, outcome, cleanup_handle, &supervisor).await;
                     }
-                    entry.client = Some(outcome.client);
-                    entry.oauth_identity = outcome.oauth_identity;
-                    entry.tools = outcome.tools;
-                    entry.resources = outcome.resources;
-                    entry.status = McpServerStatus::Connected;
-                    entry.error = None;
-                    entry.reconnect_attempt = 0;
-                    entry.next_retry_ms = None;
                 }
                 Ok(Err(err)) => {
+                    cleanup_handles.extend(cleanup_handle);
                     let mut state = self.inner.write().await;
                     let Some(entry) = state.entries.get_mut(&id) else {
                         continue;
                     };
-                    if entry.attempt_id != attempt_id {
+                    if entry.attempt_id != attempt_id || entry.status != expected_status {
                         continue;
                     }
                     if apply_connect_error(entry, &err) {
@@ -793,11 +929,12 @@ impl McpConnectionManager {
                     }
                 }
                 Err(join_err) => {
+                    cleanup_handles.extend(cleanup_handle);
                     let mut state = self.inner.write().await;
                     let Some(entry) = state.entries.get_mut(&id) else {
                         continue;
                     };
-                    if entry.attempt_id != attempt_id {
+                    if entry.attempt_id != attempt_id || entry.status != expected_status {
                         continue;
                     }
                     let diagnostic = McpDiagnostic {
@@ -814,6 +951,10 @@ impl McpConnectionManager {
             }
         }
 
+        for handle in cleanup_handles {
+            supervisor.remove_and_cleanup(&handle).await;
+        }
+
         // Schedule reconnect tasks for entries that need them.
         for id in &need_reconnect {
             self.schedule_reconnect(id).await;
@@ -825,8 +966,20 @@ fn spawn_connect(
     config: ManagedMcpServerConfig,
     supervisor: ProcessSupervisor,
     oauth_service: McpOAuthService,
-) -> JoinHandle<Result<ConnectOutcome, McpError>> {
-    tokio::spawn(async move { connect_one(config, supervisor, oauth_service).await })
+    attempt_id: u64,
+    expected_status: McpServerStatus,
+) -> ManagedConnectTask {
+    let cleanup_handle = stdio_cleanup_handle_for_config(&config, attempt_id);
+    let handle =
+        tokio::spawn(
+            async move { connect_one(config, supervisor, oauth_service, attempt_id).await },
+        );
+    ManagedConnectTask {
+        attempt_id,
+        expected_status,
+        cleanup_handle,
+        handle,
+    }
 }
 
 struct ConnectOutcome {
@@ -840,21 +993,50 @@ async fn connect_one(
     config: ManagedMcpServerConfig,
     supervisor: ProcessSupervisor,
     oauth_service: McpOAuthService,
+    attempt_id: u64,
 ) -> Result<ConnectOutcome, McpError> {
-    let built = build_client_for_config(&config, &supervisor, oauth_service).await?;
+    let built = build_client_for_config(&config, &supervisor, oauth_service, attempt_id).await?;
+    complete_connection(built.client, built.oauth_identity, &config).await
+}
+
+async fn complete_connection(
+    client: Arc<dyn McpClient>,
+    oauth_identity: Option<McpOAuthIdentity>,
+    config: &ManagedMcpServerConfig,
+) -> Result<ConnectOutcome, McpError> {
     let timeout_ms = config.startup_timeout_ms.unwrap_or(5_000);
-    let (tools, resources) = tokio::time::timeout(
+    let discovery = match tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        discover_tools(&built.client, &config),
+        discover_tools(&client, config),
     )
     .await
-    .map_err(|_| McpError::protocol(format!("timeout connecting to MCP server {}", config.id)))??;
-    Ok(ConnectOutcome {
-        client: built.client,
-        oauth_identity: built.oauth_identity,
-        tools,
-        resources,
-    })
+    {
+        Ok(result) => result,
+        Err(_) => Err(McpError::protocol(format!(
+            "timeout connecting to MCP server {}",
+            config.id
+        ))),
+    };
+    match discovery {
+        Ok((tools, resources)) => Ok(ConnectOutcome {
+            client,
+            oauth_identity,
+            tools,
+            resources,
+        }),
+        Err(error) => {
+            if !matches!(config.transport, ManagedMcpTransport::Stdio { .. })
+                && let Err(shutdown_error) = client.shutdown().await
+            {
+                tracing::warn!(
+                    server_id = %config.id,
+                    error = %shutdown_error.message(),
+                    "failed to shut down MCP client after discovery failure"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn discover_tools(
@@ -886,6 +1068,7 @@ async fn build_client_for_config(
     config: &ManagedMcpServerConfig,
     supervisor: &ProcessSupervisor,
     oauth_service: McpOAuthService,
+    attempt_id: u64,
 ) -> Result<BuiltClient, McpError> {
     match &config.transport {
         ManagedMcpTransport::Stdio {
@@ -896,6 +1079,7 @@ async fn build_client_for_config(
         } => {
             let client = stdio::build_stdio_client(
                 &config.id,
+                attempt_id,
                 StdioConfig {
                     command: command.clone(),
                     args: args.clone(),
@@ -1057,13 +1241,124 @@ fn reconnect_delay_ms(policy: McpReconnectPolicy, attempt: u32) -> u64 {
     raw.min(policy.max_delay_ms)
 }
 
-fn abort_tasks(entry: &mut ManagedMcpEntry) {
-    if let Some(task) = entry.connect_task.take() {
-        task.abort();
+#[derive(Default)]
+struct ConnectionRetirement {
+    tasks: Vec<ManagedConnectTask>,
+    direct_clients: Vec<(String, Arc<dyn McpClient>)>,
+    cleanup_handles: Vec<String>,
+}
+
+impl ConnectionRetirement {
+    fn collect_entry(&mut self, entry: &mut ManagedMcpEntry) {
+        let client = entry.client.take();
+        match &entry.config.transport {
+            ManagedMcpTransport::Stdio { .. } => {
+                self.push_cleanup(stdio_cleanup_handle(entry));
+            }
+            ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. } => {
+                if let Some(client) = client {
+                    self.push_client(entry.config.id.clone(), client);
+                }
+            }
+        }
+        self.collect_tasks(entry);
     }
-    if let Some(task) = entry.reconnect_task.take() {
-        task.abort();
+
+    fn collect_tasks(&mut self, entry: &mut ManagedMcpEntry) {
+        if let Some(task) = entry.connect_task.take() {
+            self.tasks.push(task);
+        }
+        if let Some(task) = entry.reconnect_task.take() {
+            self.tasks.push(task);
+        }
     }
+
+    fn push_client(&mut self, server_id: String, client: Arc<dyn McpClient>) {
+        self.direct_clients.push((server_id, client));
+    }
+
+    fn push_task(&mut self, task: ManagedConnectTask) {
+        self.tasks.push(task);
+    }
+
+    fn push_cleanup(&mut self, handle: Option<String>) {
+        self.cleanup_handles.extend(handle);
+    }
+
+    async fn retire(self, supervisor: &ProcessSupervisor) {
+        for task in &self.tasks {
+            task.handle.abort();
+        }
+        for task in self.tasks {
+            let cleanup_handle = task.cleanup_handle;
+            let _ = task.handle.await;
+            if let Some(handle) = cleanup_handle {
+                supervisor.remove_and_cleanup(&handle).await;
+            }
+        }
+        for (server_id, client) in self.direct_clients {
+            if let Err(error) = client.shutdown().await {
+                tracing::warn!(
+                    %server_id,
+                    error = %error.message(),
+                    "failed to shut down retired MCP client"
+                );
+            }
+        }
+        for handle in self.cleanup_handles {
+            supervisor.remove_and_cleanup(&handle).await;
+        }
+    }
+}
+
+fn install_connect_outcome(
+    entry: Option<&mut ManagedMcpEntry>,
+    attempt_id: u64,
+    expected_status: &McpServerStatus,
+    outcome: &ConnectOutcome,
+) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    if entry.attempt_id != attempt_id || entry.status != *expected_status {
+        return false;
+    }
+    entry.client = Some(Arc::clone(&outcome.client));
+    entry.oauth_identity = outcome.oauth_identity.clone();
+    entry.tools.clone_from(&outcome.tools);
+    entry.resources.clone_from(&outcome.resources);
+    entry.status = McpServerStatus::Connected;
+    entry.error = None;
+    entry.reconnect_attempt = 0;
+    entry.next_retry_ms = None;
+    true
+}
+
+async fn retire_rejected_outcome(
+    server_id: &str,
+    outcome: ConnectOutcome,
+    cleanup_handle: Option<String>,
+    supervisor: &ProcessSupervisor,
+) {
+    let mut retirement = ConnectionRetirement::default();
+    if cleanup_handle.is_some() {
+        retirement.push_cleanup(cleanup_handle);
+    } else {
+        retirement.push_client(server_id.to_owned(), outcome.client);
+    }
+    retirement.retire(supervisor).await;
+}
+
+fn stdio_cleanup_handle(entry: &ManagedMcpEntry) -> Option<String> {
+    stdio_cleanup_handle_for_config(&entry.config, entry.attempt_id)
+}
+
+fn stdio_cleanup_handle_for_config(
+    config: &ManagedMcpServerConfig,
+    attempt_id: u64,
+) -> Option<String> {
+    matches!(config.transport, ManagedMcpTransport::Stdio { .. })
+        .then(|| stdio::process_handle(&config.id, attempt_id))
 }
 
 fn snapshot_for_entry(entry: &ManagedMcpEntry) -> McpServerSnapshot {
@@ -1413,6 +1708,513 @@ mod tests {
             .map(|snapshot| snapshot.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["one", "three", "two"]);
+    }
+
+    #[tokio::test]
+    async fn stale_reconnect_cannot_install_into_a_new_generation() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::Reconnecting);
+        entry.client = None;
+        entry.tools.clear();
+        entry.resources.clear();
+        entry.reconnect_task = Some(ManagedConnectTask {
+            attempt_id: 1,
+            expected_status: McpServerStatus::Reconnecting,
+            cleanup_handle: None,
+            handle: tokio::spawn(async {
+                Ok(ConnectOutcome {
+                    client: Arc::new(MockMcpClient {
+                        tool_name: "stale".to_owned(),
+                        echo_text: "stale".to_owned(),
+                    }),
+                    oauth_identity: None,
+                    tools: vec![McpToolDefinition::new(
+                        "stale",
+                        "stale tool",
+                        serde_json::json!({"type": "object"}),
+                    )],
+                    resources: Vec::new(),
+                })
+            }),
+        });
+        while !entry
+            .reconnect_task
+            .as_ref()
+            .expect("old reconnect task exists")
+            .handle
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // The reconnect belongs to generation 1, but a reconfiguration has
+        // already advanced the entry to generation 2.
+        entry.attempt_id = 2;
+        insert_entry(&manager, entry).await;
+
+        manager.poll_finished_connections().await;
+
+        let state = manager.inner.read().await;
+        let entry = state.entries.get("auth-server").unwrap();
+        assert_eq!(entry.attempt_id, 2);
+        assert_eq!(entry.status, McpServerStatus::Reconnecting);
+        assert!(entry.client.is_none());
+        assert!(entry.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_stdio_server_awaits_registered_cleanup() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        manager.apply_config(vec![disabled_server("removed")]).await;
+        let cleaned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleaned_for_task = Arc::clone(&cleaned);
+        supervisor
+            .register(stdio::process_handle("removed", 1), move |_handle| {
+                let cleaned = Arc::clone(&cleaned_for_task);
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    cleaned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .await;
+
+        assert!(manager.remove_server("removed").await);
+
+        assert_eq!(cleaned.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn removing_server_awaits_task_before_late_cleanup_registration() {
+        struct RegisterCleanupOnDrop {
+            supervisor: ProcessSupervisor,
+            cleaned: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl Drop for RegisterCleanupOnDrop {
+            fn drop(&mut self) {
+                let cleaned = Arc::clone(&self.cleaned);
+                self.supervisor.register_immediately(
+                    stdio::process_handle("late", 1),
+                    move |_handle| {
+                        let cleaned = Arc::clone(&cleaned);
+                        Box::pin(async move {
+                            cleaned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        })
+                    },
+                );
+            }
+        }
+
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        manager.apply_config(vec![disabled_server("late")]).await;
+        let cleaned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard = RegisterCleanupOnDrop {
+            supervisor: supervisor.clone(),
+            cleaned: Arc::clone(&cleaned),
+        };
+        {
+            let mut state = manager.inner.write().await;
+            let entry = state.entries.get_mut("late").unwrap();
+            entry.connect_task = Some(ManagedConnectTask {
+                attempt_id: 1,
+                expected_status: McpServerStatus::Pending,
+                cleanup_handle: Some(stdio::process_handle("late", 1)),
+                handle: tokio::spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<Result<ConnectOutcome, McpError>>().await
+                }),
+            });
+        }
+        tokio::task::yield_now().await;
+
+        assert!(manager.remove_server("late").await);
+
+        assert_eq!(cleaned.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn poll_does_not_take_a_replacement_task_from_the_same_slot() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let (observed_finished_tx, observed_finished_rx) = tokio::sync::oneshot::channel();
+        let hook = Arc::new(PollPhaseHook {
+            observed_finished: std::sync::Mutex::new(Some(observed_finished_tx)),
+            continue_poll: tokio::sync::Notify::new(),
+        });
+        let mut entry = entry_for_status(McpServerStatus::Reconnecting);
+        entry.client = None;
+        entry.reconnect_task = Some(ManagedConnectTask {
+            attempt_id: 1,
+            expected_status: McpServerStatus::Reconnecting,
+            cleanup_handle: None,
+            handle: tokio::spawn(async { Err(McpError::protocol("old attempt")) }),
+        });
+        while !entry
+            .reconnect_task
+            .as_ref()
+            .expect("old reconnect task exists")
+            .handle
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
+        insert_entry(&manager, entry).await;
+        manager.inner.write().await.poll_phase_hook = Some(Arc::clone(&hook));
+
+        let poll_manager = manager.clone();
+        let poll = tokio::spawn(async move { poll_manager.poll_finished_connections().await });
+        observed_finished_rx.await.unwrap();
+        {
+            let mut state = manager.inner.write().await;
+            let entry = state.entries.get_mut("auth-server").unwrap();
+            entry.attempt_id = 2;
+            entry.reconnect_task = Some(ManagedConnectTask {
+                attempt_id: 2,
+                expected_status: McpServerStatus::Reconnecting,
+                cleanup_handle: None,
+                handle: tokio::spawn(std::future::pending()),
+            });
+        }
+        hook.continue_poll.notify_one();
+
+        tokio::time::timeout(Duration::from_millis(100), poll)
+            .await
+            .expect("poll must not await the replacement task")
+            .unwrap();
+
+        let state = manager.inner.read().await;
+        let task = state
+            .entries
+            .get("auth-server")
+            .unwrap()
+            .reconnect_task
+            .as_ref()
+            .unwrap();
+        assert_eq!(task.attempt_id, 2);
+        assert!(!task.handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn failing_taken_task_cleans_up_after_entry_is_removed() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        let (observed_finished_tx, observed_finished_rx) = tokio::sync::oneshot::channel();
+        let hook = Arc::new(PollPhaseHook {
+            observed_finished: std::sync::Mutex::new(Some(observed_finished_tx)),
+            continue_poll: tokio::sync::Notify::new(),
+        });
+        let cleaned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleaned_for_cleanup = cleaned.clone();
+        supervisor
+            .register(stdio::process_handle("auth-server", 1), move |_handle| {
+                let cleaned = cleaned_for_cleanup.clone();
+                Box::pin(async move {
+                    cleaned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .await;
+        let mut entry = entry_for_status(McpServerStatus::Reconnecting);
+        entry.attempt_id = 2;
+        entry.client = None;
+        entry.reconnect_task = Some(ManagedConnectTask {
+            attempt_id: 1,
+            expected_status: McpServerStatus::Reconnecting,
+            cleanup_handle: Some(stdio::process_handle("auth-server", 1)),
+            handle: tokio::spawn(async { Err(McpError::protocol("old failure")) }),
+        });
+        while !entry.reconnect_task.as_ref().unwrap().handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        insert_entry(&manager, entry).await;
+        manager.inner.write().await.poll_phase_hook = Some(Arc::clone(&hook));
+
+        let poll_manager = manager.clone();
+        let poll = tokio::spawn(async move { poll_manager.poll_finished_connections().await });
+        observed_finished_rx.await.unwrap();
+        assert!(manager.remove_server("auth-server").await);
+        hook.continue_poll.notify_one();
+        poll.await.unwrap();
+
+        assert_eq!(cleaned.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    struct ControlledClient {
+        list_started: tokio::sync::Notify,
+        release_list: tokio::sync::Notify,
+        shutdowns: std::sync::atomic::AtomicUsize,
+        fail_list: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl McpClient for ControlledClient {
+        async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
+            self.list_started.notify_one();
+            self.release_list.notified().await;
+            if self.fail_list {
+                return Err(McpError::protocol("refresh failed"));
+            }
+            Ok(vec![McpToolDefinition::new(
+                "fresh",
+                "fresh tool",
+                serde_json::json!({"type": "object"}),
+            )])
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<McpToolResponse, McpError> {
+            unreachable!()
+        }
+
+        async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
+            unreachable!()
+        }
+
+        async fn shutdown(&self) -> Result<(), McpError> {
+            self.shutdowns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_cannot_overwrite_a_reconfigured_entry() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: false,
+        });
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.client = Some(client.clone());
+        insert_entry(&manager, entry).await;
+        supervisor
+            .register(stdio::process_handle("auth-server", 1), {
+                let client = client.clone();
+                move |_handle| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let _ = client.shutdown().await;
+                    })
+                }
+            })
+            .await;
+
+        let refresh_manager = manager.clone();
+        let refresh =
+            tokio::spawn(async move { refresh_manager.refresh_tools("auth-server").await });
+        client.list_started.notified().await;
+        {
+            let mut state = manager.inner.write().await;
+            let entry = state.entries.get_mut("auth-server").unwrap();
+            entry.attempt_id = 2;
+            entry.status = McpServerStatus::Disabled;
+            entry.client = None;
+            entry.tools.clear();
+        }
+        client.release_list.notify_one();
+
+        let _ = refresh.await.unwrap();
+
+        let state = manager.inner.read().await;
+        let entry = state.entries.get("auth-server").unwrap();
+        assert_eq!(entry.attempt_id, 2);
+        assert_eq!(entry.status, McpServerStatus::Disabled);
+        assert!(entry.client.is_none());
+        assert!(entry.tools.is_empty());
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_reconnect_uses_a_fresh_attempt_id() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::Reconnecting);
+        entry.config.enabled = true;
+        entry.next_retry_ms = Some(60_000);
+        insert_entry(&manager, entry).await;
+        manager.inner.write().await.next_attempt_id = 2;
+
+        manager.schedule_reconnect("auth-server").await;
+
+        let state = manager.inner.read().await;
+        let entry = state.entries.get("auth-server").unwrap();
+        assert_eq!(entry.attempt_id, 2);
+        assert_eq!(entry.reconnect_task.as_ref().unwrap().attempt_id, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_successful_outcome_shuts_down_its_client() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: false,
+        });
+        let mut entry = entry_for_status(McpServerStatus::Reconnecting);
+        entry.attempt_id = 2;
+        entry.client = None;
+        entry.reconnect_task = Some(ManagedConnectTask {
+            attempt_id: 1,
+            expected_status: McpServerStatus::Reconnecting,
+            cleanup_handle: None,
+            handle: tokio::spawn({
+                let client = client.clone();
+                async move {
+                    Ok(ConnectOutcome {
+                        client,
+                        oauth_identity: None,
+                        tools: Vec::new(),
+                        resources: Vec::new(),
+                    })
+                }
+            }),
+        });
+        while !entry.reconnect_task.as_ref().unwrap().handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        insert_entry(&manager, entry).await;
+
+        manager.poll_finished_connections().await;
+
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_without_reconnect_retires_client_and_cleanup() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: true,
+        });
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.config.reconnect.enabled = false;
+        entry.client = Some(client.clone());
+        insert_entry(&manager, entry).await;
+        supervisor
+            .register(stdio::process_handle("auth-server", 1), {
+                let client = client.clone();
+                move |_handle| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let _ = client.shutdown().await;
+                    })
+                }
+            })
+            .await;
+
+        let refresh_manager = manager.clone();
+        let refresh =
+            tokio::spawn(async move { refresh_manager.refresh_tools("auth-server").await });
+        client.list_started.notified().await;
+        client.release_list.notify_one();
+        refresh.await.unwrap().unwrap();
+
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn removing_connected_stdio_server_shuts_down_client_once() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: false,
+        });
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.client = Some(client.clone());
+        insert_entry(&manager, entry).await;
+        supervisor
+            .register(stdio::process_handle("auth-server", 1), {
+                let client = client.clone();
+                move |_handle| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let _ = client.shutdown().await;
+                    })
+                }
+            })
+            .await;
+
+        assert!(manager.remove_server("auth-server").await);
+
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn removing_connected_http_server_awaits_client_shutdown() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: false,
+        });
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.config = http_server("http-remove");
+        entry.client = Some(client.clone());
+        insert_entry(&manager, entry).await;
+
+        assert!(manager.remove_server("http-remove").await);
+
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_shuts_down_client_before_returning_error() {
+        let client = Arc::new(ControlledClient {
+            list_started: tokio::sync::Notify::new(),
+            release_list: tokio::sync::Notify::new(),
+            shutdowns: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: true,
+        });
+        client.release_list.notify_one();
+
+        let error = match complete_connection(client.clone(), None, &http_server("discovery")).await
+        {
+            Ok(_) => panic!("discovery should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.message(), "refresh failed");
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
