@@ -163,7 +163,7 @@ static TERMINALS: LazyLock<Mutex<HashMap<String, TerminalSession>>> =
 struct TerminalSession {
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<StdMutex<Box<dyn Write + Send>>>,
     output: Arc<StdMutex<TerminalOutputBuffer>>,
     read_offset: usize,
     read_lock: Arc<Mutex<()>>,
@@ -271,7 +271,7 @@ async fn start_terminal(
         TerminalSession {
             child,
             master: pair.master,
-            writer,
+            writer: Arc::new(StdMutex::new(writer)),
             output,
             read_offset: 0,
             read_lock: Arc::new(Mutex::new(())),
@@ -351,16 +351,29 @@ fn spawn_reader_thread(
 }
 
 async fn write_terminal(tool: &str, handle: &str, input: &str) -> Result<ToolResult, ToolError> {
-    let mut terminals = TERMINALS.lock().await;
-    let session = terminals
-        .get_mut(handle)
-        .ok_or_else(|| unknown_terminal(tool, handle))?;
+    let writer = {
+        let terminals = TERMINALS.lock().await;
+        Arc::clone(
+            &terminals
+                .get(handle)
+                .ok_or_else(|| unknown_terminal(tool, handle))?
+                .writer,
+        )
+    };
     let input = normalize_terminal_input_newlines(input);
-    session
-        .writer
-        .write_all(input.as_bytes())
-        .map_err(ToolError::Io)?;
-    session.writer.flush().map_err(ToolError::Io)?;
+    task::spawn_blocking(move || {
+        let mut writer = writer
+            .lock()
+            .map_err(|_| ToolError::Io(std::io::Error::other("terminal writer lock poisoned")))?;
+        writer.write_all(input.as_bytes()).map_err(ToolError::Io)?;
+        writer.flush().map_err(ToolError::Io)
+    })
+    .await
+    .map_err(|error| {
+        ToolError::Io(std::io::Error::other(format!(
+            "terminal write task: {error}"
+        )))
+    })??;
     Ok(
         ToolResult::ok(format!("handle: {handle}\nstatus: running\nwritten: true")).with_details(
             json!({
@@ -588,10 +601,10 @@ fn stop_session(
         .stream_max_bytes
         .lock()
         .expect("stream max lock poisoned") = max_output_bytes;
-    drop(session.writer);
     drop(session.master);
     let _ = session.child.kill();
     let exit_status = session.child.wait().ok();
+    drop(session.writer);
 
     let reader_drained = if let Some(reader) = session.reader_thread.take() {
         reader

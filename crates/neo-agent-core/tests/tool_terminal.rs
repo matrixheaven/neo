@@ -2,6 +2,99 @@ use neo_agent_core::{ProcessSupervisor, ToolAccess, ToolContext, ToolError, Tool
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = std::sync::Arc::new(ToolRegistry::with_builtin_tools());
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor);
+
+    let blocked = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "python3 -c 'import sys, time; sys.stdin.read(1); print(\"writer-started\", flush=True); time.sleep(5)'"
+            }),
+        )
+        .await
+        .expect("blocked terminal start");
+    let blocked_handle = blocked.details.as_ref().expect("blocked details")["handle"]
+        .as_str()
+        .expect("blocked handle")
+        .to_owned();
+    let healthy = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": "printf healthy-terminal; sleep 1" }),
+        )
+        .await
+        .expect("healthy terminal start");
+    let healthy_handle = healthy.details.as_ref().expect("healthy details")["handle"]
+        .as_str()
+        .expect("healthy handle")
+        .to_owned();
+
+    let writer_registry = std::sync::Arc::clone(&registry);
+    let writer_context = context.clone();
+    let writer_handle = blocked_handle.clone();
+    let write = tokio::spawn(async move {
+        writer_registry
+            .run(
+                "Terminal",
+                &writer_context,
+                json!({
+                    "mode": "write",
+                    "handle": writer_handle,
+                    "input": format!("x\n{}", "x".repeat(16 * 1024 * 1024)),
+                }),
+            )
+            .await
+    });
+    let blocked_output =
+        read_terminal_until(&registry, &context, &blocked_handle, "writer-started").await;
+    assert!(blocked_output.contains("writer-started"));
+
+    let healthy_read = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.run(
+            "Terminal",
+            &context,
+            json!({ "mode": "read", "handle": healthy_handle.clone() }),
+        ),
+    )
+    .await
+    .expect("another terminal must remain available")
+    .expect("healthy terminal read");
+    assert!(healthy_read.content.contains("healthy-terminal"));
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": blocked_handle }),
+        )
+        .await
+        .expect("blocked terminal stop");
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": healthy_handle }),
+        )
+        .await
+        .expect("healthy terminal stop");
+    let _write_result = tokio::time::timeout(std::time::Duration::from_secs(1), write)
+        .await
+        .expect("blocked write must finish after terminal stop")
+        .expect("blocked write task join");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_stop_returns_promptly_for_interactive_shell() {
     let workspace = tempfile::tempdir().expect("workspace");
     let supervisor = ProcessSupervisor::default();
