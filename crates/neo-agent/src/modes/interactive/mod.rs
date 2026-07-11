@@ -1376,7 +1376,7 @@ impl InteractiveController {
                 } => {
                     self.clear_submitted_prompt();
                     self.open_interactive_preflight(
-                        spec,
+                        *spec,
                         PendingInteractiveWorkflow::Skill {
                             directives,
                             generated_prompt,

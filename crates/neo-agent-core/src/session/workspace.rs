@@ -19,6 +19,33 @@ pub fn normalize_workdir(workdir: &Path) -> PathBuf {
     std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf())
 }
 
+/// Feed a path's native OS representation into a SHA-256 digest.
+pub fn hash_os_path_into(path: &Path, hasher: &mut Sha256) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        hasher.update(path.as_os_str().as_bytes());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        hash_wide_units_into(path.as_os_str().encode_wide(), hasher);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(path.as_os_str().as_encoded_bytes());
+}
+
+#[cfg(windows)]
+fn hash_wide_units_into(units: impl IntoIterator<Item = u16>, hasher: &mut Sha256) {
+    for unit in units {
+        hasher.update(unit.to_le_bytes());
+    }
+}
+
 /// Convert a directory's `basename` into a filesystem-safe slug:
 /// lowercase, non-`[a-z0-9._-]` → `-`, trimmed, max 40 chars.
 /// Returns `"workspace"` if the result would be empty.
@@ -56,7 +83,9 @@ pub fn slugify_basename(workdir: &Path) -> String {
 pub fn encode_workdir_key(workdir: &Path) -> String {
     let normalized = normalize_workdir(workdir);
     let slug = slugify_basename(&normalized);
-    let hash = Sha256::digest(normalized.to_string_lossy().as_bytes());
+    let mut hasher = Sha256::new();
+    hash_os_path_into(&normalized, &mut hasher);
+    let hash = hasher.finalize();
     let hash_hex: String =
         hash.iter()
             .take(HASH_LENGTH.div_ceil(2))
@@ -125,6 +154,28 @@ mod tests {
         let key1 = encode_workdir_key(Path::new("/home/user1/neo"));
         let key2 = encode_workdir_key(Path::new("/home/user2/neo"));
         assert_ne!(key1, key2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_keys_distinguish_different_invalid_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let a = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/work-\xFE".to_vec()));
+        let b = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/work-\xFF".to_vec()));
+
+        assert_ne!(encode_workdir_key(&a), encode_workdir_key(&b));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wide_path_hash_distinguishes_unpaired_surrogates() {
+        let mut a = Sha256::new();
+        hash_wide_units_into([0xD800], &mut a);
+        let mut b = Sha256::new();
+        hash_wide_units_into([0xD801], &mut b);
+
+        assert_ne!(a.finalize(), b.finalize());
     }
 
     #[test]

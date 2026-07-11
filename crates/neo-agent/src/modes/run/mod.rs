@@ -770,10 +770,10 @@ async fn append_streaming_event(
     if let Some(text) = effect.assistant_text {
         assistant_text.push_str(&text);
     }
-    if effect.persist {
-        if let Some(persisted) = persistence.persisted_event(event) {
-            writer.append_event(&persisted).await?;
-        }
+    if effect.persist
+        && let Some(persisted) = persistence.persisted_event(event)
+    {
+        writer.append_event(&persisted).await?;
     }
     if effect.forward {
         let _ = event_tx.send(Ok(event.clone()));

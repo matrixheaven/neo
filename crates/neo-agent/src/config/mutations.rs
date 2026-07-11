@@ -178,7 +178,7 @@ pub fn add_custom_endpoint_provider(
         }
     }
 
-    if let Some(default_alias) = default_model.map(str::to_owned).or_else(|| {
+    if let Some(default_alias) = default_model.map(str::to_owned).or({
         if should_set_default {
             first_alias
         } else {
