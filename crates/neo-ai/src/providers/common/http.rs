@@ -1,8 +1,4 @@
-//! Shared HTTP helpers: retry loop with exponential backoff, and header injection.
-//!
-//! These are byte-for-byte identical across the four provider wire clients
-//! (`openai::responses`, `anthropic`, `openai::compatible`, `google`), so they
-//! live here to avoid duplication.
+//! Shared HTTP helpers for provider wire clients.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,7 +8,7 @@ use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio_util::sync::CancellationToken;
 
-use super::error::ProviderError;
+use super::error::{ProviderError, error_body_excerpt, parse_retry_after};
 use crate::{AiError, ChatRequest};
 
 /// Minimum backoff delay (first retry attempt).
@@ -21,6 +17,38 @@ const RETRY_MIN_MS: u64 = 300;
 const RETRY_MAX_MS: u64 = 5_000;
 /// Default total attempts when `request.options.retries` is unset.
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+pub(crate) async fn http_status_error(mut response: reqwest::Response) -> ProviderError {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after);
+    let mut bytes = Vec::new();
+
+    while bytes.len() < ERROR_BODY_LIMIT {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
+        let remaining = ERROR_BODY_LIMIT - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+
+    let body = if bytes.is_empty() {
+        None
+    } else {
+        Some(error_body_excerpt(&String::from_utf8_lossy(&bytes)))
+    };
+
+    ProviderError::HttpStatus {
+        status,
+        body,
+        retry_after,
+    }
+}
 
 /// Compute the backoff delay for a given attempt number.
 ///

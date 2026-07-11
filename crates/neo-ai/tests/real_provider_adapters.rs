@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 use neo_ai::{
@@ -52,6 +53,31 @@ impl MockServer {
 
     fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn start_unfinished_chunked_error(body: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
+
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut socket);
+            captured_requests.lock().unwrap().push(request);
+            write!(
+                socket,
+                "HTTP/1.1 400 Bad Request\r\ntransfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n{:x}\r\n",
+                body.len()
+            )
+            .unwrap();
+            socket.write_all(&body).unwrap();
+            socket.write_all(b"\r\n").unwrap();
+            socket.flush().unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        Self { url, requests }
     }
 }
 
@@ -2178,7 +2204,11 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
     assert_eq!(sent.method, "POST");
     assert_eq!(
         sent.path,
-        "/models/model-test:streamGenerateContent?alt=sse&key=test-key"
+        "/models/model-test:streamGenerateContent?alt=sse"
+    );
+    assert_eq!(
+        sent.headers.get("x-goog-api-key").map(String::as_str),
+        Some("test-key")
     );
     assert_eq!(sent.body["contents"][0]["role"], "user");
     assert_eq!(sent.body["contents"][0]["parts"][0]["text"], "hello");
@@ -2197,6 +2227,62 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
             .is_none(),
         "thinkingConfig must be omitted unless reasoning is requested"
     );
+}
+
+#[tokio::test]
+async fn google_uses_header_auth_and_maps_bounded_error_body() {
+    let body = r#"{"error":{"message":"context_length exceeded"}}"#;
+    let server = MockServer::start(vec![format!(
+        "HTTP/1.1 413 Content Too Large\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "secret-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.headers.insert(
+        "x-goog-api-key".to_owned(),
+        "attacker-controlled".to_owned(),
+    );
+
+    let err = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("x-goog-api-key")
+            .map(String::as_str),
+        Some("secret-key")
+    );
+    assert!(!requests[0].path.contains("secret-key"));
+    assert_eq!(err.code(), "provider.context_overflow");
+}
+
+#[tokio::test]
+async fn provider_error_body_stops_reading_at_limit() {
+    let server = MockServer::start_unfinished_chunked_error(vec![b'x'; 64 * 1024]);
+    let client = GoogleGenerativeAiClient::new(server.url, "test-key");
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(1),
+        client
+            .stream_chat(request(ApiKind::GoogleGenerativeAi))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("provider should stop reading once the error body reaches its limit");
+    let err = events
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert_eq!(err.code(), "provider.stream_error");
 }
 
 #[tokio::test]

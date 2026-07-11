@@ -4,7 +4,7 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use super::common::error::{ProviderError, error_body_excerpt, parse_retry_after};
+use super::common::error::ProviderError;
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -52,23 +52,8 @@ impl AnthropicMessagesClient {
         }
 
         let response = builder.send().await.map_err(ProviderError::Transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            let status = status.as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after);
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|err| format!("failed to read error body: {err}"));
-            return Err(ProviderError::HttpStatus {
-                status,
-                body: Some(error_body_excerpt(&body)),
-                retry_after,
-            });
+        if !response.status().is_success() {
+            return Err(super::common::http::http_status_error(response).await);
         }
 
         Ok(response)

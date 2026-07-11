@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{StreamExt, future, stream};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use super::common::error::{ProviderError, parse_retry_after};
+use super::common::error::ProviderError;
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -39,12 +39,12 @@ impl GoogleGenerativeAiClient {
         &self,
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let url = request_url(&self.base_url, &request.model.model, &self.api_key)?;
+        let url = request_url(&self.base_url, &request.model.model)?;
         let body = request_body(request)?;
         let mut builder = self
             .client
             .post(url)
-            .headers(headers(&request.options.headers)?)
+            .headers(headers(&self.api_key, &request.options.headers)?)
             .json(&body);
 
         if let Some(timeout) = request.options.timeout {
@@ -52,19 +52,8 @@ impl GoogleGenerativeAiClient {
         }
 
         let response = builder.send().await.map_err(ProviderError::Transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            let status = status.as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after);
-            return Err(ProviderError::HttpStatus {
-                status,
-                body: None,
-                retry_after,
-            });
+        if !response.status().is_success() {
+            return Err(super::common::http::http_status_error(response).await);
         }
 
         Ok(response)
@@ -86,19 +75,24 @@ impl ModelClient for GoogleGenerativeAiClient {
     }
 }
 
-fn request_url(base_url: &str, model: &str, api_key: &str) -> Result<reqwest::Url, ProviderError> {
+fn request_url(base_url: &str, model: &str) -> Result<reqwest::Url, ProviderError> {
     let model = model.strip_prefix("models/").unwrap_or(model);
     let mut url = reqwest::Url::parse(&format!("{base_url}/models/{model}:streamGenerateContent"))
         .map_err(|err| ProviderError::Url(format!("invalid Google Generative AI URL: {err}")))?;
-    url.query_pairs_mut()
-        .append_pair("alt", "sse")
-        .append_pair("key", api_key);
+    url.query_pairs_mut().append_pair("alt", "sse");
     Ok(url)
 }
 
-fn headers(extra_headers: &BTreeMap<String, String>) -> Result<HeaderMap, ProviderError> {
+fn headers(
+    api_key: &str,
+    extra_headers: &BTreeMap<String, String>,
+) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
     super::common::http::inject_extra_headers(&mut headers, extra_headers)?;
+    let mut api_key = HeaderValue::from_str(api_key)
+        .map_err(|err| ProviderError::Header(format!("invalid Google API key header: {err}")))?;
+    api_key.set_sensitive(true);
+    headers.insert(HeaderName::from_static("x-goog-api-key"), api_key);
     Ok(headers)
 }
 
@@ -619,6 +613,18 @@ fn stop_reason(reason: &str) -> StopReason {
 mod tests {
     use super::*;
     use crate::ToolCall;
+
+    #[test]
+    fn api_key_header_is_sensitive() {
+        let headers = headers("secret-key", &BTreeMap::new()).unwrap();
+
+        assert!(
+            headers
+                .get("x-goog-api-key")
+                .expect("API key header should be present")
+                .is_sensitive()
+        );
+    }
 
     #[test]
     fn assistant_replay_rejects_invalid_raw_tool_arguments() {

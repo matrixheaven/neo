@@ -1,7 +1,7 @@
 use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
-use crate::providers::common::error::{ProviderError, parse_retry_after};
+use crate::providers::common::error::ProviderError;
 use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -61,24 +61,8 @@ impl OpenAiCompatibleClient {
         }
 
         let response = builder.send().await.map_err(ProviderError::Transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            let status = status.as_u16();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after);
-            let body = response
-                .text()
-                .await
-                .map(|text| crate::providers::common::error::error_body_excerpt(&text))
-                .ok();
-            return Err(ProviderError::HttpStatus {
-                status,
-                body,
-                retry_after,
-            });
+        if !response.status().is_success() {
+            return Err(crate::providers::common::http::http_status_error(response).await);
         }
 
         Ok(response)
