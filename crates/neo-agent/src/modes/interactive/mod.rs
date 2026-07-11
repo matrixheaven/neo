@@ -958,18 +958,19 @@ impl InteractiveController {
 
     /// Reloads configuration from disk and refreshes all derived state.
     fn refresh_config(&mut self) {
-        let Some(path) = self.config_path() else {
+        let Some(mut current) = self.local_config.clone() else {
             return;
         };
-        // Build minimal overrides pointing at the same config path.
+        current.permission_mode = self.permission_mode;
+        let path = current.config_path.clone();
         let overrides = crate::config::ConfigOverrides {
             config_path: Some(path),
-            yolo: false,
-            auto: false,
+            project_dir: Some(current.project_dir.clone()),
             ..crate::config::ConfigOverrides::default()
         };
         match crate::config::AppConfig::load(overrides) {
-            Ok(config) => {
+            Ok(mut config) => {
+                config.inherit_live_state(&current);
                 let catalogs = picker_catalogs_for_config(&config);
                 self.session_items = catalogs.session_items;
                 self.session_list_error = catalogs.session_error;

@@ -6850,6 +6850,64 @@ fn model_selection_persists_reasoning_and_provider_across_reload() {
     assert_eq!(reloaded.default_provider, "anthropic");
 }
 
+#[tokio::test]
+async fn refresh_config_preserves_live_task_and_multi_agent_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "").expect("write config");
+    let mut config = test_config(temp.path(), temp.path().join("sessions"));
+    config.config_path = config_path;
+    *config.workspace_policy.write().expect("workspace policy") = Some(
+        neo_agent_core::WorkspaceAccessPolicy::new(temp.path().to_path_buf())
+            .expect("workspace access policy"),
+    );
+    config
+        .background_tasks
+        .start_question("question-1".to_owned(), "Pick one".to_owned())
+        .await;
+    let agent = config
+        .multi_agent
+        .start_foreground_delegate_for_test("preserve delegate");
+    let live_permission_mode = Arc::clone(&config.live_permission_mode);
+    let workspace_policy = Arc::clone(&config.workspace_policy);
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.live_permission_mode = Arc::clone(&config.live_permission_mode);
+    controller.workspace_policy = Arc::clone(&config.workspace_policy);
+    controller.local_config = Some(config);
+    controller.set_permission_mode(PermissionMode::Yolo);
+
+    controller.refresh_config();
+
+    let reloaded = controller.local_config.as_ref().expect("reloaded config");
+    assert_eq!(reloaded.background_tasks.list(false, 10).await.len(), 1);
+    assert!(reloaded.multi_agent.snapshot(&agent.id).is_some());
+    assert!(Arc::ptr_eq(
+        &reloaded.live_permission_mode,
+        &live_permission_mode
+    ));
+    assert!(Arc::ptr_eq(&reloaded.workspace_policy, &workspace_policy));
+    assert_eq!(reloaded.permission_mode, PermissionMode::Yolo);
+    assert_eq!(
+        *reloaded
+            .live_permission_mode
+            .read()
+            .expect("live permission mode"),
+        PermissionMode::Yolo
+    );
+    assert!(reloaded.project_trusted);
+    assert_eq!(
+        reloaded.project_trust,
+        crate::trust::ProjectTrustState::NotRequired
+    );
+}
+
 #[test]
 fn model_selection_without_thinking_sets_reasoning_off() {
     let temp = tempfile::tempdir().expect("tempdir");

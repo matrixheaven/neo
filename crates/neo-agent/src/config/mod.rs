@@ -114,6 +114,14 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub(crate) fn inherit_live_state(&mut self, current: &Self) {
+        self.permission_mode = current.permission_mode;
+        self.live_permission_mode = Arc::clone(&current.live_permission_mode);
+        self.workspace_policy = Arc::clone(&current.workspace_policy);
+        self.background_tasks = current.background_tasks.clone();
+        self.multi_agent = current.multi_agent.clone();
+    }
+
     /// The canonical `provider/model` display label for the configured default
     /// model. This is the single source of truth for label formatting.
     ///
