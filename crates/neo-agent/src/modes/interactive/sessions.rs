@@ -30,11 +30,7 @@ impl InteractiveController {
             return Ok(());
         }
 
-        let command = format!(
-            "cd '{}' && neo --resume '{}'",
-            session.work_dir.display(),
-            session.id
-        );
+        let command = format!("neo resume {}", session.id);
         self.push_status(command.clone());
         if let Err(error) = (self.clipboard_writer)(&command) {
             tracing::warn!("failed to copy resume command to clipboard: {error}");

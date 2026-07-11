@@ -1129,8 +1129,8 @@ mod tests {
         assert_eq!(agent_config.max_tokens, Some(64_000));
     }
 
-    #[tokio::test]
-    async fn create_session_path_uses_named_uuid_session_ids() {
+    #[test]
+    fn create_session_path_uses_named_uuid_session_ids() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = AppConfig {
             default_model: "test-model".to_owned(),
@@ -1165,30 +1165,48 @@ mod tests {
             config_file_exists: true,
         };
 
-        let path = create_session_path(&config)
-            .await
-            .expect("session path is created");
-        let session_dir = path
-            .parent()
-            .and_then(std::path::Path::parent)
-            .and_then(std::path::Path::parent)
-            .expect("session directory");
-        let session_id = session_dir
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .expect("session id");
+        let neo_home = temp.path().join("neo-home");
+        temp_env::with_vars([("NEO_HOME", Some(neo_home.as_os_str()))], || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(async {
+                let path = create_session_path(&config)
+                    .await
+                    .expect("session path is created");
+                let session_dir = path
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .expect("session directory");
+                let session_id = session_dir
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("session id");
 
-        assert!(session_id.starts_with("session_"));
-        assert_eq!(session_id.len(), "session_".len() + 36);
-        assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
-        assert!(
-            path.ends_with(
-                std::path::Path::new("agents")
-                    .join("main")
-                    .join("wire.jsonl")
-            )
-        );
-        assert!(session_dir.join("state.json").is_file());
+                assert!(session_id.starts_with("session_"));
+                assert_eq!(session_id.len(), "session_".len() + 36);
+                assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
+                let indexed = neo_agent_core::session::SessionIndex::new(&neo_home)
+                    .find(session_id)
+                    .expect("read session index")
+                    .expect("run session should be indexed");
+                assert_eq!(
+                    indexed.session_dir,
+                    crate::config::workspace_sessions_dir(&config)
+                );
+                assert_eq!(indexed.workdir, config.project_dir);
+                assert!(
+                    path.ends_with(
+                        std::path::Path::new("agents")
+                            .join("main")
+                            .join("wire.jsonl")
+                    )
+                );
+                assert!(session_dir.join("state.json").is_file());
+            });
+        });
     }
 
     #[tokio::test]

@@ -35,7 +35,9 @@ pub(super) async fn create_session_path(config: &AppConfig) -> anyhow::Result<Pa
                         session_dir.display()
                     )
                 })?;
-            return initialize_session_dir(&session_dir).await;
+            let wire_path = initialize_session_dir(&session_dir).await?;
+            crate::modes::sessions::index_new_session(config, &session_id)?;
+            return Ok(wire_path);
         }
     }
 }

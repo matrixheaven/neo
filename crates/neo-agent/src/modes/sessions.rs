@@ -7,8 +7,8 @@ use anyhow::Context;
 use neo_agent_core::AgentMessage;
 use neo_agent_core::session::export::{ExportConversation, ExportMessage, HtmlExportOptions};
 use neo_agent_core::session::{
-    JsonlSessionReader, SessionCompactionOptions, SessionIndex, SessionMetadataStore,
-    SessionSummary, compact_jsonl_session, validate_session_id,
+    JsonlSessionReader, SessionCompactionOptions, SessionIndex, SessionIndexEntry,
+    SessionMetadataStore, SessionSummary, compact_jsonl_session, validate_session_id,
 };
 use serde::Serialize;
 
@@ -54,6 +54,18 @@ pub fn list(config: &AppConfig) -> anyhow::Result<String> {
 pub(crate) enum SessionPickerScope {
     Workspace,
     All,
+}
+
+pub(crate) fn index_new_session(config: &AppConfig, session_id: &str) -> anyhow::Result<()> {
+    let neo_home = crate::config::neo_home()
+        .context("could not resolve Neo home directory for the global session index")?;
+    SessionIndex::new(&neo_home)
+        .append(&SessionIndexEntry {
+            session_id: session_id.to_owned(),
+            session_dir: workspace_sessions_dir(config),
+            workdir: config.project_dir.clone(),
+        })
+        .map_err(|error| anyhow::anyhow!("failed to index session {session_id}: {error}"))
 }
 
 /// Return session summaries for the current workspace or every known workspace.

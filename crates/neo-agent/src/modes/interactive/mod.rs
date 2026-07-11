@@ -261,35 +261,46 @@ pub async fn execute_tty_with_startup(
     }
 
     let terminal = RefCell::new(NeoTerminal::enter()?);
+    run_tty_lifecycle_with_event_factory(
+        &mut controller,
+        config,
+        &startup,
+        input_events,
+        |tui| terminal.borrow_mut().draw_tui(tui),
+        || terminal.borrow_mut().suspend(),
+    )
+    .await?;
+    Ok(Some(exit_message(controller.active_session_id())))
+}
 
+async fn run_tty_lifecycle_with_event_factory<E>(
+    controller: &mut InteractiveController,
+    config: &AppConfig,
+    startup: &StartupAction,
+    event_factory: impl FnOnce(KeybindingsManager) -> E,
+    mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
+    suspend: impl FnMut() -> Result<()>,
+) -> Result<()>
+where
+    E: TerminalEvents,
+{
+    let mut events = event_factory(controller.keybindings.clone());
     if let Some(data) = trust_dialog_data_for_startup(config) {
         controller
-            .resolve_trust_dialog_at_startup(
-                data,
-                input_events(controller.keybindings.clone()),
-                |tui| terminal.borrow_mut().draw_tui(tui),
-            )
+            .resolve_trust_dialog_at_startup(data, &mut events, |tui| render(tui))
             .await?;
     }
-    if let StartupAction::LoadSession(session_id) = &startup {
+    if let StartupAction::LoadSession(session_id) = startup {
         if let Err(error) = controller.load_session_at_startup(session_id).await {
             controller.push_status(format!("Failed to resume session: {error}"));
         }
     } else {
-        controller.apply_startup_action(&startup);
+        controller.apply_startup_action(startup);
     }
+    controller.connect_mcp_at_startup(|tui| render(tui)).await?;
     controller
-        .connect_mcp_at_startup(|tui| terminal.borrow_mut().draw_tui(tui))
-        .await?;
-    let events = input_events(controller.keybindings.clone());
-    controller
-        .run_terminal_loop_with_suspend(
-            |tui| terminal.borrow_mut().draw_tui(tui),
-            || terminal.borrow_mut().suspend(),
-            events,
-        )
-        .await?;
-    Ok(Some(exit_message(controller.active_session_id())))
+        .run_terminal_loop_with_suspend(render, suspend, &mut events)
+        .await
 }
 
 fn exit_message(session_id: Option<&str>) -> String {
@@ -1080,9 +1091,9 @@ impl InteractiveController {
     pub async fn run_terminal_loop(
         &mut self,
         mut render: impl FnMut(&mut NeoChromeState) -> Result<()>,
-        events: impl TerminalEvents,
+        mut events: impl TerminalEvents,
     ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(|tui| render(tui.chrome_mut()), || Ok(()), events)
+        self.run_terminal_loop_with_suspend(|tui| render(tui.chrome_mut()), || Ok(()), &mut events)
             .await
     }
 

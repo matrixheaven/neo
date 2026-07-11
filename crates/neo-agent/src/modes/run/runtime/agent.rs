@@ -201,6 +201,8 @@ pub(crate) async fn tool_registry_for_config(
     Ok(registry)
 }
 
+const ONE_OFF_MCP_ATTEMPT_ID: u64 = 0;
+
 /// Build a one-off [`McpClient`] for a short-lived CLI command.
 ///
 /// This is used only by CLI operations such as `mcp add --probe` and
@@ -222,6 +224,7 @@ pub(crate) async fn build_mcp_client(
                 .with_context(|| format!("missing MCP command for {}", server.id))?;
             let client = build_stdio_client(
                 &server.id,
+                ONE_OFF_MCP_ATTEMPT_ID,
                 StdioConfig {
                     command,
                     args: server.args.clone(),

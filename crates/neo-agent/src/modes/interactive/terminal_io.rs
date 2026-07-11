@@ -15,6 +15,16 @@ pub(crate) trait TerminalEvents {
     }
 }
 
+impl<T: TerminalEvents + ?Sized> TerminalEvents for &mut T {
+    fn next_input_event(&mut self) -> Result<InputEvent> {
+        (**self).next_input_event()
+    }
+
+    fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        (**self).poll_input_event(timeout)
+    }
+}
+
 pub(super) struct RawStdinEvents {
     parser: InputParser,
     pending: VecDeque<InputEvent>,
