@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 crossterm.workspace = true
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 neo-ai = { path = "../neo-ai" }
 neo-agent-core = { path = "../neo-agent-core" }
 pulldown-cmark.workspace = true
@@ -23,6 +24,7 @@ unicode-width = "0.2.0"
 winapi-util.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 
 [lints]
 workspace = true

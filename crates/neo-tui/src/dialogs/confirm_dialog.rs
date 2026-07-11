@@ -99,13 +99,13 @@ impl ConfirmDialogState {
         }
 
         match input {
-            InputEvent::Insert(character) if matches!(character, 'y' | 'Y') => {
+            InputEvent::Insert('y' | 'Y') => {
                 self.result = Some(ConfirmDialogResult::Approved {
                     id: self.id.clone(),
                 });
                 InputResult::Submitted
             }
-            InputEvent::Insert(character) if matches!(character, 'n' | 'N') => self.cancel(),
+            InputEvent::Insert('n' | 'N') => self.cancel(),
             InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {
                 self.cancel()
             }
