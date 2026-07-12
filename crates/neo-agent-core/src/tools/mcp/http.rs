@@ -260,6 +260,7 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
     Ok(Arc::new(super::client::RmcpClient::new(
         service,
         request_timeout,
+        None,
     )))
 }
 

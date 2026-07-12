@@ -1,10 +1,13 @@
 use std::{
-    collections::BTreeMap,
+    cell::Cell,
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Command,
+    rc::Rc,
 };
 
+use clap::Parser as _;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, MessageOrigin, PermissionMode, StopReason, ToolResult,
     skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
@@ -43,6 +46,17 @@ async fn interactive_session_path_uses_main_agent_wire() {
         .and_then(Path::parent)
         .expect("session root");
     assert!(session_root.join("state.json").is_file());
+    let session_id = session_root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("session id");
+    let neo_home = config.sessions_dir.parent().expect("neo home");
+    let indexed = neo_agent_core::session::SessionIndex::new(neo_home)
+        .find(session_id)
+        .expect("read session index")
+        .expect("interactive session should be indexed");
+    assert_eq!(indexed.session_dir, workspace_sessions_dir(&config));
+    assert_eq!(indexed.workdir, config.project_dir);
 
     let state = neo_agent_core::session::SessionStateStore::new(session_root)
         .read()
@@ -6850,6 +6864,64 @@ fn model_selection_persists_reasoning_and_provider_across_reload() {
     assert_eq!(reloaded.default_provider, "anthropic");
 }
 
+#[tokio::test]
+async fn refresh_config_preserves_live_task_and_multi_agent_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "").expect("write config");
+    let mut config = test_config(temp.path(), temp.path().join("sessions"));
+    config.config_path = config_path;
+    *config.workspace_policy.write().expect("workspace policy") = Some(
+        neo_agent_core::WorkspaceAccessPolicy::new(temp.path().to_path_buf())
+            .expect("workspace access policy"),
+    );
+    config
+        .background_tasks
+        .start_question("question-1".to_owned(), "Pick one".to_owned())
+        .await;
+    let agent = config
+        .multi_agent
+        .start_foreground_delegate_for_test("preserve delegate");
+    let live_permission_mode = Arc::clone(&config.live_permission_mode);
+    let workspace_policy = Arc::clone(&config.workspace_policy);
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.live_permission_mode = Arc::clone(&config.live_permission_mode);
+    controller.workspace_policy = Arc::clone(&config.workspace_policy);
+    controller.local_config = Some(config);
+    controller.set_permission_mode(PermissionMode::Yolo);
+
+    controller.refresh_config();
+
+    let reloaded = controller.local_config.as_ref().expect("reloaded config");
+    assert_eq!(reloaded.background_tasks.list(false, 10).await.len(), 1);
+    assert!(reloaded.multi_agent.snapshot(&agent.id).is_some());
+    assert!(Arc::ptr_eq(
+        &reloaded.live_permission_mode,
+        &live_permission_mode
+    ));
+    assert!(Arc::ptr_eq(&reloaded.workspace_policy, &workspace_policy));
+    assert_eq!(reloaded.permission_mode, PermissionMode::Yolo);
+    assert_eq!(
+        *reloaded
+            .live_permission_mode
+            .read()
+            .expect("live permission mode"),
+        PermissionMode::Yolo
+    );
+    assert!(reloaded.project_trusted);
+    assert_eq!(
+        reloaded.project_trust,
+        crate::trust::ProjectTrustState::NotRequired
+    );
+}
+
 #[test]
 fn model_selection_without_thinking_sets_reasoning_off() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -7342,7 +7414,7 @@ async fn session_picker_ctrl_a_empty_target_scope_can_toggle_back() {
 }
 
 #[tokio::test]
-async fn session_picker_cross_cwd_shows_resume_command() {
+async fn cross_workspace_picker_emits_parseable_product_resume_command() {
     let other_dir = tempfile::tempdir().expect("tempdir");
     let mut controller = InteractiveController::new_with_event_driver(
         "neo",
@@ -7379,12 +7451,15 @@ async fn session_picker_cross_cwd_shows_resume_command() {
         .await
         .expect("select cross-cwd session");
 
-    let expected = format!(
-        "cd '{}' && neo --resume '{SESSION_A}'",
-        other_dir.path().display(),
-    );
+    let expected = format!("neo resume {SESSION_A}");
     assert!(controller.chrome().focused_overlay().is_none());
     assert!(transcript_has_status(&controller, &expected));
+    let parsed = crate::cli::Cli::try_parse_from(expected.split_whitespace())
+        .expect("resume command should be parseable by Neo");
+    assert!(matches!(
+        parsed.command,
+        Some(crate::cli::Command::Resume { session_id: Some(id) }) if id == SESSION_A
+    ));
 }
 
 #[tokio::test]
@@ -12377,16 +12452,13 @@ async fn startup_trust_dialog_opens_when_unknown_and_trusts_workspace() {
     let data = crate::trust::trust_dialog_data_from_inputs(
         crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
     );
+    let mut events = ScriptedEvents(VecDeque::from([
+        // Default is ContinueUntrusted; move up once to TrustCurrent.
+        InputEvent::Action(KeybindingAction::SelectUp),
+        InputEvent::Action(KeybindingAction::SelectConfirm),
+    ]));
     controller
-        .resolve_trust_dialog_at_startup(
-            data,
-            ScriptedEvents(VecDeque::from([
-                // Default is ContinueUntrusted; move up once to TrustCurrent.
-                InputEvent::Action(KeybindingAction::SelectUp),
-                InputEvent::Action(KeybindingAction::SelectConfirm),
-            ])),
-            |_| Ok(()),
-        )
+        .resolve_trust_dialog_at_startup(data, &mut events, |_| Ok(()))
         .await
         .expect("resolve trust dialog");
 
@@ -12402,6 +12474,72 @@ async fn startup_trust_dialog_opens_when_unknown_and_trusts_workspace() {
             .expect("read trust"),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn startup_trust_and_main_loop_share_one_terminal_event_source() {
+    struct CountingTerminalEvents {
+        events: VecDeque<InputEvent>,
+        polls: Rc<Cell<usize>>,
+    }
+
+    impl TerminalEvents for CountingTerminalEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.polls.set(self.polls.get() + 1);
+            self.events
+                .pop_front()
+                .context("expected scripted terminal input")
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    let inputs = crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+    config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+    config.project_trusted = false;
+    controller.local_config = Some(config.clone());
+    controller.set_trust_store(crate::trust::ProjectTrustStore::new(
+        temp.path().join("trust.json"),
+    ));
+
+    let factory_calls = Rc::new(Cell::new(0));
+    let polls = Rc::new(Cell::new(0));
+    let factory_calls_for_factory = Rc::clone(&factory_calls);
+    let polls_for_factory = Rc::clone(&polls);
+    run_tty_lifecycle_with_event_factory(
+        &mut controller,
+        &config,
+        &StartupAction::None,
+        move |_keybindings| {
+            factory_calls_for_factory.set(factory_calls_for_factory.get() + 1);
+            CountingTerminalEvents {
+                events: VecDeque::from([
+                    InputEvent::Action(KeybindingAction::SelectConfirm),
+                    InputEvent::Interrupt,
+                    InputEvent::Interrupt,
+                ]),
+                polls: Rc::clone(&polls_for_factory),
+            }
+        },
+        |_| Ok(()),
+        || Ok(()),
+    )
+    .await
+    .expect("run startup and main terminal lifecycle");
+
+    assert_eq!(factory_calls.get(), 1);
+    assert_eq!(polls.get(), 3);
 }
 
 #[tokio::test]
@@ -12442,14 +12580,11 @@ async fn startup_trust_dialog_opens_when_unknown_and_continues_untrusted() {
     let data = crate::trust::trust_dialog_data_from_inputs(
         crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
     );
+    let mut events = ScriptedEvents(VecDeque::from([InputEvent::Action(
+        KeybindingAction::SelectConfirm,
+    )]));
     controller
-        .resolve_trust_dialog_at_startup(
-            data,
-            ScriptedEvents(VecDeque::from([InputEvent::Action(
-                KeybindingAction::SelectConfirm,
-            )])),
-            |_| Ok(()),
-        )
+        .resolve_trust_dialog_at_startup(data, &mut events, |_| Ok(()))
         .await
         .expect("resolve trust dialog");
 
@@ -12536,14 +12671,11 @@ async fn startup_trust_dialog_cancels_to_untrusted() {
     let data = crate::trust::trust_dialog_data_from_inputs(
         crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
     );
+    let mut events = ScriptedEvents(VecDeque::from([InputEvent::Action(
+        KeybindingAction::SelectCancel,
+    )]));
     controller
-        .resolve_trust_dialog_at_startup(
-            data,
-            ScriptedEvents(VecDeque::from([InputEvent::Action(
-                KeybindingAction::SelectCancel,
-            )])),
-            |_| Ok(()),
-        )
+        .resolve_trust_dialog_at_startup(data, &mut events, |_| Ok(()))
         .await
         .expect("resolve trust dialog");
 

@@ -31,7 +31,8 @@ pub use layout::{
     relative_agent_record_dir, session_state_path,
 };
 pub use workspace::{
-    encode_workdir_key, normalize_workdir, slugify_basename, workspace_sessions_dir,
+    encode_workdir_key, hash_os_path_into, normalize_workdir, slugify_basename,
+    workspace_sessions_dir,
 };
 
 const SESSION_FORMAT_NAME: &str = "neo.session.jsonl";

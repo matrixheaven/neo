@@ -9,7 +9,13 @@ use std::{
     thread::JoinHandle as ThreadJoinHandle,
 };
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(windows)]
+use std::{
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+};
+
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -22,9 +28,10 @@ use uuid::Uuid;
 
 use super::bash::resolved_shell;
 use super::shell_env;
+use super::terminal_process::TerminalProcessTree;
 use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback, cap_output,
-    parse_input, schema,
+    ProcessSupervisor, Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback,
+    cap_output, parse_input, schema,
 };
 
 const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
@@ -32,6 +39,53 @@ const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERMINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 const TERMINAL_OUTPUT_BUFFER_CAP: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct TerminalUtf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl TerminalUtf8Decoder {
+    fn push(&mut self, chunk: &[u8]) -> String {
+        self.pending.extend_from_slice(chunk);
+        let (output, consumed) = decode_utf8_prefix(&self.pending);
+        self.pending.drain(..consumed);
+        output
+    }
+
+    fn finish(&mut self) -> String {
+        let output = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        output
+    }
+}
+
+fn decode_utf8_prefix(bytes: &[u8]) -> (String, usize) {
+    let mut output = String::new();
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(text) => {
+                output.push_str(text);
+                consumed = bytes.len();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(
+                    std::str::from_utf8(&bytes[consumed..consumed + valid])
+                        .expect("UTF-8 error valid prefix must be valid UTF-8"),
+                );
+                consumed += valid;
+                let Some(invalid_len) = error.error_len() else {
+                    break;
+                };
+                output.push('\u{FFFD}');
+                consumed += invalid_len;
+            }
+        }
+    }
+    (output, consumed)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -161,9 +215,9 @@ static TERMINALS: LazyLock<Mutex<HashMap<String, TerminalSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct TerminalSession {
-    child: Box<dyn Child + Send + Sync>,
+    process: TerminalProcessTree,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<StdMutex<Box<dyn Write + Send>>>,
     output: Arc<StdMutex<TerminalOutputBuffer>>,
     read_offset: usize,
     read_lock: Arc<Mutex<()>>,
@@ -173,6 +227,53 @@ struct TerminalSession {
     stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
     stream_max_bytes: Arc<StdMutex<usize>>,
     streamed: Arc<StdMutex<usize>>,
+    #[cfg(windows)]
+    _launch_barrier: WindowsLaunchBarrier,
+}
+
+#[cfg(windows)]
+struct WindowsLaunchBarrier {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsLaunchBarrier {
+    fn new(workspace: &Path) -> Self {
+        Self {
+            path: workspace.join(format!(".neo-terminal-ready-{}", Uuid::new_v4())),
+        }
+    }
+
+    fn wait_command(&self) -> String {
+        let command = format!(
+            "if exist \"{}\" exit /b 0 else exit /b 1",
+            self.path.display()
+        );
+        format!(
+            "until cmd.exe /d /c {}; do sleep 0.01; done;",
+            quote_posix_shell(&command)
+        )
+    }
+
+    fn release(&self) -> std::io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map(|_| ())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsLaunchBarrier {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(windows)]
+fn quote_posix_shell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 struct ReaderThread {
@@ -221,6 +322,8 @@ async fn start_terminal(
         .take_writer()
         .map_err(|err| pty_error("open terminal writer", err))?;
     let shell = resolved_shell()?;
+    #[cfg(windows)]
+    let launch_barrier = WindowsLaunchBarrier::new(&ctx.cwd);
     // Same Windows/POSIX handling as the Bash tool: Git Bash needs a POSIX cwd
     // (passed via `cd` inside the `-lc` script, since `.cwd(windows_path)` is
     // unreliable) and `>NUL` rewritten to `>/dev/null`. On Unix the cwd is set
@@ -240,8 +343,19 @@ async fn start_terminal(
     } else {
         (Some(ctx.cwd.as_path()), command.to_owned())
     };
+    #[cfg(windows)]
+    let effective_cmd = format!("{} {effective_cmd}", launch_barrier.wait_command());
     let mut builder = CommandBuilder::new(&shell.shell_path);
-    builder.arg("-lc");
+    if shell.is_windows {
+        // A non-interactive Bash sources BASH_ENV before running its command
+        // body. Clearing it keeps the Job Object barrier ahead of user code.
+        builder.env("BASH_ENV", "");
+        builder.arg("--noprofile");
+        builder.arg("--norc");
+        builder.arg("-c");
+    } else {
+        builder.arg("-lc");
+    }
     builder.arg(&effective_cmd);
     if let Some(dir) = effective_cwd {
         builder.cwd(dir);
@@ -251,6 +365,15 @@ async fn start_terminal(
         .spawn_command(builder)
         .map_err(|err| pty_error("spawn terminal command", err))?;
     drop(pair.slave);
+    #[cfg(windows)]
+    let mut process = TerminalProcessTree::new(child).map_err(ToolError::Io)?;
+    #[cfg(not(windows))]
+    let process = TerminalProcessTree::new(child).map_err(ToolError::Io)?;
+    #[cfg(windows)]
+    if let Err(error) = launch_barrier.release() {
+        let _ = process.terminate_and_wait();
+        return Err(ToolError::Io(error));
+    }
 
     let output = Arc::new(StdMutex::new(TerminalOutputBuffer::new(
         TERMINAL_OUTPUT_BUFFER_CAP,
@@ -269,9 +392,9 @@ async fn start_terminal(
     TERMINALS.lock().await.insert(
         handle.clone(),
         TerminalSession {
-            child,
+            process,
             master: pair.master,
-            writer,
+            writer: Arc::new(StdMutex::new(writer)),
             output,
             read_offset: 0,
             read_lock: Arc::new(Mutex::new(())),
@@ -281,13 +404,11 @@ async fn start_terminal(
             stream_callback,
             stream_max_bytes,
             streamed,
+            #[cfg(windows)]
+            _launch_barrier: launch_barrier,
         },
     );
-    ctx.process_supervisor
-        .register(handle.clone(), |handle| {
-            Box::pin(async move { cleanup_terminal_session(&handle).await })
-        })
-        .await;
+    register_terminal_session(ctx.process_supervisor.clone(), handle.clone()).await;
     Ok(ToolResult::ok(format!(
         "handle: {handle}\nstatus: running\ncommand: {command}\ncols: {cols}\nrows: {rows}"
     ))
@@ -310,6 +431,7 @@ fn spawn_reader_thread(
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
     let handle = std::thread::spawn(move || {
         let mut local = [0_u8; 8192];
+        let mut decoder = TerminalUtf8Decoder::default();
         loop {
             match reader.read(&mut local) {
                 Ok(0) | Err(_) => break,
@@ -334,10 +456,23 @@ fn spawn_reader_thread(
                             .expect("stream callback lock poisoned")
                             .as_ref()
                         {
-                            callback(&String::from_utf8_lossy(streamed_chunk));
+                            let text = decoder.push(streamed_chunk);
+                            if !text.is_empty() {
+                                callback(&text);
+                            }
                         }
                     }
                 }
+            }
+        }
+        if let Some(callback) = stream_callback
+            .lock()
+            .expect("stream callback lock poisoned")
+            .as_ref()
+        {
+            let text = decoder.finish();
+            if !text.is_empty() {
+                callback(&text);
             }
         }
         // Best-effort completion signal; the consumer uses a timeout so a
@@ -351,16 +486,29 @@ fn spawn_reader_thread(
 }
 
 async fn write_terminal(tool: &str, handle: &str, input: &str) -> Result<ToolResult, ToolError> {
-    let mut terminals = TERMINALS.lock().await;
-    let session = terminals
-        .get_mut(handle)
-        .ok_or_else(|| unknown_terminal(tool, handle))?;
+    let writer = {
+        let terminals = TERMINALS.lock().await;
+        Arc::clone(
+            &terminals
+                .get(handle)
+                .ok_or_else(|| unknown_terminal(tool, handle))?
+                .writer,
+        )
+    };
     let input = normalize_terminal_input_newlines(input);
-    session
-        .writer
-        .write_all(input.as_bytes())
-        .map_err(ToolError::Io)?;
-    session.writer.flush().map_err(ToolError::Io)?;
+    task::spawn_blocking(move || {
+        let mut writer = writer
+            .lock()
+            .map_err(|_| ToolError::Io(std::io::Error::other("terminal writer lock poisoned")))?;
+        writer.write_all(input.as_bytes()).map_err(ToolError::Io)?;
+        writer.flush().map_err(ToolError::Io)
+    })
+    .await
+    .map_err(|error| {
+        ToolError::Io(std::io::Error::other(format!(
+            "terminal write task: {error}"
+        )))
+    })??;
     Ok(
         ToolResult::ok(format!("handle: {handle}\nstatus: running\nwritten: true")).with_details(
             json!({
@@ -394,7 +542,7 @@ async fn read_terminal(
         let session = terminals
             .get_mut(handle)
             .ok_or_else(|| unknown_terminal(tool, handle))?;
-        let status = session.child.try_wait().map_err(ToolError::Io)?;
+        let status = session.process.try_wait().map_err(ToolError::Io)?;
         session
             .stream_callback
             .lock()
@@ -416,7 +564,7 @@ async fn read_terminal(
         .get_mut(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     let status = session
-        .child
+        .process
         .try_wait()
         .map_err(ToolError::Io)?
         .or(initial_status);
@@ -451,7 +599,7 @@ async fn read_terminal(
     }
     *session.streamed.lock().expect("streamed lock poisoned") = total_output_bytes;
     let status_text = status.as_ref().map_or("running", |_| "exited");
-    let exit_code = status.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
+    let exit_code = status;
     Ok(ToolResult::ok(format!(
         "handle: {handle}\nstatus: {status_text}\nexit_code: {exit_code:?}\noutput:\n{output_content}"
     ))
@@ -541,22 +689,55 @@ async fn stop_terminal(
         .await
         .remove(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
-    ctx.process_supervisor.unregister(handle).await;
-    Ok(stop_session_blocking(
+    match stop_session_blocking(
         handle.to_owned(),
         session,
         "cancelled",
         max_output_bytes,
         ctx.tool_update.clone(),
     )
-    .await)
+    .await
+    {
+        Ok(result) => {
+            ctx.process_supervisor.unregister(handle).await;
+            Ok(result)
+        }
+        Err(StopSessionFailure::Recoverable { error, session }) => {
+            TERMINALS.lock().await.insert(handle.to_owned(), *session);
+            register_terminal_session(ctx.process_supervisor.clone(), handle.to_owned()).await;
+            Err(error)
+        }
+        Err(StopSessionFailure::Unrecoverable(error)) => Err(error),
+    }
+}
+
+async fn register_terminal_session(supervisor: ProcessSupervisor, handle: String) {
+    supervisor
+        .register(handle, |handle| {
+            Box::pin(async move { cleanup_terminal_session(&handle).await })
+        })
+        .await;
 }
 
 async fn cleanup_terminal_session(handle: &str) {
     let Some(session) = TERMINALS.lock().await.remove(handle) else {
         return;
     };
-    let _ = stop_session_blocking(handle.to_owned(), session, "cancelled", 0, None).await;
+    if let Err(StopSessionFailure::Recoverable { session, .. }) =
+        stop_session_blocking(handle.to_owned(), session, "cancelled", 0, None).await
+    {
+        // Supervisor shutdown has no error channel. Dropping the retained tree
+        // performs its last-resort platform cleanup instead of leaving it live.
+        drop(session);
+    }
+}
+
+enum StopSessionFailure {
+    Recoverable {
+        error: ToolError,
+        session: Box<TerminalSession>,
+    },
+    Unrecoverable(ToolError),
 }
 
 async fn stop_session_blocking(
@@ -565,12 +746,16 @@ async fn stop_session_blocking(
     status: &'static str,
     max_output_bytes: usize,
     stream_callback: Option<ToolUpdateCallback>,
-) -> ToolResult {
+) -> Result<ToolResult, StopSessionFailure> {
     task::spawn_blocking(move || {
         stop_session(&handle, session, status, max_output_bytes, stream_callback)
     })
     .await
-    .expect("terminal stop blocking task should not panic")
+    .map_err(|error| {
+        StopSessionFailure::Unrecoverable(ToolError::Io(std::io::Error::other(format!(
+            "terminal stop task: {error}"
+        ))))
+    })?
 }
 
 fn stop_session(
@@ -579,7 +764,7 @@ fn stop_session(
     status: &'static str,
     max_output_bytes: usize,
     stream_callback: Option<ToolUpdateCallback>,
-) -> ToolResult {
+) -> Result<ToolResult, StopSessionFailure> {
     *session
         .stream_callback
         .lock()
@@ -588,10 +773,17 @@ fn stop_session(
         .stream_max_bytes
         .lock()
         .expect("stream max lock poisoned") = max_output_bytes;
-    drop(session.writer);
+    let exit_code = match session.process.terminate_and_wait() {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            return Err(StopSessionFailure::Recoverable {
+                error: ToolError::Io(error),
+                session: Box::new(session),
+            });
+        }
+    };
     drop(session.master);
-    let _ = session.child.kill();
-    let exit_status = session.child.wait().ok();
+    drop(session.writer);
 
     let reader_drained = if let Some(reader) = session.reader_thread.take() {
         reader
@@ -611,8 +803,7 @@ fn stop_session(
     let output_details = cap_output_details(&output.output, max_output_bytes);
     let truncated = output_truncated || discarded_bytes_before_stop > 0;
     let output_content = format_terminal_output(&output_capped, truncated);
-    let exit_code = exit_status.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
-    ToolResult::ok(format!(
+    Ok(ToolResult::ok(format!(
         "handle: {handle}\nstatus: {status}\nexit_code: {exit_code:?}\noutput:\n{output_content}"
     ))
     .with_details(json!({
@@ -624,7 +815,7 @@ fn stop_session(
         "truncated": truncated,
         "discarded_bytes_before_stop": discarded_bytes_before_stop,
         "reader_drained": reader_drained,
-    }))
+    })))
 }
 
 #[derive(Debug)]
@@ -686,8 +877,8 @@ impl TerminalOutputBuffer {
         let start_index = effective_offset.saturating_sub(self.start_offset);
         let available = self.bytes.get(start_index..).unwrap_or_default();
         let end_index = available.len().min(max_bytes);
-        let output = String::from_utf8_lossy(&available[..end_index]).into_owned();
-        let next_offset = effective_offset.saturating_add(end_index);
+        let (output, consumed) = decode_utf8_prefix(&available[..end_index]);
+        let next_offset = effective_offset.saturating_add(consumed);
         TerminalOutputRead {
             output,
             next_offset,
@@ -787,6 +978,36 @@ fn pty_error(operation: &str, err: impl std::fmt::Display) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_decoder_preserves_utf8_split_across_chunks() {
+        let mut decoder = TerminalUtf8Decoder::default();
+
+        assert_eq!(decoder.push(&[0xE4, 0xBD]), "");
+        assert_eq!(decoder.push(&[0xA0, b'!']), "你!");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn terminal_decoder_replaces_invalid_sequences_without_consuming_incomplete_suffix() {
+        let mut decoder = TerminalUtf8Decoder::default();
+        let invalid = vec![0xFF; 8 * 1024];
+
+        assert_eq!(decoder.push(&invalid), "\u{FFFD}".repeat(invalid.len()));
+        assert_eq!(decoder.push(&[b'!', 0xE4, 0xBD]), "!");
+        assert_eq!(decoder.push(&[0xA0]), "你");
+    }
+
+    #[test]
+    fn limited_read_does_not_advance_past_incomplete_utf8() {
+        let mut buffer = TerminalOutputBuffer::new(64);
+        buffer.push("你".as_bytes());
+
+        let first = buffer.read_since_limited(0, 2);
+        assert_eq!(first.output, "");
+        assert_eq!(first.next_offset, 0);
+        assert_eq!(buffer.read_since_limited(first.next_offset, 3).output, "你");
+    }
 
     #[test]
     fn terminal_output_buffer_discards_old_bytes_without_growing_unbounded() {

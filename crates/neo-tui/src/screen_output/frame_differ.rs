@@ -24,7 +24,7 @@ use crossterm::{
         DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
-    execute,
+    execute, queue,
     terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 
@@ -39,6 +39,7 @@ use super::kitty_image::{
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
+const SYNCHRONIZED_OUTPUT_END: &[u8] = b"\x1b[?2026l";
 
 /// Cursor position for prompt editing (row, col) in the rendered content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,8 @@ pub struct TuiRenderer {
     pub(super) hardware_cursor_row: usize,
     pub(super) previous_width: u16,
     pub(super) previous_height: u16,
+    /// A failed write leaves terminal contents unknown, so retry with a full redraw.
+    pub(super) force_full_redraw: bool,
     /// Whether this is the first render (no diff, just output everything).
     pub(super) first_render: bool,
     /// Track terminal's working area (max lines ever rendered).
@@ -135,6 +138,7 @@ pub struct TuiRenderer {
     pub(super) clear_on_shrink: bool,
     pub(super) show_hardware_cursor: bool,
     pub(super) capabilities: TerminalCapabilities,
+    pub(super) debug_frame_id: u64,
     #[cfg(windows)]
     windows_input_mode: windows_input_mode::WindowsInputModeGuard,
 }
@@ -289,54 +293,124 @@ fn push_diff_start(buffer: &mut String, append_start: bool) {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct TerminalProtocolState {
+    bracketed_paste: bool,
+    kitty_keyboard: bool,
+}
+
+impl TerminalProtocolState {
+    const fn for_capabilities(capabilities: TerminalCapabilities) -> Self {
+        Self {
+            bracketed_paste: capabilities.ansi.bracketed_paste,
+            kitty_keyboard: capabilities.ansi.kitty_keyboard,
+        }
+    }
+}
+
+fn write_enter_output_with_state(
+    output: &mut dyn Write,
+    capabilities: TerminalCapabilities,
+    state: &mut TerminalProtocolState,
+) -> std::io::Result<()> {
+    let mut output = output;
+    if capabilities.ansi.bracketed_paste {
+        queue!(&mut output, EnableBracketedPaste)?;
+        state.bracketed_paste = true;
+        output.flush()?;
+    }
+    if capabilities.ansi.kitty_keyboard {
+        queue!(
+            &mut output,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            )
+        )?;
+        state.kitty_keyboard = true;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn write_enter_output(
     output: &mut dyn Write,
     capabilities: TerminalCapabilities,
 ) -> std::io::Result<()> {
+    let mut state = TerminalProtocolState::default();
+    write_enter_output_with_state(output, capabilities, &mut state)
+}
+
+fn write_leave_terminal_output_for_state(
+    output: &mut dyn Write,
+    state: TerminalProtocolState,
+) -> std::io::Result<()> {
     let mut output = output;
-    if capabilities.ansi.bracketed_paste && capabilities.ansi.kitty_keyboard {
-        execute!(
-            &mut output,
-            EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            )
-        )
-    } else if capabilities.ansi.bracketed_paste {
-        execute!(&mut output, EnableBracketedPaste)
-    } else if capabilities.ansi.kitty_keyboard {
-        execute!(
-            &mut output,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            )
-        )
-    } else {
-        Ok(())
+    let mut result = Ok(());
+    if state.kitty_keyboard
+        && let Err(error) = execute!(&mut output, PopKeyboardEnhancementFlags)
+    {
+        result = Err(error);
     }
+    if state.bracketed_paste
+        && let Err(error) = execute!(&mut output, DisableBracketedPaste)
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
+    result
 }
 
 fn write_leave_terminal_output(
     output: &mut dyn Write,
     capabilities: TerminalCapabilities,
 ) -> std::io::Result<()> {
-    let mut output = output;
-    if capabilities.ansi.bracketed_paste && capabilities.ansi.kitty_keyboard {
-        execute!(
-            &mut output,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        )
-    } else if capabilities.ansi.kitty_keyboard {
-        execute!(&mut output, PopKeyboardEnhancementFlags)
-    } else if capabilities.ansi.bracketed_paste {
-        execute!(&mut output, DisableBracketedPaste)
-    } else {
-        Ok(())
+    write_leave_terminal_output_for_state(
+        output,
+        TerminalProtocolState::for_capabilities(capabilities),
+    )
+}
+
+fn write_render_output(
+    output: &mut dyn Write,
+    buffer: &str,
+    synchronized_output: bool,
+) -> std::io::Result<()> {
+    let result = output
+        .write_all(buffer.as_bytes())
+        .and_then(|()| output.flush());
+    if let Err(error) = result {
+        if synchronized_output {
+            let _ = output.write_all(SYNCHRONIZED_OUTPUT_END);
+            let _ = output.flush();
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+struct RawModeGuard {
+    active: bool,
+}
+
+impl RawModeGuard {
+    fn enter() -> std::io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self { active: true })
+    }
+
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = disable_raw_mode();
+        }
     }
 }
 
@@ -344,11 +418,20 @@ impl TuiRenderer {
     /// Enable raw mode + bracketed paste + keyboard enhancement.
     /// Does NOT enter alternate screen.
     pub fn enter(capabilities: TerminalCapabilities) -> std::io::Result<Self> {
-        enable_raw_mode()?;
+        let raw_mode = RawModeGuard::enter()?;
         #[cfg(windows)]
-        let windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
+        let mut windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
         let mut output = stdout();
-        write_enter_output(&mut output, capabilities)?;
+        let mut protocol_state = TerminalProtocolState::default();
+        if let Err(error) =
+            write_enter_output_with_state(&mut output, capabilities, &mut protocol_state)
+        {
+            let _ = write_leave_terminal_output_for_state(&mut output, protocol_state);
+            #[cfg(windows)]
+            windows_input_mode.restore();
+            return Err(error);
+        }
+        raw_mode.disarm();
         Ok(Self {
             previous_lines: Vec::new(),
             previous_kitty_image_ids: BTreeSet::new(),
@@ -357,6 +440,7 @@ impl TuiRenderer {
             hardware_cursor_row: 0,
             previous_width: 0,
             previous_height: 0,
+            force_full_redraw: false,
             first_render: true,
             max_lines_rendered: 0,
             cursor_row: 0,
@@ -365,6 +449,7 @@ impl TuiRenderer {
                 env::var("NEO_HARDWARE_CURSOR").ok().as_deref(),
             ),
             capabilities,
+            debug_frame_id: 0,
             #[cfg(windows)]
             windows_input_mode,
         })
@@ -404,14 +489,23 @@ impl TuiRenderer {
 
     /// Re-enter after suspend.
     pub fn suspend_resume(&mut self) -> std::io::Result<()> {
-        enable_raw_mode()?;
+        let raw_mode = RawModeGuard::enter()?;
         #[cfg(windows)]
         {
             self.windows_input_mode.restore();
             self.windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
         }
         let mut output = stdout();
-        write_enter_output(&mut output, self.capabilities)?;
+        let mut protocol_state = TerminalProtocolState::default();
+        if let Err(error) =
+            write_enter_output_with_state(&mut output, self.capabilities, &mut protocol_state)
+        {
+            let _ = write_leave_terminal_output_for_state(&mut output, protocol_state);
+            #[cfg(windows)]
+            self.windows_input_mode.restore();
+            return Err(error);
+        }
+        raw_mode.disarm();
         // Force full redraw after resume
         self.first_render = true;
         self.previous_lines.clear();
@@ -447,6 +541,26 @@ impl TuiRenderer {
         output: &mut dyn Write,
         width: u16,
         height_u16: u16,
+        new_lines: Vec<String>,
+        cursor: Option<CursorPos>,
+    ) -> std::io::Result<()> {
+        match self.render_to_with_size_inner(output, width, height_u16, new_lines, cursor) {
+            Ok(()) => {
+                self.force_full_redraw = false;
+                Ok(())
+            }
+            Err(error) => {
+                self.force_full_redraw = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn render_to_with_size_inner(
+        &mut self,
+        output: &mut dyn Write,
+        width: u16,
+        height_u16: u16,
         mut new_lines: Vec<String>,
         cursor: Option<CursorPos>,
     ) -> std::io::Result<()> {
@@ -476,14 +590,14 @@ impl TuiRenderer {
                 width_changed,
                 height_changed,
             },
-        ) {
+        )? {
             return Ok(());
         }
 
         // Content shrank below the historical high-water mark. We only force a
         // viewport redraw when explicitly opted in (e.g. a closed overlay).
         if self.clear_on_shrink && new_lines.len() < self.max_lines_rendered {
-            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos)?;
             return Ok(());
         }
 
@@ -491,24 +605,35 @@ impl TuiRenderer {
 
         // No changes - but still need to update hardware cursor position if it moved
         let Some(change_range) = change_range else {
-            self.position_hardware_cursor(output, cursor_pos, new_lines.len());
+            let hardware_cursor_row = self.position_hardware_cursor(
+                output,
+                cursor_pos,
+                new_lines.len(),
+                self.hardware_cursor_row,
+            )?;
             self.previous_viewport_top = viewport.previous_top;
             self.previous_height = height_u16;
             self.previous_lines = new_lines;
+            self.hardware_cursor_row = hardware_cursor_row;
             return Ok(());
         };
 
         // All changes are in deleted lines (nothing to render, just clear)
         if change_range.first >= new_lines.len() {
-            if !self.render_deleted_tail(output, dimensions, new_lines_ref, change_range, viewport)
-            {
+            if !self.render_deleted_tail(
+                output,
+                dimensions,
+                new_lines_ref,
+                change_range,
+                viewport,
+            )? {
                 self.full_render_with_dimensions(
                     output,
                     true,
                     new_lines_ref,
                     dimensions,
                     cursor_pos,
-                );
+                )?;
                 return Ok(());
             }
             self.finish_deleted_tail(
@@ -517,7 +642,7 @@ impl TuiRenderer {
                 cursor_pos,
                 dimensions,
                 viewport.previous_top,
-            );
+            )?;
             return Ok(());
         }
 
@@ -525,18 +650,17 @@ impl TuiRenderer {
         // If the first changed line is above the previous viewport, use a full
         // clear render.
         if change_range.first < viewport.previous_top {
-            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos)?;
             return Ok(());
         }
 
         let Some(diff_render) =
             self.build_diff_render(&new_lines, change_range, viewport, dimensions)
         else {
-            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos)?;
             return Ok(());
         };
-        self.finish_diff_render(output, new_lines, cursor_pos, dimensions, &diff_render);
-        Ok(())
+        self.finish_diff_render(output, new_lines, cursor_pos, dimensions, &diff_render)
     }
 
     fn try_early_full_render(
@@ -546,13 +670,13 @@ impl TuiRenderer {
         dimensions: RenderDimensions,
         cursor_pos: Option<CursorPos>,
         changes: RenderChangeFlags,
-    ) -> bool {
+    ) -> std::io::Result<bool> {
         let Some(clear) = self.early_full_render_clear(changes) else {
-            return false;
+            return Ok(false);
         };
-        self.full_render_with_dimensions(output, clear, new_lines, dimensions, cursor_pos);
+        self.full_render_with_dimensions(output, clear, new_lines, dimensions, cursor_pos)?;
         self.first_render = false;
-        true
+        Ok(true)
     }
 
     fn full_render_with_dimensions(
@@ -562,7 +686,7 @@ impl TuiRenderer {
         new_lines: &[String],
         dimensions: RenderDimensions,
         cursor_pos: Option<CursorPos>,
-    ) {
+    ) -> std::io::Result<()> {
         self.full_render(
             output,
             clear,
@@ -571,10 +695,13 @@ impl TuiRenderer {
             dimensions.height_u16,
             dimensions.width,
             cursor_pos,
-        );
+        )
     }
 
     fn early_full_render_clear(&self, changes: RenderChangeFlags) -> Option<bool> {
+        if self.force_full_redraw {
+            return Some(true);
+        }
         if self.previous_lines.is_empty() && !changes.width_changed && !changes.height_changed {
             return Some(false);
         }
@@ -659,25 +786,37 @@ impl TuiRenderer {
         cursor_pos: Option<CursorPos>,
         dimensions: RenderDimensions,
         diff_render: &DiffRender,
-    ) {
+    ) -> std::io::Result<()> {
         self.log_diff_render(dimensions, &new_lines, diff_render);
-        let _ = output.write_all(diff_render.buffer.as_bytes());
-        let _ = output.flush();
+        write_render_output(
+            output,
+            &diff_render.buffer,
+            self.capabilities.ansi.synchronized_output,
+        )?;
 
-        self.cursor_row = new_lines.len().saturating_sub(1);
-        self.hardware_cursor_row = diff_render.final_cursor_row;
-        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
-        self.previous_viewport_top = diff_render.viewport.previous_top.max(
+        let cursor_row = new_lines.len().saturating_sub(1);
+        let max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
+        let previous_viewport_top = diff_render.viewport.previous_top.max(
             diff_render
                 .final_cursor_row
                 .saturating_sub(dimensions.height - 1),
         );
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
+        let hardware_cursor_row = self.position_hardware_cursor(
+            output,
+            cursor_pos,
+            new_lines.len(),
+            diff_render.final_cursor_row,
+        )?;
 
         self.previous_lines = new_lines;
         self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
+        self.cursor_row = cursor_row;
+        self.hardware_cursor_row = hardware_cursor_row;
+        self.max_lines_rendered = max_lines_rendered;
+        self.previous_viewport_top = previous_viewport_top;
         self.previous_width = dimensions.width;
         self.previous_height = dimensions.height_u16;
+        Ok(())
     }
 
     fn previous_buffer_length(&self, height: usize) -> usize {
@@ -718,15 +857,15 @@ impl TuiRenderer {
         new_lines: &[String],
         change_range: ChangeRange,
         viewport: ViewportState,
-    ) -> bool {
+    ) -> std::io::Result<bool> {
         if self.previous_lines.len() <= new_lines.len() {
-            return true;
+            return Ok(true);
         }
 
         let target_row = new_lines.len().saturating_sub(1);
         let extra_lines = self.previous_lines.len() - new_lines.len();
         if target_row < viewport.previous_top || extra_lines > dimensions.height {
-            return false;
+            return Ok(false);
         }
 
         let mut buffer = String::new();
@@ -738,13 +877,10 @@ impl TuiRenderer {
         buffer.push_str("\x1b[?2026l");
 
         if debug_log_enabled() {
-            let _ = write_output_log("deleted-lines", &buffer);
+            let _ = write_output_log(self.debug_frame_id, "deleted-lines", &buffer);
         }
-        let _ = output.write_all(buffer.as_bytes());
-        let _ = output.flush();
-        self.cursor_row = target_row;
-        self.hardware_cursor_row = target_row;
-        true
+        write_render_output(output, &buffer, true)?;
+        Ok(true)
     }
 
     fn finish_deleted_tail(
@@ -754,13 +890,18 @@ impl TuiRenderer {
         cursor_pos: Option<CursorPos>,
         dimensions: RenderDimensions,
         previous_viewport_top: usize,
-    ) {
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
+    ) -> std::io::Result<()> {
+        let cursor_row = new_lines.len().saturating_sub(1);
+        let hardware_cursor_row =
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len(), cursor_row)?;
         self.previous_lines = new_lines;
         self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
+        self.cursor_row = cursor_row;
+        self.hardware_cursor_row = hardware_cursor_row;
         self.previous_width = dimensions.width;
         self.previous_height = dimensions.height_u16;
         self.previous_viewport_top = previous_viewport_top;
+        Ok(())
     }
 
     /// Full render: optionally clear screen/scrollback, then write the full
@@ -775,9 +916,10 @@ impl TuiRenderer {
         height_u16: u16,
         width: u16,
         cursor_pos: Option<CursorPos>,
-    ) {
+    ) -> std::io::Result<()> {
         if debug_log_enabled() {
             let _ = write_debug_log(
+                self.debug_frame_id,
                 &format!("full-render-{clear}"),
                 width,
                 height,
@@ -818,38 +960,47 @@ impl TuiRenderer {
         }
         buffer.push_str("\x1b[?2026l");
         if debug_log_enabled() {
-            let _ = write_output_log(&format!("full-render-{clear}"), &buffer);
+            let _ = write_output_log(
+                self.debug_frame_id,
+                &format!("full-render-{clear}"),
+                &buffer,
+            );
         }
-        let _ = output.write_all(buffer.as_bytes());
-        let _ = output.flush();
+        write_render_output(output, &buffer, true)?;
 
-        self.cursor_row = new_lines.len().saturating_sub(1);
-        self.hardware_cursor_row = self.cursor_row;
-        if clear {
-            self.max_lines_rendered = new_lines.len();
+        let cursor_row = new_lines.len().saturating_sub(1);
+        let max_lines_rendered = if clear {
+            new_lines.len()
         } else {
-            self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
-        }
+            self.max_lines_rendered.max(new_lines.len())
+        };
         let buffer_length = height.max(new_lines.len());
-        self.previous_viewport_top = buffer_length.saturating_sub(height);
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
+        let previous_viewport_top = buffer_length.saturating_sub(height);
+        let hardware_cursor_row =
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len(), cursor_row)?;
         self.previous_lines = new_lines.to_vec();
         self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
+        self.cursor_row = cursor_row;
+        self.hardware_cursor_row = hardware_cursor_row;
+        self.max_lines_rendered = max_lines_rendered;
+        self.previous_viewport_top = previous_viewport_top;
         self.previous_width = width;
         self.previous_height = height_u16;
+        Ok(())
     }
 
     /// Position the hardware cursor for IME candidate windows.
     fn position_hardware_cursor(
-        &mut self,
+        &self,
         output: &mut dyn Write,
         cursor_pos: Option<CursorPos>,
         total_lines: usize,
-    ) {
+        current_hardware_cursor_row: usize,
+    ) -> std::io::Result<usize> {
         if cursor_pos.is_none() || total_lines == 0 {
-            let _ = write!(output, "\x1b[?25l"); // Hide cursor
-            let _ = output.flush();
-            return;
+            output.write_all(b"\x1b[?25l")?; // Hide cursor
+            output.flush()?;
+            return Ok(current_hardware_cursor_row);
         }
         let cursor_pos = cursor_pos.unwrap();
 
@@ -858,7 +1009,7 @@ impl TuiRenderer {
         let target_col = cursor_pos.col;
 
         // Move cursor from current position to target
-        let row_delta = target_row.cast_signed() - self.hardware_cursor_row.cast_signed();
+        let row_delta = target_row.cast_signed() - current_hardware_cursor_row.cast_signed();
         let mut buffer = String::new();
         if row_delta > 0 {
             let _ = write!(buffer, "\x1b[{row_delta}B"); // Move down
@@ -874,11 +1025,11 @@ impl TuiRenderer {
         }
 
         if !buffer.is_empty() {
-            let _ = output.write_all(buffer.as_bytes());
-            let _ = output.flush();
+            output.write_all(buffer.as_bytes())?;
+            output.flush()?;
         }
 
-        self.hardware_cursor_row = target_row;
+        Ok(target_row)
     }
 }
 
@@ -1027,6 +1178,124 @@ impl Drop for TuiRenderer {
 mod tests {
     use super::*;
 
+    struct FailingWriter {
+        bytes_before_failure: usize,
+    }
+
+    impl FailingWriter {
+        const fn after_bytes(bytes_before_failure: usize) -> Self {
+            Self {
+                bytes_before_failure,
+            }
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.bytes_before_failure == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            let written = buffer.len().min(self.bytes_before_failure);
+            self.bytes_before_failure -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailOnWrite {
+        successful_writes_remaining: usize,
+    }
+
+    impl FailOnWrite {
+        const fn after_writes(successful_writes_remaining: usize) -> Self {
+            Self {
+                successful_writes_remaining,
+            }
+        }
+    }
+
+    impl Write for FailOnWrite {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.successful_writes_remaining == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            self.successful_writes_remaining -= 1;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingFailingWriter {
+        bytes_before_failure: usize,
+        failed_once: bool,
+        output: Vec<u8>,
+    }
+
+    impl RecordingFailingWriter {
+        const fn after_bytes(bytes_before_failure: usize) -> Self {
+            Self {
+                bytes_before_failure,
+                failed_once: false,
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for RecordingFailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.bytes_before_failure == 0 && !self.failed_once {
+                self.failed_once = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            if self.failed_once {
+                self.output.extend_from_slice(buffer);
+                return Ok(buffer.len());
+            }
+            let written = buffer.len().min(self.bytes_before_failure);
+            self.output.extend_from_slice(&buffer[..written]);
+            self.bytes_before_failure -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn render_state(
+        renderer: &TuiRenderer,
+    ) -> (
+        Vec<String>,
+        BTreeSet<u32>,
+        usize,
+        usize,
+        usize,
+        u16,
+        u16,
+        bool,
+        usize,
+        usize,
+    ) {
+        (
+            renderer.previous_lines.clone(),
+            renderer.previous_kitty_image_ids.clone(),
+            renderer.viewport_top,
+            renderer.previous_viewport_top,
+            renderer.hardware_cursor_row,
+            renderer.previous_width,
+            renderer.previous_height,
+            renderer.first_render,
+            renderer.max_lines_rendered,
+            renderer.cursor_row,
+        )
+    }
+
     fn test_renderer(previous_lines: Vec<String>) -> TuiRenderer {
         let line_count = previous_lines.len();
         TuiRenderer {
@@ -1037,15 +1306,70 @@ mod tests {
             hardware_cursor_row: line_count.saturating_sub(1),
             previous_width: if line_count == 0 { 0 } else { 80 },
             previous_height: if line_count == 0 { 0 } else { 24 },
+            force_full_redraw: false,
             first_render: line_count == 0,
             max_lines_rendered: line_count,
             cursor_row: line_count.saturating_sub(1),
             clear_on_shrink: false,
             show_hardware_cursor: true,
             capabilities: TerminalCapabilities::default(),
+            debug_frame_id: 0,
             #[cfg(windows)]
             windows_input_mode: windows_input_mode::WindowsInputModeGuard::inactive(),
         }
+    }
+
+    #[test]
+    fn render_write_failure_does_not_commit_frame_state() {
+        let mut renderer = test_renderer(vec!["old".to_owned()]);
+        let before = render_state(&renderer);
+        let mut output = FailingWriter::after_bytes(2);
+
+        let error = renderer
+            .render_to_with_size(&mut output, 80, 24, vec!["new".to_owned()], None)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(render_state(&renderer), before);
+        assert!(renderer.force_full_redraw);
+    }
+
+    #[test]
+    fn cursor_write_failure_keeps_cached_frame_and_forces_full_retry() {
+        let mut renderer = test_renderer(vec!["old".to_owned()]);
+        let before = render_state(&renderer);
+        let mut output = FailOnWrite::after_writes(1);
+
+        let error = renderer
+            .render_to_with_size(
+                &mut output,
+                80,
+                24,
+                vec!["new".to_owned()],
+                Some(CursorPos { row: 0, col: 0 }),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(render_state(&renderer), before);
+        assert!(renderer.force_full_redraw);
+
+        let mut retry_output = Vec::new();
+        renderer
+            .render_to_with_size(&mut retry_output, 80, 24, vec!["new".to_owned()], None)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&retry_output).contains("\x1b[2J\x1b[H\x1b[3J"));
+    }
+
+    #[test]
+    fn failed_synchronized_render_closes_terminal_output_mode() {
+        let mut output = RecordingFailingWriter::after_bytes("\x1b[?2026h".len());
+
+        let error = write_render_output(&mut output, "\x1b[?2026hframe", true).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(output.output.starts_with(b"\x1b[?2026h"));
+        assert!(output.output.ends_with(SYNCHRONIZED_OUTPUT_END));
     }
 
     #[test]
@@ -1384,7 +1708,9 @@ mod tests {
         renderer.hardware_cursor_row = 0;
         let mut buf = Vec::new();
 
-        renderer.position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1);
+        renderer
+            .position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1, 0)
+            .unwrap();
         let output = String::from_utf8_lossy(&buf);
 
         assert!(output.contains("\x1b[4G"));
@@ -1399,7 +1725,9 @@ mod tests {
         renderer.hardware_cursor_row = 0;
         let mut buf = Vec::new();
 
-        renderer.position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1);
+        renderer
+            .position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1, 0)
+            .unwrap();
         let output = String::from_utf8_lossy(&buf);
 
         assert!(output.contains("\x1b[4G"));

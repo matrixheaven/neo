@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{cli::Cli, themes::ResolvedTheme, trust};
 
+mod atomic_file;
 mod loader;
 mod matching;
 pub(crate) mod mutations;
@@ -27,7 +28,12 @@ pub(crate) use paths::{
 };
 
 // Re-export config types for callers that access them via `crate::config::*`.
-pub(crate) use loader::{read_file_config, write_file_config};
+pub(crate) use loader::update_file_config;
+#[cfg(test)]
+pub(crate) use loader::{
+    config_process_lock_is_available, read_file_config, update_file_config_with_lock_hook,
+    update_file_config_with_writer,
+};
 pub(crate) use types::FileConfig;
 pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
 
@@ -114,6 +120,14 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub(crate) fn inherit_live_state(&mut self, current: &Self) {
+        self.permission_mode = current.permission_mode;
+        self.live_permission_mode = Arc::clone(&current.live_permission_mode);
+        self.workspace_policy = Arc::clone(&current.workspace_policy);
+        self.background_tasks = current.background_tasks.clone();
+        self.multi_agent = current.multi_agent.clone();
+    }
+
     /// The canonical `provider/model` display label for the configured default
     /// model. This is the single source of truth for label formatting.
     ///

@@ -147,6 +147,7 @@ pub struct BackgroundTaskManager {
     inner: Arc<Mutex<HashMap<String, BackgroundTaskRecord>>>,
     persistence_dir: Option<Arc<PathBuf>>,
     persistent_outputs: Arc<Mutex<HashMap<String, Arc<Mutex<File>>>>>,
+    persistence_errors: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskManager {
@@ -240,6 +241,19 @@ impl BackgroundTaskManager {
         task_id: &str,
         chunk: &str,
     ) -> Result<(), ToolError> {
+        let result = self.append_persistent_output_inner(task_id, chunk).await;
+        if let Err(error) = &result {
+            self.record_persistence_error(task_id, error.to_string())
+                .await;
+        }
+        result
+    }
+
+    async fn append_persistent_output_inner(
+        &self,
+        task_id: &str,
+        chunk: &str,
+    ) -> Result<(), ToolError> {
         let Some(root) = &self.persistence_dir else {
             return Ok(());
         };
@@ -287,8 +301,18 @@ impl BackgroundTaskManager {
 
     async fn close_persistent_output(&self, task_id: &str) {
         if let Err(err) = self.finish_persistent_output(task_id).await {
-            eprintln!("failed to close background task output: {err}");
+            self.record_persistence_error(task_id, err.to_string())
+                .await;
         }
+    }
+
+    async fn record_persistence_error(&self, task_id: &str, error: String) {
+        tracing::warn!(task_id, error = %error, "failed to persist background task output");
+        self.persistence_errors
+            .lock()
+            .await
+            .entry(task_id.to_owned())
+            .or_insert(error);
     }
 
     #[cfg(test)]
@@ -458,6 +482,27 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Apply one ordered, bounded child-progress update to a running swarm.
+    pub async fn update_delegate_swarm_progress(
+        &self,
+        task_id: &str,
+        child_progress: crate::multi_agent::SwarmChildProgress,
+        aggregate: crate::multi_agent::SwarmAggregate,
+        state: crate::multi_agent::AgentLifecycleState,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && let BackgroundTaskState::DelegateSwarmRunning { snapshot } = &mut record.state
+        {
+            crate::multi_agent::apply_swarm_child_progress(
+                snapshot,
+                &child_progress,
+                aggregate,
+                state,
+            );
+        }
+    }
+
     /// Mark a running delegate swarm as completed.
     pub async fn complete_delegate_swarm(
         &self,
@@ -617,7 +662,15 @@ impl BackgroundTaskManager {
         loop {
             let snapshot = self.snapshot(task_id).await?;
             if !block || !snapshot.status.is_active() || Instant::now() >= deadline {
-                return Ok(snapshot_result(&snapshot, max_output_bytes));
+                let mut result = snapshot_result(&snapshot, max_output_bytes);
+                if let Some(error) = self.persistence_errors.lock().await.get(task_id).cloned() {
+                    result.content.push_str("\npersistence_error: ");
+                    result.content.push_str(&error);
+                    if let Some(details) = result.details.as_mut() {
+                        details["persistence_error"] = json!(error);
+                    }
+                }
+                return Ok(result);
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1891,6 +1944,41 @@ mod tests {
                 .await
                 .expect("read output"),
             "hello world\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_is_visible_in_typed_task_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocked_root = temp.path().join("not-a-directory");
+        tokio::fs::write(&blocked_root, b"file").await.unwrap();
+        let manager = BackgroundTaskManager::new().with_persistence_dir(blocked_root);
+        manager
+            .start_bash_with_task_id(
+                "bash-persistence".to_owned(),
+                "persistent task".to_owned(),
+                fake_command(None, "", ""),
+                1024,
+            )
+            .await
+            .unwrap();
+
+        manager
+            .persist_task_output_for_test("bash-persistence", "chunk")
+            .await
+            .expect_err("persistence root is a file");
+        let result = manager
+            .output("bash-persistence", false, Duration::ZERO, 1024)
+            .await
+            .unwrap();
+
+        assert!(result.content.contains("persistence_error:"));
+        assert!(
+            result
+                .details
+                .as_ref()
+                .and_then(|details| details["persistence_error"].as_str())
+                .is_some()
         );
     }
 

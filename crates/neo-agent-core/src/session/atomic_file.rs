@@ -2,7 +2,22 @@ use std::{ffi::OsStr, fs, io, io::Write, path::Path};
 
 use uuid::Uuid;
 
+pub(crate) enum AtomicWriteStatus {
+    Durable,
+    CommittedUnsynced(io::Error),
+}
+
 pub(crate) fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    match write_file_atomic_status(path, content)? {
+        AtomicWriteStatus::Durable => Ok(()),
+        AtomicWriteStatus::CommittedUnsynced(error) => Err(error),
+    }
+}
+
+pub(crate) fn write_file_atomic_status(
+    path: &Path,
+    content: &[u8],
+) -> io::Result<AtomicWriteStatus> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -16,22 +31,34 @@ pub(crate) fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
         .and_then(OsStr::to_str)
         .unwrap_or("session");
     let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let write_result = write_temp_file(&temp_path, content).and_then(|()| {
-        fs::rename(&temp_path, path)?;
-        sync_parent_dir(parent)
-    });
-    if write_result.is_err() {
+    if let Err(error) = write_temp_file(&temp_path, content) {
         let _ = fs::remove_file(&temp_path);
+        return Err(error);
     }
-    write_result
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    match sync_parent_dir(parent) {
+        Ok(()) => Ok(AtomicWriteStatus::Durable),
+        Err(error) => Ok(AtomicWriteStatus::CommittedUnsynced(error)),
+    }
 }
 
-fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
+pub(crate) fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     validate_safe_directory(path)
 }
 
-fn validate_safe_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn validate_safe_directory_if_present(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_safe_directory(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn validate_safe_directory(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
@@ -48,7 +75,7 @@ fn validate_safe_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
+pub(crate) fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -80,6 +107,10 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
+}
+
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    sync_parent_dir(path)
 }
 
 fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {

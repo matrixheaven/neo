@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult,
-    goal::{Goal, GoalManager, GoalStatus},
+    goal::{Goal, GoalError, GoalManager, GoalStatus},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -153,6 +153,9 @@ impl Tool for UpdateGoalStatusTool {
                     Ok(ToolResult::ok(content).with_details(details))
                 }
                 Ok(None) => Ok(ToolResult::error("no active goal to update")),
+                Err(err) if GoalError::is_committed_unsynced(&err) => Ok(ToolResult::ok(format!(
+                    "Goal status update committed with durability warning: {err}"
+                ))),
                 Err(err) => Ok(ToolResult::error(format!("failed to update goal: {err}"))),
             }
         })
@@ -238,14 +241,14 @@ impl Tool for ExitGoalModeTool {
             }
             let objective = goal.objective.clone();
             Ok(match self.manager.start(goal).await {
-                Ok(Some(_previous)) => started_goal_result(
-                    &self.manager,
-                    format!("Approved and started goal: {objective} (previous goal superseded)"),
-                    true,
-                ),
-                Ok(None) => started_goal_result(
+                Ok(()) => started_goal_result(
                     &self.manager,
                     format!("Approved and started goal: {objective}"),
+                    true,
+                ),
+                Err(err) if GoalError::is_committed_unsynced(&err) => started_goal_result(
+                    &self.manager,
+                    format!("Approved and started goal: {objective} (durability warning: {err})"),
                     true,
                 ),
                 Err(err) => ToolResult::error(format!("failed to start goal: {err}")),
@@ -296,23 +299,36 @@ impl Tool for StartGoalTool {
             }
             let objective = goal.objective.clone();
 
-            let result = if args.replace {
-                manager.replace(goal).await
+            if args.replace {
+                Ok(match manager.replace(goal).await {
+                    Ok(Some(_previous)) => started_goal_result(
+                        &manager,
+                        format!("Started goal: {objective} (previous goal superseded)"),
+                        false,
+                    ),
+                    Ok(None) => {
+                        started_goal_result(&manager, format!("Started goal: {objective}"), false)
+                    }
+                    Err(err) if GoalError::is_committed_unsynced(&err) => started_goal_result(
+                        &manager,
+                        format!("Started goal: {objective} (durability warning: {err})"),
+                        false,
+                    ),
+                    Err(err) => ToolResult::error(format!("failed to replace goal: {err}")),
+                })
             } else {
-                manager.start(goal).await
-            };
-
-            Ok(match result {
-                Ok(Some(_previous)) => started_goal_result(
-                    &manager,
-                    format!("Started goal: {objective} (previous goal superseded)"),
-                    false,
-                ),
-                Ok(None) => {
-                    started_goal_result(&manager, format!("Started goal: {objective}"), false)
-                }
-                Err(err) => ToolResult::error(format!("failed to start goal: {err}")),
-            })
+                Ok(match manager.start(goal).await {
+                    Ok(()) => {
+                        started_goal_result(&manager, format!("Started goal: {objective}"), false)
+                    }
+                    Err(err) if GoalError::is_committed_unsynced(&err) => started_goal_result(
+                        &manager,
+                        format!("Started goal: {objective} (durability warning: {err})"),
+                        false,
+                    ),
+                    Err(err) => ToolResult::error(format!("failed to start goal: {err}")),
+                })
+            }
         })
     }
 }
@@ -440,8 +456,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_goal_replace_supersedes_existing() {
+    async fn start_goal_without_replace_rejects_existing_goal() {
         let (_temp, manager) = make_manager().await;
+        let tool = StartGoalTool::new(Arc::clone(&manager));
+        let ctx = ToolContext::new(".").expect("context");
+
+        tool.execute(&ctx, json!({"objective": "First goal"}))
+            .await
+            .expect("start first");
+        let result = tool
+            .execute(&ctx, json!({"objective": "Second goal"}))
+            .await
+            .expect("reject second");
+
+        assert!(result.is_error);
+        assert!(result.content.contains("active goal"));
+        assert_eq!(
+            manager
+                .active()
+                .expect("first goal remains active")
+                .objective,
+            "First goal"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_goal_replace_supersedes_existing() {
+        let (temp, manager) = make_manager().await;
         let tool = StartGoalTool::new(Arc::clone(&manager));
         let ctx = ToolContext::new(".").expect("context");
 
@@ -461,6 +502,20 @@ mod tests {
         assert!(result.content.contains("previous goal superseded"));
         let active = manager.active().expect("active goal");
         assert_eq!(active.objective, "Second goal");
+        assert!(
+            temp.path()
+                .join("agents/main/goals")
+                .join("active.json")
+                .is_file()
+        );
+
+        let reloaded = GoalManager::load(temp.path().to_path_buf())
+            .await
+            .expect("reload manager");
+        assert_eq!(
+            reloaded.active().expect("replacement restored").objective,
+            "Second goal"
+        );
     }
 
     #[tokio::test]

@@ -653,16 +653,15 @@ impl ReasoningDraft {
 }
 
 fn entry_reasoning_capability(entry: &ModelEntry) -> ReasoningCapability {
-    if entry.reasoning.supports_reasoning() || matches!(entry.reasoning, ReasoningCapability::None)
-    {
-        if entry.reasoning.supports_reasoning()
+    if (entry.reasoning.supports_reasoning()
+        || matches!(entry.reasoning, ReasoningCapability::None))
+        && (entry.reasoning.supports_reasoning()
             || !entry
                 .capabilities
                 .iter()
-                .any(|capability| capability == "thinking" || capability == "reasoning")
-        {
-            return entry.reasoning.clone();
-        }
+                .any(|capability| capability == "thinking" || capability == "reasoning"))
+    {
+        return entry.reasoning.clone();
     }
     if entry
         .capabilities

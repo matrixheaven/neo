@@ -1,6 +1,11 @@
 //! Stdio MCP client builder.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use rmcp::{ServiceExt, transport::TokioChildProcess};
 use tokio::{
@@ -8,7 +13,10 @@ use tokio::{
     process::Command,
 };
 
-use super::{McpError, client::McpClient};
+use super::{
+    McpError,
+    client::{BoundedByteTail, McpClient, SharedStderrTail},
+};
 use crate::tools::ProcessSupervisor;
 
 #[derive(Debug, Clone)]
@@ -22,10 +30,8 @@ pub struct StdioConfig {
 
 /// Configure a `tokio::process::Command` for an MCP stdio server.
 ///
-/// Extracted from `build_stdio_client` so it can be unit-tested without
-/// spawning a real subprocess. Note: stderr is NOT set here — it is set on
-/// the `TokioChildProcessBuilder` instead, because the builder overwrites
-/// stdio settings during `spawn()`.
+/// Stderr is configured on `TokioChildProcessBuilder`, because the builder
+/// overwrites the command's stdio settings during `spawn()`.
 pub(crate) fn build_command(config: &StdioConfig) -> Command {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args);
@@ -40,6 +46,7 @@ pub(crate) fn build_command(config: &StdioConfig) -> Command {
 
 pub async fn build_stdio_client(
     server_id: &str,
+    attempt_id: u64,
     config: StdioConfig,
     supervisor: &ProcessSupervisor,
 ) -> Result<Arc<dyn McpClient>, McpError> {
@@ -53,27 +60,58 @@ pub async fn build_stdio_client(
         .spawn()
         .map_err(|e| McpError::protocol(format!("failed to spawn stdio MCP server: {e}")))?;
 
-    // Drain stderr in the background so the child never blocks on a full
-    // stderr pipe. Lines are read and dropped — they must NOT be inherited
-    // (which would leak onto the terminal in TUI mode).
-    if let Some(stderr) = stderr_opt {
-        tokio::spawn(async move { drain_stderr(stderr).await });
-    }
+    // Drain raw stderr bytes so the child cannot block on a full pipe. The
+    // bounded tail is retained for diagnostics but never inherited by the TUI.
+    let stderr_tail: SharedStderrTail = Arc::new(Mutex::new(BoundedByteTail::default()));
+    let mut stderr_drain = stderr_opt.map(|stderr| {
+        let tail = Arc::clone(&stderr_tail);
+        tokio::spawn(async move { drain_stderr(stderr, tail).await })
+    });
 
     let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
 
-    let service = ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?;
+    let service = match ().serve(transport).await {
+        Ok(service) => service,
+        Err(error) => {
+            if let Some(mut drain) = stderr_drain.take()
+                && tokio::time::timeout(Duration::from_millis(250), &mut drain)
+                    .await
+                    .is_err()
+            {
+                drain.abort();
+            }
+            return Err(McpError::protocol(error.to_string()).with_stderr_tail(Some(
+                stderr_tail
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .snapshot(),
+            )));
+        }
+    };
 
-    let client: Arc<dyn McpClient> =
-        Arc::new(super::client::RmcpClient::new(service, request_timeout));
+    let client: Arc<dyn McpClient> = Arc::new(super::client::RmcpClient::new(
+        service,
+        request_timeout,
+        Some(stderr_tail),
+    ));
 
-    let handle = format!("mcp_stdio_{server_id}");
+    let handle = process_handle(server_id, attempt_id);
+    let cleanup_server_id = server_id.to_owned();
     let client_for_cleanup = Arc::clone(&client);
     supervisor
-        .register(handle, move |_handle| {
+        .register(handle, move |handle| {
             let client = Arc::clone(&client_for_cleanup);
+            let server_id = cleanup_server_id.clone();
             Box::pin(async move {
-                let _ = client.shutdown().await;
+                if let Err(error) = client.shutdown().await {
+                    tracing::warn!(
+                        %server_id,
+                        attempt_id,
+                        %handle,
+                        error = %error.message(),
+                        "failed to shut down supervised stdio MCP client"
+                    );
+                }
             })
         })
         .await;
@@ -81,7 +119,11 @@ pub async fn build_stdio_client(
     Ok(client)
 }
 
-async fn drain_stderr<R>(stderr: R)
+pub(crate) fn process_handle(server_id: &str, attempt_id: u64) -> String {
+    format!("mcp_stdio_{server_id}_{attempt_id}")
+}
+
+async fn drain_stderr<R>(stderr: R, tail: SharedStderrTail)
 where
     R: AsyncRead + Unpin,
 {
@@ -90,10 +132,10 @@ where
     loop {
         match stderr.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
-            Ok(_) => {
-                // Intentionally drop bytes — MCP server stderr is debug noise
-                // that must not reach the terminal.
-            }
+            Ok(read) => tail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(&buffer[..read]),
         }
     }
 }
@@ -105,18 +147,46 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     #[test]
-    fn build_command_pipes_stderr() {
+    fn failing_stdio_server_writes_stderr() {
+        if std::env::var_os("NEO_STDIO_STDERR_HELPER").is_some() {
+            use std::io::Write as _;
+
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(b"not-json\n").unwrap();
+            stdout.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            let mut stderr = std::io::stderr().lock();
+            stderr.write_all(&[b'x'; 10_000]).unwrap();
+            stderr.flush().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_stdio_handshake_exposes_bounded_stderr_tail() {
         let config = StdioConfig {
-            command: "echo".into(),
-            args: vec![],
-            env: BTreeMap::new(),
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".to_owned(),
+                "tools::mcp::stdio::tests::failing_stdio_server_writes_stderr".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            env: BTreeMap::from([("NEO_STDIO_STDERR_HELPER".to_owned(), "1".to_owned())]),
             cwd: None,
             tool_timeout_ms: None,
         };
-        // We can't inspect the Stdio setting directly on tokio::process::Command,
-        // but we can verify the command is configured without panicking.
-        // stderr piping is set on the TokioChildProcessBuilder, not here.
-        let _cmd = build_command(&config);
+
+        let error =
+            match build_stdio_client("broken", 1, config, &ProcessSupervisor::default()).await {
+                Ok(_) => panic!("helper exits without completing MCP handshake"),
+                Err(error) => error,
+            };
+        let tail = error.stderr_tail().expect("stderr tail");
+        assert_eq!(tail.len(), super::super::client::MCP_STDERR_TAIL_CAPACITY);
+        assert!(tail.ends_with(b"x"));
     }
 
     #[tokio::test]
@@ -125,7 +195,11 @@ mod tests {
         writer.write_all(b"diagnostic\n").await.unwrap();
         drop(writer);
 
-        let finished = timeout(Duration::from_millis(100), drain_stderr(stderr)).await;
+        let finished = timeout(
+            Duration::from_millis(100),
+            drain_stderr(stderr, Arc::new(Mutex::new(BoundedByteTail::default()))),
+        )
+        .await;
 
         assert!(finished.is_ok(), "stderr drain should stop at EOF");
     }
@@ -136,11 +210,23 @@ mod tests {
         writer.write_all(b"\xffunterminated").await.unwrap();
         drop(writer);
 
-        let finished = timeout(Duration::from_millis(100), drain_stderr(stderr)).await;
+        let tail = Arc::new(Mutex::new(BoundedByteTail::default()));
+
+        let finished = timeout(
+            Duration::from_millis(100),
+            drain_stderr(stderr, Arc::clone(&tail)),
+        )
+        .await;
 
         assert!(
             finished.is_ok(),
             "stderr drain should treat stderr as raw bytes"
+        );
+        assert_eq!(
+            tail.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot(),
+            b"\xffunterminated"
         );
     }
 }

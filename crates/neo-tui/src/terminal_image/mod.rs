@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io::Cursor};
 
 use serde::{Deserialize, Serialize};
 
@@ -159,13 +159,16 @@ impl ImageRenderPolicy {
 
         let protocol = self.negotiate(capabilities);
         let escape_sequence = match protocol {
-            NegotiatedImageProtocol::Kitty => encode_kitty_graphics(
-                bytes,
-                &KittyGraphicsOptions::new(kitty_format_for_mime(&image.mime_type))
-                    .with_image_id(stable_image_id(&image.id))
-                    .with_cell_size(cell_width, cell_height),
-            )
-            .ok(),
+            NegotiatedImageProtocol::Kitty => normalize_kitty_payload(bytes, &image.mime_type)
+                .and_then(|png| {
+                    encode_kitty_graphics(
+                        &png,
+                        &KittyGraphicsOptions::new(KittyImageFormat::Png)
+                            .with_image_id(stable_image_id(&image.id))
+                            .with_cell_size(cell_width, cell_height),
+                    )
+                    .ok()
+                }),
             NegotiatedImageProtocol::Iterm2 => encode_iterm2_inline_image(
                 bytes,
                 &Iterm2InlineImageOptions::new()
@@ -417,8 +420,18 @@ enum InlineImagePayload {
     RemoteUrl(String),
 }
 
-fn kitty_format_for_mime(_mime_type: &str) -> KittyImageFormat {
-    KittyImageFormat::Png
+fn normalize_kitty_payload(bytes: &[u8], mime_type: &str) -> Option<Vec<u8>> {
+    let input_format = match mime_type {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/gif" => image::ImageFormat::Gif,
+        "image/webp" => image::ImageFormat::WebP,
+        _ => return None,
+    };
+    let image = image::load_from_memory_with_format(bytes, input_format).ok()?;
+    let mut png = Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
 }
 
 #[must_use]
@@ -604,4 +617,71 @@ pub(super) fn encode_base64(data: &[u8]) -> String {
     }
 
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use image::{ColorType, codecs::jpeg::JpegEncoder};
+
+    use super::*;
+
+    #[test]
+    fn kitty_jpeg_payload_is_png_or_falls_back() {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new(&mut jpeg)
+            .encode(&[0, 0, 0], 1, 1, ColorType::Rgb8.into())
+            .expect("encode test JPEG");
+        let image = InlineImage::bytes(
+            "jpeg",
+            "image/jpeg",
+            jpeg,
+            None::<String>,
+            ImageSource::Generated,
+        );
+        let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false)
+            .render_inline_image(
+                &image,
+                TerminalImageCapabilities::default().with_kitty(true),
+                &ImageDisplayOptions::bounded(1, 1),
+            );
+
+        assert_eq!(rendered.protocol, NegotiatedImageProtocol::Kitty);
+        let sequence = rendered.escape_sequence.expect("Kitty sequence");
+        let encoded = sequence
+            .split_once(';')
+            .expect("Kitty payload separator")
+            .1
+            .strip_suffix(STRING_TERMINATOR)
+            .expect("Kitty string terminator");
+        let payload = STANDARD.decode(encoded).expect("Kitty payload base64");
+        assert!(payload.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(sequence.contains("f=100"));
+    }
+
+    #[test]
+    fn kitty_invalid_payload_falls_back_to_metadata() {
+        for (mime_type, bytes) in [
+            ("image/jpeg", b"not a JPEG".as_slice()),
+            ("image/png", b"\x89PNG".as_slice()),
+        ] {
+            let image = InlineImage::bytes(
+                "invalid",
+                mime_type,
+                bytes.to_vec(),
+                None::<String>,
+                ImageSource::Generated,
+            );
+            let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false)
+                .render_inline_image(
+                    &image,
+                    TerminalImageCapabilities::default().with_kitty(true),
+                    &ImageDisplayOptions::bounded(1, 1),
+                );
+
+            assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
+            assert!(rendered.escape_sequence.is_none());
+            assert_eq!(rendered.lines, vec![rendered.metadata]);
+        }
+    }
 }

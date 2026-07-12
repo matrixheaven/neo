@@ -414,37 +414,37 @@ impl AgentConfig {
                 }
             }
             Err(err) => {
-                eprintln!(
-                    "ignoring malformed approval rules at {}: {err}",
-                    path.display()
-                );
+                if let Ok(mut guard) = self.prefix_approval_rules.lock() {
+                    *guard = ApprovalRuleStore::default();
+                }
+                tracing::warn!(path = %path.display(), error = %err, "ignoring malformed approval rules");
             }
         }
     }
 
     /// Persist the current Layer-2 prefix rules to `<home>/approval_rules.json`.
-    /// Returns the path written, or `None` if no home dir is set or the write
-    /// failed (a failed write is logged but does not interrupt the turn).
-    #[must_use]
-    pub fn save_prefix_approval_rules(&self) -> Option<PathBuf> {
-        let path = self.approval_rules_path()?;
+    /// Returns the path written, or `None` if no home dir is configured.
+    pub fn save_prefix_approval_rules(&self) -> anyhow::Result<Option<PathBuf>> {
+        let Some(path) = self.approval_rules_path() else {
+            return Ok(None);
+        };
         let store = self
             .prefix_approval_rules
             .lock()
-            .ok()
-            .map(|guard| guard.clone())?;
-        let text = serde_json::to_string_pretty(&store).ok()?;
-        if let Some(parent) = path.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            eprintln!("failed to create dir for approval rules");
-            return None;
+            .map_err(|_| anyhow::anyhow!("approval rule store lock poisoned"))?
+            .clone();
+        let text = serde_json::to_string_pretty(&store)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                tracing::warn!(path = %parent.display(), %error, "failed to create approval rules directory");
+                error
+            })?;
         }
-        if std::fs::write(&path, text).is_err() {
-            eprintln!("failed to write approval rules at {}", path.display());
-            return None;
-        }
-        Some(path)
+        std::fs::write(&path, text).map_err(|error| {
+            tracing::warn!(path = %path.display(), %error, "failed to write approval rules");
+            error
+        })?;
+        Ok(Some(path))
     }
 
     /// Replace the shared plan-mode state. Useful when constructing from a
@@ -647,5 +647,32 @@ mod tests {
         let settings = CompactionSettings::new(100_000, 4);
 
         assert!(!settings.micro_enabled);
+    }
+
+    #[test]
+    fn malformed_approval_rules_clear_stale_typed_state() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("approval_rules.json"), b"not json").unwrap();
+        let mut config = test_config().with_home_dir(temp.path());
+        config
+            .prefix_approval_rules
+            .lock()
+            .unwrap()
+            .prefix_rules
+            .push(crate::permissions::PrefixApprovalRule {
+                prefix: vec!["cargo".to_owned()],
+                label: "cargo".to_owned(),
+            });
+
+        config.load_prefix_approval_rules();
+
+        assert!(
+            config
+                .prefix_approval_rules
+                .lock()
+                .unwrap()
+                .prefix_rules
+                .is_empty()
+        );
     }
 }

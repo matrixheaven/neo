@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context as _;
+use neo_agent_core::session::hash_os_path_into;
 use sha2::{Digest, Sha256};
 
 pub(crate) fn project_key(project_dir: &Path) -> anyhow::Result<String> {
@@ -15,29 +16,8 @@ pub(crate) fn project_key(project_dir: &Path) -> anyhow::Result<String> {
 
 fn path_hash_hex(path: &Path) -> String {
     let mut hasher = Sha256::new();
-    hash_path_bytes(path, &mut hasher);
+    hash_os_path_into(path, &mut hasher);
     format!("{:x}", hasher.finalize())
-}
-
-#[cfg(unix)]
-fn hash_path_bytes(path: &Path, hasher: &mut Sha256) {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    hasher.update(path.as_os_str().as_bytes());
-}
-
-#[cfg(windows)]
-fn hash_path_bytes(path: &Path, hasher: &mut Sha256) {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    for unit in path.as_os_str().encode_wide() {
-        hasher.update(unit.to_le_bytes());
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn hash_path_bytes(path: &Path, hasher: &mut Sha256) {
-    hasher.update(path.to_string_lossy().as_bytes());
 }
 
 #[cfg(test)]

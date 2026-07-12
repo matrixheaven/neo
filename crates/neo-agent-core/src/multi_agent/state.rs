@@ -323,7 +323,6 @@ pub struct AgentProgressSignature {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SwarmChildProgress {
     pub item_index: usize,
-    pub item: String,
     pub progress: AgentProgressSnapshot,
 }
 
@@ -423,25 +422,28 @@ pub fn apply_agent_progress(
     if let Some(text) = &progress.latest_text {
         upsert_progress_text(&mut snapshot.activity, text);
     }
+    trim_progress_activity(&mut snapshot.activity);
     true
 }
 
 pub fn apply_swarm_child_progress(
     swarm: &mut SwarmSnapshot,
     child_progress: &SwarmChildProgress,
-    aggregate: SwarmAggregate,
-    state: AgentLifecycleState,
+    _aggregate: SwarmAggregate,
+    _state: AgentLifecycleState,
 ) -> Option<AgentSnapshot> {
-    let child = swarm.children.iter_mut().find(|child| {
-        child.item_index == child_progress.item_index
-            || child.agent.id == child_progress.progress.agent_id
-    })?;
-    child.item_index = child_progress.item_index;
-    child.item.clone_from(&child_progress.item);
-    let _ = apply_agent_progress(&mut child.agent, &child_progress.progress);
-    swarm.aggregate = aggregate;
-    swarm.state = state;
-    Some(child.agent.clone())
+    let updated = {
+        let child = swarm.children.iter_mut().find(|child| {
+            child.item_index == child_progress.item_index
+                || child.agent.id == child_progress.progress.agent_id
+        })?;
+        let _ = apply_agent_progress(&mut child.agent, &child_progress.progress);
+        child.agent.clone()
+    };
+    swarm.aggregate =
+        SwarmAggregate::from_states(swarm.children.iter().map(|child| child.agent.state));
+    swarm.state = swarm.aggregate.status();
+    Some(updated)
 }
 
 fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateToolProgress) {
@@ -485,6 +487,12 @@ fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str) {
             thinking: false,
         },
     });
+}
+
+fn trim_progress_activity(activity: &mut Vec<AgentActivityEntry>) {
+    const MAX_AGENT_ACTIVITY: usize = 24;
+    let excess = activity.len().saturating_sub(MAX_AGENT_ACTIVITY);
+    activity.drain(..excess);
 }
 
 fn duration_millis_u64(duration: Duration) -> u64 {

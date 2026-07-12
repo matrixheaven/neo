@@ -97,6 +97,7 @@ pub use mcp::{
 };
 pub use mcp_manager::*;
 pub use process_supervisor::ProcessSupervisor;
+mod terminal_process;
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).
 pub use ask_user::{

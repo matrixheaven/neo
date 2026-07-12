@@ -44,12 +44,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Determine whether we will enter the interactive TUI. If so, tracing
     // output must NOT go to stderr — it would corrupt the terminal display.
-    // Instead, capture it into an in-memory ring buffer and forward WARN/ERROR
-    // events to the TUI transcript.
+    // Instead, forward structured WARN/ERROR events to the TUI transcript.
     let is_tui = is_interactive_tui_mode(&cli);
     let log_receiver = if is_tui {
-        let (_capture, rx) = log_capture::setup_tui_tracing(500);
-        rx
+        log_capture::setup_tui_tracing()
     } else {
         init_stderr_tracing();
         None
@@ -96,7 +94,16 @@ async fn dispatch(
     cli: Cli,
     log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
-    let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
+    let mut overrides = ConfigOverrides::from_cli(&cli);
+    if let Some(config_path) = &mut overrides.config_path
+        && config_path.is_relative()
+    {
+        *config_path = std::env::current_dir()
+            .context("failed to resolve launch directory for relative --config path")?
+            .join(&*config_path);
+    }
+    resolve_resume_workspace(&cli)?;
+    let config = AppConfig::load(overrides)?;
 
     if cli.resume_picker && cli.command.is_some() {
         anyhow::bail!(
@@ -117,6 +124,28 @@ async fn dispatch(
         log_receiver,
     )
     .await
+}
+
+fn resolve_resume_workspace(cli: &Cli) -> anyhow::Result<()> {
+    let Some(Command::Resume {
+        session_id: Some(session_id),
+    }) = &cli.command
+    else {
+        return Ok(());
+    };
+    let neo_home = config::neo_home()
+        .context("could not resolve Neo home directory for the global session index")?;
+    let index = neo_agent_core::session::SessionIndex::new(&neo_home);
+    let entry = index
+        .find(session_id)?
+        .with_context(|| format!("indexed session not found: {session_id}"))?;
+    std::env::set_current_dir(&entry.workdir).with_context(|| {
+        format!(
+            "failed to enter indexed workspace {} for session {session_id}",
+            entry.workdir.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[derive(Clone)]

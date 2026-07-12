@@ -57,6 +57,17 @@ fn write_home_config(content: &str) {
     fs::write(&config_path, content).expect("write home config");
 }
 
+fn index_session(session_id: &str, session_dir: &Path, workdir: &Path) {
+    let index = neo_agent_core::session::SessionIndex::new(&neo_home_for_test());
+    index
+        .append(&neo_agent_core::session::SessionIndexEntry {
+            session_id: session_id.to_owned(),
+            session_dir: session_dir.to_path_buf(),
+            workdir: workdir.to_path_buf(),
+        })
+        .expect("index session");
+}
+
 fn run(mut command: Command) -> String {
     let output = command.output().expect("neo command should run");
     assert!(
@@ -435,6 +446,44 @@ fn run_text_with_missing_credentials_does_not_persist_assistant_response() {
 }
 
 #[test]
+fn newly_created_session_with_custom_directory_can_resume_from_global_index() {
+    let workspace = TempDir::new().expect("workspace tempdir");
+    let launch_workspace = TempDir::new().expect("launch workspace tempdir");
+    let custom_sessions = workspace.path().join("custom-sessions");
+    write_home_config(&format!("sessions_dir = {:?}\n", custom_sessions));
+
+    let output = neo()
+        .current_dir(workspace.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["run", "--output", "text", "indexed prompt"])
+        .output()
+        .expect("neo command should run");
+    assert!(!output.status.success(), "missing credentials should fail");
+
+    let sessions = find_jsonl_files_in_bucket(&custom_sessions, workspace.path());
+    let session_id = sessions
+        .into_iter()
+        .next()
+        .and_then(|path| {
+            path.parent()?
+                .parent()?
+                .parent()?
+                .file_name()?
+                .to_str()
+                .map(str::to_owned)
+        })
+        .expect("created session id");
+
+    let mut resume = neo();
+    resume
+        .current_dir(launch_workspace.path())
+        .args(["resume", &session_id]);
+    let stdout = run(resume);
+    assert!(stdout.contains(&format!("session {session_id}")));
+    assert!(stdout.contains("user: indexed prompt"));
+}
+
+#[test]
 fn sessions_show_and_resume_read_jsonl_transcripts() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
@@ -455,6 +504,7 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     assert!(show_stdout.contains("\"User\""));
     assert!(show_stdout.contains("hi back"));
 
+    index_session(SESSION_A, &sessions, temp.path());
     let mut resume = neo();
     resume.current_dir(temp.path()).args(["resume", SESSION_A]);
     let resume_stdout = run(resume);
@@ -462,6 +512,99 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     assert!(resume_stdout.contains("user: hello"));
     assert!(resume_stdout.contains("assistant: hi back"));
     assert!(!resume_stdout.contains("placeholder"));
+}
+
+#[test]
+fn resume_specific_session_uses_indexed_workspace() {
+    let indexed_workspace = TempDir::new().expect("indexed workspace tempdir");
+    let launch_workspace = TempDir::new().expect("launch workspace tempdir");
+    let sessions = session_bucket(indexed_workspace.path());
+    fs::create_dir_all(&sessions).expect("create indexed sessions bucket");
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"indexed workspace prompt\"}}]}}}}\n",
+    );
+    index_session(SESSION_A, &sessions, indexed_workspace.path());
+
+    let mut resume = neo();
+    resume
+        .current_dir(launch_workspace.path())
+        .args(["resume", SESSION_A]);
+    let resume_stdout = run(resume);
+
+    assert!(resume_stdout.contains(&format!("session {SESSION_A}")));
+    assert!(resume_stdout.contains("user: indexed workspace prompt"));
+}
+
+#[test]
+fn resume_specific_session_rejects_missing_index_even_when_local_session_exists() {
+    let launch_workspace = TempDir::new().expect("launch workspace tempdir");
+    let neo_home = launch_workspace.path().join("neo-home");
+    let sessions_root = neo_home.join("sessions");
+    let local_bucket =
+        neo_agent_core::session::workspace_sessions_dir(&sessions_root, launch_workspace.path());
+    fs::create_dir_all(&local_bucket).expect("create local sessions bucket");
+    write_session_transcript(
+        &local_bucket,
+        SESSION_A,
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"must not read local fallback\"}}]}}}}\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_neo"))
+        .current_dir(launch_workspace.path())
+        .env("NEO_HOME", &neo_home)
+        .args(["resume", SESSION_A])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("indexed session not found"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("must not read local fallback"));
+}
+
+#[test]
+fn resume_specific_session_anchors_relative_config_to_launch_workspace() {
+    let launch_workspace = TempDir::new().expect("launch workspace tempdir");
+    let indexed_workspace = TempDir::new().expect("indexed workspace tempdir");
+    let neo_home = launch_workspace.path().join("neo-home");
+    let custom_sessions = launch_workspace.path().join("custom-sessions");
+    let config_text = toml::to_string(&serde_json::json!({
+        "sessions_dir": custom_sessions,
+    }))
+    .expect("serialize config");
+    fs::write(launch_workspace.path().join("relative.toml"), config_text)
+        .expect("write launch config");
+
+    let indexed_bucket =
+        neo_agent_core::session::workspace_sessions_dir(&custom_sessions, indexed_workspace.path());
+    fs::create_dir_all(&indexed_bucket).expect("create indexed sessions bucket");
+    write_session_transcript(
+        &indexed_bucket,
+        SESSION_A,
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"launch relative config transcript\"}}]}}}}\n",
+    );
+    neo_agent_core::session::SessionIndex::new(&neo_home)
+        .append(&neo_agent_core::session::SessionIndexEntry {
+            session_id: SESSION_A.to_owned(),
+            session_dir: indexed_bucket,
+            workdir: indexed_workspace.path().to_path_buf(),
+        })
+        .expect("index session");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_neo"))
+        .current_dir(launch_workspace.path())
+        .env("NEO_HOME", &neo_home)
+        .args(["--config", "relative.toml", "resume", SESSION_A])
+        .output()
+        .expect("neo command should run");
+
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("launch relative config transcript"));
 }
 
 #[test]
@@ -486,6 +629,7 @@ fn sessions_accept_exact_workspace_bucket_ids() {
     let show_stdout = run(show);
     assert!(show_stdout.contains("alpha prompt"));
 
+    index_session(SESSION_A, &sessions, temp.path());
     let mut resume_path = neo();
     resume_path
         .current_dir(temp.path())
@@ -616,6 +760,7 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     assert!(show_stdout.contains("CompactionApplied"));
     assert!(show_stdout.contains("Algorithmic transcript summary"));
 
+    index_session(SESSION_A, &sessions, temp.path());
     let mut resume = neo();
     resume.current_dir(temp.path()).args(["resume", SESSION_A]);
     let resume_stdout = run(resume);

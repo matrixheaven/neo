@@ -3,7 +3,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use neo_agent_core::{PermissionMode, goal::GoalManager, session::main_agent_plans_dir};
+use neo_agent_core::{
+    PermissionMode,
+    goal::{GoalError, GoalManager},
+    session::main_agent_plans_dir,
+};
 use neo_tui::shell::{DevelopmentMode, GoalModeStatus};
 
 use super::InteractiveController;
@@ -222,6 +226,9 @@ impl InteractiveController {
         match manager.pause().await {
             Ok(Some(goal)) => self.push_goal_status("⏸ Goal paused", &goal.objective),
             Ok(None) => self.push_status("No active goal to pause"),
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
+                self.push_status(format!("Goal paused with durability warning: {err}"))
+            }
             Err(err) => self.push_status(format!("Failed to pause goal: {err}")),
         }
     }
@@ -230,6 +237,9 @@ impl InteractiveController {
         match manager.resume().await {
             Ok(Some(goal)) => self.push_goal_status("▶ Goal resumed", &goal.objective),
             Ok(None) => self.push_status("No active goal to resume"),
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
+                self.push_status(format!("Goal resumed with durability warning: {err}"))
+            }
             Err(err) => self.push_status(format!("Failed to resume goal: {err}")),
         }
     }
@@ -238,6 +248,9 @@ impl InteractiveController {
         match manager.cancel().await {
             Ok(Some(goal)) => self.push_goal_status("⏹ Goal cancelled", &goal.objective),
             Ok(None) => self.push_status("No active goal to cancel"),
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
+                self.push_status(format!("Goal cancelled with durability warning: {err}"))
+            }
             Err(err) => self.push_status(format!("Failed to cancel goal: {err}")),
         }
     }
@@ -267,6 +280,11 @@ impl InteractiveController {
         match manager.replace(goal).await {
             Ok(Some(_previous)) => self.push_status(format!("Replaced goal with: {objective}")),
             Ok(None) => self.push_status(format!("Started goal: {objective}")),
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
+                self.push_status(format!(
+                    "Replaced goal with: {objective} (durability warning: {err})"
+                ));
+            }
             Err(err) => {
                 self.push_status(format!("Failed to replace goal: {err}"));
                 return true;
@@ -282,6 +300,18 @@ impl InteractiveController {
             Ok(()) if had_active_goal => self.push_status(format!("Queued goal: {objective}")),
             Ok(()) => {
                 self.push_status(format!("Started goal: {objective}"));
+                self.push_goal_status("▶ Goal started", objective);
+                return false;
+            }
+            Err(err) if GoalError::is_committed_unsynced(&err) && had_active_goal => {
+                self.push_status(format!(
+                    "Queued goal: {objective} (durability warning: {err})"
+                ));
+            }
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
+                self.push_status(format!(
+                    "Started goal: {objective} (durability warning: {err})"
+                ));
                 self.push_goal_status("▶ Goal started", objective);
                 return false;
             }
@@ -313,12 +343,12 @@ impl InteractiveController {
         let goal = neo_agent_core::goal::Goal::new(objective);
         let objective = goal.objective.clone();
         match manager.start(goal).await {
-            Ok(Some(_previous)) => {
+            Ok(()) => self.push_status(format!("Started goal: {objective}")),
+            Err(err) if GoalError::is_committed_unsynced(&err) => {
                 self.push_status(format!(
-                    "Started goal: {objective} (previous goal superseded)"
+                    "Started goal: {objective} (durability warning: {err})"
                 ));
             }
-            Ok(None) => self.push_status(format!("Started goal: {objective}")),
             Err(err) => {
                 self.push_status(format!("Failed to start goal: {err}"));
                 return true;

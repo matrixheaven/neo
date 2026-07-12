@@ -41,19 +41,18 @@ impl ReasoningEffort {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReasoningSelection {
+    #[default]
     Off,
     On,
-    Effort { effort: ReasoningEffort },
-    BudgetTokens { budget_tokens: u32 },
-}
-
-impl Default for ReasoningSelection {
-    fn default() -> Self {
-        Self::Off
-    }
+    Effort {
+        effort: ReasoningEffort,
+    },
+    BudgetTokens {
+        budget_tokens: u32,
+    },
 }
 
 impl ReasoningSelection {
@@ -80,23 +79,24 @@ pub struct ReasoningBudget {
 impl ReasoningBudget {
     #[must_use]
     pub const fn contains(&self, budget_tokens: u32) -> bool {
-        if let Some(min) = self.min {
-            if budget_tokens < min {
-                return false;
-            }
+        if let Some(min) = self.min
+            && budget_tokens < min
+        {
+            return false;
         }
-        if let Some(max) = self.max {
-            if budget_tokens > max {
-                return false;
-            }
+        if let Some(max) = self.max
+            && budget_tokens > max
+        {
+            return false;
         }
         true
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningCapability {
+    #[default]
     None,
     Toggle {
         disable_supported: bool,
@@ -116,12 +116,6 @@ pub enum ReasoningCapability {
         budget: Option<ReasoningBudget>,
         disable_supported: bool,
     },
-}
-
-impl Default for ReasoningCapability {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl ReasoningCapability {

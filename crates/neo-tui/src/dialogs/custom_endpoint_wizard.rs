@@ -1746,7 +1746,7 @@ fn default_reasoning_efforts() -> Vec<ReasoningEffort> {
     ]
 }
 
-fn sort_reasoning_efforts(values: &mut Vec<ReasoningEffort>) {
+fn sort_reasoning_efforts(values: &mut [ReasoningEffort]) {
     values.sort_by_key(|value| {
         all_reasoning_efforts()
             .iter()

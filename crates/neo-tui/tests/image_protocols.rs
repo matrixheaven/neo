@@ -1,3 +1,4 @@
+use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use neo_tui::shell::InlineImageRenderCache;
 use neo_tui::terminal_image::{
     ImageDisplayOptions, ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy,
@@ -228,7 +229,7 @@ fn image_render_policy_keeps_remote_images_metadata_only_by_default() {
 }
 
 #[test]
-fn image_render_policy_renders_local_or_base64_payloads_with_selected_protocol() {
+fn image_render_policy_falls_back_for_invalid_local_payload() {
     let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
     let local = InlineImage::bytes(
         "img-local",
@@ -245,27 +246,26 @@ fn image_render_policy_renders_local_or_base64_payloads_with_selected_protocol()
     );
 
     assert_eq!(local.size_bytes(), Some(4));
-    assert_eq!(rendered.protocol, NegotiatedImageProtocol::Kitty);
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
     assert!(
         rendered
             .metadata
             .contains("[image: image/png generated 4 bytes alt=\"generated plot\"]")
     );
-    assert!(
-        rendered
-            .escape_sequence
-            .as_deref()
-            .is_some_and(|sequence| sequence.starts_with("\x1b_G"))
-    );
+    assert!(rendered.escape_sequence.is_none());
 }
 
 #[test]
 fn terminal_image_thumbnail_uses_bounded_kitty_cell_dimensions() {
     let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(&[0, 0, 0], 1, 1, ColorType::Rgb8.into())
+        .expect("encode test PNG");
     let image = InlineImage::bytes(
         "img-wide",
         "image/png",
-        [137, 80, 78, 71],
+        png,
         Some("wide screenshot"),
         ImageSource::Base64,
     );

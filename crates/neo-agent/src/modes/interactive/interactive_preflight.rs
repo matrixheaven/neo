@@ -40,7 +40,7 @@ pub(super) enum SkillPreflightDecision {
     Ready,
     InvalidUsage,
     Open {
-        spec: InteractivePreflightSpec,
+        spec: Box<InteractivePreflightSpec>,
         generated_prompt: Option<String>,
     },
     Blocked(String),
@@ -103,16 +103,16 @@ impl InteractivePreflightSpec {
 }
 
 pub(super) fn init_preflight() -> InteractivePreflightSpec {
-    optional_preflight(
-        WorkflowId::Init,
-        "Switch to Ask mode?",
-        "Generating a strong AGENTS.md usually requires asking about reference locations, project preferences, and durable workflow rules.",
-        "Switch to Ask and start",
-        "Ask mode lets the workflow clarify missing project guidance before writing.",
-        "Stay Auto and generate best effort",
-        "Start /init without user questions. The agent will proceed with explicit best-effort assumptions.",
-        "Do not start /init.",
-    )
+    optional_preflight(OptionalPreflight {
+        workflow_id: WorkflowId::Init,
+        title: "Switch to Ask mode?",
+        body: "Generating a strong AGENTS.md usually requires asking about reference locations, project preferences, and durable workflow rules.",
+        recommended_label: "Switch to Ask and start",
+        recommended_description: "Ask mode lets the workflow clarify missing project guidance before writing.",
+        alternate_label: "Stay Auto and generate best effort",
+        alternate_description: "Start /init without user questions. The agent will proceed with explicit best-effort assumptions.",
+        cancel_description: "Do not start /init.",
+    })
 }
 
 pub(super) fn preflight_for_skill_directives(
@@ -145,7 +145,7 @@ pub(super) fn skill_preflight_decision(
     }
     match preflight_for_skill_directives(directives) {
         Ok(Some((spec, generated_prompt))) => SkillPreflightDecision::Open {
-            spec,
+            spec: Box::new(spec),
             generated_prompt,
         },
         Ok(None) => SkillPreflightDecision::Ready,
@@ -190,37 +190,39 @@ fn required_skill_preflight(
     }
 }
 
-fn optional_preflight(
+struct OptionalPreflight<'a> {
     workflow_id: WorkflowId,
-    title: &str,
-    body: &str,
-    recommended_label: &str,
-    recommended_description: &str,
-    alternate_label: &str,
-    alternate_description: &str,
-    cancel_description: &str,
-) -> InteractivePreflightSpec {
-    let key = workflow_id.key();
+    title: &'a str,
+    body: &'a str,
+    recommended_label: &'a str,
+    recommended_description: &'a str,
+    alternate_label: &'a str,
+    alternate_description: &'a str,
+    cancel_description: &'a str,
+}
+
+fn optional_preflight(input: OptionalPreflight<'_>) -> InteractivePreflightSpec {
+    let key = input.workflow_id.key();
     InteractivePreflightSpec {
-        workflow_id,
-        title: title.to_owned(),
-        body: body.to_owned(),
+        workflow_id: input.workflow_id,
+        title: input.title.to_owned(),
+        body: input.body.to_owned(),
         recommended: PreflightChoice {
             id: format!("preflight:{key}:switch-ask"),
-            label: recommended_label.to_owned(),
-            description: recommended_description.to_owned(),
+            label: input.recommended_label.to_owned(),
+            description: input.recommended_description.to_owned(),
             action: PreflightAction::SwitchPermissionMode(PermissionMode::Ask),
         },
         alternate: Some(PreflightChoice {
             id: format!("preflight:{key}:continue-auto"),
-            label: alternate_label.to_owned(),
-            description: alternate_description.to_owned(),
+            label: input.alternate_label.to_owned(),
+            description: input.alternate_description.to_owned(),
             action: PreflightAction::ContinueAutoBestEffort,
         }),
         cancel: PreflightChoice {
             id: format!("preflight:{key}:cancel"),
             label: "Cancel".to_owned(),
-            description: cancel_description.to_owned(),
+            description: input.cancel_description.to_owned(),
             action: PreflightAction::Cancel,
         },
         auto_mode_policy: AutoModePolicy::OptionalClarification {

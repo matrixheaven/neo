@@ -1,5 +1,10 @@
 use futures::{StreamExt, stream};
 use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
@@ -11,9 +16,34 @@ use super::{
 use crate::AgentEvent;
 use crate::multi_agent::{
     AgentLifecycleState, AgentProfile, AgentRunMode, ChildRuntimeDeps, DelegateContext,
-    DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
-    apply_swarm_template,
+    DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
+    SwarmSnapshot, apply_agent_progress, apply_swarm_template,
 };
+
+type SwarmProgressUpdate = (SwarmChildProgress, SwarmAggregate, AgentLifecycleState);
+
+async fn publish_swarm_progress(
+    event_callback: &Option<ToolEventCallback>,
+    background: &Option<(crate::BackgroundTaskManager, String)>,
+    turn: u32,
+    swarm_id: &str,
+    (child_progress, aggregate, state): SwarmProgressUpdate,
+) {
+    if let Some(callback) = event_callback {
+        callback(AgentEvent::DelegateSwarmProgressUpdated {
+            turn,
+            swarm_id: swarm_id.to_owned(),
+            state,
+            aggregate,
+            child_progress: child_progress.clone(),
+        });
+    }
+    if let Some((manager, task_id)) = background {
+        manager
+            .update_delegate_swarm_progress(task_id, child_progress, aggregate, state)
+            .await;
+    }
+}
 
 /// Build the Delegate/DelegateSwarm input schema with the per-role selection
 /// guide appended to the `role` field description, so the main agent knows when
@@ -403,14 +433,17 @@ async fn run_swarm_children(
         vec![None; initial_snapshot.children.len()];
     let current_children =
         std::sync::Arc::new(std::sync::Mutex::new(initial_snapshot.children.clone()));
+    const PROGRESS_QUEUE_CAPACITY: usize = 64;
+    let (progress_tx, mut progress_rx) = mpsc::channel(PROGRESS_QUEUE_CAPACITY);
+    let overflow = Arc::new(Mutex::new(BTreeMap::<usize, SwarmProgressUpdate>::new()));
     let mut stream = stream::iter(initial_snapshot.children.clone())
         .map(|child| {
             let runtime = runtime.clone();
             let deps = deps.clone();
-            let event_callback = event_callback.clone();
-            let background = background.clone();
             let initial_snapshot = initial_snapshot.clone();
             let current_children = std::sync::Arc::clone(&current_children);
+            let progress_tx = progress_tx.clone();
+            let overflow = Arc::clone(&overflow);
             async move {
                 let item_index = child.item_index;
                 let item = child.item.clone();
@@ -432,40 +465,41 @@ async fn run_swarm_children(
                         &initial_snapshot.swarm_id,
                         &item,
                         DelegateContext::None,
-                        |agent| {
-                            let snapshot = {
+                        |progress| {
+                            let (aggregate, state) = {
                                 let mut children = current_children
                                     .lock()
                                     .expect("swarm progress state poisoned");
                                 if let Some(child) = children.get_mut(item_index) {
-                                    child.agent = agent;
+                                    let _ = apply_agent_progress(&mut child.agent, &progress);
                                 }
                                 let aggregate = SwarmAggregate::from_states(
                                     children.iter().map(|c| c.agent.state),
                                 );
-                                SwarmSnapshot {
-                                    swarm_id: initial_snapshot.swarm_id.clone(),
-                                    description: initial_snapshot.description.clone(),
-                                    role: initial_snapshot.role,
-                                    mode: initial_snapshot.mode,
-                                    state: aggregate.status(),
-                                    max_concurrency: initial_snapshot.max_concurrency,
-                                    aggregate,
-                                    children: children.clone(),
-                                }
+                                (aggregate, aggregate.status())
                             };
-                            if let Some(callback) = &event_callback {
-                                callback(AgentEvent::DelegateSwarmUpdated {
-                                    turn,
-                                    swarm: snapshot.clone(),
-                                });
-                            }
-                            if let Some((manager, task_id)) = &background {
-                                let manager = manager.clone();
-                                let task_id = task_id.clone();
-                                tokio::spawn(async move {
-                                    manager.update_delegate_swarm(&task_id, snapshot).await;
-                                });
+                            let update = (
+                                SwarmChildProgress {
+                                    item_index,
+                                    progress,
+                                },
+                                aggregate,
+                                state,
+                            );
+                            match progress_tx.try_send(update) {
+                                Ok(()) => {
+                                    overflow
+                                        .lock()
+                                        .expect("swarm progress overflow poisoned")
+                                        .remove(&item_index);
+                                }
+                                Err(mpsc::error::TrySendError::Full(update)) => {
+                                    overflow
+                                        .lock()
+                                        .expect("swarm progress overflow poisoned")
+                                        .insert(item_index, update);
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {}
                             }
                         },
                     )
@@ -479,7 +513,61 @@ async fn run_swarm_children(
         })
         .buffer_unordered(max_concurrency);
 
-    while let Some(completed_child) = stream.next().await {
+    let mut completed_count = 0;
+    loop {
+        tokio::select! {
+            Some((child_progress, aggregate, state)) = progress_rx.recv() => {
+                publish_swarm_progress(
+                    &event_callback,
+                    &background,
+                    turn,
+                    &initial_snapshot.swarm_id,
+                    (child_progress, aggregate, state),
+                ).await;
+                while let Ok(update) = progress_rx.try_recv() {
+                    publish_swarm_progress(
+                        &event_callback,
+                        &background,
+                        turn,
+                        &initial_snapshot.swarm_id,
+                        update,
+                    ).await;
+                }
+                let overflow_updates = std::mem::take(
+                    &mut *overflow.lock().expect("swarm progress overflow poisoned"),
+                );
+                for (_, update) in overflow_updates {
+                    publish_swarm_progress(
+                        &event_callback,
+                        &background,
+                        turn,
+                        &initial_snapshot.swarm_id,
+                        update,
+                    ).await;
+                }
+            }
+            Some(completed_child) = stream.next() => {
+        while let Ok(update) = progress_rx.try_recv() {
+            publish_swarm_progress(
+                &event_callback,
+                &background,
+                turn,
+                &initial_snapshot.swarm_id,
+                update,
+            ).await;
+        }
+        let overflow_updates = std::mem::take(
+            &mut *overflow.lock().expect("swarm progress overflow poisoned"),
+        );
+        for (_, update) in overflow_updates {
+            publish_swarm_progress(
+                &event_callback,
+                &background,
+                turn,
+                &initial_snapshot.swarm_id,
+                update,
+            ).await;
+        }
         let index = completed_child.item_index;
         {
             let mut children = current_children
@@ -517,6 +605,13 @@ async fn run_swarm_children(
             manager
                 .update_delegate_swarm(task_id, snapshot.clone())
                 .await;
+        }
+        completed_count += 1;
+        if completed_count == initial_snapshot.children.len() {
+            break;
+        }
+            }
+            else => break,
         }
     }
 
@@ -612,6 +707,11 @@ fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<()
 }
 
 fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<(), ToolError> {
+    const MAX_SWARM_CHILDREN: usize = 8;
+    const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
+    const MAX_SWARM_ITEM_TITLE_CHARS: usize = 80;
+    const MAX_SWARM_ITEM_VALUE_CHARS: usize = 512;
+    const MAX_SWARM_PROMPT_TEMPLATE_CHARS: usize = 512;
     if request.description.trim().is_empty() {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -622,6 +722,20 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
             message: "items or resume_agent_ids must contain at least one child".to_owned(),
+        });
+    }
+    if request.items.len() + request.resume_agent_ids.len() > MAX_SWARM_CHILDREN {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("swarm supports at most {MAX_SWARM_CHILDREN} children"),
+        });
+    }
+    if request.description.chars().count() > MAX_SWARM_DESCRIPTION_CHARS {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!(
+                "description must not exceed {MAX_SWARM_DESCRIPTION_CHARS} characters"
+            ),
         });
     }
     if !request.items.is_empty()
@@ -638,6 +752,14 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
         });
     }
     if let Some(template) = request.prompt_template.as_deref() {
+        if template.chars().count() > MAX_SWARM_PROMPT_TEMPLATE_CHARS {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "prompt_template must not exceed {MAX_SWARM_PROMPT_TEMPLATE_CHARS} characters"
+                ),
+            });
+        }
         if !request.items.is_empty() && !template.contains("{{item}}") {
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
@@ -659,6 +781,22 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
                 message: format!("items[{index}].value must not be empty"),
             });
         }
+        if item.title.chars().count() > MAX_SWARM_ITEM_TITLE_CHARS {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "items[{index}].title must not exceed {MAX_SWARM_ITEM_TITLE_CHARS} characters"
+                ),
+            });
+        }
+        if item.value.chars().count() > MAX_SWARM_ITEM_VALUE_CHARS {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "items[{index}].value must not exceed {MAX_SWARM_ITEM_VALUE_CHARS} characters"
+                ),
+            });
+        }
     }
     for (agent_id, prompt) in &request.resume_agent_ids {
         if !agent_id.starts_with("agent_") {
@@ -671,6 +809,14 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
                 message: format!("resume_agent_ids[{agent_id}] must not be empty"),
+            });
+        }
+        if prompt.chars().count() > MAX_SWARM_ITEM_VALUE_CHARS {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "resume_agent_ids[{agent_id}] must not exceed {MAX_SWARM_ITEM_VALUE_CHARS} characters"
+                ),
             });
         }
     }
