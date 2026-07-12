@@ -1,6 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::{env, fs};
 
 use anyhow::Context;
@@ -24,6 +26,7 @@ use crate::{themes, trust};
 const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
+static PROCESS_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 impl AppConfig {
     #[allow(clippy::too_many_lines)]
@@ -416,15 +419,138 @@ pub(crate) fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
     toml::from_str(&content).with_context(|| format!("failed to parse config {}", path.display()))
 }
 
-pub(crate) fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
-    }
+pub(crate) fn update_file_config<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut FileConfig) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    update_file_config_impl(
+        path,
+        mutate,
+        |file, content| {
+            file.write_all(content)
+                .with_context(|| format!("failed to write temporary config for {}", path.display()))
+        },
+        || {},
+    )
+}
 
-    let config = config_with_default_compaction(config);
-    let content = toml::to_string_pretty(&config)?;
-    fs::write(path, content).with_context(|| format!("failed to write config {}", path.display()))
+#[cfg(test)]
+pub(crate) fn update_file_config_with_writer<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut FileConfig) -> anyhow::Result<T>,
+    writer: impl FnOnce(&mut File, &[u8]) -> anyhow::Result<()>,
+) -> anyhow::Result<T> {
+    update_file_config_impl(path, mutate, writer, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn update_file_config_with_lock_hook<T>(
+    path: &Path,
+    before_advisory_lock: impl FnOnce(),
+    mutate: impl FnOnce(&mut FileConfig) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    update_file_config_impl(
+        path,
+        mutate,
+        |file, content| {
+            file.write_all(content)
+                .with_context(|| format!("failed to write temporary config for {}", path.display()))
+        },
+        before_advisory_lock,
+    )
+}
+
+fn update_file_config_impl<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut FileConfig) -> anyhow::Result<T>,
+    writer: impl FnOnce(&mut File, &[u8]) -> anyhow::Result<()>,
+    before_advisory_lock: impl FnOnce(),
+) -> anyhow::Result<T> {
+    let requested_parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(requested_parent).with_context(|| {
+        format!(
+            "failed to create config directory {}",
+            requested_parent.display()
+        )
+    })?;
+    let resolved_path = resolved_config_path(path, requested_parent)?;
+    let parent = resolved_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let lock_key = resolved_path.clone();
+    let process_lock = process_lock(lock_key);
+    let _process_guard = process_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let lock_path = advisory_lock_path(&resolved_path, parent);
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open config lock {}", lock_path.display()))?;
+    before_advisory_lock();
+    lock_file
+        .lock()
+        .with_context(|| format!("failed to lock config {}", resolved_path.display()))?;
+
+    let mut config = read_file_config(&resolved_path)?;
+    let result = mutate(&mut config)?;
+    let content = toml::to_string_pretty(&config_with_default_compaction(&config))?;
+    super::atomic_file::write_with(&resolved_path, content.as_bytes(), writer)?;
+    Ok(result)
+}
+
+fn process_lock(lock_key: PathBuf) -> Arc<Mutex<()>> {
+    let mut locks = PROCESS_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        locks
+            .entry(lock_key)
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn config_process_lock_is_available(path: &Path) -> anyhow::Result<bool> {
+    let requested_parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(requested_parent)?;
+    let resolved_path = resolved_config_path(path, requested_parent)?;
+    let lock = process_lock(resolved_path);
+    let available = lock.try_lock().is_ok();
+    Ok(available)
+}
+
+fn resolved_config_path(path: &Path, parent: &Path) -> anyhow::Result<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path)
+            .with_context(|| format!("failed to resolve config {}", path.display()));
+    }
+    let parent = fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve config directory {}", parent.display()))?;
+    Ok(path
+        .file_name()
+        .map_or_else(|| parent.clone(), |name| parent.join(name)))
+}
+
+fn advisory_lock_path(path: &Path, parent: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config.toml"))
+        .to_os_string();
+    name.push(".lock");
+    parent.join(name)
 }
 
 fn config_with_default_compaction(config: &FileConfig) -> FileConfig {

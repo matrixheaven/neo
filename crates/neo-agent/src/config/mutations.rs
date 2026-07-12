@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::{
     AppConfig, FileConfig, McpConfig, McpServerConfig, ModelConfig, ProviderConfig,
-    read_file_config, write_file_config,
+    update_file_config,
 };
 
 /// Add or replace a provider in config.toml.
@@ -21,49 +21,53 @@ pub fn add_provider(
     provider_id: &str,
     cfg: ProviderConfig,
 ) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
-    providers.insert(provider_id.to_owned(), cfg);
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
+        providers.insert(provider_id.to_owned(), cfg);
+        Ok(())
+    })?;
     Ok(format!("added provider '{provider_id}'\n"))
 }
 
 /// Remove a provider and all its models from config.toml.
 pub fn remove_provider(config_path: &Path, provider_id: &str) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    remove_provider_config(&mut file_config, provider_id);
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        remove_provider_config(file_config, provider_id);
+        Ok(())
+    })?;
     Ok(format!("removed provider '{provider_id}' and its models\n"))
 }
 
 /// Add or replace a model in config.toml.
 pub fn add_model(config_path: &Path, alias: &str, cfg: ModelConfig) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    let models = file_config.models.get_or_insert_with(BTreeMap::new);
-    models.insert(alias.to_owned(), cfg);
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        let models = file_config.models.get_or_insert_with(BTreeMap::new);
+        models.insert(alias.to_owned(), cfg);
+        Ok(())
+    })?;
     Ok(format!("added model '{alias}'\n"))
 }
 
 /// Remove a model from config.toml.
 pub fn remove_model(config_path: &Path, alias: &str) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    if let Some(models) = &mut file_config.models {
-        models.remove(alias);
-    }
-    // Clear default if it was this alias
-    if file_config.default_model.as_deref() == Some(alias) {
-        file_config.default_model = None;
-    }
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        if let Some(models) = &mut file_config.models {
+            models.remove(alias);
+        }
+        if file_config.default_model.as_deref() == Some(alias) {
+            file_config.default_model = None;
+        }
+        Ok(())
+    })?;
     Ok(format!("removed model '{alias}'\n"))
 }
 
 /// Set the default model alias.
 pub fn set_default_model(config_path: &Path, alias: &str) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    file_config.default_model = Some(alias.to_owned());
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        file_config.default_model = Some(alias.to_owned());
+        Ok(())
+    })?;
     Ok(format!("default model set to '{alias}'\n"))
 }
 
@@ -74,11 +78,12 @@ pub fn set_model_selection(
     provider_id: &str,
     reasoning: &neo_ai::ReasoningSelection,
 ) -> anyhow::Result<()> {
-    let mut file_config = read_file_config(config_path)?;
-    file_config.default_model = Some(alias.to_owned());
-    file_config.default_provider = Some(provider_id.to_owned());
-    file_config.runtime.get_or_insert_default().reasoning = Some(reasoning.clone());
-    write_file_config(config_path, &file_config)
+    update_file_config(config_path, |file_config| {
+        file_config.default_model = Some(alias.to_owned());
+        file_config.default_provider = Some(provider_id.to_owned());
+        file_config.runtime.get_or_insert_default().reasoning = Some(reasoning.clone());
+        Ok(())
+    })
 }
 
 /// Import a provider from the models.dev catalog into config.toml.
@@ -118,16 +123,16 @@ pub fn add_provider_from_catalog_entry(
         })?;
     let count = provider_config.models.len();
 
-    let mut file_config = read_file_config(config_path)?;
-    replace_provider_from_catalog(
-        &mut file_config,
-        provider_id,
-        &provider_config,
-        api_key,
-        default_model,
-    );
-
-    write_file_config(config_path, &file_config)?;
+    update_file_config(config_path, |file_config| {
+        replace_provider_from_catalog(
+            file_config,
+            provider_id,
+            &provider_config,
+            api_key,
+            default_model,
+        );
+        Ok(())
+    })?;
 
     Ok(format!(
         "imported provider '{provider_id}' with {count} model{} from models.dev\n",
@@ -143,59 +148,59 @@ pub fn add_custom_endpoint_provider(
     models: Vec<(String, ModelConfig)>,
     default_model: Option<&str>,
 ) -> anyhow::Result<String> {
-    let mut file_config = read_file_config(config_path)?;
-    let supplied_aliases = models
-        .iter()
-        .map(|(alias, _)| alias.as_str())
-        .collect::<Vec<_>>();
-    if let Some(default_alias) = default_model {
-        anyhow::ensure!(
-            supplied_aliases.contains(&default_alias),
-            "default model '{default_alias}' is not one of the supplied model aliases"
-        );
-    }
-    clear_provider_default(&mut file_config, provider_id);
-    let should_set_default = file_config
-        .default_model
-        .as_deref()
-        .is_none_or(str::is_empty);
-    remove_provider_entry(file_config.providers.as_mut(), provider_id);
-    remove_provider_models(file_config.models.as_mut(), provider_id);
-
-    let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
-    providers.insert(provider_id.to_owned(), provider_config);
-
-    let first_alias = models.first().map(|(alias, _)| alias.clone());
-    {
-        let model_table = file_config.models.get_or_insert_with(BTreeMap::new);
-        for (alias, model) in models {
+    let count = update_file_config(config_path, |file_config| {
+        let supplied_aliases = models
+            .iter()
+            .map(|(alias, _)| alias.as_str())
+            .collect::<Vec<_>>();
+        if let Some(default_alias) = default_model {
             anyhow::ensure!(
-                model.provider == provider_id,
-                "model '{alias}' references provider '{}', expected '{provider_id}'",
-                model.provider
+                supplied_aliases.contains(&default_alias),
+                "default model '{default_alias}' is not one of the supplied model aliases"
             );
-            model_table.insert(alias, model);
         }
-    }
+        clear_provider_default(file_config, provider_id);
+        let should_set_default = file_config
+            .default_model
+            .as_deref()
+            .is_none_or(str::is_empty);
+        remove_provider_entry(file_config.providers.as_mut(), provider_id);
+        remove_provider_models(file_config.models.as_mut(), provider_id);
 
-    if let Some(default_alias) = default_model.map(str::to_owned).or({
-        if should_set_default {
-            first_alias
-        } else {
-            None
+        let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
+        providers.insert(provider_id.to_owned(), provider_config);
+
+        let first_alias = models.first().map(|(alias, _)| alias.clone());
+        {
+            let model_table = file_config.models.get_or_insert_with(BTreeMap::new);
+            for (alias, model) in models {
+                anyhow::ensure!(
+                    model.provider == provider_id,
+                    "model '{alias}' references provider '{}', expected '{provider_id}'",
+                    model.provider
+                );
+                model_table.insert(alias, model);
+            }
         }
-    }) {
-        file_config.default_model = Some(default_alias);
-        file_config.default_provider = Some(provider_id.to_owned());
-    }
 
-    let count = file_config.models.as_ref().map_or(0, |models| {
-        models
-            .values()
-            .filter(|model| model.provider == provider_id)
-            .count()
-    });
-    write_file_config(config_path, &file_config)?;
+        if let Some(default_alias) = default_model.map(str::to_owned).or({
+            if should_set_default {
+                first_alias
+            } else {
+                None
+            }
+        }) {
+            file_config.default_model = Some(default_alias);
+            file_config.default_provider = Some(provider_id.to_owned());
+        }
+
+        Ok(file_config.models.as_ref().map_or(0, |models| {
+            models
+                .values()
+                .filter(|model| model.provider == provider_id)
+                .count()
+        }))
+    })?;
     Ok(format!(
         "added provider '{provider_id}' with {count} model{}\n",
         if count == 1 { "" } else { "s" }
@@ -238,33 +243,35 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
 
 pub fn upsert_mcp_server(server: &McpServerConfig, config_path: &Path) -> anyhow::Result<String> {
     crate::mcp_ops::validate_mcp_server_config(server)?;
-    let mut config = read_file_config(config_path)?;
-    let mcp = config.mcp.get_or_insert_with(McpConfig::default);
-    if let Some(existing) = mcp
-        .servers
-        .iter_mut()
-        .find(|existing| existing.id == server.id)
-    {
-        *existing = server.clone();
-    } else {
-        mcp.servers.push(server.clone());
-    }
-    write_file_config(config_path, &config)?;
+    update_file_config(config_path, |config| {
+        let mcp = config.mcp.get_or_insert_with(McpConfig::default);
+        if let Some(existing) = mcp
+            .servers
+            .iter_mut()
+            .find(|existing| existing.id == server.id)
+        {
+            *existing = server.clone();
+        } else {
+            mcp.servers.push(server.clone());
+        }
+        Ok(())
+    })?;
     Ok(format!("added MCP server {}\n", server.id))
 }
 
 pub fn remove_mcp_server(server_id: &str, config_path: &Path) -> anyhow::Result<String> {
-    let mut config = read_file_config(config_path)?;
-    let Some(mcp) = config.mcp.as_mut() else {
-        anyhow::bail!("MCP server {server_id} is not configured");
-    };
-    let original_len = mcp.servers.len();
-    mcp.servers.retain(|server| server.id != server_id);
-    anyhow::ensure!(
-        mcp.servers.len() != original_len,
-        "MCP server {server_id} is not configured"
-    );
-    write_file_config(config_path, &config)?;
+    update_file_config(config_path, |config| {
+        let Some(mcp) = config.mcp.as_mut() else {
+            anyhow::bail!("MCP server {server_id} is not configured");
+        };
+        let original_len = mcp.servers.len();
+        mcp.servers.retain(|server| server.id != server_id);
+        anyhow::ensure!(
+            mcp.servers.len() != original_len,
+            "MCP server {server_id} is not configured"
+        );
+        Ok(())
+    })?;
     Ok(format!("removed MCP server {server_id}\n"))
 }
 
@@ -273,16 +280,17 @@ pub fn set_mcp_server_enabled(
     enabled: bool,
     config_path: &Path,
 ) -> anyhow::Result<String> {
-    let mut config = read_file_config(config_path)?;
-    let Some(server) = config
-        .mcp
-        .as_mut()
-        .and_then(|mcp| mcp.servers.iter_mut().find(|server| server.id == server_id))
-    else {
-        anyhow::bail!("MCP server {server_id} is not configured");
-    };
-    server.enabled = enabled;
-    write_file_config(config_path, &config)?;
+    update_file_config(config_path, |config| {
+        let Some(server) = config
+            .mcp
+            .as_mut()
+            .and_then(|mcp| mcp.servers.iter_mut().find(|server| server.id == server_id))
+        else {
+            anyhow::bail!("MCP server {server_id} is not configured");
+        };
+        server.enabled = enabled;
+        Ok(())
+    })?;
     let action = if enabled { "enabled" } else { "disabled" };
     Ok(format!("{action} MCP server {server_id}\n"))
 }
@@ -509,7 +517,14 @@ fn provider_credential_label(cfg: &ProviderConfig) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::{
+        collections::BTreeMap,
+        fs::{self, OpenOptions},
+        io::Write as _,
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
 
     use neo_ai::{ApiType, catalog};
     use tempfile::TempDir;
@@ -517,7 +532,166 @@ mod tests {
     use super::{add_provider, add_provider_from_catalog_entry, list_providers, remove_provider};
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig,
+        config_process_lock_is_available, read_file_config, update_file_config,
+        update_file_config_with_lock_hook, update_file_config_with_writer,
     };
+
+    #[test]
+    fn concurrent_config_updates_preserve_both_mutations() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let (first_mutation_started_tx, first_mutation_started_rx) = mpsc::sync_channel(0);
+        let (release_first_tx, release_first_rx) = mpsc::sync_channel(0);
+        let (start_second_tx, start_second_rx) = mpsc::sync_channel(0);
+        let (second_attempting_tx, second_attempting_rx) = mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let first_path = &config_path;
+            scope.spawn(move || {
+                update_file_config(first_path, |config| {
+                    config.default_model = Some("model-a".to_owned());
+                    first_mutation_started_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            let second_path = &config_path;
+            scope.spawn(move || {
+                start_second_rx.recv().unwrap();
+                second_attempting_tx.send(()).unwrap();
+                update_file_config(second_path, |config| {
+                    config.default_provider = Some("provider-b".to_owned());
+                    Ok(())
+                })
+                .unwrap();
+            });
+
+            first_mutation_started_rx.recv().unwrap();
+            start_second_tx.send(()).unwrap();
+            second_attempting_rx.recv().unwrap();
+            assert!(!config_process_lock_is_available(&config_path).unwrap());
+            release_first_tx.send(()).unwrap();
+        });
+
+        let config = read_file_config(&config_path).unwrap();
+        assert_eq!(config.default_model.as_deref(), Some("model-a"));
+        assert_eq!(config.default_provider.as_deref(), Some("provider-b"));
+    }
+
+    #[test]
+    fn failed_atomic_replace_leaves_previous_config_parseable() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "default_model = \"original\"\n").unwrap();
+
+        let result = update_file_config_with_writer(
+            &config_path,
+            |config| {
+                config.default_model = Some("replacement".to_owned());
+                Ok(())
+            },
+            |file, _content| {
+                file.write_all(b"default_model = ")?;
+                anyhow::bail!("injected writer failure")
+            },
+        );
+
+        assert!(result.is_err());
+        let config = read_file_config(&config_path).unwrap();
+        assert_eq!(config.default_model.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn config_lock_helper() {
+        let Some(lock_path) = std::env::var_os("NEO_CONFIG_LOCK_HELPER_LOCK") else {
+            return;
+        };
+        let ready_path = std::env::var_os("NEO_CONFIG_LOCK_HELPER_READY").unwrap();
+        let release_path = std::env::var_os("NEO_CONFIG_LOCK_HELPER_RELEASE").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        lock.lock().unwrap();
+        fs::write(ready_path, b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(&release_path).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn advisory_config_lock_blocks_external_writer() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "default_model = \"original\"\n").unwrap();
+        let lock_path = temp.path().join("config.toml.lock");
+        let ready_path = temp.path().join("lock-ready");
+        let release_path = temp.path().join("lock-release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::mutations::tests::config_lock_helper",
+                "--nocapture",
+            ])
+            .env("NEO_CONFIG_LOCK_HELPER_LOCK", &lock_path)
+            .env("NEO_CONFIG_LOCK_HELPER_READY", &ready_path)
+            .env("NEO_CONFIG_LOCK_HELPER_RELEASE", &release_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !ready_path.exists() {
+            fs::write(&release_path, b"release").unwrap();
+            let _ = child.wait();
+            panic!("lock helper did not acquire the advisory lock");
+        }
+
+        let (completed_tx, completed_rx) = mpsc::sync_channel(0);
+        let (at_lock_tx, at_lock_rx) = mpsc::sync_channel(0);
+        let (attempt_lock_tx, attempt_lock_rx) = mpsc::sync_channel(0);
+        let blocked = std::thread::scope(|scope| {
+            let update_path = &config_path;
+            scope.spawn(move || {
+                update_file_config_with_lock_hook(
+                    update_path,
+                    || {
+                        at_lock_tx.send(()).unwrap();
+                        attempt_lock_rx.recv().unwrap();
+                    },
+                    |config| {
+                        config.default_provider = Some("external-waited".to_owned());
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let _ = completed_tx.send(());
+            });
+
+            at_lock_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            attempt_lock_tx.send(()).unwrap();
+            let blocked = completed_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err();
+            fs::write(&release_path, b"release").unwrap();
+            completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            blocked
+        });
+
+        assert!(child.wait().unwrap().success());
+        assert!(blocked, "config update bypassed the external advisory lock");
+        let config = read_file_config(&config_path).unwrap();
+        assert_eq!(config.default_provider.as_deref(), Some("external-waited"));
+    }
 
     #[test]
     fn list_providers_formats_text_and_json_entries() {

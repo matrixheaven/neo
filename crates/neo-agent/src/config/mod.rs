@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{cli::Cli, themes::ResolvedTheme, trust};
 
+mod atomic_file;
 mod loader;
 mod matching;
 pub(crate) mod mutations;
@@ -27,7 +28,12 @@ pub(crate) use paths::{
 };
 
 // Re-export config types for callers that access them via `crate::config::*`.
-pub(crate) use loader::{read_file_config, write_file_config};
+pub(crate) use loader::update_file_config;
+#[cfg(test)]
+pub(crate) use loader::{
+    config_process_lock_is_available, read_file_config, update_file_config_with_lock_hook,
+    update_file_config_with_writer,
+};
 pub(crate) use types::FileConfig;
 pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
 
