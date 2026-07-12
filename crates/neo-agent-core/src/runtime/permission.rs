@@ -488,8 +488,16 @@ async fn resolve_approval(
                 } else {
                     false
                 };
-                if should_save {
-                    let _ = config.save_prefix_approval_rules();
+                if should_save && let Err(error) = config.save_prefix_approval_rules() {
+                    if let Ok(mut store) = config.prefix_approval_rules.lock() {
+                        store
+                            .prefix_rules
+                            .retain(|saved| saved.prefix != rule.prefix);
+                    }
+                    tracing::warn!(%error, "failed to persist prefix approval rule");
+                    return Some(ToolResult::error(format!(
+                        "failed to persist prefix approval rule: {error}"
+                    )));
                 }
             }
             None

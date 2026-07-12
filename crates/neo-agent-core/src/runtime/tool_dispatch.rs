@@ -83,14 +83,15 @@ fn prepare_tool_calls_for_execution<'a>(
             if let Ok(ref parsed) = prepared
                 && let Some(warning) = &parsed.warning
             {
-                eprintln!(
-                    "[warn] tool call '{}' arguments repaired: {}",
-                    parsed.name, warning
-                );
+                emit_repaired_tool_arguments_warning(&parsed.name, warning);
             }
             (tool_call, prepared)
         })
         .collect()
+}
+
+pub fn emit_repaired_tool_arguments_warning(tool_name: &str, warning: &str) {
+    tracing::warn!(tool_name, warning, "tool arguments repaired");
 }
 
 #[allow(clippy::too_many_arguments)]

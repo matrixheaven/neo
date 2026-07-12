@@ -873,7 +873,7 @@ where
                             .append_persistent_output(task_id, output_chunk.as_ref())
                             .await
                         {
-                            eprintln!("failed to persist background task output: {err}");
+                            tracing::warn!(task_id, error = %err, "background task output persistence failed");
                         }
                     }
                     {

@@ -138,6 +138,7 @@ pub struct TuiRenderer {
     pub(super) clear_on_shrink: bool,
     pub(super) show_hardware_cursor: bool,
     pub(super) capabilities: TerminalCapabilities,
+    pub(super) debug_frame_id: u64,
     #[cfg(windows)]
     windows_input_mode: windows_input_mode::WindowsInputModeGuard,
 }
@@ -448,6 +449,7 @@ impl TuiRenderer {
                 env::var("NEO_HARDWARE_CURSOR").ok().as_deref(),
             ),
             capabilities,
+            debug_frame_id: 0,
             #[cfg(windows)]
             windows_input_mode,
         })
@@ -875,7 +877,7 @@ impl TuiRenderer {
         buffer.push_str("\x1b[?2026l");
 
         if debug_log_enabled() {
-            let _ = write_output_log("deleted-lines", &buffer);
+            let _ = write_output_log(self.debug_frame_id, "deleted-lines", &buffer);
         }
         write_render_output(output, &buffer, true)?;
         Ok(true)
@@ -917,6 +919,7 @@ impl TuiRenderer {
     ) -> std::io::Result<()> {
         if debug_log_enabled() {
             let _ = write_debug_log(
+                self.debug_frame_id,
                 &format!("full-render-{clear}"),
                 width,
                 height,
@@ -957,7 +960,11 @@ impl TuiRenderer {
         }
         buffer.push_str("\x1b[?2026l");
         if debug_log_enabled() {
-            let _ = write_output_log(&format!("full-render-{clear}"), &buffer);
+            let _ = write_output_log(
+                self.debug_frame_id,
+                &format!("full-render-{clear}"),
+                &buffer,
+            );
         }
         write_render_output(output, &buffer, true)?;
 
@@ -1306,6 +1313,7 @@ mod tests {
             clear_on_shrink: false,
             show_hardware_cursor: true,
             capabilities: TerminalCapabilities::default(),
+            debug_frame_id: 0,
             #[cfg(windows)]
             windows_input_mode: windows_input_mode::WindowsInputModeGuard::inactive(),
         }

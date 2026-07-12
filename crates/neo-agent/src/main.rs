@@ -44,12 +44,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Determine whether we will enter the interactive TUI. If so, tracing
     // output must NOT go to stderr — it would corrupt the terminal display.
-    // Instead, capture it into an in-memory ring buffer and forward WARN/ERROR
-    // events to the TUI transcript.
+    // Instead, forward structured WARN/ERROR events to the TUI transcript.
     let is_tui = is_interactive_tui_mode(&cli);
     let log_receiver = if is_tui {
-        let (_capture, rx) = log_capture::setup_tui_tracing(500);
-        rx
+        log_capture::setup_tui_tracing()
     } else {
         init_stderr_tracing();
         None
