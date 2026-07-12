@@ -473,7 +473,7 @@ impl McpConnectionManager {
                     false
                 }
                 Err(err) => {
-                    let diagnostic = diagnostic_from_error(&err, &entry.config, None);
+                    let diagnostic = diagnostic_from_error(&err, &entry.config);
                     if err.is_needs_auth() {
                         set_needs_auth(entry, diagnostic);
                         false
@@ -1015,7 +1015,8 @@ async fn complete_connection(
         Err(_) => Err(McpError::protocol(format!(
             "timeout connecting to MCP server {}",
             config.id
-        ))),
+        ))
+        .with_stderr_tail(client.stderr_tail())),
     };
     match discovery {
         Ok((tools, resources)) => Ok(ConnectOutcome {
@@ -1140,11 +1141,7 @@ fn oauth_identity_for_config(
     }
 }
 
-fn diagnostic_from_error(
-    error: &McpError,
-    config: &ManagedMcpServerConfig,
-    stderr_tail: Option<String>,
-) -> McpDiagnostic {
+fn diagnostic_from_error(error: &McpError, config: &ManagedMcpServerConfig) -> McpDiagnostic {
     let message = error.message().to_owned();
     let hint = diagnostic_hint(&message, config);
     McpDiagnostic {
@@ -1152,7 +1149,9 @@ fn diagnostic_from_error(
         transport: config.transport.label().to_owned(),
         message,
         hint,
-        stderr_tail,
+        stderr_tail: error
+            .stderr_tail()
+            .map(|tail| String::from_utf8_lossy(tail).into_owned()),
     }
 }
 
@@ -1226,7 +1225,7 @@ fn set_needs_auth(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) {
 }
 
 fn apply_connect_error(entry: &mut ManagedMcpEntry, err: &McpError) -> bool {
-    let diagnostic = diagnostic_from_error(err, &entry.config, None);
+    let diagnostic = diagnostic_from_error(err, &entry.config);
     if err.is_needs_auth() {
         set_needs_auth(entry, diagnostic);
         false
@@ -1942,6 +1941,46 @@ mod tests {
         assert_eq!(supervisor.active_count().await, 0);
     }
 
+    #[tokio::test]
+    async fn failed_stdio_discovery_cleans_up_supervised_process() {
+        let supervisor = ProcessSupervisor::default();
+        let manager = McpConnectionManager::new(supervisor.clone());
+        let cleaned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleaned_for_cleanup = Arc::clone(&cleaned);
+        supervisor
+            .register(stdio::process_handle("failed", 1), move |_handle| {
+                let cleaned = Arc::clone(&cleaned_for_cleanup);
+                Box::pin(async move {
+                    cleaned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .await;
+        let mut entry = entry_for_status(McpServerStatus::Pending);
+        entry.config = disabled_server("failed");
+        entry.config.enabled = true;
+        entry.config.reconnect.enabled = false;
+        entry.client = None;
+        entry.connect_task = Some(ManagedConnectTask {
+            attempt_id: 1,
+            expected_status: McpServerStatus::Pending,
+            cleanup_handle: Some(stdio::process_handle("failed", 1)),
+            handle: tokio::spawn(async { Err(McpError::protocol("discovery failed")) }),
+        });
+        while !entry.connect_task.as_ref().unwrap().handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        insert_entry(&manager, entry).await;
+
+        manager.poll_finished_connections().await;
+
+        assert_eq!(cleaned.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(supervisor.active_count().await, 0);
+        assert_eq!(
+            manager.snapshot("failed").await.unwrap().status,
+            McpServerStatus::Failed
+        );
+    }
+
     struct ControlledClient {
         list_started: tokio::sync::Notify,
         release_list: tokio::sync::Notify,
@@ -2215,6 +2254,52 @@ mod tests {
             client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn startup_timeout_diagnostic_includes_stdio_stderr_tail() {
+        struct HangingTailClient;
+
+        #[async_trait::async_trait]
+        impl McpClient for HangingTailClient {
+            async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
+                std::future::pending().await
+            }
+
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: serde_json::Value,
+            ) -> Result<McpToolResponse, McpError> {
+                unreachable!()
+            }
+
+            async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
+                unreachable!()
+            }
+
+            async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
+                unreachable!()
+            }
+
+            async fn shutdown(&self) -> Result<(), McpError> {
+                Ok(())
+            }
+
+            fn stderr_tail(&self) -> Option<Vec<u8>> {
+                Some(b"startup stalled".to_vec())
+            }
+        }
+
+        let mut config = disabled_server("slow-stdio");
+        config.startup_timeout_ms = Some(1);
+        let error = match complete_connection(Arc::new(HangingTailClient), None, &config).await {
+            Ok(_) => panic!("discovery should time out"),
+            Err(error) => error,
+        };
+        let diagnostic = diagnostic_from_error(&error, &config);
+
+        assert_eq!(diagnostic.stderr_tail.as_deref(), Some("startup stalled"));
     }
 
     #[tokio::test]

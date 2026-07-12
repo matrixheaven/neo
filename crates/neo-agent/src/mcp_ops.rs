@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use neo_agent_core::{
-    ManagedMcpTransport, McpConnectionManager, McpOAuthIdentity, McpOAuthService,
+    ManagedMcpTransport, McpConnectionManager, McpDiagnostic, McpOAuthIdentity, McpOAuthService,
     McpOAuthServiceConfig, McpOAuthTransportKind, McpReconnectPolicy, McpResourceListEntry,
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
     build_authorization_manager, oauth::callback_server::CallbackServer,
@@ -325,15 +325,15 @@ pub fn summarize_mcp_servers_from_snapshots(
             McpServerStatus::NeedsAuth => {
                 McpToolDiscovery::NeedsAuth(snapshot.error.as_ref().map_or_else(
                     || "OAuth authentication required".to_owned(),
-                    |d| d.message.clone(),
+                    |d| format_mcp_diagnostic(d, false),
                 ))
             }
-            McpServerStatus::Failed => McpToolDiscovery::Failed(
-                snapshot
-                    .error
-                    .as_ref()
-                    .map_or_else(|| "connection failed".to_owned(), |d| d.message.clone()),
-            ),
+            McpServerStatus::Failed => {
+                McpToolDiscovery::Failed(snapshot.error.as_ref().map_or_else(
+                    || "connection failed".to_owned(),
+                    |d| format_mcp_diagnostic(d, false),
+                ))
+            }
             McpServerStatus::Pending | McpServerStatus::Reconnecting => {
                 McpToolDiscovery::NotRequested
             }
@@ -382,10 +382,10 @@ pub fn mcp_startup_status_from_snapshot(snapshot: &McpServerSnapshot) -> McpStar
             ),
         },
         McpServerStatus::Failed => McpStartupPhase::Failed {
-            message: snapshot
-                .error
-                .as_ref()
-                .map_or_else(|| "connection failed".to_owned(), |d| d.message.clone()),
+            message: snapshot.error.as_ref().map_or_else(
+                || "connection failed".to_owned(),
+                |d| format_mcp_diagnostic(d, false),
+            ),
         },
         McpServerStatus::Pending | McpServerStatus::Reconnecting => McpStartupPhase::Connecting,
         McpServerStatus::Disabled => McpStartupPhase::Disabled,
@@ -440,12 +440,10 @@ pub fn format_mcp_startup_message(snapshot: &McpServerSnapshot) -> String {
         McpServerStatus::Failed => format!(
             "MCP server \"{}\" failed · {}",
             snapshot.id,
-            snapshot
-                .error
-                .as_ref()
-                .map_or("connection failed", |diagnostic| diagnostic
-                    .message
-                    .as_str())
+            snapshot.error.as_ref().map_or_else(
+                || "connection failed".to_owned(),
+                |diagnostic| { format_mcp_diagnostic(diagnostic, false) }
+            )
         ),
         McpServerStatus::Pending | McpServerStatus::Reconnecting => format!(
             "MCP server \"{}\" still connecting ({})",
@@ -590,9 +588,7 @@ pub fn format_mcp_status(snapshots: &[McpServerSnapshot]) -> String {
     for snapshot in snapshots {
         let status = snapshot.status.as_str();
         let detail = match &snapshot.error {
-            Some(diag) => format!("{} — {}", diag.message, diag.hint.as_deref().unwrap_or(""))
-                .trim_end_matches(" — ")
-                .to_owned(),
+            Some(diag) => format_mcp_diagnostic(diag, true),
             None => String::new(),
         };
         lines.push(format!(
@@ -601,6 +597,36 @@ pub fn format_mcp_status(snapshots: &[McpServerSnapshot]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn format_mcp_diagnostic(diagnostic: &McpDiagnostic, include_hint: bool) -> String {
+    fn sanitize_line(value: &str) -> String {
+        neo_tui::utils::shell_output::sanitize_shell_output(value)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    let mut parts = vec![sanitize_line(&diagnostic.message)];
+    if include_hint && let Some(hint) = diagnostic.hint.as_deref() {
+        let hint = sanitize_line(hint);
+        if !hint.is_empty() {
+            parts.push(hint);
+        }
+    }
+    if let Some(stderr_tail) = diagnostic.stderr_tail.as_deref() {
+        let stderr_tail = sanitize_line(stderr_tail);
+        if !stderr_tail.is_empty() {
+            parts.push(format!("stderr: {stderr_tail}"));
+        }
+    }
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn endpoint_summary(server: &McpServerConfig) -> String {
@@ -996,7 +1022,7 @@ mod tests {
                     transport: "http".to_owned(),
                     message: "OAuth authentication required".to_owned(),
                     hint: Some("Run /mcp and authenticate this server.".to_owned()),
-                    stderr_tail: None,
+                    stderr_tail: Some("\x1b]0;owned\x07authorization failed".to_owned()),
                 }),
                 reconnect_attempt: 0,
                 next_retry_ms: None,
@@ -1005,7 +1031,9 @@ mod tests {
 
         assert_eq!(
             summaries[0].tools,
-            McpToolDiscovery::NeedsAuth("OAuth authentication required".to_owned())
+            McpToolDiscovery::NeedsAuth(
+                "OAuth authentication required · stderr: authorization failed".to_owned()
+            )
         );
     }
 
@@ -1076,6 +1104,39 @@ mod tests {
         assert_eq!(
             format_mcp_startup_message(&snapshot),
             "MCP server \"linear\" needs OAuth · Run /mcp to authenticate."
+        );
+    }
+
+    #[test]
+    fn failed_mcp_diagnostics_render_sanitized_stderr_tail() {
+        let snapshot = McpServerSnapshot {
+            id: "broken".to_owned(),
+            transport: "stdio".to_owned(),
+            status: McpServerStatus::Failed,
+            tool_count: 0,
+            tool_names: Vec::new(),
+            resource_count: None,
+            error: Some(neo_agent_core::McpDiagnostic {
+                server_id: "broken".to_owned(),
+                transport: "stdio".to_owned(),
+                message: "connection closed".to_owned(),
+                hint: None,
+                stderr_tail: Some("\x1b]0;owned\x07visible failure\nsecond line".to_owned()),
+            }),
+            reconnect_attempt: 0,
+            next_retry_ms: None,
+        };
+
+        let status = format_mcp_status(std::slice::from_ref(&snapshot));
+        let startup = mcp_startup_status_from_snapshot(&snapshot);
+
+        assert!(status.contains("stderr: visible failure | second line"));
+        assert!(!status.contains('\x1b'));
+        assert_eq!(
+            startup.phase,
+            McpStartupPhase::Failed {
+                message: "connection closed · stderr: visible failure | second line".to_owned(),
+            }
         );
     }
 }

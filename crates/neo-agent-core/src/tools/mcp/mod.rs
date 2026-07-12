@@ -142,6 +142,7 @@ pub enum McpErrorKind {
 pub struct McpError {
     kind: McpErrorKind,
     message: String,
+    stderr_tail: Option<Vec<u8>>,
 }
 
 impl McpError {
@@ -150,6 +151,7 @@ impl McpError {
         Self {
             kind: McpErrorKind::Protocol,
             message: message.into(),
+            stderr_tail: None,
         }
     }
 
@@ -158,6 +160,7 @@ impl McpError {
         Self {
             kind: McpErrorKind::NeedsAuth,
             message: message.into(),
+            stderr_tail: None,
         }
     }
 
@@ -174,6 +177,17 @@ impl McpError {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    #[must_use]
+    pub fn with_stderr_tail(mut self, stderr_tail: Option<Vec<u8>>) -> Self {
+        self.stderr_tail = stderr_tail.filter(|tail| !tail.is_empty());
+        self
+    }
+
+    #[must_use]
+    pub fn stderr_tail(&self) -> Option<&[u8]> {
+        self.stderr_tail.as_deref()
     }
 }
 
