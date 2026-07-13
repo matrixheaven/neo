@@ -1268,9 +1268,7 @@ mod tests {
         }
     }
 
-    fn render_state(
-        renderer: &TuiRenderer,
-    ) -> (
+    type RenderState = (
         Vec<String>,
         BTreeSet<u32>,
         usize,
@@ -1281,7 +1279,9 @@ mod tests {
         bool,
         usize,
         usize,
-    ) {
+    );
+
+    fn render_state(renderer: &TuiRenderer) -> RenderState {
         (
             renderer.previous_lines.clone(),
             renderer.previous_kitty_image_ids.clone(),

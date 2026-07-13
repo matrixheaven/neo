@@ -333,7 +333,7 @@ fn replay_accepts_compaction_summary_without_new_metadata() {
 
 #[test]
 fn replay_ignores_old_context_window_event_for_authority() {
-    let events = vec![
+    let events = [
         AgentEvent::MessageAppended {
             message: AgentMessage::user_text("real history ".repeat(1_000)),
         },
@@ -355,7 +355,7 @@ fn replay_ignores_old_context_window_event_for_authority() {
 
 #[test]
 fn replay_drops_incomplete_trailing_tool_exchange_before_budgeting() {
-    let events = vec![
+    let events = [
         AgentEvent::MessageAppended {
             message: AgentMessage::assistant(
                 Vec::new(),

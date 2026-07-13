@@ -6872,8 +6872,7 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
     let mut config = test_config(temp.path(), temp.path().join("sessions"));
     config.config_path = config_path;
     *config.workspace_policy.write().expect("workspace policy") = Some(
-        neo_agent_core::WorkspaceAccessPolicy::new(temp.path().to_path_buf())
-            .expect("workspace access policy"),
+        neo_agent_core::WorkspaceAccessPolicy::new(temp.path()).expect("workspace access policy"),
     );
     config
         .background_tasks
