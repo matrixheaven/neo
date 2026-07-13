@@ -1491,9 +1491,10 @@ impl MultiAgentRuntime {
                 let text = content_text(content);
                 if !text.trim().is_empty() {
                     changed = true;
-                    snapshot.latest_text = Some(bounded_latest_text(&text));
+                    let canonical_text = bounded_latest_text(&text);
+                    snapshot.latest_text = Some(canonical_text.clone());
                     if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
-                        != Some(text.trim())
+                        != Some(canonical_text.as_str())
                     {
                         push_text_activity(snapshot, &text, false);
                     }
@@ -2038,18 +2039,19 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                 message: AgentMessage::Assistant { content, .. },
             } => {
                 let text = content_text(content);
-                if !text.trim().is_empty()
+                let canonical_text = bounded_latest_text(&text);
+                if !canonical_text.is_empty()
                     && latest_text_activity(activity.as_slice(), false).as_deref()
-                        != Some(text.trim())
+                        != Some(canonical_text.as_str())
                 {
-                    append_text_activity(&mut activity, &text, false);
+                    let _ = append_text_activity(&mut activity, &text, false);
                 }
             }
-            AgentEvent::ThinkingDelta { text, .. } if !text.trim().is_empty() => {
-                append_text_activity(&mut activity, text, true);
+            AgentEvent::ThinkingDelta { text, .. } => {
+                let _ = append_text_activity(&mut activity, text, true);
             }
-            AgentEvent::TextDelta { text, .. } if !text.trim().is_empty() => {
-                append_text_activity(&mut activity, text, false);
+            AgentEvent::TextDelta { text, .. } => {
+                let _ = append_text_activity(&mut activity, text, false);
             }
             _ => {}
         }
@@ -2059,12 +2061,12 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
 }
 
 fn push_text_activity(snapshot: &mut AgentSnapshot, text: &str, thinking: bool) {
-    if !append_text_activity(&mut snapshot.activity, text, thinking) {
+    let Some(accumulated) = append_text_activity(&mut snapshot.activity, text, thinking) else {
         return;
-    }
+    };
 
     if !thinking {
-        snapshot.latest_text = Some(bounded_latest_text(text));
+        snapshot.latest_text = Some(accumulated);
     }
 }
 
@@ -2072,10 +2074,7 @@ fn append_text_activity(
     activity: &mut Vec<AgentActivityEntry>,
     text: &str,
     thinking: bool,
-) -> bool {
-    if text.trim().is_empty() {
-        return false;
-    }
+) -> Option<String> {
     if let Some(AgentActivityEntry {
         kind:
             AgentActivityKind::Text {
@@ -2085,33 +2084,42 @@ fn append_text_activity(
     }) = activity.last_mut()
         && *previous_thinking == thinking
     {
-        previous.push_str(&bounded_latest_text(text));
-        *previous = bounded_latest_text(previous);
-        return true;
+        previous.push_str(text);
+        *previous = bounded_stream_text(previous);
+        return Some(previous.trim().to_owned());
     }
 
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let bounded = bounded_stream_text(text);
+    let accumulated = bounded.trim().to_owned();
     activity.push(AgentActivityEntry {
         kind: AgentActivityKind::Text {
-            text: bounded_latest_text(text),
+            text: bounded,
             thinking,
         },
     });
-    true
+    Some(accumulated)
 }
 
 const MAX_LATEST_MODEL_TEXT_CHARS: usize = 512;
 
 fn bounded_latest_text(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX_LATEST_MODEL_TEXT_CHARS {
-        return trimmed.to_owned();
+    bounded_stream_text(text.trim())
+}
+
+fn bounded_stream_text(text: &str) -> String {
+    if text.chars().count() <= MAX_LATEST_MODEL_TEXT_CHARS {
+        return text.to_owned();
     }
     let keep = MAX_LATEST_MODEL_TEXT_CHARS.saturating_sub(3);
-    let start = trimmed
+    let start = text
         .char_indices()
-        .nth(trimmed.chars().count().saturating_sub(keep))
+        .nth(text.chars().count().saturating_sub(keep))
         .map_or(0, |(index, _)| index);
-    format!("...{}", &trimmed[start..])
+    format!("...{}", &text[start..])
 }
 
 fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
@@ -2328,6 +2336,50 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarized_child_activity_preserves_whitespace_deltas_without_duplicate_body() {
+        let events = [
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "All".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: " ".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "edits applied.".to_owned(),
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "Let".to_owned(),
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: " ".to_owned(),
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "me verify.".to_owned(),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    vec![Content::text("All edits applied.")],
+                    Vec::new(),
+                    StopReason::EndTurn,
+                ),
+            },
+        ];
+
+        let activity = summarize_child_activity(&events);
+        let body = latest_text_activity(&activity, false);
+        let thinking = latest_text_activity(&activity, true);
+
+        assert_eq!(body.as_deref(), Some("All edits applied."));
+        assert_eq!(thinking.as_deref(), Some("Let me verify."));
+    }
 
     #[tokio::test]
     async fn live_cancel_guard_does_not_remove_replaced_token() {

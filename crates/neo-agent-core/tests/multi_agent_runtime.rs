@@ -981,7 +981,7 @@ fn child_text_and_thinking_deltas_accumulate_into_live_activity() {
     let snapshot = runtime.start_foreground_delegate_for_test("stream text");
     let started_at = std::time::Instant::now();
 
-    for text in ["All ", "edits ", "applied."] {
+    for text in ["All", " ", "edits", " ", "applied."] {
         let _ = runtime.apply_child_event(
             &snapshot.id,
             started_at,
@@ -991,7 +991,7 @@ fn child_text_and_thinking_deltas_accumulate_into_live_activity() {
             },
         );
     }
-    for text in ["Let ", "me ", "verify."] {
+    for text in ["Let", " ", "me", " ", "verify."] {
         let _ = runtime.apply_child_event(
             &snapshot.id,
             started_at,
