@@ -14,7 +14,6 @@ async fn session_state_write_rejects_symlinked_state_file() {
 
     let error = store
         .write(&SessionState::new())
-        .await
         .expect_err("session state write should reject symlinked target");
 
     assert!(

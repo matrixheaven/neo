@@ -22,6 +22,7 @@ pub struct CustomEndpointProviderDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CustomEndpointModelDraft {
     pub source: CustomEndpointModelSource,
     pub model_id: String,
@@ -126,6 +127,7 @@ pub struct CustomEndpointWizardState {
 
 impl CustomEndpointWizardState {
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(opts: CustomEndpointWizardOptions) -> Self {
         Self {
             theme: opts.theme,
@@ -491,7 +493,7 @@ impl CustomEndpointWizardState {
                     format!("{marker} {label:<21} type = \"{value}\"")
                 })
                 .chain([
-                    "".to_owned(),
+                    String::new(),
                     hint_line("↑/↓ select · Enter choose · Esc back", self.theme),
                 ])
                 .collect(),
@@ -1050,7 +1052,7 @@ impl CustomEndpointWizardState {
                 self.selected = 2;
                 InputResult::Handled
             }
-            WizardStep::EndpointAuth => {
+            WizardStep::EndpointAuth | WizardStep::ValidationError => {
                 self.step = WizardStep::Provider;
                 self.selected = 0;
                 InputResult::Handled
@@ -1110,14 +1112,10 @@ impl CustomEndpointWizardState {
                 self.selected = 0;
                 InputResult::Handled
             }
-            WizardStep::ValidationError => {
-                self.step = WizardStep::Provider;
-                self.selected = 0;
-                InputResult::Handled
-            }
         }
     }
 
+    #[allow(clippy::cast_sign_loss, reason = "delta is non-negative in this branch")]
     fn move_selection(&mut self, delta: isize) -> InputResult {
         let count = self.selection_count();
         if count == 0 {
@@ -1131,6 +1129,7 @@ impl CustomEndpointWizardState {
         InputResult::Handled
     }
 
+    #[allow(clippy::match_same_arms, reason = "selection counts are coincidentally equal across unrelated steps")]
     fn selection_count(&self) -> usize {
         match self.step {
             WizardStep::Provider | WizardStep::EndpointAuth | WizardStep::AuthSource => 3,
@@ -1634,7 +1633,6 @@ fn api_type_rows() -> [(&'static str, &'static str); 4] {
 
 fn api_type_for_index(index: usize) -> ApiType {
     match index {
-        0 => ApiType::OpenAi,
         1 => ApiType::OpenAiResponse,
         2 => ApiType::Anthropic,
         3 => ApiType::Google,
@@ -1688,8 +1686,9 @@ fn value_or_placeholder(value: &str, placeholder: &str, theme: TuiTheme) -> Stri
 fn auth_field_label(auth_source: &CustomEndpointAuthDraft) -> &'static str {
     match auth_source {
         CustomEndpointAuthDraft::EnvVar(_) => "Env var name",
-        CustomEndpointAuthDraft::InlineSecret(_) => "API key",
-        CustomEndpointAuthDraft::LocalPlaceholder => "API key",
+        CustomEndpointAuthDraft::InlineSecret(_) | CustomEndpointAuthDraft::LocalPlaceholder => {
+            "API key"
+        }
     }
 }
 

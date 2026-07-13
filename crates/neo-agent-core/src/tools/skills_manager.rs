@@ -718,10 +718,10 @@ fn preflight_resource_parent(skill_dir: &Path, relative_parent: &Path) -> io::Re
 
 #[cfg(unix)]
 fn apply_resource_executable(path: &Path, executable: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     if !executable {
         return Ok(());
     }
-    use std::os::unix::fs::PermissionsExt;
     let metadata = stdfs::metadata(path)?;
     let mut permissions = metadata.permissions();
     permissions.set_mode(permissions.mode() | 0o100);

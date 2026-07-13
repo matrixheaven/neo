@@ -43,6 +43,7 @@ impl Drop for TerminalProcessTree {
 }
 
 impl TerminalProcessTree {
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn new(child: Box<dyn Child + Send + Sync>) -> io::Result<Self> {
         #[cfg(windows)]
         let mut child = child;
@@ -129,6 +130,7 @@ impl TerminalProcessTree {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn exit_code(status: portable_pty::ExitStatus) -> i32 {
     i32::try_from(status.exit_code()).unwrap_or(i32::MAX)
 }

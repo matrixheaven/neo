@@ -47,6 +47,7 @@ use crate::runtime::AgentConfig;
 
 use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
 
+#[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Format a shell failure message from `exit_code` and optional Unix `signal`.

@@ -260,7 +260,7 @@ pub(super) fn completion_source_candidates(
     }
 
     if prefix.starts_with('@') {
-        let mut candidates = file_reference_completion_candidates(root, prefix)?;
+        let mut candidates = file_reference_completion_candidates(root, prefix);
         candidates.truncate(MAX_FILE_REFERENCE_COMPLETIONS);
         return Ok(candidates);
     }
@@ -445,7 +445,7 @@ struct FileReferenceScore {
 fn file_reference_completion_candidates(
     root: &Path,
     prefix: &str,
-) -> Result<Vec<CompletionCandidate>> {
+) -> Vec<CompletionCandidate> {
     file_reference_completion_candidates_with_limits(
         root,
         prefix,
@@ -459,7 +459,7 @@ pub(super) fn file_reference_completion_candidates_with_limits(
     prefix: &str,
     max_inspected_entries: usize,
     max_completions: usize,
-) -> Result<Vec<CompletionCandidate>> {
+) -> Vec<CompletionCandidate> {
     let query = prefix.strip_prefix('@').unwrap_or(prefix).trim();
     let query_segment = query.rsplit('/').next().unwrap_or(query);
     let show_dotfiles = query_segment.starts_with('.');
@@ -546,7 +546,7 @@ pub(super) fn file_reference_completion_candidates_with_limits(
             .then_with(|| left.value.cmp(&right.value))
     });
     candidates.truncate(max_completions);
-    Ok(candidates
+    candidates
         .into_iter()
         .map(|candidate| {
             CompletionCandidate::new(
@@ -556,7 +556,7 @@ pub(super) fn file_reference_completion_candidates_with_limits(
                 CompletionSource::FileReference,
             )
         })
-        .collect())
+        .collect()
 }
 
 fn score_file_reference(

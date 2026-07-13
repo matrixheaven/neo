@@ -402,7 +402,7 @@ fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn resolve_approval(
     config: &AgentConfig,
     turn: u32,

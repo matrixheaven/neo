@@ -122,7 +122,7 @@ impl TranscriptPane {
             AgentEvent::DelegateProgressUpdated { turn, progress } => {
                 self.finish_active_text_blocks();
                 self.transcript
-                    .upsert_delegate_progress(*turn, progress.clone());
+                    .upsert_delegate_progress(*turn, progress);
                 self.record_delegate_absorption_target(
                     *turn,
                     AbsorbedToolKind::Delegate,
@@ -156,7 +156,7 @@ impl TranscriptPane {
                     swarm_id,
                     *state,
                     *aggregate,
-                    child_progress.clone(),
+                    child_progress,
                 );
                 self.record_delegate_absorption_target(
                     *turn,

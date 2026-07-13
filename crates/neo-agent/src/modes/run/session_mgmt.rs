@@ -53,7 +53,6 @@ async fn initialize_session_dir(session_dir: &Path) -> anyhow::Result<PathBuf> {
     state.ensure_main_agent();
     SessionStateStore::new(session_dir)
         .write(&state)
-        .await
         .with_context(|| format!("failed to write session state {}", session_dir.display()))?;
     Ok(wire_path)
 }

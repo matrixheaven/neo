@@ -344,6 +344,7 @@ async fn run_command(
     }
 }
 
+#[allow(clippy::duration_suboptimal_units)]
 async fn run_command_without_error_mapping(
     ctx: &ToolContext,
     command: &str,
@@ -712,9 +713,9 @@ async fn kill_child(process: &mut ManagedChild) -> ShellTermination {
     )
 }
 
-fn kill_process_group_if_available(_process: &ManagedChild) {
+fn kill_process_group_if_available(process: &ManagedChild) {
     #[cfg(unix)]
-    if let Some(process_group) = _process.process_group {
+    if let Some(process_group) = process.process_group {
         let _ = kill_process_group(process_group, Signal::KILL)
             .or_else(|err| if err == Errno::SRCH { Ok(()) } else { Err(err) });
     }
@@ -745,6 +746,7 @@ async fn kill_windows_process_tree_if_available(process: &ManagedChild) {
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::unused_async)]
 async fn kill_windows_process_tree_if_available(_process: &ManagedChild) {}
 
 async fn start_background_command(

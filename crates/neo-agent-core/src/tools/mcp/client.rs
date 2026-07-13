@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn unexpected_close_error_includes_stderr_tail() {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
-        let mut server_task = tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             let service = HangingServer {
                 request_started: Arc::new(Notify::new()),
             }

@@ -113,6 +113,7 @@ impl InteractiveController {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(super) fn handle_workspace_confirm_result(&mut self, result: ConfirmDialogResult) -> bool {
         let approved = matches!(result, ConfirmDialogResult::Approved { .. });
         self.tui.chrome_mut().close_focused_overlay();

@@ -1684,7 +1684,7 @@ impl MultiAgentRuntime {
             swarm_id: swarm_id.map(str::to_owned),
             swarm_item: swarm_item.map(str::to_owned),
         });
-        store.write(&state).await.map_err(|err| err.to_string())
+        store.write(&state).map_err(|err| err.to_string())
     }
 }
 

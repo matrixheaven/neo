@@ -852,7 +852,7 @@ impl McpConnectionManager {
                     let accepted = install_connect_outcome(
                         state.entries.get_mut(&id),
                         attempt_id,
-                        &expected_status,
+                        expected_status,
                         &outcome,
                     );
                     drop(state);
@@ -907,7 +907,7 @@ impl McpConnectionManager {
                     let accepted = install_connect_outcome(
                         state.entries.get_mut(&id),
                         attempt_id,
-                        &expected_status,
+                        expected_status,
                         &outcome,
                     );
                     drop(state);
@@ -1313,17 +1313,17 @@ impl ConnectionRetirement {
 fn install_connect_outcome(
     entry: Option<&mut ManagedMcpEntry>,
     attempt_id: u64,
-    expected_status: &McpServerStatus,
+    expected_status: McpServerStatus,
     outcome: &ConnectOutcome,
 ) -> bool {
     let Some(entry) = entry else {
         return false;
     };
-    if entry.attempt_id != attempt_id || entry.status != *expected_status {
+    if entry.attempt_id != attempt_id || entry.status != expected_status {
         return false;
     }
     entry.client = Some(Arc::clone(&outcome.client));
-    entry.oauth_identity = outcome.oauth_identity.clone();
+    entry.oauth_identity.clone_from(&outcome.oauth_identity);
     entry.tools.clone_from(&outcome.tools);
     entry.resources.clone_from(&outcome.resources);
     entry.status = McpServerStatus::Connected;
@@ -2243,10 +2243,10 @@ mod tests {
         });
         client.release_list.notify_one();
 
-        let error = match complete_connection(client.clone(), None, &http_server("discovery")).await
-        {
-            Ok(_) => panic!("discovery should fail"),
-            Err(error) => error,
+        let Err(error) = complete_connection(client.clone(), None, &http_server("discovery"))
+            .await
+        else {
+            panic!("discovery should fail")
         };
 
         assert_eq!(error.message(), "refresh failed");
@@ -2293,9 +2293,10 @@ mod tests {
 
         let mut config = disabled_server("slow-stdio");
         config.startup_timeout_ms = Some(1);
-        let error = match complete_connection(Arc::new(HangingTailClient), None, &config).await {
-            Ok(_) => panic!("discovery should time out"),
-            Err(error) => error,
+        let Err(error) = complete_connection(Arc::new(HangingTailClient), None, &config)
+            .await
+        else {
+            panic!("discovery should time out")
         };
         let diagnostic = diagnostic_from_error(&error, &config);
 

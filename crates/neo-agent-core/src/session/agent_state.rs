@@ -116,7 +116,7 @@ impl SessionStateStore {
         Ok(state)
     }
 
-    pub async fn write(&self, state: &SessionState) -> Result<(), SessionError> {
+    pub fn write(&self, state: &SessionState) -> Result<(), SessionError> {
         let path = self.path();
         let content = serde_json::to_string_pretty(state)
             .map_err(|source| SessionError::Json { line: 0, source })?;

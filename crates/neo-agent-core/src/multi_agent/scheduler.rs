@@ -22,6 +22,7 @@ pub struct SwarmSchedulerConfig {
 }
 
 impl Default for SwarmSchedulerConfig {
+    #[allow(clippy::duration_suboptimal_units)]
     fn default() -> Self {
         Self {
             max_concurrency: 4,

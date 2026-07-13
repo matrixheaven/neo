@@ -444,7 +444,7 @@ impl TranscriptStore {
         });
     }
 
-    pub fn upsert_delegate_progress(&mut self, turn: u32, progress: AgentProgressSnapshot) {
+    pub fn upsert_delegate_progress(&mut self, turn: u32, progress: &AgentProgressSnapshot) {
         let id = progress.agent_id.as_str().to_owned();
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
@@ -455,7 +455,7 @@ impl TranscriptStore {
             let Some(mut snapshot) = group.snapshot(&id).cloned() else {
                 return;
             };
-            let _ = apply_agent_progress(&mut snapshot, &progress);
+            let _ = apply_agent_progress(&mut snapshot, progress);
             group.upsert(snapshot);
             self.invalidate_all_cache();
             return;
@@ -465,7 +465,7 @@ impl TranscriptStore {
             _ => None,
         }) {
             let mut snapshot = entry.snapshot().clone();
-            let _ = apply_agent_progress(&mut snapshot, &progress);
+            let _ = apply_agent_progress(&mut snapshot, progress);
             entry.update(snapshot);
             self.invalidate_all_cache();
             return;
@@ -499,7 +499,7 @@ impl TranscriptStore {
         swarm_id: &str,
         state: AgentLifecycleState,
         aggregate: SwarmAggregate,
-        child_progress: SwarmChildProgress,
+        child_progress: &SwarmChildProgress,
     ) {
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == swarm_id => {
@@ -508,7 +508,7 @@ impl TranscriptStore {
             _ => None,
         }) {
             let mut snapshot = entry.snapshot().clone();
-            apply_swarm_child_progress(&mut snapshot, &child_progress, aggregate, state);
+            apply_swarm_child_progress(&mut snapshot, child_progress, aggregate, state);
             entry.update(snapshot);
             self.invalidate_all_cache();
         }

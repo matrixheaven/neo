@@ -647,6 +647,7 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
 /// This discovers OAuth metadata from the MCP server URL, dynamically registers
 /// a client, and performs a browser-based PKCE authorization-code flow. The
 /// resulting token is imported into Neo's per-MCP credential store.
+#[allow(clippy::duration_suboptimal_units)]
 pub async fn authenticate_mcp_server_oauth(
     server_id: &str,
     server: &McpServerConfig,

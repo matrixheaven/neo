@@ -179,11 +179,11 @@ mod tests {
             tool_timeout_ms: None,
         };
 
-        let error =
-            match build_stdio_client("broken", 1, config, &ProcessSupervisor::default()).await {
-                Ok(_) => panic!("helper exits without completing MCP handshake"),
-                Err(error) => error,
-            };
+        let Err(error) =
+            build_stdio_client("broken", 1, config, &ProcessSupervisor::default()).await
+        else {
+            panic!("helper exits without completing MCP handshake");
+        };
         let tail = error.stderr_tail().expect("stderr tail");
         assert_eq!(tail.len(), super::super::client::MCP_STDERR_TAIL_CAPACITY);
         assert!(tail.ends_with(b"x"));

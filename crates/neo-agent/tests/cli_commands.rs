@@ -450,7 +450,7 @@ fn newly_created_session_with_custom_directory_can_resume_from_global_index() {
     let workspace = TempDir::new().expect("workspace tempdir");
     let launch_workspace = TempDir::new().expect("launch workspace tempdir");
     let custom_sessions = workspace.path().join("custom-sessions");
-    write_home_config(&format!("sessions_dir = {:?}\n", custom_sessions));
+    write_home_config(&format!("sessions_dir = {custom_sessions:?}\n"));
 
     let output = neo()
         .current_dir(workspace.path())

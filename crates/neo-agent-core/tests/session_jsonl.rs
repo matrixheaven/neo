@@ -980,7 +980,7 @@ async fn session_state_store_round_trips_main_and_subagent_records() {
         swarm_item: Some("crate-a".to_owned()),
     });
 
-    store.write(&state).await.expect("write state");
+    store.write(&state).expect("write state");
     let loaded = store.read().await.expect("read state");
 
     assert_eq!(loaded.schema_version, 1);
@@ -1021,7 +1021,6 @@ async fn session_state_store_adds_missing_main_agent_when_reading_existing_state
     let store = SessionStateStore::new(temp.path());
     store
         .write(&SessionState::new())
-        .await
         .expect("write state without main");
 
     let loaded = store.read().await.expect("read state");

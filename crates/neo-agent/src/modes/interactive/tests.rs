@@ -2731,7 +2731,7 @@ fn agents_guide_validator_accepts_required_structure() {
 
 #[test]
 fn agents_guide_validator_reports_missing_duplicate_and_reordered_headings() {
-    let guide = r#"# Project Agent Guide
+    let guide = r"# Project Agent Guide
 
 ## Reference
 text
@@ -2749,7 +2749,7 @@ text
 Created: 2026-07-07
 Source commit: abc1234
 Best valid until: 2026-10-07
-"#;
+";
 
     let issues = init_command::validate_agents_guide(guide);
     let codes: Vec<_> = issues.iter().map(|issue| issue.code).collect();
@@ -2971,8 +2971,7 @@ fn at_file_reference_completion_caps_large_walks() {
         "@prompt",
         inspected_cap,
         super::prompt_completion::MAX_FILE_REFERENCE_COMPLETIONS,
-    )
-    .expect("file references");
+    );
 
     assert_eq!(candidates.len(), inspected_cap);
     assert!(candidates.iter().all(|candidate| {
@@ -11447,6 +11446,7 @@ async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
 }
 
 #[tokio::test]
+#[allow(clippy::duration_suboptimal_units)]
 async fn shell_mode_uses_spec_timeouts_for_user_commands() {
     let observed_timeouts = Arc::new(std::sync::Mutex::new(None));
     let captured_timeouts = Arc::clone(&observed_timeouts);

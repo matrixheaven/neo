@@ -226,7 +226,7 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
         let provider = if let Some(mut p) = existing {
             // Override existing built-in provider fields
             if let Some(display_name) = &provider_config.display_name {
-                p.display_name = display_name.clone();
+                p.display_name.clone_from(display_name);
             }
             if let Some(t) = &provider_config.provider_type {
                 p.provider_type = Some(*t);

@@ -247,8 +247,7 @@ fn display_relative_path(path: &Path) -> String {
         .filter_map(|component| match component {
             Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
             Component::ParentDir => Some("..".to_owned()),
-            Component::CurDir => None,
-            Component::RootDir | Component::Prefix(_) => None,
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => None,
         })
         .collect::<Vec<_>>()
         .join("/")

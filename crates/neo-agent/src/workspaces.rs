@@ -394,6 +394,7 @@ mod tests {
         assert!(!path.with_extension("json.bak").exists());
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn symlink_created(result: std::io::Result<()>) -> bool {
         result.is_ok()
     }

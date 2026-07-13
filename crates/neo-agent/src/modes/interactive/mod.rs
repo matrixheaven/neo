@@ -170,7 +170,9 @@ type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const TASK_BROWSER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+#[allow(clippy::duration_suboptimal_units)]
 const SHELL_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(120);
+#[allow(clippy::duration_suboptimal_units)]
 const SHELL_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(600);
 const SHELL_MAX_OUTPUT_BYTES: usize = 200_000;
 
@@ -1276,6 +1278,7 @@ impl InteractiveController {
             .is_none_or(|config| config.project_trusted)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn submit_current_prompt(&mut self) -> Result<()> {
         // If the `/btw` sidecar panel is open, the composer is connected to the
         // sidecar. Route Enter to the sidecar instead of the main turn path.
@@ -1894,6 +1897,7 @@ impl InteractiveController {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn resolve_submitted_prompt(
     prompt: String,
     config: Option<&AppConfig>,

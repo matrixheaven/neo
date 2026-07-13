@@ -81,7 +81,7 @@ impl WorkspaceAccessPolicy {
         let canonical = match candidate.canonicalize() {
             Ok(canonical) => canonical,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return self.resolve_missing_read_path(candidate);
+                return self.resolve_missing_read_path(&candidate);
             }
             Err(error) => return Err(WorkspaceAccessError::Io(error)),
         };
@@ -97,18 +97,17 @@ impl WorkspaceAccessPolicy {
 
     fn resolve_missing_read_path(
         &self,
-        candidate: PathBuf,
+        candidate: &Path,
     ) -> Result<PathBuf, WorkspaceAccessError> {
         let parent = candidate
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf());
+            .map_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf(), Path::to_path_buf);
         let canonical_parent = parent.canonicalize()?;
         let file_name =
             candidate
                 .file_name()
                 .ok_or_else(|| WorkspaceAccessError::PathOutsideWorkspace {
-                    path: candidate.clone(),
+                    path: candidate.to_path_buf(),
                 })?;
         let Some(root) = self.containing_root(&canonical_parent) else {
             return Err(WorkspaceAccessError::PathOutsideWorkspace {
@@ -126,15 +125,14 @@ impl WorkspaceAccessPolicy {
     pub fn resolve_write_path(&self, path: &Path) -> Result<PathBuf, WorkspaceAccessError> {
         let candidate = self.absolute_candidate(path);
         match std::fs::symlink_metadata(&candidate) {
-            Ok(_) => return self.resolve_existing_write_path(candidate),
+            Ok(_) => return self.resolve_existing_write_path(&candidate),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(WorkspaceAccessError::Io(error)),
         }
 
         let parent = candidate
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf());
+            .map_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf(), Path::to_path_buf);
         let canonical_parent = parent.canonicalize()?;
         let file_name =
             candidate
@@ -157,13 +155,13 @@ impl WorkspaceAccessPolicy {
 
     fn resolve_existing_write_path(
         &self,
-        candidate: PathBuf,
+        candidate: &Path,
     ) -> Result<PathBuf, WorkspaceAccessError> {
         let canonical = candidate
             .canonicalize()
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => WorkspaceAccessError::PathOutsideWorkspace {
-                    path: candidate.clone(),
+                    path: candidate.to_path_buf(),
                 },
                 _ => WorkspaceAccessError::Io(error),
             })?;

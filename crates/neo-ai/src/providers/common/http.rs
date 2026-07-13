@@ -29,9 +29,8 @@ pub(crate) async fn http_status_error(mut response: reqwest::Response) -> Provid
     let mut bytes = Vec::new();
 
     while bytes.len() < ERROR_BODY_LIMIT {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) | Err(_) => break,
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
         };
         let remaining = ERROR_BODY_LIMIT - bytes.len();
         bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);

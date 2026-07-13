@@ -1,3 +1,4 @@
+#![allow(clippy::duration_suboptimal_units)]
 use std::time::Duration;
 
 use neo_agent_core::multi_agent::{

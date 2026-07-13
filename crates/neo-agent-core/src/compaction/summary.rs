@@ -22,7 +22,7 @@ pub struct CompactionOutcome {
     pub projection_omitted_tokens: usize,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn run_full_compaction<F>(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,

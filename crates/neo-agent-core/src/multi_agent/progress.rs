@@ -434,6 +434,7 @@ fn erf(x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::duration_suboptimal_units)]
 mod tests {
     use super::*;
 

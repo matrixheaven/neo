@@ -409,6 +409,7 @@ impl IncrementalSse {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,

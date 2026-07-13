@@ -206,6 +206,7 @@ impl ModelSelectorState {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn budget_error(&self, entry: &ModelEntry, draft: &ReasoningDraft) -> Option<String> {
         if !draft.editing_budget {
             return None;
@@ -332,7 +333,7 @@ impl ModelSelectorState {
                 Color::Reset,
             )],
             ReasoningCapability::BudgetTokens { min, max, .. } => {
-                self.render_budget_control(entry, draft, ReasoningBudget { min, max }, width)
+                self.render_budget_control(entry, draft, &ReasoningBudget { min, max }, width)
             }
             ReasoningCapability::Combined {
                 toggle,
@@ -356,7 +357,7 @@ impl ModelSelectorState {
                     )];
                 }
                 if let Some(bounds) = budget {
-                    return self.render_budget_control(entry, draft, bounds, width);
+                    return self.render_budget_control(entry, draft, &bounds, width);
                 }
                 let selection = self.effective_reasoning(entry);
                 let mut labels = Vec::new();
@@ -380,17 +381,17 @@ impl ModelSelectorState {
         &self,
         entry: &ModelEntry,
         draft: &ReasoningDraft,
-        bounds: ReasoningBudget,
+        bounds: &ReasoningBudget,
         width: usize,
     ) -> Vec<String> {
         let selection = self.effective_reasoning(entry);
         let custom_selected = matches!(selection, ReasoningSelection::BudgetTokens { .. })
-            && !budget_presets(&bounds).contains(&selection);
+            && !budget_presets(bounds).contains(&selection);
         let mut labels = Vec::new();
         if entry_reasoning_capability(entry).disable_supported() {
             labels.push(segment("off", matches!(selection, ReasoningSelection::Off)));
         }
-        for preset in budget_presets(&bounds) {
+        for preset in budget_presets(bounds) {
             if let ReasoningSelection::BudgetTokens { budget_tokens } = preset {
                 labels.push(segment(
                     &format_budget_label(budget_tokens),
@@ -410,7 +411,7 @@ impl ModelSelectorState {
             style_line(
                 &format!(
                     " Range: {} tokens       Custom: {}",
-                    format_budget_range(&bounds),
+                    format_budget_range(bounds),
                     draft.budget_input
                 ),
                 width,
@@ -462,6 +463,7 @@ impl ModelSelectorState {
         styled
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
@@ -553,7 +555,7 @@ impl ModelSelectorState {
                     if let Some(draft) = self.selected_draft_mut() {
                         draft
                             .budget_input
-                            .extend(text.chars().filter(|ch| ch.is_ascii_digit()));
+                            .extend(text.chars().filter(char::is_ascii_digit));
                         draft.sync_budget_selection();
                     }
                 } else {
@@ -561,7 +563,6 @@ impl ModelSelectorState {
                 }
                 InputResult::Handled
             }
-            InputEvent::NewLine => InputResult::Ignored,
             // Arrow up/down from keybindings
             InputEvent::Action(KeybindingAction::SelectUp) => {
                 self.list.move_up();

@@ -114,6 +114,7 @@ pub(super) mod windows_input_mode {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct TuiRenderer {
     pub(super) previous_lines: Vec<String>,
     pub(super) previous_kitty_image_ids: BTreeSet<u32>,

@@ -62,8 +62,7 @@ async fn terminal_stop_terminates_descendant_processes() {
         let alive = std::process::Command::new("kill")
             .args(["-0", &descendant.to_string()])
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .is_ok_and(|status| status.success());
         if !alive {
             return;
         }

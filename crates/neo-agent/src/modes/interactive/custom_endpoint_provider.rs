@@ -57,7 +57,7 @@ impl InteractiveController {
         match action {
             CustomEndpointWizardAction::FetchModels => self.start_custom_endpoint_fetch(),
             CustomEndpointWizardAction::TestConnection(draft) => {
-                self.start_custom_endpoint_test(draft)
+                self.start_custom_endpoint_test(draft);
             }
             CustomEndpointWizardAction::Save(draft) => self.save_custom_endpoint_provider(draft),
             CustomEndpointWizardAction::Cancelled => {
@@ -159,6 +159,7 @@ impl InteractiveController {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn start_custom_endpoint_test(&mut self, draft: CustomEndpointProviderDraft) {
         if let Some(pending) = &self.pending_custom_endpoint_test {
             if self.custom_endpoint_test_still_matches(pending) {
@@ -320,6 +321,7 @@ impl InteractiveController {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn save_custom_endpoint_provider(&mut self, draft: CustomEndpointProviderDraft) {
         let Some(config_path) = self.config_path() else {
             self.push_status("No config available");
@@ -564,6 +566,7 @@ mod tests {
             .open_custom_endpoint_wizard(CustomEndpointWizardOptions { theme })
     }
 
+    #[allow(clippy::duration_suboptimal_units)]
     fn pending_fetch_for_current_wizard(
         controller: &InteractiveController,
     ) -> PendingCustomEndpointFetch {
@@ -588,6 +591,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::duration_suboptimal_units)]
     fn pending_test_for_current_wizard(
         controller: &InteractiveController,
         working_label: &str,

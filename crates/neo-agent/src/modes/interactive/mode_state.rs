@@ -227,7 +227,7 @@ impl InteractiveController {
             Ok(Some(goal)) => self.push_goal_status("⏸ Goal paused", &goal.objective),
             Ok(None) => self.push_status("No active goal to pause"),
             Err(err) if GoalError::is_committed_unsynced(&err) => {
-                self.push_status(format!("Goal paused with durability warning: {err}"))
+                self.push_status(format!("Goal paused with durability warning: {err}"));
             }
             Err(err) => self.push_status(format!("Failed to pause goal: {err}")),
         }
@@ -238,7 +238,7 @@ impl InteractiveController {
             Ok(Some(goal)) => self.push_goal_status("▶ Goal resumed", &goal.objective),
             Ok(None) => self.push_status("No active goal to resume"),
             Err(err) if GoalError::is_committed_unsynced(&err) => {
-                self.push_status(format!("Goal resumed with durability warning: {err}"))
+                self.push_status(format!("Goal resumed with durability warning: {err}"));
             }
             Err(err) => self.push_status(format!("Failed to resume goal: {err}")),
         }
@@ -249,7 +249,7 @@ impl InteractiveController {
             Ok(Some(goal)) => self.push_goal_status("⏹ Goal cancelled", &goal.objective),
             Ok(None) => self.push_status("No active goal to cancel"),
             Err(err) if GoalError::is_committed_unsynced(&err) => {
-                self.push_status(format!("Goal cancelled with durability warning: {err}"))
+                self.push_status(format!("Goal cancelled with durability warning: {err}"));
             }
             Err(err) => self.push_status(format!("Failed to cancel goal: {err}")),
         }

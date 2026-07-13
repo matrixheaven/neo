@@ -345,10 +345,10 @@ mod tests {
     #[test]
     fn runtime_table_without_compaction_keeps_compaction_enabled() {
         let (_temp, config_path, project_dir) = temp_project_config(
-            r#"
+            r"
 [runtime]
 temperature = 0.2
-"#,
+",
         );
         let config = load_config(config_path, project_dir);
         let compaction = config.runtime.compaction.expect("compaction default");
@@ -359,10 +359,10 @@ temperature = 0.2
     #[test]
     fn config_partial_compaction_disables_micro_projection_by_default() {
         let (_temp, config_path, project_dir) = temp_project_config(
-            r#"
+            r"
 [runtime.compaction]
 enabled = true
-"#,
+",
         );
 
         let config = load_config(config_path, project_dir);

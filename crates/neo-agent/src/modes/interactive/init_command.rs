@@ -17,7 +17,7 @@ pub(super) const REQUIRED_AGENTS_HEADINGS: &[&str] = &[
     "Metadata",
 ];
 
-const GOLDEN_STYLE_EXAMPLE: &str = r#"# Project Agent Guide
+const GOLDEN_STYLE_EXAMPLE: &str = r"# Project Agent Guide
 
 ## Reference
 
@@ -78,7 +78,7 @@ Never expose secrets. Review dependency and plugin changes as code. Prefer local
 Created: 2026-07-07
 Source commit: example
 Best valid until: 2026-10-07
-"#;
+";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct InitPromptRequest<'a> {
@@ -129,7 +129,7 @@ pub(super) fn build_init_workflow_prompt(request: InitPromptRequest<'_>) -> Stri
     };
 
     format!(
-        r#"You are running Neo's /init workflow.
+        r"You are running Neo's /init workflow.
 
 Target file: {target}
 Workspace root: {workspace_root}
@@ -155,7 +155,7 @@ After writing AGENTS.md, ensure all required sections are present in order, Meta
 Golden style example. Use this for structure, concision, and operational tone only. Do not copy project-specific facts unless current repository research supports them:
 
 {golden_style_example}
-"#,
+",
         target = target.display(),
         workspace_root = request.workspace_root.display(),
         current_date = request.current_date,

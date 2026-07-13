@@ -300,6 +300,7 @@ fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Resul
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn start_terminal(
     ctx: &ToolContext,
     command: &str,

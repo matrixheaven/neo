@@ -462,7 +462,6 @@ async fn child_run_appends_events_to_agent_wire() {
     state.ensure_main_agent();
     SessionStateStore::new(session_dir)
         .write(&state)
-        .await
         .expect("state");
 
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
@@ -535,7 +534,6 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
     state.ensure_main_agent();
     SessionStateStore::new(session_dir)
         .write(&state)
-        .await
         .expect("state");
 
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
@@ -612,7 +610,6 @@ async fn failed_child_run_flushes_partial_agent_wire() {
     state.ensure_main_agent();
     SessionStateStore::new(session_dir)
         .write(&state)
-        .await
         .expect("state");
 
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
@@ -681,7 +678,6 @@ async fn concurrent_swarm_child_runs_preserve_all_state_records() {
     state.ensure_main_agent();
     SessionStateStore::new(session_dir)
         .write(&state)
-        .await
         .expect("state");
 
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());

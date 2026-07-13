@@ -2312,6 +2312,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::duration_suboptimal_units)]
     async fn foreground_bash_task_can_be_detached() {
         let manager = BackgroundTaskManager::new();
         let task_id = manager

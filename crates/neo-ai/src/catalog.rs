@@ -253,9 +253,10 @@ fn catalog_model_reasoning(model: &CatalogModel) -> ReasoningCapability {
         usize::from(has_toggle) + usize::from(effort.is_some()) + usize::from(budget.is_some());
     if family_count > 1 {
         let (effort_values, effort_disable_supported) = effort.unwrap_or_default();
-        let (budget, budget_disable_supported) = budget
-            .map(|(min, max)| (Some(ReasoningBudget { min, max }), min == Some(0)))
-            .unwrap_or((None, false));
+        let (budget, budget_disable_supported) = budget.map_or(
+            (None, false),
+            |(min, max)| (Some(ReasoningBudget { min, max }), min == Some(0)),
+        );
         return ReasoningCapability::Combined {
             toggle: has_toggle,
             effort: effort_values,

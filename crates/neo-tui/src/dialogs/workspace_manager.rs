@@ -3,6 +3,7 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{InputResult, Style, paint, truncate_width, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WorkspaceRow {
     pub path: String,
     pub enabled: bool,
@@ -451,6 +452,7 @@ mod tests {
         TuiTheme::default()
     }
 
+    #[allow(clippy::fn_params_excessive_bools)]
     fn row(path: &str, enabled: bool, read: bool, write: bool, missing: bool) -> WorkspaceRow {
         WorkspaceRow {
             path: path.to_owned(),

@@ -23,8 +23,8 @@ use crate::multi_agent::{
 type SwarmProgressUpdate = (SwarmChildProgress, SwarmAggregate, AgentLifecycleState);
 
 async fn publish_swarm_progress(
-    event_callback: &Option<ToolEventCallback>,
-    background: &Option<(crate::BackgroundTaskManager, String)>,
+    event_callback: Option<&ToolEventCallback>,
+    background: Option<&(crate::BackgroundTaskManager, String)>,
     turn: u32,
     swarm_id: &str,
     (child_progress, aggregate, state): SwarmProgressUpdate,
@@ -429,11 +429,11 @@ async fn run_swarm_children(
     event_callback: Option<ToolEventCallback>,
     background: Option<(crate::BackgroundTaskManager, String)>,
 ) -> SwarmSnapshot {
+    const PROGRESS_QUEUE_CAPACITY: usize = 64;
     let mut ordered_children: Vec<Option<SwarmChildSnapshot>> =
         vec![None; initial_snapshot.children.len()];
     let current_children =
         std::sync::Arc::new(std::sync::Mutex::new(initial_snapshot.children.clone()));
-    const PROGRESS_QUEUE_CAPACITY: usize = 64;
     let (progress_tx, mut progress_rx) = mpsc::channel(PROGRESS_QUEUE_CAPACITY);
     let overflow = Arc::new(Mutex::new(BTreeMap::<usize, SwarmProgressUpdate>::new()));
     let mut stream = stream::iter(initial_snapshot.children.clone())
@@ -518,16 +518,16 @@ async fn run_swarm_children(
         tokio::select! {
             Some((child_progress, aggregate, state)) = progress_rx.recv() => {
                 publish_swarm_progress(
-                    &event_callback,
-                    &background,
+                    event_callback.as_ref(),
+                    background.as_ref(),
                     turn,
                     &initial_snapshot.swarm_id,
                     (child_progress, aggregate, state),
                 ).await;
                 while let Ok(update) = progress_rx.try_recv() {
                     publish_swarm_progress(
-                        &event_callback,
-                        &background,
+                        event_callback.as_ref(),
+                        background.as_ref(),
                         turn,
                         &initial_snapshot.swarm_id,
                         update,
@@ -538,8 +538,8 @@ async fn run_swarm_children(
                 );
                 for (_, update) in overflow_updates {
                     publish_swarm_progress(
-                        &event_callback,
-                        &background,
+                        event_callback.as_ref(),
+                        background.as_ref(),
                         turn,
                         &initial_snapshot.swarm_id,
                         update,
@@ -549,8 +549,8 @@ async fn run_swarm_children(
             Some(completed_child) = stream.next() => {
         while let Ok(update) = progress_rx.try_recv() {
             publish_swarm_progress(
-                &event_callback,
-                &background,
+                event_callback.as_ref(),
+                background.as_ref(),
                 turn,
                 &initial_snapshot.swarm_id,
                 update,
@@ -561,8 +561,8 @@ async fn run_swarm_children(
         );
         for (_, update) in overflow_updates {
             publish_swarm_progress(
-                &event_callback,
-                &background,
+                event_callback.as_ref(),
+                background.as_ref(),
                 turn,
                 &initial_snapshot.swarm_id,
                 update,
@@ -706,6 +706,7 @@ fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<()
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<(), ToolError> {
     const MAX_SWARM_CHILDREN: usize = 8;
     const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
