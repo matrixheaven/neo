@@ -2035,7 +2035,8 @@ fn replay_session_into_transcript(
                 | AgentEvent::DelegateSwarmStarted { .. }
                 | AgentEvent::DelegateSwarmUpdated { .. }
                 | AgentEvent::DelegateSwarmProgressUpdated { .. }
-                | AgentEvent::DelegateSwarmFinished { .. } => {
+                | AgentEvent::DelegateSwarmFinished { .. }
+                | AgentEvent::SkillInvocation { .. } => {
                     transcript.apply_agent_event(event);
                 }
                 _ => {}

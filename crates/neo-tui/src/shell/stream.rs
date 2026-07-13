@@ -49,9 +49,6 @@ pub enum StreamUpdate {
         id: String,
         questions: Vec<QuestionDisplayData>,
     },
-    SkillActivated {
-        name: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -35,7 +35,7 @@ impl NeoChromeState {
             StreamUpdate::QuestionRequested { id, questions } => {
                 self.push_question_overlay(id, questions);
             }
-            StreamUpdate::ThinkingFinished | StreamUpdate::SkillActivated { .. } => {}
+            StreamUpdate::ThinkingFinished => {}
         }
     }
 
@@ -223,7 +223,7 @@ impl NeoChromeState {
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
             | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::SkillActivated { .. } => {}
+            | AgentEvent::SkillInvocation { .. } => {}
             AgentEvent::GoalStarted { .. } | AgentEvent::GoalResumed { .. } => {
                 self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Active));
             }

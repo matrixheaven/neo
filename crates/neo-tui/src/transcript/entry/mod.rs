@@ -12,7 +12,7 @@ use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
 use crate::transcript::ToolCallComponent;
 use crate::transcript::WorkflowCardComponent;
-use neo_agent_core::PlanSuggestion;
+use neo_agent_core::{PlanSuggestion, SkillInvocationOutcome, SkillInvocationSource};
 use serde::{Deserialize, Serialize};
 
 mod copy;
@@ -171,6 +171,8 @@ pub enum TranscriptEntry {
     },
     SkillActivation {
         names: Vec<String>,
+        source: SkillInvocationSource,
+        outcome: SkillInvocationOutcome,
         body: String,
         expanded: bool,
     },
@@ -381,9 +383,16 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn skill_activated(names: Vec<String>, body: impl Into<String>) -> Self {
+    pub fn skill_invocation(
+        names: Vec<String>,
+        source: SkillInvocationSource,
+        outcome: SkillInvocationOutcome,
+        body: impl Into<String>,
+    ) -> Self {
         Self::SkillActivation {
             names,
+            source,
+            outcome,
             body: body.into(),
             expanded: false,
         }
@@ -588,9 +597,19 @@ impl TranscriptEntry {
             ),
             Self::SkillActivation {
                 names,
+                source,
+                outcome,
                 body,
                 expanded,
-            } => render_skill_activation(names, body, *expanded, inner_width, theme),
+            } => render_skill_activation(
+                names,
+                *source,
+                *outcome,
+                body,
+                *expanded,
+                inner_width,
+                theme,
+            ),
             Self::Delegate { component } => render_delegate_card(component, inner_width, theme),
             Self::DelegateGroup { component } => component.render_with_theme(inner_width, theme),
             Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
@@ -989,35 +1008,88 @@ const SKILL_ACTIVATION_PREVIEW_LINES: usize = 3;
 
 fn render_skill_activation(
     names: &[String],
+    source: SkillInvocationSource,
+    outcome: SkillInvocationOutcome,
     body: &str,
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let activation = Style::default().fg(theme.status_warn).bold();
+    let (marker, label, status_style) = match outcome {
+        SkillInvocationOutcome::Activated => (
+            "✦",
+            "Skill activated: ",
+            Style::default().fg(theme.status_warn).bold(),
+        ),
+        SkillInvocationOutcome::Failed => (
+            "✕",
+            "Skill failed: ",
+            Style::default().fg(theme.status_error).bold(),
+        ),
+    };
     let skill_name = Style::default().fg(theme.brand).bold();
     let thinking = render_thinking::thinking_style(theme);
     let muted = Style::default().fg(theme.text_muted);
+    let error = Style::default().fg(theme.status_error);
     let name_list = names.join(", ");
+    let source = match source {
+        SkillInvocationSource::Auto => "auto",
+        SkillInvocationSource::Manual => "manual",
+    };
+    let suffix = format!(" · {source}");
+    let full_prefix = format!("{marker} {label}");
+    let prefix = if visible_width(&full_prefix) + visible_width(&suffix) < width {
+        full_prefix
+    } else {
+        format!("{marker} ")
+    };
+    let name_width = width.saturating_sub(visible_width(&prefix) + visible_width(&suffix));
+    let visible_name = crate::primitive::truncate_to_width(&name_list, name_width);
 
     let mut rows = Vec::new();
     rows.push(
         Line::from_spans(vec![
-            Span::styled("✦ Skill activated: ", activation),
-            Span::styled(name_list, skill_name),
+            Span::styled(prefix, status_style),
+            Span::styled(visible_name, skill_name),
+            Span::styled(suffix, muted),
         ])
         .truncate_to_width(width),
     );
-    rows.push(Line::styled("━".repeat(width.max(1)), activation));
 
-    let body_lines = skill_body_lines(body, width.max(1));
+    let body = body.trim();
+    if body.is_empty() {
+        rows.push(Line::raw(""));
+        return rows;
+    }
+    if outcome == SkillInvocationOutcome::Activated {
+        rows.push(Line::styled("━".repeat(width.max(1)), status_style));
+    }
+
+    let body_width = if outcome == SkillInvocationOutcome::Failed {
+        width.saturating_sub(2).max(1)
+    } else {
+        width.max(1)
+    };
+    let body_lines = skill_body_lines(body, body_width);
     let visible_count = if expanded {
         body_lines.len()
     } else {
         body_lines.len().min(SKILL_ACTIVATION_PREVIEW_LINES)
     };
     for line in body_lines.iter().take(visible_count) {
-        rows.push(Line::styled(line.clone(), thinking));
+        let line = if outcome == SkillInvocationOutcome::Failed {
+            format!("  {line}")
+        } else {
+            line.clone()
+        };
+        rows.push(Line::styled(
+            line,
+            if outcome == SkillInvocationOutcome::Failed {
+                error
+            } else {
+                thinking
+            },
+        ));
     }
     if !expanded && body_lines.len() > visible_count {
         let remaining = body_lines.len() - visible_count;
@@ -1129,8 +1201,10 @@ mod tests {
 
     #[test]
     fn skill_activation_renders_aggregate_collapsed_preview() {
-        let entry = TranscriptEntry::skill_activated(
+        let entry = TranscriptEntry::skill_invocation(
             vec!["skill_one".to_owned(), "skill_two".to_owned()],
+            SkillInvocationSource::Manual,
+            SkillInvocationOutcome::Activated,
             "\
 foo
 bar
@@ -1147,7 +1221,7 @@ amigo",
             .collect::<Vec<_>>();
         let text = lines.iter().map(Line::text).collect::<Vec<_>>();
 
-        assert_eq!(text[0], "✦ Skill activated: skill_one, skill_two");
+        assert_eq!(text[0], "✦ Skill activated: skill_one, skill_two · manual");
         assert!(text[1].starts_with("━"));
         assert_eq!(text[2], "foo");
         assert_eq!(text[3], "bar");
@@ -1175,8 +1249,10 @@ amigo",
 
     #[test]
     fn skill_activation_expands_full_body() {
-        let entry = TranscriptEntry::skill_activated(
+        let entry = TranscriptEntry::skill_invocation(
             vec!["skill_one".to_owned(), "skill_two".to_owned()],
+            SkillInvocationSource::Manual,
+            SkillInvocationOutcome::Activated,
             "foo\nbar\ntest test test\nbonjour\nhello\ntest test test test\nhola\namigo",
         );
         let mut entry = entry;
@@ -1189,10 +1265,28 @@ amigo",
             .map(|l| l.text().clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines[0], "✦ Skill activated: skill_one, skill_two");
+        assert_eq!(lines[0], "✦ Skill activated: skill_one, skill_two · manual");
         assert!(lines.contains(&"bonjour".to_owned()));
         assert!(lines.contains(&"amigo".to_owned()));
         assert!(!lines.iter().any(|l| l.contains("ctrl+o to expand")));
+    }
+
+    #[test]
+    fn skill_activation_preserves_source_at_narrow_width() {
+        let entry = TranscriptEntry::skill_invocation(
+            vec!["using-superpowers".to_owned()],
+            SkillInvocationSource::Auto,
+            SkillInvocationOutcome::Activated,
+            "",
+        );
+
+        let header = entry.render(24, &TuiTheme::default())[0].text().clone();
+
+        assert!(
+            header.contains("· auto"),
+            "source should remain visible: {header}"
+        );
+        assert!(visible_width(&header) <= 24, "header should fit: {header}");
     }
 
     #[test]

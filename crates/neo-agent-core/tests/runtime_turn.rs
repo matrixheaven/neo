@@ -3,8 +3,9 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, Content,
     PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, SessionApprovalKey,
-    SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, StopReason, TodoEventData, Tool,
-    ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, SkillInvocationOutcome,
+    SkillInvocationSource, StopReason, TodoEventData, Tool, ToolContext, ToolError,
+    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, main_agent_plans_dir, workspace_sessions_dir},
     skills::SkillStore,
@@ -4899,6 +4900,71 @@ Review the current change carefully.
                     && result.content.contains("Review the current change carefully.")
         )),
         "Skill should execute successfully; events: {events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SkillInvocation {
+                names,
+                source: SkillInvocationSource::Auto,
+                outcome: SkillInvocationOutcome::Activated,
+                body,
+            } if names == &["review".to_owned()] && body.is_empty()
+        )),
+        "Skill should emit one semantic activation event; events: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn automatic_missing_skill_emits_failed_skill_invocation() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Skill".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: json!({"skill": "missing"}).to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools_and_skills(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        ToolRegistry::new(),
+        SkillStore::default(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("use missing skill"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("missing skill result should return to the model");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SkillInvocation {
+                names,
+                source: SkillInvocationSource::Auto,
+                outcome: SkillInvocationOutcome::Failed,
+                body,
+            } if names == &["missing".to_owned()]
+                && body.contains("skill `missing` is not available")
+        )),
+        "missing Skill should emit a semantic failure event; events: {events:#?}"
     );
 }
 

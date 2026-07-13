@@ -1292,9 +1292,10 @@ fn skill_tool_call_renders_as_skill_activation_card_not_tool_card() {
         name: "Skill".to_owned(),
         result: neo_agent_core::ToolResult::ok("expanded skill body"),
     });
-    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillActivated {
-        turn: 1,
-        name: "brainstorming".to_owned(),
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
+        names: vec!["brainstorming".to_owned()],
+        source: neo_agent_core::SkillInvocationSource::Auto,
+        outcome: neo_agent_core::SkillInvocationOutcome::Activated,
         body: String::new(),
     });
 
@@ -1319,14 +1320,26 @@ fn skill_tool_call_renders_as_skill_activation_card_not_tool_card() {
         ),
         "skill card should name brainstorming"
     );
+    let frame = plain_frame(&mut pane, 80, 20);
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("✦ Skill activated: brainstorming · auto")),
+        "semantic header should include the automatic source: {frame:#?}"
+    );
+    assert!(
+        frame.iter().all(|line| !line.contains('━')),
+        "an empty activation body should not render a divider: {frame:#?}"
+    );
 }
 
 #[test]
 fn skill_tool_with_arguments_shows_them_in_activation_body() {
     let mut pane = TranscriptPane::new(80, 20);
-    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillActivated {
-        turn: 1,
-        name: "review".to_owned(),
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
+        names: vec!["review".to_owned()],
+        source: neo_agent_core::SkillInvocationSource::Auto,
+        outcome: neo_agent_core::SkillInvocationOutcome::Activated,
         body: "target: src/lib.rs".to_owned(),
     });
 
@@ -1342,5 +1355,79 @@ fn skill_tool_with_arguments_shows_them_in_activation_body() {
                 if body == "target: src/lib.rs"
         ),
         "body should contain formatted arguments"
+    );
+}
+
+#[test]
+fn failed_skill_tool_renders_semantic_failure_card() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "skill-1".to_owned(),
+        name: "Skill".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "skill-1".to_owned(),
+        name: "Skill".to_owned(),
+        result: neo_agent_core::ToolResult::error("skill `missing` is not available"),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
+        names: vec!["missing".to_owned()],
+        source: neo_agent_core::SkillInvocationSource::Auto,
+        outcome: neo_agent_core::SkillInvocationOutcome::Failed,
+        body: "skill `missing` is not available".to_owned(),
+    });
+
+    assert!(
+        pane.transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::ToolRun { .. })),
+        "failed Skill calls should not leak a generic tool card"
+    );
+    let frame = plain_frame(&mut pane, 80, 20);
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("✕ Skill failed: missing · auto")),
+        "failure header should be visible: {frame:#?}"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("  skill `missing` is not available")),
+        "failure body should be indented: {frame:#?}"
+    );
+    assert!(
+        frame.iter().all(|line| !line.contains('━')),
+        "failure cards should not render a divider: {frame:#?}"
+    );
+}
+
+#[test]
+fn skill_activation_toggle_expands_collapsed_body() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
+        names: vec!["review".to_owned()],
+        source: neo_agent_core::SkillInvocationSource::Auto,
+        outcome: neo_agent_core::SkillInvocationOutcome::Activated,
+        body: "one\ntwo\nthree\nfour\nfive".to_owned(),
+    });
+
+    let collapsed = plain_frame(&mut pane, 80, 20);
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("ctrl+o to expand"))
+    );
+
+    assert!(pane.toggle_tool_output_expanded());
+    let expanded = plain_frame(&mut pane, 80, 20);
+    assert!(expanded.iter().any(|line| line.contains("five")));
+    assert!(
+        expanded
+            .iter()
+            .all(|line| !line.contains("ctrl+o to expand"))
     );
 }

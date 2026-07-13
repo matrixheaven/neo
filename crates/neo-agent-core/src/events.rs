@@ -69,6 +69,18 @@ impl From<neo_ai::StopReason> for StopReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SkillInvocationSource {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum SkillInvocationOutcome {
+    Activated,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AgentEvent {
     RunStarted {
@@ -135,10 +147,10 @@ pub enum AgentEvent {
         name: String,
         partial_result: ToolResult,
     },
-    SkillActivated {
-        turn: u32,
-        name: String,
-        #[serde(default)]
+    SkillInvocation {
+        names: Vec<String>,
+        source: SkillInvocationSource,
+        outcome: SkillInvocationOutcome,
         body: String,
     },
     GoalStarted {

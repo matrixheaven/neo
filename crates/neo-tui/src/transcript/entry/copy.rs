@@ -41,7 +41,13 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
             "Goal",
             copy_goal(*kind, objective, detail.as_deref(), *turns),
         ),
-        TranscriptEntry::SkillActivation { names, body, .. } => ("Skill", copy_skill(names, body)),
+        TranscriptEntry::SkillActivation {
+            names,
+            source,
+            outcome,
+            body,
+            ..
+        } => ("Skill", copy_skill(names, *source, *outcome, body)),
         TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::AssistantMessage { .. }
         | TranscriptEntry::ThinkingBlock { .. }
@@ -145,8 +151,21 @@ fn copy_goal(
     )
 }
 
-fn copy_skill(names: &[String], body: &str) -> String {
-    let header = format!("Skill activated: {}", names.join(", "));
+fn copy_skill(
+    names: &[String],
+    source: neo_agent_core::SkillInvocationSource,
+    outcome: neo_agent_core::SkillInvocationOutcome,
+    body: &str,
+) -> String {
+    let status = match outcome {
+        neo_agent_core::SkillInvocationOutcome::Activated => "activated",
+        neo_agent_core::SkillInvocationOutcome::Failed => "failed",
+    };
+    let source = match source {
+        neo_agent_core::SkillInvocationSource::Auto => "auto",
+        neo_agent_core::SkillInvocationSource::Manual => "manual",
+    };
+    let header = format!("Skill {status}: {} · {source}", names.join(", "));
     if body.trim().is_empty() {
         header
     } else {

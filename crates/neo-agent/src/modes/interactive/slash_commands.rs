@@ -383,9 +383,13 @@ impl InteractiveController {
     }
 
     fn push_skill_invocation_entry(&mut self, names: Vec<String>, body: &str) {
-        self.transcript_mut().push_transcript(
-            neo_tui::transcript::TranscriptEntry::skill_activated(names, body),
-        );
+        self.transcript_mut()
+            .apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
+                names,
+                source: neo_agent_core::SkillInvocationSource::Manual,
+                outcome: neo_agent_core::SkillInvocationOutcome::Activated,
+                body: body.to_owned(),
+            });
     }
 
     fn replace_prompt_text(&mut self, text: &str) {

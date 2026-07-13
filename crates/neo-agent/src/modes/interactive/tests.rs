@@ -2392,8 +2392,12 @@ amigo";
     assert_eq!(skill_cards, 1);
     assert!(matches!(
         entries.last(),
-        Some(TranscriptEntry::SkillActivation { names, body, .. })
-            if names == &vec!["skill_one".to_owned(), "skill_two".to_owned()] && body == stripped
+        Some(TranscriptEntry::SkillActivation {
+            names,
+            source: neo_agent_core::SkillInvocationSource::Manual,
+            body,
+            ..
+        }) if names == &vec!["skill_one".to_owned(), "skill_two".to_owned()] && body == stripped
     ));
 
     controller
@@ -2434,6 +2438,110 @@ amigo";
             .iter()
             .any(|entry| matches!(entry, TranscriptEntry::UserMessage { content, .. } if content == stripped)),
         "skill activation body should not be rendered again as a user message"
+    );
+}
+
+#[tokio::test]
+async fn automatic_skill_invocation_renders_one_semantic_card() {
+    use futures::StreamExt as _;
+    use neo_agent_core::harness::FakeHarness;
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            neo_ai::AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            neo_ai::AiStreamEvent::ToolCallStart {
+                id: "skill-1".to_owned(),
+                name: "Skill".to_owned(),
+            },
+            neo_ai::AiStreamEvent::ToolCallEnd {
+                id: "skill-1".to_owned(),
+                raw_arguments: serde_json::json!({"skill": "refactor"}).to_string(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            neo_ai::AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            neo_ai::AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let model = harness.model();
+    let client = harness.client();
+    let run_turn: TurnDriver = Arc::new(move |request, channels| {
+        let model = model.clone();
+        let client = Arc::clone(&client);
+        Box::pin(async move {
+            let runtime = neo_agent_core::AgentRuntime::with_tools_and_skills(
+                neo_agent_core::AgentConfig::for_model(model),
+                client,
+                neo_agent_core::ToolRegistry::new(),
+                skill_store_with_refactor_skill(),
+            );
+            let mut context = neo_agent_core::AgentContext::new();
+            let mut events =
+                runtime.run_turn(&mut context, AgentMessage::user_content(request.prompt));
+            while let Some(event) = events.next().await {
+                channels.send_event(event?);
+            }
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "fake/model",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+
+    controller.type_text("use refactor skill");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("prompt submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("automatic skill turn completes");
+
+    let entries = transcript_entries(&controller);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::SkillActivation { .. }))
+            .count(),
+        1,
+        "automatic invocation should render exactly one semantic card"
+    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::SkillActivation {
+            names,
+            source: neo_agent_core::SkillInvocationSource::Auto,
+            outcome: neo_agent_core::SkillInvocationOutcome::Activated,
+            ..
+        } if names == &["refactor".to_owned()]
+    )));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::ToolRun { .. })),
+        "the hidden Skill tool must not create a duplicate generic card"
     );
 }
 
@@ -5709,6 +5817,31 @@ fn rebuild_transcript_from_session_replays_tool_calls_and_results() {
     assert!(rendered.contains("Used Read (README.md)"));
     assert!(rendered.contains("README contents"));
     assert!(!rendered.contains("Using Read"));
+}
+
+#[test]
+fn replay_session_into_transcript_uses_persisted_skill_invocation_outcome() {
+    let mut transcript = TranscriptPane::new(80, 12);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::SkillInvocation {
+            names: vec!["missing".to_owned()],
+            source: neo_agent_core::SkillInvocationSource::Auto,
+            outcome: neo_agent_core::SkillInvocationOutcome::Failed,
+            body: "skill `missing` is not available".to_owned(),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+
+    assert!(matches!(
+        transcript.transcript().entries(),
+        [TranscriptEntry::SkillActivation {
+            names,
+            source: neo_agent_core::SkillInvocationSource::Auto,
+            outcome: neo_agent_core::SkillInvocationOutcome::Failed,
+            ..
+        }] if names == &["missing".to_owned()]
+    ));
 }
 
 #[test]

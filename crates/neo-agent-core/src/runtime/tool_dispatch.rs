@@ -21,8 +21,8 @@ use super::tool_arguments::prepare_tool_arguments;
 use crate::skills::SkillStoreHandle;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
-    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ToolAccess, ToolContext,
-    ToolError, ToolRegistry, ToolResult,
+    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, SkillInvocationOutcome,
+    SkillInvocationSource, ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +186,50 @@ fn parsed_prepared_arguments(
     }
 }
 
+fn emit_tool_execution_finished(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: Option<&serde_json::Value>,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if tool_call.name.as_ref() == "Skill" {
+        let raw_arguments;
+        let arguments = if let Some(arguments) = arguments {
+            arguments
+        } else {
+            raw_arguments =
+                serde_json::from_str(&tool_call.raw_arguments).unwrap_or(serde_json::Value::Null);
+            &raw_arguments
+        };
+        let name = arguments
+            .get("skill")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        emitter.emit(AgentEvent::SkillInvocation {
+            names: vec![name],
+            source: SkillInvocationSource::Auto,
+            outcome: if result.is_error {
+                SkillInvocationOutcome::Failed
+            } else {
+                SkillInvocationOutcome::Activated
+            },
+            body: if result.is_error {
+                result.content.clone()
+            } else {
+                format_skill_tool_arguments(arguments)
+            },
+        });
+    }
+    emitter.emit(AgentEvent::ToolExecutionFinished {
+        turn,
+        id: tool_call.id.to_string(),
+        name: tool_call.name.to_string(),
+        result: result.clone(),
+    });
+}
+
 fn scheduling_class_for_preparation(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
@@ -255,12 +299,7 @@ async fn execute_tool_calls_sequential(
             Ok(prepared) => prepared,
             Err(error_result) => {
                 let result = error_result.clone();
-                emitter.emit(AgentEvent::ToolExecutionFinished {
-                    turn,
-                    id: tool_call.id.to_string(),
-                    name: tool_call.name.to_string(),
-                    result: result.clone(),
-                });
+                emit_tool_execution_finished(turn, tool_call, None, &result, emitter);
                 results.push(((*tool_call).clone(), result));
                 continue;
             }
@@ -300,12 +339,13 @@ async fn execute_tool_calls_sequential(
             &tool_context,
             emitter,
         );
-        emitter.emit(AgentEvent::ToolExecutionFinished {
+        emit_tool_execution_finished(
             turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            result: result.clone(),
-        });
+            tool_call,
+            Some(&prepared_call.arguments),
+            &result,
+            emitter,
+        );
         results.push(((*tool_call).clone(), result));
         if cancel_token.is_cancelled() {
             break;
@@ -350,12 +390,7 @@ async fn execute_tool_calls_parallel(
             Ok(prepared) => prepared,
             Err(error_result) => {
                 let result = error_result;
-                emitter.emit(AgentEvent::ToolExecutionFinished {
-                    turn,
-                    id: tool_call.id.to_string(),
-                    name: tool_call.name.to_string(),
-                    result: result.clone(),
-                });
+                emit_tool_execution_finished(turn, tool_call, None, &result, emitter);
                 completed.push((index, (*tool_call).clone(), result));
                 continue;
             }
@@ -380,12 +415,13 @@ async fn execute_tool_calls_parallel(
                 &tool_context,
                 emitter,
             );
-            emitter.emit(AgentEvent::ToolExecutionFinished {
+            emit_tool_execution_finished(
                 turn,
-                id: tool_call.id.to_string(),
-                name: tool_call.name.to_string(),
-                result: result.clone(),
-            });
+                tool_call,
+                Some(&prepared_call.arguments),
+                &result,
+                emitter,
+            );
             completed.push((index, (*tool_call).clone(), result));
             continue;
         }
@@ -411,12 +447,13 @@ async fn execute_tool_calls_parallel(
                     &tool_context,
                     emitter,
                 );
-                emitter.emit(AgentEvent::ToolExecutionFinished {
+                emit_tool_execution_finished(
                     turn,
-                    id: tool_call.id.to_string(),
-                    name: tool_call.name.to_string(),
-                    result: result.clone(),
-                });
+                    tool_call,
+                    Some(&prepared_call.arguments),
+                    &result,
+                    emitter,
+                );
                 completed.push((index, (*tool_call).clone(), result));
             }
             continue;
@@ -469,12 +506,7 @@ async fn execute_tool_calls_parallel(
             &tool_context,
             emitter,
         );
-        emitter.emit(AgentEvent::ToolExecutionFinished {
-            turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            result: result.clone(),
-        });
+        emit_tool_execution_finished(turn, &tool_call, Some(&arguments), &result, emitter);
         completed.push((index, tool_call, result));
     }
 
@@ -562,17 +594,6 @@ async fn prepare_and_run_tool(
                 cancel_token,
             )
             .await;
-            if tool_call.name.as_ref() == "Skill" && !result.is_error {
-                emitter.emit(AgentEvent::SkillActivated {
-                    turn,
-                    name: arguments
-                        .get("skill")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    body: format_skill_tool_arguments(arguments),
-                });
-            }
             Ok(result)
         }
     }

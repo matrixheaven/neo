@@ -401,8 +401,14 @@ impl TranscriptPane {
     }
 
     fn apply_skill_goal_event(&mut self, event: &AgentEvent) {
-        if let AgentEvent::SkillActivated { name, body, .. } = event {
-            self.push_skill_activation(name.clone(), body.clone());
+        if let AgentEvent::SkillInvocation {
+            names,
+            source,
+            outcome,
+            body,
+        } = event
+        {
+            self.push_skill_invocation(names.clone(), *source, *outcome, body.clone());
             return;
         }
         self.apply_goal_event(event);
@@ -690,8 +696,16 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn push_skill_activation(&mut self, name: String, body: String) {
-        self.push_transcript(TranscriptEntry::skill_activated(vec![name], body));
+    fn push_skill_invocation(
+        &mut self,
+        names: Vec<String>,
+        source: neo_agent_core::SkillInvocationSource,
+        outcome: neo_agent_core::SkillInvocationOutcome,
+        body: String,
+    ) {
+        self.push_transcript(TranscriptEntry::skill_invocation(
+            names, source, outcome, body,
+        ));
     }
 
     fn push_goal_card(
