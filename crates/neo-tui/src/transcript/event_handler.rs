@@ -109,7 +109,6 @@ impl TranscriptPane {
             AgentEvent::DelegateStarted { turn, agent }
             | AgentEvent::DelegateUpdated { turn, agent }
             | AgentEvent::DelegateFinished { turn, agent } => {
-                self.finish_active_text_blocks();
                 self.transcript.upsert_delegate(*turn, agent.clone());
                 self.record_delegate_absorption_target(
                     *turn,
@@ -120,9 +119,7 @@ impl TranscriptPane {
                 true
             }
             AgentEvent::DelegateProgressUpdated { turn, progress } => {
-                self.finish_active_text_blocks();
-                self.transcript
-                    .upsert_delegate_progress(*turn, progress);
+                self.transcript.upsert_delegate_progress(*turn, progress);
                 self.record_delegate_absorption_target(
                     *turn,
                     AbsorbedToolKind::Delegate,
@@ -134,7 +131,6 @@ impl TranscriptPane {
             AgentEvent::DelegateSwarmStarted { turn, swarm }
             | AgentEvent::DelegateSwarmUpdated { turn, swarm }
             | AgentEvent::DelegateSwarmFinished { turn, swarm } => {
-                self.finish_active_text_blocks();
                 self.transcript.upsert_delegate_swarm(swarm.clone());
                 self.record_delegate_absorption_target(
                     *turn,
@@ -151,7 +147,6 @@ impl TranscriptPane {
                 aggregate,
                 child_progress,
             } => {
-                self.finish_active_text_blocks();
                 self.transcript.upsert_delegate_swarm_progress(
                     swarm_id,
                     *state,
@@ -169,7 +164,6 @@ impl TranscriptPane {
             AgentEvent::WorkflowStarted { workflow, .. }
             | AgentEvent::WorkflowUpdated { workflow, .. }
             | AgentEvent::WorkflowFinished { workflow, .. } => {
-                self.finish_active_text_blocks();
                 self.transcript.upsert_workflow(workflow.clone());
                 self.mark_dirty();
                 true

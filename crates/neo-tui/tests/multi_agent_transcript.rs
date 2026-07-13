@@ -10,7 +10,8 @@ use neo_agent_core::multi_agent::{
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
 use neo_tui::transcript::{
-    DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent, TranscriptPane,
+    DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent, TranscriptEntry,
+    TranscriptPane,
 };
 
 fn running_delegate() -> AgentSnapshot {
@@ -373,6 +374,110 @@ fn compact_delegate_progress_replays_as_delegate_card() {
     assert!(text.contains("1 tool"), "{text}");
     assert!(text.contains("• Used Read"), "{text}");
     assert!(text.contains("persisted compact progress"), "{text}");
+}
+
+#[test]
+fn in_place_card_updates_preserve_active_thinking() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let mut delegate = running_delegate();
+    let mut swarm = swarm_with_child_states(vec![AgentLifecycleState::Queued]);
+    let swarm_child = swarm.children[0].clone();
+
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 1,
+        agent: delegate.clone(),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 1,
+        swarm: swarm.clone(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingStarted {
+        turn: 2,
+        id: "reasoning".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "Arch".to_owned(),
+    });
+
+    delegate.updated_at_ms += 1;
+    delegate.latest_text = Some("delegate update".to_owned());
+    pane.apply_agent_event(AgentEvent::DelegateUpdated {
+        turn: 1,
+        agent: delegate.clone(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "i".to_owned(),
+    });
+
+    delegate.updated_at_ms += 1;
+    delegate.latest_text = Some("delegate progress".to_owned());
+    pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
+        turn: 1,
+        progress: AgentProgressSnapshot::from_agent(&delegate),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "m".to_owned(),
+    });
+
+    swarm.children[0].agent.state = AgentLifecycleState::Running;
+    swarm.children[0].agent.updated_at_ms += 1;
+    swarm.children[0].agent.latest_text = Some("swarm update".to_owned());
+    swarm.aggregate = SwarmAggregate::from_states([AgentLifecycleState::Running]);
+    swarm.state = swarm.aggregate.status();
+    pane.apply_agent_event(AgentEvent::DelegateSwarmUpdated { turn: 1, swarm });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "e".to_owned(),
+    });
+
+    let mut updated_child = swarm_child.agent;
+    updated_child.state = AgentLifecycleState::Running;
+    updated_child.updated_at_ms += 1;
+    updated_child.latest_text = Some("swarm progress".to_owned());
+    let aggregate = SwarmAggregate::from_states([AgentLifecycleState::Running]);
+    pane.apply_agent_event(AgentEvent::DelegateSwarmProgressUpdated {
+        turn: 1,
+        swarm_id: "swarm_test".to_owned(),
+        state: AgentLifecycleState::Running,
+        aggregate,
+        child_progress: SwarmChildProgress {
+            item_index: swarm_child.item_index,
+            progress: AgentProgressSnapshot::from_agent(&updated_child),
+        },
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "des".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingFinished {
+        turn: 2,
+        signature: None,
+        redacted: false,
+    });
+
+    let thinking = pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(thinking, vec!["Archimedes"]);
+
+    let _ = pane.render_frame(160, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("delegate progress"), "{text}");
+    assert!(text.contains("swarm progress"), "{text}");
 }
 
 #[test]

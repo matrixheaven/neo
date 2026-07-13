@@ -2,7 +2,7 @@ use neo_agent_core::AgentEvent;
 use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState, WorkflowStepRecord};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Line, strip_ansi};
-use neo_tui::transcript::{TranscriptPane, WorkflowCardComponent};
+use neo_tui::transcript::{TranscriptEntry, TranscriptPane, WorkflowCardComponent};
 
 fn step(
     index: usize,
@@ -157,4 +157,45 @@ fn transcript_pane_upserts_workflow_card_from_events() {
         .join("\n");
 
     assert!(text.contains("Workflow  Runtime audit and fix"), "{text}");
+}
+
+#[test]
+fn in_place_workflow_update_preserves_active_thinking() {
+    let mut pane = TranscriptPane::new(120, 20);
+    let mut workflow = sample_snapshot();
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: workflow.clone(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingStarted {
+        turn: 2,
+        id: "reasoning".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: "continuous".to_owned(),
+    });
+
+    workflow.steps[1].summary = Some("Updated in place.".to_owned());
+    pane.apply_agent_event(AgentEvent::WorkflowUpdated { turn: 1, workflow });
+    pane.apply_agent_event(AgentEvent::ThinkingDelta {
+        turn: 2,
+        text: " thinking".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ThinkingFinished {
+        turn: 2,
+        signature: None,
+        redacted: false,
+    });
+
+    let thinking = pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(thinking, vec!["continuous thinking"]);
 }

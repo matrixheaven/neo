@@ -381,7 +381,6 @@ impl TranscriptStore {
     /// Upsert a delegate card by agent ID. If a card for this agent already
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate(&mut self, turn: u32, snapshot: AgentSnapshot) {
-        self.mark_visible_boundary();
         let id = snapshot.id.as_str().to_owned();
         if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
@@ -476,7 +475,6 @@ impl TranscriptStore {
     /// Upsert a swarm card by swarm ID. If a card for this swarm already
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate_swarm(&mut self, snapshot: SwarmSnapshot) {
-        self.mark_visible_boundary();
         let id = snapshot.swarm_id.clone();
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == id => {
@@ -516,7 +514,6 @@ impl TranscriptStore {
 
     /// Upsert a workflow card by workflow ID.
     pub fn upsert_workflow(&mut self, snapshot: WorkflowSnapshot) {
-        self.mark_visible_boundary();
         let id = snapshot.id.0.clone();
         let existing_index = self
             .entries
