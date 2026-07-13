@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, fmt, str::FromStr, time::Duration};
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum CacheRetention {
@@ -11,33 +11,117 @@ pub enum CacheRetention {
     Long,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum ReasoningEffort {
-    #[serde(rename = "minimal", alias = "Minimal")]
-    Minimal,
-    #[serde(rename = "low", alias = "Low")]
-    Low,
-    #[serde(rename = "medium", alias = "Medium")]
-    Medium,
-    #[serde(rename = "high", alias = "High")]
-    High,
-    #[serde(rename = "xhigh", alias = "XHigh")]
-    XHigh,
-    #[serde(rename = "max", alias = "Max")]
-    Max,
-}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ReasoningEffort(String);
 
 impl ReasoningEffort {
+    pub const MINIMAL: &'static str = "minimal";
+    pub const LOW: &'static str = "low";
+    pub const MEDIUM: &'static str = "medium";
+    pub const HIGH: &'static str = "high";
+    pub const XHIGH: &'static str = "xhigh";
+    pub const MAX: &'static str = "max";
+
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
+    pub fn minimal() -> Self {
+        Self(Self::MINIMAL.to_owned())
+    }
+
+    #[must_use]
+    pub fn low() -> Self {
+        Self(Self::LOW.to_owned())
+    }
+
+    #[must_use]
+    pub fn medium() -> Self {
+        Self(Self::MEDIUM.to_owned())
+    }
+
+    #[must_use]
+    pub fn high() -> Self {
+        Self(Self::HIGH.to_owned())
+    }
+
+    #[must_use]
+    pub fn xhigh() -> Self {
+        Self(Self::XHIGH.to_owned())
+    }
+
+    #[must_use]
+    pub fn max() -> Self {
+        Self(Self::MAX.to_owned())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidReasoningEffort;
+
+impl fmt::Display for InvalidReasoningEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("reasoning effort cannot be empty or whitespace-only")
+    }
+}
+
+impl std::error::Error for InvalidReasoningEffort {}
+
+impl TryFrom<String> for ReasoningEffort {
+    type Error = InvalidReasoningEffort;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() {
+            return Err(InvalidReasoningEffort);
         }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<&str> for ReasoningEffort {
+    type Error = InvalidReasoningEffort;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = InvalidReasoningEffort;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value)
+    }
+}
+
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ReasoningEffort {
+    fn schema_name() -> Cow<'static, str> {
+        "ReasoningEffort".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": r"\S"
+        })
     }
 }
 
@@ -62,9 +146,9 @@ impl ReasoningSelection {
     }
 
     #[must_use]
-    pub const fn effort(&self) -> Option<ReasoningEffort> {
+    pub const fn effort(&self) -> Option<&ReasoningEffort> {
         match self {
-            Self::Effort { effort } => Some(*effort),
+            Self::Effort { effort } => Some(effort),
             Self::Off | Self::On | Self::BudgetTokens { .. } => None,
         }
     }

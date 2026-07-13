@@ -145,7 +145,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         ReasoningSelection::Effort { effort } => {
             body["thinking"] = json!({
                 "type": "enabled",
-                "budget_tokens": thinking_budget_tokens(*effort),
+                "budget_tokens": thinking_budget_tokens(effort)?,
                 "display": "summarized",
             });
         }
@@ -168,13 +168,16 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     Ok(body)
 }
 
-const fn thinking_budget_tokens(effort: ReasoningEffort) -> u32 {
-    match effort {
-        ReasoningEffort::Minimal | ReasoningEffort::Low => 1_024,
-        ReasoningEffort::Medium => 2_048,
-        ReasoningEffort::High => 8_192,
-        ReasoningEffort::XHigh => 16_384,
-        ReasoningEffort::Max => 32_768,
+fn thinking_budget_tokens(effort: &ReasoningEffort) -> Result<u32, ProviderError> {
+    match effort.as_str() {
+        ReasoningEffort::MINIMAL | ReasoningEffort::LOW => Ok(1_024),
+        ReasoningEffort::MEDIUM => Ok(2_048),
+        ReasoningEffort::HIGH => Ok(8_192),
+        ReasoningEffort::XHIGH => Ok(16_384),
+        ReasoningEffort::MAX => Ok(32_768),
+        custom => Err(ProviderError::Unsupported(format!(
+            "Anthropic provider does not support custom reasoning effort '{custom}'"
+        ))),
     }
 }
 

@@ -633,7 +633,7 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
         max_tokens: Some(128),
         headers,
         reasoning: ReasoningSelection::Effort {
-            effort: ReasoningEffort::Medium,
+            effort: ReasoningEffort::medium(),
         },
         retries: Some(0),
         cache: CacheRetention::Long,
@@ -725,7 +725,7 @@ async fn openai_responses_client_serializes_reasoning_selection_with_encrypted_h
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
     let mut request = request(ApiKind::OpenAiResponse);
     request.options.reasoning = ReasoningSelection::Effort {
-        effort: ReasoningEffort::High,
+        effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
     };
 
     client
@@ -737,7 +737,7 @@ async fn openai_responses_client_serializes_reasoning_selection_with_encrypted_h
         .unwrap();
 
     let sent = server.requests().pop().unwrap();
-    assert_eq!(sent.body["reasoning"]["effort"], "high");
+    assert_eq!(sent.body["reasoning"]["effort"], "UltraMax");
     assert_eq!(sent.body["reasoning"]["summary"], "auto");
     assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
 }
@@ -1857,7 +1857,7 @@ async fn anthropic_messages_client_serializes_reasoning_selection_as_budget_thin
     let mut request = request(ApiKind::AnthropicMessages);
     request.options.temperature = Some(0.4);
     request.options.reasoning = ReasoningSelection::Effort {
-        effort: ReasoningEffort::High,
+        effort: ReasoningEffort::high(),
     };
 
     client
@@ -1880,6 +1880,32 @@ async fn anthropic_messages_client_serializes_reasoning_selection_as_budget_thin
         sent.body.get("output_config").is_none(),
         "Neo does not opt into adaptive Anthropic thinking without explicit model compat"
     );
+}
+
+#[tokio::test]
+async fn anthropic_messages_client_rejects_custom_effort_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
+    };
+    request.options.retries = Some(0);
+
+    let error = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("custom reasoning effort 'UltraMax'")
+    );
+    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]
@@ -2364,7 +2390,7 @@ async fn google_generative_ai_client_serializes_reasoning_selection_as_thinking_
     let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
     let mut request = request(ApiKind::GoogleGenerativeAi);
     request.options.reasoning = ReasoningSelection::Effort {
-        effort: ReasoningEffort::Medium,
+        effort: ReasoningEffort::medium(),
     };
 
     client
@@ -2384,6 +2410,32 @@ async fn google_generative_ai_client_serializes_reasoning_selection_as_thinking_
         sent.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         2048
     );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_rejects_custom_effort_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
+    };
+    request.options.retries = Some(0);
+
+    let error = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("custom reasoning effort 'UltraMax'")
+    );
+    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]

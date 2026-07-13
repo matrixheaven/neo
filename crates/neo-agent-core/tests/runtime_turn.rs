@@ -667,7 +667,7 @@ async fn runtime_rejects_reasoning_selection_when_model_lacks_reasoning_before_r
     }]);
     let mut config = AgentConfig::for_model(harness.model());
     config.reasoning = ReasoningSelection::Effort {
-        effort: ReasoningEffort::Low,
+        effort: ReasoningEffort::low(),
     };
 
     assert_runtime_rejects_unsupported_capability(
@@ -688,7 +688,7 @@ async fn runtime_rejects_unsupported_reasoning_selection_before_request() {
     }]);
     let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
         reasoning: ReasoningCapability::Effort {
-            values: vec![ReasoningEffort::High],
+            values: vec![ReasoningEffort::high()],
             disable_supported: true,
         },
         ..ModelCapabilities::tool_chat()
@@ -738,13 +738,13 @@ async fn runtime_passes_reasoning_selection_into_chat_request_options() {
     }]);
     let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
         reasoning: ReasoningCapability::Effort {
-            values: vec![ReasoningEffort::Low],
+            values: vec![ReasoningEffort::try_from("UltraMax").expect("custom effort")],
             disable_supported: true,
         },
         ..ModelCapabilities::tool_chat()
     }));
     config.reasoning = ReasoningSelection::Effort {
-        effort: ReasoningEffort::Low,
+        effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
     };
     let runtime = AgentRuntime::new(config, harness.client());
     let mut context = AgentContext::new();
@@ -760,7 +760,7 @@ async fn runtime_passes_reasoning_selection_into_chat_request_options() {
     assert_eq!(
         harness.requests()[0].options.reasoning,
         ReasoningSelection::Effort {
-            effort: ReasoningEffort::Low,
+            effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
         }
     );
 }

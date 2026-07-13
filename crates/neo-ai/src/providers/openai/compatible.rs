@@ -8,7 +8,7 @@ use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 const EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE: &str =
@@ -174,21 +174,11 @@ fn assistant_message_body(
 
 fn openai_reasoning_selection(
     selection: &ReasoningSelection,
-) -> Result<Option<&'static str>, ProviderError> {
+) -> Result<Option<&str>, ProviderError> {
     match selection {
         ReasoningSelection::Off => Ok(None),
         ReasoningSelection::On => Ok(Some("high")),
-        ReasoningSelection::Effort { effort } => match effort {
-            ReasoningEffort::Low => Ok(Some("low")),
-            ReasoningEffort::Medium => Ok(Some("medium")),
-            ReasoningEffort::High => Ok(Some("high")),
-            ReasoningEffort::Minimal | ReasoningEffort::XHigh | ReasoningEffort::Max => {
-                Err(ProviderError::Unsupported(format!(
-                    "OpenAI-compatible provider type 'openai' supports reasoning effort low, medium, or high without an explicit model mapping; got {}",
-                    effort.as_str()
-                )))
-            }
-        },
+        ReasoningSelection::Effort { effort } => Ok(Some(effort.as_str())),
         ReasoningSelection::BudgetTokens { .. } => Err(ProviderError::Unsupported(
             "OpenAI-compatible provider type 'openai' does not support budget reasoning selections"
                 .to_owned(),
@@ -693,6 +683,16 @@ fn reasoning_delta(delta: &Value) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::ToolCall;
+
+    #[test]
+    fn reasoning_selection_preserves_max_effort() {
+        let selection = ReasoningSelection::Effort {
+            effort: crate::ReasoningEffort::max(),
+        };
+        let effort = openai_reasoning_selection(&selection).expect("max reasoning effort");
+
+        assert_eq!(effort, Some("max"));
+    }
 
     #[test]
     fn message_body_serializes_assistant_tool_calls() {

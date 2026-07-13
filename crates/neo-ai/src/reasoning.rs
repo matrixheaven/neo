@@ -34,12 +34,12 @@ impl ReasoningPolicy {
         match self {
             Self::Off => ReasoningSelection::Off,
             Self::Auto => auto_selection(&model.capabilities.reasoning),
-            Self::Minimal => effort_selection(ReasoningEffort::Minimal),
-            Self::Low => effort_selection(ReasoningEffort::Low),
-            Self::Medium => effort_selection(ReasoningEffort::Medium),
-            Self::High => effort_selection(ReasoningEffort::High),
-            Self::XHigh => effort_selection(ReasoningEffort::XHigh),
-            Self::Max => effort_selection(ReasoningEffort::Max),
+            Self::Minimal => effort_selection(ReasoningEffort::minimal()),
+            Self::Low => effort_selection(ReasoningEffort::low()),
+            Self::Medium => effort_selection(ReasoningEffort::medium()),
+            Self::High => effort_selection(ReasoningEffort::high()),
+            Self::XHigh => effort_selection(ReasoningEffort::xhigh()),
+            Self::Max => effort_selection(ReasoningEffort::max()),
         }
     }
 }
@@ -65,15 +65,18 @@ fn auto_selection(capability: &ReasoningCapability) -> ReasoningSelection {
 }
 
 fn effort_auto_selection(values: &[ReasoningEffort]) -> Option<ReasoningSelection> {
-    let effort = if values.contains(&ReasoningEffort::Medium) {
-        ReasoningEffort::Medium
+    let effort = if values
+        .iter()
+        .any(|effort| effort.as_str() == ReasoningEffort::MEDIUM)
+    {
+        ReasoningEffort::medium()
     } else {
-        *values.first()?
+        values.first()?.clone()
     };
     Some(effort_selection(effort))
 }
 
-const fn effort_selection(effort: ReasoningEffort) -> ReasoningSelection {
+fn effort_selection(effort: ReasoningEffort) -> ReasoningSelection {
     ReasoningSelection::Effort { effort }
 }
 

@@ -381,7 +381,10 @@ mod tests {
                     model_id: "gpt-reasoner".into(),
                     capabilities: vec!["reasoning".into()],
                     reasoning: ReasoningCapability::Effort {
-                        values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                        values: vec![
+                            neo_ai::ReasoningEffort::low(),
+                            neo_ai::ReasoningEffort::high(),
+                        ],
                         disable_supported: true,
                     },
                     max_context_tokens: Some(128_000),
@@ -414,7 +417,7 @@ mod tests {
                     alias: "openai/gpt-reasoner".to_owned(),
                     thinking: true,
                     reasoning: ReasoningSelection::Effort {
-                        effort: neo_ai::ReasoningEffort::Low,
+                        effort: neo_ai::ReasoningEffort::low(),
                     },
                 }
             ))

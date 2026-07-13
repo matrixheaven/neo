@@ -992,7 +992,7 @@ mod tests {
                 temperature: Some(0.35),
                 max_tokens: Some(512),
                 reasoning: neo_ai::ReasoningSelection::Effort {
-                    effort: neo_ai::ReasoningEffort::High,
+                    effort: neo_ai::ReasoningEffort::high(),
                 },
                 replay_reasoning: true,
                 steering_queue_mode: QueueMode::OneAtATime,
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(
             agent_config.reasoning,
             neo_ai::ReasoningSelection::Effort {
-                effort: neo_ai::ReasoningEffort::High,
+                effort: neo_ai::ReasoningEffort::high(),
             }
         );
         assert_eq!(agent_config.steering_queue_mode, QueueMode::OneAtATime);
@@ -2029,7 +2029,10 @@ mod tests {
                     "reasoning".to_owned(),
                 ],
                 reasoning: neo_ai::ReasoningCapability::Effort {
-                    values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                    values: vec![
+                        neo_ai::ReasoningEffort::low(),
+                        neo_ai::ReasoningEffort::high(),
+                    ],
                     disable_supported: true,
                 },
                 ..ModelConfig::default()
@@ -2042,7 +2045,10 @@ mod tests {
         assert_eq!(
             model.capabilities.reasoning,
             neo_ai::ReasoningCapability::Effort {
-                values: vec![neo_ai::ReasoningEffort::Low, neo_ai::ReasoningEffort::High],
+                values: vec![
+                    neo_ai::ReasoningEffort::low(),
+                    neo_ai::ReasoningEffort::high()
+                ],
                 disable_supported: true,
             }
         );

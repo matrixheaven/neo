@@ -649,7 +649,7 @@ mod tests {
             images: true,
             embeddings: true,
             reasoning: ReasoningCapability::Effort {
-                values: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                values: vec![ReasoningEffort::low(), ReasoningEffort::high()],
                 disable_supported: true,
             },
         };

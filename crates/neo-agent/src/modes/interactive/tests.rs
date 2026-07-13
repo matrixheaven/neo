@@ -6753,7 +6753,7 @@ async fn capture_configured_interactive_turn_reasoning(
 #[tokio::test]
 async fn configured_low_reasoning_reaches_interactive_turn_unchanged() {
     let expected = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::Low,
+        effort: neo_ai::ReasoningEffort::low(),
     };
 
     let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
@@ -6764,7 +6764,7 @@ async fn configured_low_reasoning_reaches_interactive_turn_unchanged() {
 #[tokio::test]
 async fn configured_max_reasoning_reaches_interactive_turn_unchanged() {
     let expected = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::Max,
+        effort: neo_ai::ReasoningEffort::max(),
     };
 
     let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
@@ -6825,7 +6825,7 @@ fn model_selection_persists_reasoning_and_provider_across_reload() {
     let config_path = config.config_path.clone();
     config.runtime.reasoning = neo_ai::ReasoningSelection::Off;
     let expected_reasoning = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::Medium,
+        effort: neo_ai::ReasoningEffort::medium(),
     };
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -6926,7 +6926,7 @@ fn model_selection_without_thinking_sets_reasoning_off() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
     config.runtime.reasoning = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::Max,
+        effort: neo_ai::ReasoningEffort::max(),
     };
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -6937,7 +6937,7 @@ fn model_selection_without_thinking_sets_reasoning_off() {
     );
     controller.local_config = Some(config);
     controller.set_current_reasoning(neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::Max,
+        effort: neo_ai::ReasoningEffort::max(),
     });
 
     controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {

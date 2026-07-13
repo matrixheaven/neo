@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(
             runtime.reasoning,
             neo_ai::ReasoningSelection::Effort {
-                effort: neo_ai::ReasoningEffort::High,
+                effort: neo_ai::ReasoningEffort::high(),
             }
         );
     }

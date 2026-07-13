@@ -218,7 +218,7 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
         headers,
         timeout: Some(Duration::from_secs(5)),
         reasoning: ReasoningSelection::Effort {
-            effort: ReasoningEffort::Medium,
+            effort: ReasoningEffort::medium(),
         },
         replay_reasoning: true,
         retries: Some(0),
@@ -528,13 +528,15 @@ async fn openai_http_status_error_includes_body_excerpt() {
 }
 
 #[tokio::test]
-async fn openai_rejects_unsupported_reasoning_selection_without_posting() {
-    let server = MockServer::start(Vec::new());
+async fn openai_preserves_custom_reasoning_effort() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "choices": [{ "delta": {}, "finish_reason": "stop" }]
+    })])]);
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
-    let err = client
+    client
         .stream_chat(request(RequestOptions {
             reasoning: ReasoningSelection::Effort {
-                effort: ReasoningEffort::Minimal,
+                effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
             },
             retries: Some(0),
             ..RequestOptions::default()
@@ -543,12 +545,11 @@ async fn openai_rejects_unsupported_reasoning_selection_without_posting() {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap_err();
+        .expect("custom effort request");
 
-    let message = err.to_string();
-    assert!(message.contains("low, medium, or high"), "{message}");
-    assert!(message.contains("minimal"), "{message}");
-    assert!(server.requests().is_empty());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["reasoning_effort"], "UltraMax");
 }
 
 #[tokio::test]

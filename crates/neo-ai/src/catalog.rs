@@ -294,15 +294,10 @@ fn catalog_effort_reasoning_option(option: &Value) -> Option<(Vec<ReasoningEffor
     let mut efforts = Vec::new();
 
     for value in values.iter().filter_map(Value::as_str) {
-        match value {
-            "none" => disable_supported = true,
-            "minimal" => efforts.push(ReasoningEffort::Minimal),
-            "low" => efforts.push(ReasoningEffort::Low),
-            "medium" => efforts.push(ReasoningEffort::Medium),
-            "high" => efforts.push(ReasoningEffort::High),
-            "xhigh" => efforts.push(ReasoningEffort::XHigh),
-            "max" => efforts.push(ReasoningEffort::Max),
-            _ => {}
+        if value == "none" {
+            disable_supported = true;
+        } else if let Ok(effort) = ReasoningEffort::try_from(value) {
+            efforts.push(effort);
         }
     }
 
@@ -440,7 +435,7 @@ mod tests {
             "id": "gpt-test",
             "reasoning": true,
             "reasoning_options": [
-                { "type": "effort", "values": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] }
+                { "type": "effort", "values": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "UltraMax"] }
             ]
         }))
         .expect("catalog model");
@@ -449,12 +444,13 @@ mod tests {
             catalog_model_reasoning(&model),
             ReasoningCapability::Effort {
                 values: vec![
-                    ReasoningEffort::Minimal,
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
-                    ReasoningEffort::XHigh,
-                    ReasoningEffort::Max,
+                    ReasoningEffort::minimal(),
+                    ReasoningEffort::low(),
+                    ReasoningEffort::medium(),
+                    ReasoningEffort::high(),
+                    ReasoningEffort::xhigh(),
+                    ReasoningEffort::max(),
+                    ReasoningEffort::try_from("UltraMax").expect("custom effort"),
                 ],
                 disable_supported: true,
             }
@@ -477,7 +473,7 @@ mod tests {
             catalog_model_reasoning(&model),
             ReasoningCapability::Combined {
                 toggle: true,
-                effort: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                effort: vec![ReasoningEffort::low(), ReasoningEffort::high()],
                 budget: None,
                 disable_supported: true,
             }
@@ -522,7 +518,7 @@ mod tests {
             catalog_model_reasoning(&model),
             ReasoningCapability::Combined {
                 toggle: true,
-                effort: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                effort: vec![ReasoningEffort::low(), ReasoningEffort::high()],
                 budget: Some(ReasoningBudget {
                     min: Some(128),
                     max: Some(24_576),

@@ -117,7 +117,7 @@ effort = "high"
 
 ### `[runtime.reasoning]` Sub-Table
 
-`mode = "off"` disables reasoning (default), `mode = "on"` enables the provider/model default, `mode = "effort"` sends an explicit `effort` (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) when supported, and `mode = "budget_tokens"` sends an explicit `budget_tokens` count when supported.
+`mode = "off"` disables reasoning (default), `mode = "on"` enables the provider/model default, `mode = "effort"` sends an explicit provider-defined `effort` when supported, and `mode = "budget_tokens"` sends an explicit `budget_tokens` count when supported. Common effort values include `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; providers may declare other non-empty, case-sensitive values.
 
 ### `[runtime.compaction]` Sub-Table
 

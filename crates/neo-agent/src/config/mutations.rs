@@ -809,9 +809,9 @@ model = "claude-sonnet-4"
                     ],
                     reasoning: neo_ai::ReasoningCapability::Effort {
                         values: vec![
-                            neo_ai::ReasoningEffort::Low,
-                            neo_ai::ReasoningEffort::Medium,
-                            neo_ai::ReasoningEffort::High,
+                            neo_ai::ReasoningEffort::low(),
+                            neo_ai::ReasoningEffort::medium(),
+                            neo_ai::ReasoningEffort::high(),
                         ],
                         disable_supported: true,
                     },

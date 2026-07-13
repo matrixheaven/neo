@@ -117,7 +117,7 @@ effort = "high"
 
 ### `[runtime.reasoning]` 子表
 
-`mode = "off"` 关闭 reasoning（默认），`mode = "on"` 启用 provider/model 默认 reasoning，`mode = "effort"` 在支持时发送显式 `effort`（`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），`mode = "budget_tokens"` 在支持时发送显式 `budget_tokens` 数量。
+`mode = "off"` 关闭 reasoning（默认），`mode = "on"` 启用 provider/model 默认 reasoning，`mode = "effort"` 在支持时发送 provider 定义的显式 `effort`，`mode = "budget_tokens"` 在支持时发送显式 `budget_tokens` 数量。常见 effort 包括 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`；provider 也可以声明其他非空且区分大小写的值。
 
 ### `[runtime.compaction]` 子表
 

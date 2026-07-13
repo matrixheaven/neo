@@ -128,8 +128,8 @@ fn openai_responses_reasoning(
 ) -> Result<Option<ReasoningEffort>, ProviderError> {
     match selection {
         ReasoningSelection::Off => Ok(None),
-        ReasoningSelection::On => Ok(Some(ReasoningEffort::High)),
-        ReasoningSelection::Effort { effort } => Ok(Some(*effort)),
+        ReasoningSelection::On => Ok(Some(ReasoningEffort::high())),
+        ReasoningSelection::Effort { effort } => Ok(Some(effort.clone())),
         ReasoningSelection::BudgetTokens { .. } => Err(ProviderError::Unsupported(
             "OpenAI Responses provider does not support budget reasoning selections".to_owned(),
         )),

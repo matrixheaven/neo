@@ -141,6 +141,17 @@ display_name = "Claude Sonnet 4.5"
 
 能力标签用于 UI 提示与能力路由（如 reasoning effort 仅对声明了 `reasoning` 的模型生效）。缺省时 Neo 按模型默认能力推断。
 
+### Provider 自定义 reasoning effort
+
+Provider 可以定义 Neo 常用预设以外的 effort 值：
+
+```toml
+[runtime]
+reasoning = { mode = "effort", effort = "UltraMax" }
+```
+
+Effort 值由 provider 定义并区分大小写。具有原生 effort 字段的 provider 会按原文接收该值；基于 budget 或 toggle 的 adapter 会拒绝无法映射的值。空字符串或纯空白值无效。支持哪些值请查阅 provider 的模型文档。
+
 ## 下一步
 
 - [配置文件总览](config-files.md) — `config.toml` 全字段表

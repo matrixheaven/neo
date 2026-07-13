@@ -1423,13 +1423,13 @@ impl CustomEndpointWizardState {
     }
 
     fn toggle_reasoning_effort(&mut self) -> InputResult {
-        let Some(effort) = all_reasoning_efforts().get(self.selected).copied() else {
+        let Some(effort) = all_reasoning_efforts().get(self.selected).cloned() else {
             return InputResult::Ignored;
         };
         match &mut self.draft_model.reasoning {
             ReasoningCapability::Effort { values, .. }
             | ReasoningCapability::Combined { effort: values, .. } => {
-                if let Some(index) = values.iter().position(|value| *value == effort) {
+                if let Some(index) = values.iter().position(|value| value == &effort) {
                     values.remove(index);
                 } else {
                     values.push(effort);
@@ -1729,20 +1729,20 @@ fn reasoning_label(reasoning: &ReasoningCapability) -> &'static str {
 
 fn all_reasoning_efforts() -> [ReasoningEffort; 6] {
     [
-        ReasoningEffort::Minimal,
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::Max,
+        ReasoningEffort::minimal(),
+        ReasoningEffort::low(),
+        ReasoningEffort::medium(),
+        ReasoningEffort::high(),
+        ReasoningEffort::xhigh(),
+        ReasoningEffort::max(),
     ]
 }
 
 fn default_reasoning_efforts() -> Vec<ReasoningEffort> {
     vec![
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
+        ReasoningEffort::low(),
+        ReasoningEffort::medium(),
+        ReasoningEffort::high(),
     ]
 }
 
@@ -2265,9 +2265,9 @@ mod tests {
             embeddings: false,
             reasoning: ReasoningCapability::Effort {
                 values: vec![
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
+                    ReasoningEffort::low(),
+                    ReasoningEffort::medium(),
+                    ReasoningEffort::high(),
                 ],
                 disable_supported: true,
             },
@@ -2310,9 +2310,9 @@ mod tests {
             state.draft_model.reasoning,
             ReasoningCapability::Effort {
                 values: vec![
-                    ReasoningEffort::Minimal,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
+                    ReasoningEffort::minimal(),
+                    ReasoningEffort::medium(),
+                    ReasoningEffort::high(),
                 ],
                 disable_supported: true,
             }
@@ -2385,7 +2385,7 @@ mod tests {
             state.draft_model.reasoning,
             ReasoningCapability::Combined {
                 toggle: true,
-                effort: vec![ReasoningEffort::Low, ReasoningEffort::Medium],
+                effort: vec![ReasoningEffort::low(), ReasoningEffort::medium()],
                 budget: Some(neo_ai::ReasoningBudget {
                     min: Some(4096),
                     max: None,

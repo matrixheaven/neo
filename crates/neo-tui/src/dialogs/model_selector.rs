@@ -700,7 +700,7 @@ fn default_enabled_reasoning_selection(
         ReasoningCapability::Toggle { .. } => Some(ReasoningSelection::On),
         ReasoningCapability::Effort { values, .. } => values
             .first()
-            .copied()
+            .cloned()
             .map(|effort| ReasoningSelection::Effort { effort }),
         ReasoningCapability::BudgetTokens { min, max, .. } => {
             let bounds = ReasoningBudget {
@@ -718,7 +718,7 @@ fn default_enabled_reasoning_selection(
             if !effort.is_empty() {
                 return effort
                     .first()
-                    .copied()
+                    .cloned()
                     .map(|effort| ReasoningSelection::Effort { effort });
             }
             if let Some(bounds) = budget {
@@ -745,7 +745,7 @@ fn reasoning_choices(capability: &ReasoningCapability) -> Vec<ReasoningSelection
             choices.extend(
                 values
                     .iter()
-                    .copied()
+                    .cloned()
                     .map(|effort| ReasoningSelection::Effort { effort }),
             );
         }
@@ -765,7 +765,7 @@ fn reasoning_choices(capability: &ReasoningCapability) -> Vec<ReasoningSelection
                 choices.extend(
                     effort
                         .iter()
-                        .copied()
+                        .cloned()
                         .map(|effort| ReasoningSelection::Effort { effort }),
                 );
             } else if let Some(bounds) = budget {
@@ -814,12 +814,25 @@ fn render_effort_segments(
         labels.push(segment("off", matches!(selection, ReasoningSelection::Off)));
     }
     labels.extend(values.iter().map(|effort| {
+        let label = safe_effort_label(effort.as_str());
         segment(
-            effort.as_str(),
+            &label,
             matches!(selection, ReasoningSelection::Effort { effort: selected } if selected == effort),
         )
     }));
     labels.join("  ")
+}
+
+fn safe_effort_label(value: &str) -> String {
+    let mut label = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            label.extend(character.escape_default());
+        } else {
+            label.push(character);
+        }
+    }
+    label
 }
 
 fn segment(label: &str, selected: bool) -> String {
@@ -943,10 +956,10 @@ mod tests {
                 capabilities: vec!["reasoning".into()],
                 reasoning: ReasoningCapability::Effort {
                     values: vec![
-                        ReasoningEffort::Low,
-                        ReasoningEffort::Medium,
-                        ReasoningEffort::High,
-                        ReasoningEffort::XHigh,
+                        ReasoningEffort::low(),
+                        ReasoningEffort::medium(),
+                        ReasoningEffort::high(),
+                        ReasoningEffort::xhigh(),
                     ],
                     disable_supported: true,
                 },
@@ -995,7 +1008,7 @@ mod tests {
             current_alias: "openai/gpt-reasoner".into(),
             selected_alias: None,
             current_reasoning: ReasoningSelection::Effort {
-                effort: ReasoningEffort::Medium,
+                effort: ReasoningEffort::medium(),
             },
             theme: theme(),
         });
@@ -1018,10 +1031,58 @@ mod tests {
                 alias: "openai/gpt-reasoner".to_owned(),
                 thinking: true,
                 reasoning: ReasoningSelection::Effort {
-                    effort: ReasoningEffort::High,
+                    effort: ReasoningEffort::high(),
                 },
             }))
         );
+    }
+
+    #[test]
+    fn model_declared_custom_effort_renders_and_selects_exact_value() {
+        let custom = ReasoningEffort::try_from("UltraMax").expect("custom effort");
+        let mut model = reasoning_models().remove(0);
+        model.reasoning = ReasoningCapability::Effort {
+            values: vec![custom.clone()],
+            disable_supported: true,
+        };
+        let alias = model.alias.clone();
+        let mut state = ModelSelectorState::new(ModelSelectorOptions {
+            models: vec![model],
+            current_alias: alias.clone(),
+            selected_alias: None,
+            current_reasoning: ReasoningSelection::Off,
+            theme: theme(),
+        });
+
+        assert!(state.render_lines(80).join("\n").contains("UltraMax"));
+        state.handle_input(&InputEvent::MoveRight);
+        state.handle_input(&InputEvent::Submit);
+
+        assert_eq!(
+            state.take_result(),
+            Some(ModelSelectorResult::Selected(ModelSelection {
+                alias,
+                thinking: true,
+                reasoning: ReasoningSelection::Effort { effort: custom },
+            }))
+        );
+    }
+
+    #[test]
+    fn custom_effort_control_characters_are_escaped_only_for_display() {
+        let custom = ReasoningEffort::try_from("Ultra\n\u{1b}Max").expect("custom effort");
+        let rendered = render_effort_segments(
+            std::slice::from_ref(&custom),
+            false,
+            &ReasoningSelection::Effort {
+                effort: custom.clone(),
+            },
+        );
+
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains(r"Ultra\n\u{1b}Max"));
+        assert_eq!(custom.as_str(), "Ultra\n\u{1b}Max");
     }
 
     #[test]

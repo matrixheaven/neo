@@ -141,6 +141,20 @@ display_name = "Claude Sonnet 4.5"
 
 Capability tags are used for UI hints and capability routing (e.g. reasoning effort only takes effect on models that declare `reasoning`). When omitted, Neo infers them from the model's default capabilities.
 
+### Provider-defined reasoning efforts
+
+Providers may define effort values beyond Neo's common presets:
+
+```toml
+[runtime]
+reasoning = { mode = "effort", effort = "UltraMax" }
+```
+
+Effort values are provider-defined and case-sensitive. Providers with a native
+effort field receive the value exactly as written; budget- or toggle-based
+adapters reject values they cannot map. Empty or whitespace-only values are
+invalid. Consult the provider's model documentation for supported values.
+
 ## Next Steps
 
 - [Configuration Files](config-files.md) — full field table for `config.toml`
