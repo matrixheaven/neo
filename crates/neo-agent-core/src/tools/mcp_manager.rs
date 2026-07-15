@@ -92,6 +92,7 @@ pub enum McpServerStatus {
     NeedsAuth,
     Failed,
     Reconnecting,
+    Cancelled,
 }
 
 impl McpServerStatus {
@@ -104,6 +105,7 @@ impl McpServerStatus {
             Self::NeedsAuth => "needs_auth",
             Self::Failed => "failed",
             Self::Reconnecting => "reconnecting",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -704,6 +706,26 @@ impl McpConnectionManager {
             .read_resource(uri)
             .await
             .map_err(|err| anyhow::anyhow!("{}", err.message()))
+    }
+
+    /// Cancel pending startup and reconnect tasks without disconnecting ready servers.
+    pub async fn cancel_startup(&self) {
+        let mut state = self.inner.write().await;
+        let mut retirement = ConnectionRetirement::default();
+        for entry in state.entries.values_mut().filter(|entry| {
+            matches!(
+                entry.status,
+                McpServerStatus::Pending | McpServerStatus::Reconnecting
+            )
+        }) {
+            retirement.collect_tasks(entry);
+            entry.status = McpServerStatus::Cancelled;
+            entry.error = None;
+            entry.next_retry_ms = None;
+        }
+        let supervisor = state.supervisor.clone();
+        drop(state);
+        retirement.retire(&supervisor).await;
     }
 
     /// Shut down all managed servers and cancel pending tasks.
@@ -1708,6 +1730,49 @@ mod tests {
             .map(|snapshot| snapshot.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["one", "three", "two"]);
+    }
+
+    #[tokio::test]
+    async fn cancel_startup_preserves_connected_servers() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        insert_entry(
+            &manager,
+            entry_for_status(McpServerStatus::Connected),
+        )
+        .await;
+
+        let mut pending = entry_for_status(McpServerStatus::Pending);
+        pending.config.id = "pending-server".to_owned();
+        pending.client = None;
+        pending.tools.clear();
+        pending.resources.clear();
+        pending.connect_task = Some(ManagedConnectTask {
+            attempt_id: pending.attempt_id,
+            expected_status: McpServerStatus::Pending,
+            cleanup_handle: None,
+            handle: tokio::spawn(std::future::pending()),
+        });
+        insert_entry(&manager, pending).await;
+
+        manager.cancel_startup().await;
+
+        assert_eq!(
+            manager
+                .snapshot("auth-server")
+                .await
+                .expect("connected server exists")
+                .status,
+            McpServerStatus::Connected
+        );
+        assert_eq!(
+            manager
+                .snapshot("pending-server")
+                .await
+                .expect("pending server exists")
+                .status,
+            McpServerStatus::Cancelled
+        );
+        assert!(manager.get_client("auth-server").await.is_ok());
     }
 
     #[tokio::test]
