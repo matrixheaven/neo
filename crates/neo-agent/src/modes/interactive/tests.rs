@@ -3138,6 +3138,10 @@ fn prompt_completions_merges_real_prompt_package_and_session_commands() {
         by_value["/resume"].description.as_deref(),
         Some("Resume a local session")
     );
+    assert_eq!(
+        by_value["/sessions"].description.as_deref(),
+        Some("Alias for /resume")
+    );
     for item in by_value.values() {
         let description = item.description.as_deref().unwrap_or_default();
         assert!(!description.contains("source:"));
@@ -3688,7 +3692,7 @@ fn slash_fuzzy_completions_return_empty_for_miss() {
 }
 
 #[tokio::test]
-async fn event_loop_slash_resume_opens_local_session_picker() {
+async fn event_loop_slash_resume_and_sessions_open_local_session_picker() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_with_event_driver(
@@ -3725,21 +3729,24 @@ async fn event_loop_slash_resume_opens_local_session_picker() {
         },
     );
 
-    controller.type_text("/resume");
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-        .await
-        .expect("slash resume command runs locally");
-
-    assert!(matches!(
+    for command in ["/resume", "/sessions"] {
+        controller.type_text(command);
         controller
-            .chrome()
-            .focused_overlay()
-            .map(|overlay| &overlay.kind),
-        Some(OverlayKind::SessionPicker(_))
-    ));
-    assert!(controller.chrome().prompt().text.is_empty());
-    assert!(requests.lock().expect("recorded requests").is_empty());
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("session picker command runs locally");
+
+        assert!(matches!(
+            controller
+                .chrome()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::SessionPicker(_))
+        ));
+        assert!(controller.chrome().prompt().text.is_empty());
+        assert!(requests.lock().expect("recorded requests").is_empty());
+        let _ = controller.tui.chrome_mut().close_focused_overlay();
+    }
 }
 
 #[tokio::test]
@@ -9091,6 +9098,11 @@ fn controller_with_session_for_new_tests() -> (
 #[tokio::test]
 async fn slash_new_resets_to_unsaved_fresh_session_without_streaming() {
     let (mut controller, _requests) = controller_with_session_for_new_tests();
+    controller.tui.chrome_mut().set_context_window(Some(
+        ContextWindow::new(1_000_000)
+            .with_used_tokens(57_000)
+            .with_projected_tokens(Some(61_000)),
+    ));
 
     controller.type_text("/new");
     controller
@@ -9120,6 +9132,10 @@ async fn slash_new_resets_to_unsaved_fresh_session_without_streaming() {
     );
     assert!(controller.chrome().prompt().text.is_empty());
     assert!(controller.chrome().todo_items().is_empty());
+    assert_eq!(
+        controller.chrome().context_window(),
+        Some(ContextWindow::new(1_000_000))
+    );
 }
 
 #[tokio::test]

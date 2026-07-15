@@ -70,6 +70,7 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
 
 static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Resume a local session"),
+    ("/sessions", "Alias for /resume"),
     ("/new", "Start a fresh local session"),
     ("/clear", "Alias for /new"),
     ("/fork", "Fork the current session"),
@@ -442,10 +443,7 @@ struct FileReferenceScore {
     path_len: usize,
 }
 
-fn file_reference_completion_candidates(
-    root: &Path,
-    prefix: &str,
-) -> Vec<CompletionCandidate> {
+fn file_reference_completion_candidates(root: &Path, prefix: &str) -> Vec<CompletionCandidate> {
     file_reference_completion_candidates_with_limits(
         root,
         prefix,

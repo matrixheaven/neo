@@ -180,6 +180,14 @@ impl InteractiveController {
         self.close_inline_prompt_completion();
         self.tui.chrome_mut().clear_interrupted_turn_state();
         self.tui.chrome_mut().clear_todos();
+        let max_context_tokens = self
+            .tui
+            .chrome()
+            .context_window()
+            .and_then(|context| context.max_tokens);
+        self.tui
+            .chrome_mut()
+            .set_context_window(max_context_tokens.map(neo_tui::shell::ContextWindow::new));
         self.tui
             .chrome_mut()
             .set_main_agent_token_usage(neo_tui::shell::MainAgentTokenUsage::default());

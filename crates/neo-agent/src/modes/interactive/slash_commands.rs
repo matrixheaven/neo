@@ -69,7 +69,7 @@ impl InteractiveController {
                     return true;
                 }
             }
-            "/resume" => self.open_session_picker(),
+            "/resume" | "/sessions" => self.open_session_picker(),
             "/fork" => {
                 if let Err(error) = self.fork_current_session().await {
                     self.push_status(format!("Failed to fork session: {error}"));
