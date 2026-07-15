@@ -244,6 +244,28 @@ fn mcp_startup_status_updates_pending_spinner_to_green_connected_row() {
 }
 
 #[test]
+fn mcp_startup_status_updates_pending_spinner_to_interrupted_row() {
+    let mut transcript_pane = TranscriptPane::new(100, 12);
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Connecting,
+    });
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Cancelled,
+    });
+
+    let rendered = plain_frame(&mut transcript_pane, 100, 12).join("\n");
+    assert!(
+        rendered.contains("MCP server \"linear\" startup interrupted (http)"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("connecting..."), "{rendered}");
+}
+
+#[test]
 fn mcp_startup_status_updates_pending_spinner_to_red_failed_row() {
     let theme = TuiTheme::default().with_status_error(Color::Rgb(211, 37, 69));
     let mut transcript_pane = TranscriptPane::new(100, 12);

@@ -337,6 +337,7 @@ pub fn summarize_mcp_servers_from_snapshots(
             McpServerStatus::Pending | McpServerStatus::Reconnecting => {
                 McpToolDiscovery::NotRequested
             }
+            McpServerStatus::Cancelled => McpToolDiscovery::NotRequested,
             McpServerStatus::Disabled => McpToolDiscovery::SkippedDisabled,
         };
     }
@@ -388,6 +389,7 @@ pub fn mcp_startup_status_from_snapshot(snapshot: &McpServerSnapshot) -> McpStar
             ),
         },
         McpServerStatus::Pending | McpServerStatus::Reconnecting => McpStartupPhase::Connecting,
+        McpServerStatus::Cancelled => McpStartupPhase::Cancelled,
         McpServerStatus::Disabled => McpStartupPhase::Disabled,
     };
     McpStartupStatusData {
@@ -447,6 +449,10 @@ pub fn format_mcp_startup_message(snapshot: &McpServerSnapshot) -> String {
         ),
         McpServerStatus::Pending | McpServerStatus::Reconnecting => format!(
             "MCP server \"{}\" still connecting ({})",
+            snapshot.id, snapshot.transport
+        ),
+        McpServerStatus::Cancelled => format!(
+            "MCP server \"{}\" startup interrupted ({})",
             snapshot.id, snapshot.transport
         ),
         McpServerStatus::Disabled => {

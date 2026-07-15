@@ -241,6 +241,10 @@ impl McpStartupStatusData {
             McpStartupPhase::Failed { message } => {
                 format!("MCP server \"{}\" failed · {message}", self.id)
             }
+            McpStartupPhase::Cancelled => format!(
+                "MCP server \"{}\" startup interrupted ({})",
+                self.id, self.transport
+            ),
             McpStartupPhase::Disabled => {
                 format!("MCP server \"{}\" disabled ({})", self.id, self.transport)
             }
@@ -254,6 +258,7 @@ pub enum McpStartupPhase {
     Connected { tool_count: usize },
     NeedsAuth { hint: String },
     Failed { message: String },
+    Cancelled,
     Disabled,
 }
 
@@ -484,9 +489,7 @@ impl TranscriptEntry {
                 true
             }
             Self::McpStartupStatus { data } => {
-                data.phase = McpStartupPhase::Failed {
-                    message: "Interrupted when terminal exited".to_owned(),
-                };
+                data.phase = McpStartupPhase::Cancelled;
                 true
             }
             Self::QueuedMessage { text, .. } => {
