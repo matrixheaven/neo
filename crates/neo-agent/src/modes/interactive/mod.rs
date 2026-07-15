@@ -313,9 +313,7 @@ where
     } else {
         controller.apply_startup_action(startup);
     }
-    controller
-        .connect_mcp_at_startup(|tui, animation_due| render(tui, animation_due))
-        .await?;
+    controller.connect_mcp_at_startup().await?;
     controller
         .run_terminal_loop_with_suspend(render, suspend, &mut events)
         .await
@@ -395,6 +393,7 @@ pub(crate) struct InteractiveController {
     pending_interactive_workflow: Option<PendingInteractiveWorkflow>,
     pending_preflight: Option<InteractivePreflightSpec>,
     mcp_manager: Option<McpConnectionManager>,
+    mcp_startup_active: bool,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Kimi-style skill activation prompt waiting to be injected as context for
     /// the next turn.
@@ -785,6 +784,7 @@ impl InteractiveController {
             pending_interactive_workflow: None,
             pending_preflight: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
+            mcp_startup_active: false,
             skill_store: None,
             pending_skill_context: None,
             pending_skill_user_message_to_suppress: None,
@@ -1073,95 +1073,81 @@ impl InteractiveController {
         render(&mut self.tui)
     }
 
-    async fn connect_mcp_at_startup(
-        &mut self,
-        mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
-    ) -> Result<()> {
-        const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(25);
-        const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
-
+    async fn connect_mcp_at_startup(&mut self) -> Result<()> {
         let Some(config) = self.local_config.clone() else {
             return Ok(());
         };
         let Some(manager) = self.mcp_manager.clone() else {
             return Ok(());
         };
-        let mut frame_scheduler = FrameScheduler::new(Instant::now(), MIN_RENDER_INTERVAL);
 
-        let mut startup_changed = false;
         for status in mcp_ops::mcp_startup_connecting_statuses(&config) {
-            startup_changed |= self.transcript_mut().upsert_mcp_startup_status(status);
+            self.transcript_mut().upsert_mcp_startup_status(status);
         }
-        if startup_changed {
-            frame_scheduler.request_immediate();
-        }
-        render_due_frame(
-            &mut frame_scheduler,
-            &mut self.tui,
-            &mut render,
-            Instant::now(),
-        )?;
 
         match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
-            Ok(_) => loop {
-                let snapshots = manager.snapshots().await;
-                let settled = snapshots.iter().all(|snapshot| {
-                    !matches!(
+            Ok(snapshots) => {
+                self.mcp_startup_active = snapshots.iter().any(|snapshot| {
+                    matches!(
                         snapshot.status,
                         McpServerStatus::Pending | McpServerStatus::Reconnecting
                     )
                 });
-                let mut changed = false;
-                for snapshot in snapshots.iter().filter(|snapshot| {
-                    config
-                        .mcp
-                        .servers
-                        .iter()
-                        .any(|server| server.enabled && server.id == snapshot.id)
-                }) {
-                    changed |= self.transcript_mut().upsert_mcp_startup_status(
-                        mcp_ops::mcp_startup_status_from_snapshot(snapshot),
-                    );
-                }
-                if changed {
-                    if settled {
-                        frame_scheduler.request_immediate();
-                    } else {
-                        frame_scheduler.request_coalesced();
-                    }
-                }
-                render_due_frame(
-                    &mut frame_scheduler,
-                    &mut self.tui,
-                    &mut render,
-                    Instant::now(),
-                )?;
-                if settled {
-                    break;
-                }
-                let timeout =
-                    frame_scheduler.poll_timeout(Instant::now(), CONNECTION_POLL_INTERVAL);
-                if timeout.is_zero() {
-                    tokio::task::yield_now().await;
-                } else {
-                    tokio::time::sleep(timeout).await;
-                }
-            },
+            }
             Err(error) => {
                 for status in mcp_ops::mcp_startup_failed_statuses(&config, &error.to_string()) {
                     self.transcript_mut().upsert_mcp_startup_status(status);
                 }
                 self.push_status(format!("MCP startup failed: {error}"));
-                frame_scheduler.request_immediate();
-                render_due_frame(
-                    &mut frame_scheduler,
-                    &mut self.tui,
-                    &mut render,
-                    Instant::now(),
-                )?;
             }
         }
         Ok(())
+    }
+
+    async fn poll_mcp_startup(&mut self) -> bool {
+        if !self.mcp_startup_active {
+            return false;
+        }
+        let (Some(config), Some(manager)) = (self.local_config.clone(), self.mcp_manager.clone())
+        else {
+            self.mcp_startup_active = false;
+            return false;
+        };
+        let snapshots = manager.snapshots().await;
+        let settled = snapshots.iter().all(|snapshot| {
+            !matches!(
+                snapshot.status,
+                McpServerStatus::Pending | McpServerStatus::Reconnecting
+            )
+        });
+        let mut changed = false;
+        for snapshot in snapshots.iter().filter(|snapshot| {
+            config
+                .mcp
+                .servers
+                .iter()
+                .any(|server| server.enabled && server.id == snapshot.id)
+        }) {
+            changed |= self
+                .transcript_mut()
+                .upsert_mcp_startup_status(mcp_ops::mcp_startup_status_from_snapshot(snapshot));
+        }
+        if settled {
+            self.mcp_startup_active = false;
+        }
+        changed
+    }
+
+    async fn cancel_mcp_startup(&mut self) -> bool {
+        if !self.mcp_startup_active {
+            return false;
+        }
+        if let Some(manager) = self.mcp_manager.clone() {
+            manager.cancel_startup().await;
+        }
+        let _ = self.poll_mcp_startup().await;
+        self.show_notice("MCP startup interrupted");
+        true
     }
 
     #[cfg(test)]
@@ -1243,6 +1229,7 @@ impl InteractiveController {
             async_state_changed |= self.poll_pending_custom_endpoint_fetch().await;
             async_state_changed |= self.poll_pending_custom_endpoint_test().await;
             async_state_changed |= self.poll_pending_mcp_probe().await;
+            async_state_changed |= self.poll_mcp_startup().await;
             if async_state_changed || self.tui.is_transcript_dirty() {
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
             }

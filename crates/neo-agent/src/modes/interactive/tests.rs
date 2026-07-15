@@ -13468,8 +13468,36 @@ async fn startup_trust_idle_poll_does_not_render_another_frame() {
 }
 
 #[tokio::test]
-async fn startup_mcp_without_visible_status_does_not_render() {
+async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
+    struct ScriptedTerminalEvents(VecDeque<InputEvent>);
+
+    impl TerminalEvents for ScriptedTerminalEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.0.pop_front().context("expected scripted input")
+        }
+
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+            Ok(self.0.pop_front())
+        }
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.mcp.servers.push(crate::config::McpServerConfig {
+        id: "slow".to_owned(),
+        enabled: true,
+        transport: crate::config::McpTransport::Stdio,
+        command: Some("neo-missing-mcp-server-for-test".to_owned()),
+        url: None,
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        headers: BTreeMap::new(),
+        cwd: None,
+        enabled_tools: Vec::new(),
+        disabled_tools: Vec::new(),
+        startup_timeout_ms: Some(5_000),
+        tool_timeout_ms: None,
+    });
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -13477,18 +13505,46 @@ async fn startup_mcp_without_visible_status_does_not_render() {
         temp.path(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.local_config = Some(test_config(temp.path(), temp.path().join(".neo/sessions")));
-    let mut render_count = 0;
+    controller.local_config = Some(config.clone());
+    let saw_text = Rc::new(Cell::new(false));
+    let saw_text_on_render = Rc::clone(&saw_text);
 
-    controller
-        .connect_mcp_at_startup(|_, _| {
-            render_count += 1;
-            Ok(None)
-        })
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        run_tty_lifecycle_with_event_factory(
+            &mut controller,
+            &config,
+            &StartupAction::None,
+            |_keybindings| {
+                ScriptedTerminalEvents(VecDeque::from([
+                    InputEvent::Insert('x'),
+                    InputEvent::Backspace,
+                    InputEvent::Cancel,
+                    InputEvent::Interrupt,
+                    InputEvent::Interrupt,
+                ]))
+            },
+            move |tui, _| {
+                saw_text_on_render
+                    .set(saw_text_on_render.get() || tui.chrome().prompt().text == "x");
+                Ok(None)
+            },
+            || Ok(()),
+        ),
+    )
+    .await
+    .expect("MCP startup must not block terminal input")
+    .expect("terminal lifecycle succeeds");
+
+    assert!(saw_text.get(), "composer input was never rendered");
+    let snapshot = controller
+        .mcp_manager
+        .as_ref()
+        .expect("MCP manager exists")
+        .snapshot("slow")
         .await
-        .expect("MCP startup succeeds");
-
-    assert_eq!(render_count, 0, "unchanged startup poll must not render");
+        .expect("slow MCP snapshot exists");
+    assert_eq!(snapshot.status, McpServerStatus::Cancelled);
 }
 
 #[tokio::test]

@@ -329,7 +329,10 @@ impl InteractiveController {
             self.tui.chrome_mut().close_btw_panel();
             return Ok(false);
         }
-        let _ = self.interrupt_active_or_stale_turn().await?;
+        if self.interrupt_active_or_stale_turn().await? {
+            return Ok(false);
+        }
+        let _ = self.cancel_mcp_startup().await;
         Ok(false)
     }
 
@@ -346,6 +349,9 @@ impl InteractiveController {
             return Ok(false);
         }
         if self.interrupt_active_or_stale_turn().await? {
+            return Ok(false);
+        }
+        if self.cancel_mcp_startup().await {
             return Ok(false);
         }
         Ok(self.handle_app_clear())

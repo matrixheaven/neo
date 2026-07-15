@@ -1735,11 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_startup_preserves_connected_servers() {
         let manager = McpConnectionManager::new(ProcessSupervisor::default());
-        insert_entry(
-            &manager,
-            entry_for_status(McpServerStatus::Connected),
-        )
-        .await;
+        insert_entry(&manager, entry_for_status(McpServerStatus::Connected)).await;
 
         let mut pending = entry_for_status(McpServerStatus::Pending);
         pending.config.id = "pending-server".to_owned();
