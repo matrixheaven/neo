@@ -11,6 +11,7 @@ use rmcp::{ServiceExt, transport::TokioChildProcess};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
+    task::JoinHandle,
 };
 
 use super::{
@@ -25,6 +26,7 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
+    pub startup_timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
 }
 
@@ -69,23 +71,22 @@ pub async fn build_stdio_client(
     });
 
     let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
+    let startup_timeout = Duration::from_millis(config.startup_timeout_ms.unwrap_or(5_000));
 
-    let service = match ().serve(transport).await {
-        Ok(service) => service,
-        Err(error) => {
-            if let Some(mut drain) = stderr_drain.take()
-                && tokio::time::timeout(Duration::from_millis(250), &mut drain)
-                    .await
-                    .is_err()
-            {
-                drain.abort();
-            }
-            return Err(McpError::protocol(error.to_string()).with_stderr_tail(Some(
-                stderr_tail
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .snapshot(),
-            )));
+    let service = match tokio::time::timeout(startup_timeout, ().serve(transport)).await {
+        Ok(Ok(service)) => service,
+        Ok(Err(error)) => {
+            return Err(
+                stdio_startup_error(error.to_string(), &mut stderr_drain, &stderr_tail).await,
+            );
+        }
+        Err(_) => {
+            return Err(stdio_startup_error(
+                format!("timeout connecting to MCP server {server_id}"),
+                &mut stderr_drain,
+                &stderr_tail,
+            )
+            .await);
         }
     };
 
@@ -117,6 +118,26 @@ pub async fn build_stdio_client(
         .await;
 
     Ok(client)
+}
+
+async fn stdio_startup_error(
+    message: String,
+    stderr_drain: &mut Option<JoinHandle<()>>,
+    stderr_tail: &SharedStderrTail,
+) -> McpError {
+    if let Some(mut drain) = stderr_drain.take()
+        && tokio::time::timeout(Duration::from_millis(250), &mut drain)
+            .await
+            .is_err()
+    {
+        drain.abort();
+    }
+    McpError::protocol(message).with_stderr_tail(Some(
+        stderr_tail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot(),
+    ))
 }
 
 pub(crate) fn process_handle(server_id: &str, attempt_id: u64) -> String {
@@ -162,6 +183,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hanging_stdio_server_never_answers() {
+        if std::env::var_os("NEO_STDIO_HANG_HELPER").is_some() {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_handshake_honors_startup_timeout() {
+        let config = StdioConfig {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".to_owned(),
+                "tools::mcp::stdio::tests::hanging_stdio_server_never_answers".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            env: BTreeMap::from([("NEO_STDIO_HANG_HELPER".to_owned(), "1".to_owned())]),
+            cwd: None,
+            startup_timeout_ms: Some(25),
+            tool_timeout_ms: None,
+        };
+
+        let result = timeout(
+            Duration::from_secs(2),
+            build_stdio_client("slow", 1, config, &ProcessSupervisor::default()),
+        )
+        .await
+        .expect("stdio startup timeout must resolve before watchdog");
+        let Err(error) = result else {
+            panic!("hanging handshake must fail")
+        };
+
+        assert!(
+            error
+                .message()
+                .contains("timeout connecting to MCP server slow"),
+            "{}",
+            error.message()
+        );
+    }
+
     #[tokio::test]
     async fn failed_stdio_handshake_exposes_bounded_stderr_tail() {
         let config = StdioConfig {
@@ -176,6 +243,7 @@ mod tests {
             ],
             env: BTreeMap::from([("NEO_STDIO_STDERR_HELPER".to_owned(), "1".to_owned())]),
             cwd: None,
+            startup_timeout_ms: None,
             tool_timeout_ms: None,
         };
 

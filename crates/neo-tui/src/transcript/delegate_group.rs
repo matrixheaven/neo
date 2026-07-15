@@ -42,12 +42,25 @@ impl DelegateGroupComponent {
         self.agents.iter().find(|agent| agent.id.as_str() == id)
     }
 
-    pub fn upsert(&mut self, snapshot: AgentSnapshot) {
+    pub fn upsert(&mut self, snapshot: AgentSnapshot) -> bool {
         if let Some(existing) = self.agents.iter_mut().find(|agent| agent.id == snapshot.id) {
-            *existing = merge_group_delegate_snapshot(existing, snapshot);
+            let merged = merge_group_delegate_snapshot(existing, snapshot);
+            if *existing == merged {
+                return false;
+            }
+            *existing = merged;
         } else {
             self.agents.push(snapshot);
         }
+        true
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        let mut changed = false;
+        for agent in &mut self.agents {
+            changed |= crate::transcript::interrupt_agent_snapshot(agent);
+        }
+        changed
     }
 
     pub fn on_render_tick(&mut self, now_ms: u64) -> bool {
@@ -290,6 +303,9 @@ fn merge_group_delegate_snapshot(
 ) -> AgentSnapshot {
     if current.id != incoming.id {
         return incoming;
+    }
+    if current.state.is_terminal() && !incoming.state.is_terminal() {
+        return current.clone();
     }
     if current.state == AgentLifecycleState::Cancelled
         && incoming.state == AgentLifecycleState::Completed

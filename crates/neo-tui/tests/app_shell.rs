@@ -133,7 +133,7 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
 }
 
 #[test]
-fn app_shell_render_tick_animates_transcript_thinking_spinner() {
+fn app_shell_explicit_animation_tick_animates_transcript_thinking_spinner() {
     let chrome = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
     let mut transcript = TranscriptPane::new(80, 20);
     transcript.push_transcript(neo_tui::transcript::TranscriptEntry::thinking_streaming(

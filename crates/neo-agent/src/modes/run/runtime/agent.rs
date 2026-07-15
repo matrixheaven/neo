@@ -230,6 +230,7 @@ pub(crate) async fn build_mcp_client(
                     args: server.args.clone(),
                     env: server.env.clone(),
                     cwd: server.cwd.clone(),
+                    startup_timeout_ms: server.startup_timeout_ms,
                     tool_timeout_ms: server.tool_timeout_ms,
                 },
                 supervisor,

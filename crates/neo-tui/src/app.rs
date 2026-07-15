@@ -1,4 +1,6 @@
-use crate::screen_output::CursorPos;
+use std::time::{Duration, Instant};
+
+use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
@@ -9,6 +11,8 @@ pub struct NeoTui {
     chrome: NeoChromeState,
     transcript: TranscriptPane,
 }
+
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 
 impl NeoTui {
     #[must_use]
@@ -66,11 +70,13 @@ impl NeoTui {
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
+            lines.truncate(height);
             apply_gutter(&mut lines);
             return (lines, None);
         }
 
-        let chrome_render = render_chrome(&mut self.chrome, width, height);
+        let chrome_render =
+            fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
         let chrome_height = chrome_render.lines.len();
         if self.transcript.live_chrome_height() != chrome_height {
             self.transcript.set_live_chrome_height(chrome_height);
@@ -83,7 +89,6 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
-        self.transcript.tick_cached_live_entries_for_parent_render();
         let mut lines = self
             .transcript
             .render_frame(width, height)
@@ -92,9 +97,76 @@ impl NeoTui {
         (lines, cursor)
     }
 
+    #[must_use]
+    pub fn render_terminal_frame(&mut self, width: usize, height: usize) -> TerminalFrame {
+        self.render_terminal_frame_at(width, height, Instant::now())
+    }
+
+    #[must_use]
+    pub fn render_terminal_frame_at(
+        &mut self,
+        width: usize,
+        height: usize,
+        now: Instant,
+    ) -> TerminalFrame {
+        if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
+            lines.truncate(height);
+            apply_gutter(&mut lines);
+            return TerminalFrame::new(Vec::new(), lines, None);
+        }
+
+        let chrome_render =
+            fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+        let chrome_height = chrome_render.lines.len();
+        if self.transcript.live_chrome_height() != chrome_height {
+            self.transcript.set_live_chrome_height(chrome_height);
+        }
+        self.transcript.set_theme(self.chrome.theme());
+        self.transcript
+            .set_image_render_policy(self.chrome.image_render_policy());
+        self.transcript
+            .set_image_capabilities(self.chrome.image_capabilities());
+        self.transcript
+            .set_workspace_root(self.chrome.workspace_root());
+        self.transcript.resize(width, height);
+
+        let mut update = self.transcript.render_terminal_update(width, height);
+        for block in &mut update.history {
+            apply_gutter(&mut block.lines);
+        }
+        let cursor = append_chrome(&mut update.live, chrome_render);
+        let next_animation_deadline = (self.chrome.working_label().is_some()
+            || update.has_visible_animation)
+            .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+        TerminalFrame::with_animation_deadline(
+            update.history,
+            update.live,
+            cursor,
+            next_animation_deadline,
+        )
+    }
+
+    pub fn advance_animation_at(&mut self, _now: Instant) {
+        self.chrome.advance_activity_frame();
+        self.transcript.advance_animation_at_ms(current_time_ms());
+    }
+
+    pub fn acknowledge_history(&mut self, frame: &TerminalFrame) {
+        self.transcript.acknowledge_history(&frame.history);
+    }
+
     pub fn render(&mut self, width: usize, height: usize) -> Vec<String> {
         self.render_frame(width, height).0
     }
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn render_full_screen_overlay_frame(
@@ -141,4 +213,26 @@ fn append_chrome(lines: &mut Vec<String>, chrome: ChromeRender) -> Option<Cursor
         row: body_len + chrome.prompt_start_row + cursor.row,
         col: cursor.col + CHROME_GUTTER,
     })
+}
+
+fn fit_chrome_to_height(mut chrome: ChromeRender, height: usize) -> ChromeRender {
+    if chrome.lines.len() <= height {
+        return chrome;
+    }
+
+    let removed = chrome.lines.len() - height;
+    chrome.lines.drain(..removed);
+    chrome.cursor = chrome.cursor.and_then(|cursor| {
+        chrome
+            .prompt_start_row
+            .checked_add(cursor.row)
+            .and_then(|row| row.checked_sub(removed))
+            .filter(|row| *row < height)
+            .map(|row| CursorPos {
+                row,
+                col: cursor.col,
+            })
+    });
+    chrome.prompt_start_row = 0;
+    chrome
 }

@@ -12,7 +12,7 @@ use neo_tui::shell::{DevelopmentMode, GoalModeStatus, StreamUpdate};
 use tokio_util::sync::CancellationToken;
 
 use super::InteractiveController;
-use super::{RunningTurn, TurnChannels, TurnRequest};
+use super::{FrameRequest, RunningTurn, TurnChannels, TurnRequest};
 
 impl InteractiveController {
     pub(super) fn start_turn_with_prompt(&mut self, prompt: Vec<Content>) {
@@ -114,13 +114,15 @@ impl InteractiveController {
         result
     }
 
-    pub(super) async fn drain_active_turn(&mut self) -> Result<()> {
+    pub(super) async fn drain_active_turn(&mut self) -> Result<FrameRequest> {
         let Some(mut turn) = self.active_turn.take() else {
-            return Ok(());
+            return Ok(FrameRequest::None);
         };
+        let mut frame_request = FrameRequest::None;
 
         while let Ok(session_id) = turn.session_ids.try_recv() {
             self.set_active_session_id(session_id);
+            frame_request = frame_request.merge(FrameRequest::Coalesced);
         }
         while let Ok(approval) = turn.approvals.try_recv() {
             self.register_pending_approval(approval);
@@ -131,15 +133,17 @@ impl InteractiveController {
                 neo_tui::notify::EventKind::Question,
             );
             self.register_pending_question(pending);
+            frame_request = frame_request.merge(FrameRequest::Immediate);
         }
         while let Ok(event) = turn.events.try_recv() {
             match event {
                 Ok(event) => {
                     self.notify_for_event(&event);
-                    self.apply_turn_event(event);
+                    frame_request = frame_request.merge(self.apply_turn_event(event));
                 }
                 Err(error) => {
                     self.push_status(format!("Error: {error}"));
+                    frame_request = frame_request.merge(FrameRequest::Coalesced);
                 }
             }
         }
@@ -151,6 +155,7 @@ impl InteractiveController {
                 .map_err(|error| anyhow::anyhow!("interactive turn task failed: {error}"))?;
             while let Ok(session_id) = turn.session_ids.try_recv() {
                 self.set_active_session_id(session_id);
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
             }
             while let Ok(approval) = turn.approvals.try_recv() {
                 self.register_pending_approval(approval);
@@ -161,15 +166,17 @@ impl InteractiveController {
                     neo_tui::notify::EventKind::Question,
                 );
                 self.register_pending_question(pending);
+                frame_request = frame_request.merge(FrameRequest::Immediate);
             }
             while let Ok(event) = turn.events.try_recv() {
                 match event {
                     Ok(event) => {
                         self.notify_for_event(&event);
-                        self.apply_turn_event(event);
+                        frame_request = frame_request.merge(self.apply_turn_event(event));
                     }
                     Err(error) => {
                         self.push_status(format!("Error: {error}"));
+                        frame_request = frame_request.merge(FrameRequest::Coalesced);
                     }
                 }
             }
@@ -188,14 +195,18 @@ impl InteractiveController {
                         .apply_stream_update(StreamUpdate::Error {
                             text: error.to_string(),
                         });
+                    frame_request = frame_request.merge(FrameRequest::Coalesced);
                 }
             }
-            self.refresh_git_status_now();
+            if self.refresh_git_status_now() {
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
+            }
             self.start_next_queued_after_turn().await?;
+            frame_request = frame_request.merge(FrameRequest::Coalesced);
         } else {
             self.active_turn = Some(turn);
         }
-        Ok(())
+        Ok(frame_request)
     }
 
     pub(super) async fn start_next_queued_after_turn(&mut self) -> Result<()> {

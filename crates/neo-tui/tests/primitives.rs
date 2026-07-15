@@ -815,9 +815,9 @@ fn transcript_selection_copies_item_range_with_roles() {
     transcript.push(TranscriptEntry::user_message("first prompt"));
     transcript.push(TranscriptEntry::assistant_message("first answer"));
     transcript.push_tool_run("tool-1", "shell.run", Some("exit 0".to_owned()));
-    if let Some(tool) = transcript.tool_mut("tool-1") {
-        tool.set_result(Some("exit 0".to_owned()), None, false, Some(0));
-    }
+    assert!(transcript.mutate_tool("tool-1", |tool| {
+        tool.set_result(Some("exit 0".to_owned()), None, false, Some(0))
+    }));
     transcript.push(TranscriptEntry::status("done"));
 
     transcript.select_visible_entry();

@@ -332,6 +332,55 @@ fn option_b_delegate_group_keeps_agent_names_visible() {
 }
 
 #[test]
+fn later_same_turn_root_delegate_remains_visible_after_prior_group_commit() {
+    let mut pane = TranscriptPane::new(160, 30);
+    for delegate in [
+        option_b_delegate(
+            "committed_nova",
+            "Nova",
+            AgentRole::Coder,
+            AgentLifecycleState::Completed,
+            "first completed task",
+        ),
+        option_b_delegate(
+            "committed_vega",
+            "Vega",
+            AgentRole::Explorer,
+            AgentLifecycleState::Completed,
+            "second completed task",
+        ),
+    ] {
+        pane.apply_agent_event(AgentEvent::DelegateFinished {
+            turn: 7,
+            agent: delegate,
+        });
+    }
+    let committed = pane.render_terminal_update(160, 30);
+    assert!(!committed.history.is_empty());
+    pane.acknowledge_history(&committed.history);
+
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 7,
+        agent: option_b_delegate(
+            "later_euler",
+            "Euler",
+            AgentRole::Reviewer,
+            AgentLifecycleState::Running,
+            "review committed output",
+        ),
+    });
+    let update = pane.render_terminal_update(160, 30);
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(live.contains("Euler"), "live transcript:\n{live}");
+}
+
+#[test]
 fn compact_delegate_progress_replays_as_delegate_card() {
     let mut pane = TranscriptPane::new(160, 30);
     let mut started = option_b_delegate(
@@ -2688,7 +2737,7 @@ fn delegate_card_fixed_thinking_window_renders_before_single_final_row() {
 }
 
 #[test]
-fn render_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
+fn explicit_animation_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
     let mut pane = TranscriptPane::new(120, 30);
     let mut snapshot = running_delegate();
     snapshot.elapsed = Duration::from_secs(0);
@@ -2702,7 +2751,7 @@ fn render_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
     let _ = pane.render_frame(120, 30);
     assert!(!pane.is_dirty_for_test());
 
-    pane.render_tick_at_ms_for_test(61_000);
+    pane.advance_animation_at_ms(61_000);
     assert!(pane.is_dirty_for_test());
     let frame = pane.render_frame(120, 30).unwrap_or_default().join("\n");
     assert!(frame.contains("1m 0s") || frame.contains("1m"), "{frame}");

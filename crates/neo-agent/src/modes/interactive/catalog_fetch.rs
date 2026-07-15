@@ -198,13 +198,13 @@ impl InteractiveController {
 
     /// Poll a pending catalog fetch. If it has finished, clear the working
     /// indicator and open the provider picker; if not, leave it in place.
-    pub(super) async fn poll_pending_catalog_fetch(&mut self) {
+    pub(super) async fn poll_pending_catalog_fetch(&mut self) -> bool {
         let Some(pending) = self.pending_catalog_fetch.take() else {
-            return;
+            return false;
         };
         if !pending.handle.is_finished() {
             self.pending_catalog_fetch = Some(pending);
-            return;
+            return false;
         }
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
@@ -238,12 +238,12 @@ impl InteractiveController {
                             ));
                         }
                     }
-                    return;
+                    return true;
                 }
                 let items = catalog_choice_items(&catalog);
                 if items.is_empty() {
                     self.push_status("No providers found in catalog.");
-                    return;
+                    return true;
                 }
                 self.open_catalog_fetch_result(pending.source, catalog, items);
             }
@@ -254,6 +254,7 @@ impl InteractiveController {
                 self.push_status(format!("Error: Failed to fetch catalog: {join_error}"));
             }
         }
+        true
     }
 
     fn open_catalog_fetch_result(

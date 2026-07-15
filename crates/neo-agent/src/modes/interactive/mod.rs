@@ -64,6 +64,9 @@ mod log_events;
 
 mod prompt_history;
 
+mod frame_scheduler;
+use frame_scheduler::{FrameDue, FrameRequest, FrameScheduler};
+
 mod git_status;
 use git_status::{event_should_refresh_git_status, git_status_label};
 
@@ -263,15 +266,23 @@ pub async fn execute_tty_with_startup(
     }
 
     let terminal = RefCell::new(NeoTerminal::enter()?);
-    run_tty_lifecycle_with_event_factory(
+    let lifecycle_result = run_tty_lifecycle_with_event_factory(
         &mut controller,
         config,
         &startup,
         input_events,
-        |tui| terminal.borrow_mut().draw_tui(tui),
+        |tui, animation_due| terminal.borrow_mut().draw_tui(tui, animation_due),
         || terminal.borrow_mut().suspend(),
     )
-    .await?;
+    .await;
+    let final_render_result = controller.finalize_and_render_terminal_exit(|tui| {
+        let _ = terminal.borrow_mut().draw_tui(tui, false)?;
+        Ok(())
+    });
+    let leave_result = terminal.borrow_mut().leave();
+    lifecycle_result?;
+    final_render_result?;
+    leave_result?;
     Ok(Some(exit_message(controller.active_session_id())))
 }
 
@@ -280,7 +291,7 @@ async fn run_tty_lifecycle_with_event_factory<E>(
     config: &AppConfig,
     startup: &StartupAction,
     event_factory: impl FnOnce(KeybindingsManager) -> E,
-    mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
+    mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
     suspend: impl FnMut() -> Result<()>,
 ) -> Result<()>
 where
@@ -289,7 +300,10 @@ where
     let mut events = event_factory(controller.keybindings.clone());
     if let Some(data) = trust_dialog_data_for_startup(config) {
         controller
-            .resolve_trust_dialog_at_startup(data, &mut events, |tui| render(tui))
+            .resolve_trust_dialog_at_startup(data, &mut events, |tui| {
+                let _ = render(tui, false)?;
+                Ok(())
+            })
             .await?;
     }
     if let StartupAction::LoadSession(session_id) = startup {
@@ -299,10 +313,26 @@ where
     } else {
         controller.apply_startup_action(startup);
     }
-    controller.connect_mcp_at_startup(|tui| render(tui)).await?;
+    controller
+        .connect_mcp_at_startup(|tui, animation_due| render(tui, animation_due))
+        .await?;
     controller
         .run_terminal_loop_with_suspend(render, suspend, &mut events)
         .await
+}
+
+fn render_due_frame(
+    scheduler: &mut FrameScheduler,
+    tui: &mut neo_tui::NeoTui,
+    render: &mut impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
+    now: Instant,
+) -> Result<()> {
+    let Some(due) = scheduler.take_due(now) else {
+        return Ok(());
+    };
+    let deadline = render(tui, due == FrameDue::Animation)?;
+    scheduler.replace_animation_deadline(deadline);
+    Ok(())
 }
 
 fn exit_message(session_id: Option<&str>) -> String {
@@ -1025,24 +1055,52 @@ impl InteractiveController {
         self.transcript_mut().push_status(message);
     }
 
-    async fn connect_mcp_at_startup(
+    fn finalize_terminal_exit(&mut self) {
+        if self.active_turn.is_some() {
+            self.abort_active_turn();
+        }
+        self.tui
+            .transcript_mut()
+            .finalize_interrupted_live_entries();
+        self.clear_interrupted_turn_state();
+    }
+
+    fn finalize_and_render_terminal_exit(
         &mut self,
         mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
     ) -> Result<()> {
+        self.finalize_terminal_exit();
+        render(&mut self.tui)
+    }
+
+    async fn connect_mcp_at_startup(
+        &mut self,
+        mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
+    ) -> Result<()> {
+        const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+        const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+
         let Some(config) = self.local_config.clone() else {
             return Ok(());
         };
         let Some(manager) = self.mcp_manager.clone() else {
             return Ok(());
         };
+        let mut frame_scheduler = FrameScheduler::new(Instant::now(), MIN_RENDER_INTERVAL);
 
-        let startup_statuses = mcp_ops::mcp_startup_connecting_statuses(&config);
-        if !startup_statuses.is_empty() {
-            for status in startup_statuses {
-                self.transcript_mut().upsert_mcp_startup_status(status);
-            }
-            render(&mut self.tui)?;
+        let mut startup_changed = false;
+        for status in mcp_ops::mcp_startup_connecting_statuses(&config) {
+            startup_changed |= self.transcript_mut().upsert_mcp_startup_status(status);
         }
+        if startup_changed {
+            frame_scheduler.request_immediate();
+        }
+        render_due_frame(
+            &mut frame_scheduler,
+            &mut self.tui,
+            &mut render,
+            Instant::now(),
+        )?;
 
         match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
             Ok(_) => loop {
@@ -1053,6 +1111,7 @@ impl InteractiveController {
                         McpServerStatus::Pending | McpServerStatus::Reconnecting
                     )
                 });
+                let mut changed = false;
                 for snapshot in snapshots.iter().filter(|snapshot| {
                     config
                         .mcp
@@ -1060,23 +1119,46 @@ impl InteractiveController {
                         .iter()
                         .any(|server| server.enabled && server.id == snapshot.id)
                 }) {
-                    self.transcript_mut().upsert_mcp_startup_status(
+                    changed |= self.transcript_mut().upsert_mcp_startup_status(
                         mcp_ops::mcp_startup_status_from_snapshot(snapshot),
                     );
                 }
-                self.tui.transcript_mut().render_tick();
-                render(&mut self.tui)?;
+                if changed {
+                    if settled {
+                        frame_scheduler.request_immediate();
+                    } else {
+                        frame_scheduler.request_coalesced();
+                    }
+                }
+                render_due_frame(
+                    &mut frame_scheduler,
+                    &mut self.tui,
+                    &mut render,
+                    Instant::now(),
+                )?;
                 if settled {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                let timeout =
+                    frame_scheduler.poll_timeout(Instant::now(), CONNECTION_POLL_INTERVAL);
+                if timeout.is_zero() {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(timeout).await;
+                }
             },
             Err(error) => {
                 for status in mcp_ops::mcp_startup_failed_statuses(&config, &error.to_string()) {
                     self.transcript_mut().upsert_mcp_startup_status(status);
                 }
                 self.push_status(format!("MCP startup failed: {error}"));
-                render(&mut self.tui)?;
+                frame_scheduler.request_immediate();
+                render_due_frame(
+                    &mut frame_scheduler,
+                    &mut self.tui,
+                    &mut render,
+                    Instant::now(),
+                )?;
             }
         }
         Ok(())
@@ -1095,30 +1177,39 @@ impl InteractiveController {
         mut render: impl FnMut(&mut NeoChromeState) -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(|tui| render(tui.chrome_mut()), || Ok(()), &mut events)
-            .await
+        self.run_terminal_loop_with_suspend(
+            |tui, _| {
+                render(tui.chrome_mut())?;
+                Ok(None)
+            },
+            || Ok(()),
+            &mut events,
+        )
+        .await
     }
 
     async fn run_terminal_loop_with_suspend(
         &mut self,
-        mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
+        mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
         mut suspend: impl FnMut() -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
-        // Cap render frequency to ~30 FPS (33ms). During streaming, multiple
-        // TextDelta events arrive within one 50ms poll cycle; without a cap,
-        // the loop renders on every iteration even when the previous render
-        // was only milliseconds ago. The cap is a floor, not a ceiling —
-        // user input (keyboard, resize) always renders immediately.
         const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
 
-        render(&mut self.tui)?;
-        let mut last_render = Instant::now();
+        let initial_deadline = render(&mut self.tui, false)?;
+        let mut frame_scheduler = FrameScheduler::new(Instant::now(), MIN_RENDER_INTERVAL);
+        frame_scheduler.replace_animation_deadline(initial_deadline);
         loop {
-            match events.poll_input_event(Duration::from_millis(50))? {
+            let poll_timeout = frame_scheduler.poll_timeout(Instant::now(), MIN_RENDER_INTERVAL);
+            match events.poll_input_event(poll_timeout)? {
                 Some(event) => {
+                    frame_scheduler.request_immediate();
                     let is_interrupt = matches!(event, InputEvent::Interrupt);
                     if self.handle_input_event(event).await? {
+                        self.tui.chrome_mut().pending_input_mut().clear();
+                        if self.active_shell_command.is_some() {
+                            self.cancel_shell_command().await?;
+                        }
                         let had_active_turn = self.active_turn.is_some();
                         if is_interrupt {
                             self.cancel_active_turn().await?;
@@ -1127,40 +1218,41 @@ impl InteractiveController {
                         }
                         if had_active_turn {
                             self.refresh_git_status_now();
-                            render(&mut self.tui)?;
+                            let deadline = render(&mut self.tui, false)?;
+                            frame_scheduler.replace_animation_deadline(deadline);
                         }
                         break;
                     }
                     if self.take_suspend_requested() {
                         suspend()?;
-                        render(&mut self.tui)?;
-                        last_render = Instant::now();
                     }
                 }
                 None => tokio::task::yield_now().await,
             }
-            self.drain_active_turn().await?;
+            let mut frame_request = self.drain_active_turn().await?;
             self.drain_active_shell_command().await?;
-            self.drain_btw_sidecar();
+            if self.drain_btw_sidecar() {
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
+            }
             self.drain_log_events();
-            if self.active_turn.is_some() {
-                self.refresh_git_status_if_due();
+            if self.active_turn.is_some() && self.refresh_git_status_if_due() {
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
             }
-            self.maybe_refresh_task_browser().await;
-            self.poll_pending_catalog_fetch().await;
-            self.poll_pending_custom_endpoint_fetch().await;
-            self.poll_pending_custom_endpoint_test().await;
-            self.poll_pending_mcp_probe().await;
-            self.tui.chrome_mut().advance_activity_frame();
-            // Throttle rendering during streaming to avoid O(n) re-render
-            // storms when there are hundreds of transcript entries.
-            let now = Instant::now();
-            if self.tui.is_transcript_dirty()
-                || now.duration_since(last_render) >= MIN_RENDER_INTERVAL
-            {
-                render(&mut self.tui)?;
-                last_render = now;
+            let mut async_state_changed = self.maybe_refresh_task_browser().await;
+            async_state_changed |= self.poll_pending_catalog_fetch().await;
+            async_state_changed |= self.poll_pending_custom_endpoint_fetch().await;
+            async_state_changed |= self.poll_pending_custom_endpoint_test().await;
+            async_state_changed |= self.poll_pending_mcp_probe().await;
+            if async_state_changed || self.tui.is_transcript_dirty() {
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
             }
+            frame_request.schedule(&mut frame_scheduler);
+            render_due_frame(
+                &mut frame_scheduler,
+                &mut self.tui,
+                &mut render,
+                Instant::now(),
+            )?;
         }
         Ok(())
     }
@@ -1629,22 +1721,37 @@ impl InteractiveController {
         self.prompt_history = Some(store);
     }
 
-    fn refresh_git_status_now(&mut self) {
+    fn refresh_git_status_now(&mut self) -> bool {
         let label = (self.git_status_provider)(&self.workspace_root);
+        let changed = self.tui.chrome().git_status_label() != label.as_deref();
         self.tui.chrome_mut().set_git_status_label(label);
         self.last_git_status_refresh = Some(Instant::now());
+        changed
     }
 
-    fn refresh_git_status_if_due(&mut self) {
+    fn refresh_git_status_if_due(&mut self) -> bool {
         let should_refresh = self
             .last_git_status_refresh
             .is_none_or(|refreshed_at| refreshed_at.elapsed() >= self.git_status_refresh_interval);
         if should_refresh {
-            self.refresh_git_status_now();
+            return self.refresh_git_status_now();
+        }
+        false
+    }
+
+    fn frame_request_for_agent_event(event: &AgentEvent) -> FrameRequest {
+        if matches!(
+            event,
+            AgentEvent::ApprovalRequested { .. } | AgentEvent::QuestionRequested { .. }
+        ) {
+            FrameRequest::Immediate
+        } else {
+            FrameRequest::Coalesced
         }
     }
 
-    fn apply_turn_event(&mut self, event: AgentEvent) {
+    fn apply_turn_event(&mut self, event: AgentEvent) -> FrameRequest {
+        let frame_request = Self::frame_request_for_agent_event(&event);
         let should_refresh_git_status = event_should_refresh_git_status(&event);
         self.render_appended_user_message_if_needed(&event);
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
@@ -1663,6 +1770,7 @@ impl InteractiveController {
         if should_refresh_git_status {
             self.refresh_git_status_now();
         }
+        frame_request
     }
 
     fn render_appended_user_message_if_needed(&mut self, event: &AgentEvent) {
@@ -2017,192 +2125,209 @@ fn replay_session_into_transcript(
     for notice in &loaded.notices {
         transcript.push_transcript(neo_tui::transcript::TranscriptEntry::status(notice.clone()));
     }
-    let mut suppressor = DelegateReplaySuppressor::from_events(&loaded.events);
     if loaded.events.is_empty() {
         for message in &loaded.messages {
-            suppressor.replay_message(transcript, message);
+            transcript.replay_message(message);
         }
     } else {
+        let mut coverage = ReplayAggregateCoverage::default();
         for event in &loaded.events {
             match event {
-                AgentEvent::MessageAppended { message } => {
-                    suppressor.replay_message(transcript, message);
-                }
-                AgentEvent::DelegateStarted { .. }
-                | AgentEvent::DelegateUpdated { .. }
-                | AgentEvent::DelegateProgressUpdated { .. }
-                | AgentEvent::DelegateFinished { .. }
-                | AgentEvent::DelegateSwarmStarted { .. }
-                | AgentEvent::DelegateSwarmUpdated { .. }
-                | AgentEvent::DelegateSwarmProgressUpdated { .. }
-                | AgentEvent::DelegateSwarmFinished { .. }
-                | AgentEvent::SkillInvocation { .. } => {
+                AgentEvent::MessageAppended { message } => match message {
+                    AgentMessage::User { .. }
+                    | AgentMessage::System { .. }
+                    | AgentMessage::ShellCommand { .. } => {
+                        transcript.replay_message(message);
+                    }
+                    AgentMessage::Assistant { .. } => {
+                        match coverage.take_assistant_replay_plan(message) {
+                            AssistantReplayPlan::Skip => {}
+                            AssistantReplayPlan::Full => transcript.replay_message(message),
+                            AssistantReplayPlan::Partial {
+                                content,
+                                tool_calls,
+                            } => {
+                                if !content.is_empty() {
+                                    transcript.replay_assistant_content(&content);
+                                }
+                                if !tool_calls.is_empty() {
+                                    transcript.replay_message(&AgentMessage::assistant(
+                                        Vec::new(),
+                                        tool_calls,
+                                        neo_agent_core::StopReason::ToolUse,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    AgentMessage::ToolResult { tool_call_id, .. } => {
+                        if !coverage.take_tool_result_detail(tool_call_id) {
+                            transcript.replay_message(message);
+                        }
+                    }
+                },
+                AgentEvent::ApprovalRequested { .. } => {}
+                _ => {
+                    coverage.observe(event);
                     transcript.apply_agent_event(event);
                 }
-                _ => {}
             }
         }
+        transcript.finalize_interrupted_live_entries();
     }
-    suppressor.finish(transcript);
+}
+
+/// Tracks detailed events that precede their persisted aggregate messages.
+///
+/// Current sessions persist both streams: incremental assistant/tool events are
+/// needed for a faithful live transcript, while `MessageAppended` remains the
+/// canonical context record. Older or reduced JSONL may contain only the latter
+/// plus unrelated metadata events. Consuming this projection in event order lets
+/// replay retain those aggregate-only messages without duplicating modern ones.
+#[derive(Debug, Default)]
+struct ReplayAggregateCoverage {
+    assistant: AssistantReplayProjection,
+    completed_tool_results: BTreeSet<String>,
+}
+
+impl ReplayAggregateCoverage {
+    fn observe(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::MessageStarted { .. }
+            | AgentEvent::MessageFinished { .. }
+            | AgentEvent::ThinkingStarted { .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+            }
+            AgentEvent::TextDelta { text, .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+                self.assistant.text.push_str(text);
+            }
+            AgentEvent::ThinkingDelta { text, .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+                self.assistant.thinking.push_str(text);
+            }
+            AgentEvent::ThinkingFinished { redacted, .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+                self.assistant.thinking_redacted |= *redacted;
+            }
+            AgentEvent::ToolCallStarted { id, .. }
+            | AgentEvent::ToolCallArgumentsDelta { id, .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+                self.assistant.tool_ids.insert(id.clone());
+            }
+            AgentEvent::ToolCallFinished { tool_call, .. } => {
+                self.assistant.has_detail = true;
+                self.assistant.open = true;
+                self.assistant.tool_ids.insert(tool_call.id.to_string());
+            }
+            AgentEvent::ToolExecutionStarted { id, .. }
+            | AgentEvent::ToolExecutionUpdate { id, .. }
+            | AgentEvent::ShellCommandStarted { id, .. }
+            | AgentEvent::ShellCommandFinished { id, .. }
+                if self.assistant.open =>
+            {
+                self.assistant.tool_ids.insert(id.clone());
+            }
+            AgentEvent::ToolExecutionFinished { id, .. } => {
+                self.completed_tool_results.insert(id.clone());
+                if self.assistant.open {
+                    self.assistant.tool_ids.insert(id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn take_assistant_replay_plan(&mut self, message: &AgentMessage) -> AssistantReplayPlan {
+        let plan = self.assistant.replay_plan(message);
+        self.assistant = AssistantReplayProjection::default();
+        plan
+    }
+
+    fn take_tool_result_detail(&mut self, id: &str) -> bool {
+        self.completed_tool_results.remove(id)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AssistantReplayPlan {
+    Skip,
+    Full,
+    Partial {
+        content: Vec<Content>,
+        tool_calls: Vec<neo_agent_core::AgentToolCall>,
+    },
 }
 
 #[derive(Debug, Default)]
-struct DelegateReplaySuppressor {
-    delegate_ids: BTreeSet<String>,
-    swarm_ids: BTreeSet<String>,
-    pending: BTreeMap<String, PendingDelegateToolCall>,
+struct AssistantReplayProjection {
+    text: String,
+    thinking: String,
+    thinking_redacted: bool,
+    tool_ids: BTreeSet<String>,
+    has_detail: bool,
+    open: bool,
 }
 
-#[derive(Debug, Clone)]
-struct PendingDelegateToolCall {
-    kind: DelegateReplayKind,
-    tool_call: neo_agent_core::AgentToolCall,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DelegateReplayKind {
-    Delegate,
-    DelegateSwarm,
-}
-
-impl DelegateReplaySuppressor {
-    fn from_events(events: &[AgentEvent]) -> Self {
-        let mut suppressor = Self::default();
-        for event in events {
-            match event {
-                AgentEvent::DelegateStarted { agent, .. }
-                | AgentEvent::DelegateUpdated { agent, .. }
-                | AgentEvent::DelegateFinished { agent, .. } => {
-                    suppressor.delegate_ids.insert(agent.id.as_str().to_owned());
-                }
-                AgentEvent::DelegateProgressUpdated { progress, .. } => {
-                    suppressor
-                        .delegate_ids
-                        .insert(progress.agent_id.as_str().to_owned());
-                }
-                AgentEvent::DelegateSwarmStarted { swarm, .. }
-                | AgentEvent::DelegateSwarmUpdated { swarm, .. }
-                | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
-                    suppressor.swarm_ids.insert(swarm.swarm_id.clone());
-                }
-                AgentEvent::DelegateSwarmProgressUpdated { swarm_id, .. } => {
-                    suppressor.swarm_ids.insert(swarm_id.clone());
-                }
-                _ => {}
-            }
-        }
-        suppressor
-    }
-
-    fn replay_message(&mut self, transcript: &mut TranscriptPane, message: &AgentMessage) {
-        match message {
-            AgentMessage::Assistant {
-                content,
-                tool_calls,
-                stop_reason,
-            } => {
-                self.flush_pending(transcript);
-                let tool_calls = tool_calls
-                    .iter()
-                    .filter(|tool_call| !self.defer_delegate_tool_call(tool_call))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !content.is_empty() || !tool_calls.is_empty() {
-                    transcript.replay_message(&AgentMessage::Assistant {
-                        content: content.clone(),
-                        tool_calls,
-                        stop_reason: *stop_reason,
-                    });
-                }
-            }
-            AgentMessage::ToolResult {
-                tool_call_id,
-                content,
-                is_error,
-                ..
-            } => {
-                if let Some(pending) = self.pending.remove(tool_call_id.as_ref()) {
-                    if *is_error || !self.result_matches_restored_target(pending.kind, content) {
-                        Self::replay_tool_call(transcript, pending.tool_call);
-                        transcript.replay_message(message);
-                    }
-                } else {
-                    transcript.replay_message(message);
-                }
-            }
-            _ => {
-                self.flush_pending(transcript);
-                transcript.replay_message(message);
-            }
-        }
-    }
-
-    fn finish(&mut self, transcript: &mut TranscriptPane) {
-        self.flush_pending(transcript);
-    }
-
-    fn defer_delegate_tool_call(&mut self, tool_call: &neo_agent_core::AgentToolCall) -> bool {
-        let Some(kind) = DelegateReplayKind::from_tool_name(&tool_call.name) else {
-            return false;
+impl AssistantReplayProjection {
+    fn replay_plan(&self, message: &AgentMessage) -> AssistantReplayPlan {
+        let AgentMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } = message
+        else {
+            return AssistantReplayPlan::Full;
         };
-        if !self.has_targets(kind) {
-            return false;
+        if !self.has_detail {
+            return AssistantReplayPlan::Full;
         }
-        self.pending.insert(
-            tool_call.id.to_string(),
-            PendingDelegateToolCall {
-                kind,
-                tool_call: tool_call.clone(),
-            },
-        );
-        true
-    }
 
-    fn has_targets(&self, kind: DelegateReplayKind) -> bool {
-        match kind {
-            DelegateReplayKind::Delegate => !self.delegate_ids.is_empty(),
-            DelegateReplayKind::DelegateSwarm => !self.swarm_ids.is_empty(),
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut thinking_redacted = false;
+        let mut uncovered_content = Vec::new();
+        for part in content {
+            match part {
+                Content::Text { text: part_text } => text.push_str(part_text),
+                Content::Thinking {
+                    text: part_text,
+                    redacted,
+                    ..
+                } => {
+                    thinking.push_str(part_text);
+                    thinking_redacted |= *redacted;
+                }
+                // Incremental stream events do not carry image payloads. Keep
+                // image parts for a partial replay after text/thinking matches.
+                Content::Image { .. } => uncovered_content.push(part.clone()),
+            }
         }
-    }
 
-    fn result_matches_restored_target(
-        &self,
-        kind: DelegateReplayKind,
-        content: &[Content],
-    ) -> bool {
-        let text = content
+        if self.text != text
+            || self.thinking != thinking
+            || self.thinking_redacted != thinking_redacted
+        {
+            return AssistantReplayPlan::Full;
+        }
+
+        let uncovered_tool_calls = tool_calls
             .iter()
-            .filter_map(Content::as_text)
-            .collect::<Vec<_>>()
-            .join("");
-        match kind {
-            DelegateReplayKind::Delegate => self.delegate_ids.iter().any(|id| text.contains(id)),
-            DelegateReplayKind::DelegateSwarm => self.swarm_ids.iter().any(|id| text.contains(id)),
-        }
-    }
-
-    fn flush_pending(&mut self, transcript: &mut TranscriptPane) {
-        let pending = std::mem::take(&mut self.pending);
-        for pending in pending.into_values() {
-            Self::replay_tool_call(transcript, pending.tool_call);
-        }
-    }
-
-    fn replay_tool_call(transcript: &mut TranscriptPane, tool_call: neo_agent_core::AgentToolCall) {
-        transcript.replay_message(&AgentMessage::Assistant {
-            content: Vec::new(),
-            tool_calls: vec![tool_call],
-            stop_reason: neo_agent_core::StopReason::ToolUse,
-        });
-    }
-}
-
-impl DelegateReplayKind {
-    fn from_tool_name(name: &str) -> Option<Self> {
-        match name {
-            "Delegate" => Some(Self::Delegate),
-            "DelegateSwarm" => Some(Self::DelegateSwarm),
-            _ => None,
+            .filter(|tool_call| !self.tool_ids.contains(tool_call.id.as_ref()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if uncovered_content.is_empty() && uncovered_tool_calls.is_empty() {
+            AssistantReplayPlan::Skip
+        } else {
+            AssistantReplayPlan::Partial {
+                content: uncovered_content,
+                tool_calls: uncovered_tool_calls,
+            }
         }
     }
 }

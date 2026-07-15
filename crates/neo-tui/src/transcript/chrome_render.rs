@@ -40,12 +40,20 @@ pub fn apply_gutter(lines: &mut [String]) {
 /// tool (bash/edit/write/...) breaks an in-progress run. Live output buffers
 /// are preserved because we render from the components directly (not cloned
 /// states).
+pub(super) struct OrderedToolRender {
+    pub lines: Vec<Line>,
+    pub animated_header_indices: Vec<usize>,
+    pub live_header_indices: Vec<usize>,
+}
+
 pub(super) fn render_ordered_tools(
     ordered: &mut [ToolCallComponent],
     width: usize,
     theme: &TuiTheme,
-) -> Vec<Line> {
+) -> OrderedToolRender {
     let mut rows = Vec::new();
+    let mut animated_header_indices = Vec::new();
+    let mut live_header_indices = Vec::new();
     let mut i = 0;
     while i < ordered.len() {
         if !rows.is_empty() {
@@ -54,6 +62,12 @@ pub(super) fn render_ordered_tools(
         let current_name = ordered[i].name().to_owned();
         let groupable = is_groupable(&current_name);
         if !groupable {
+            record_tool_header(
+                &ordered[i],
+                rows.len(),
+                &mut animated_header_indices,
+                &mut live_header_indices,
+            );
             rows.extend(ordered[i].render_with_theme(width, theme));
             i += 1;
             continue;
@@ -69,12 +83,27 @@ pub(super) fn render_ordered_tools(
         if j - i >= 2 {
             // Group of >= 2: render as a tree card. Only group tools that are
             // NOT still streaming live output (a running read shows solo).
-            let any_live_output = ordered[i..j].iter().any(|t| !t.progress().is_empty());
+            let any_live_output = ordered[i..j].iter().any(ToolCallComponent::has_live_rows);
             if any_live_output {
-                for tool in &mut ordered[i..j] {
+                for (index, tool) in ordered[i..j].iter_mut().enumerate() {
+                    if index > 0 {
+                        rows.push(Line::raw(""));
+                    }
+                    record_tool_header(
+                        tool,
+                        rows.len(),
+                        &mut animated_header_indices,
+                        &mut live_header_indices,
+                    );
                     rows.extend(tool.render_with_theme(width, theme));
                 }
             } else {
+                if ordered[i..j]
+                    .iter()
+                    .any(|tool| tool.finalization() == crate::primitive::Finalization::Live)
+                {
+                    live_header_indices.push(rows.len());
+                }
                 let states: Vec<&ToolCallState> =
                     ordered[i..j].iter().map(ToolCallComponent::state).collect();
                 let expanded = ordered[i..j].iter().all(ToolCallComponent::is_expanded);
@@ -85,11 +114,35 @@ pub(super) fn render_ordered_tools(
                 rows.extend(render_tool_group(&group, width, theme, expanded));
             }
         } else {
+            record_tool_header(
+                &ordered[i],
+                rows.len(),
+                &mut animated_header_indices,
+                &mut live_header_indices,
+            );
             rows.extend(ordered[i].render_with_theme(width, theme));
         }
         i = j;
     }
-    rows
+    OrderedToolRender {
+        lines: rows,
+        animated_header_indices,
+        live_header_indices,
+    }
+}
+
+fn record_tool_header(
+    tool: &ToolCallComponent,
+    row: usize,
+    animated_header_indices: &mut Vec<usize>,
+    live_header_indices: &mut Vec<usize>,
+) {
+    if tool.has_visible_animation() {
+        animated_header_indices.push(row);
+    }
+    if tool.finalization() == crate::primitive::Finalization::Live {
+        live_header_indices.push(row);
+    }
 }
 
 /// Whether a tool name is eligible for consecutive-call grouping.

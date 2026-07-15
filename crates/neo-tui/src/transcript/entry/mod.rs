@@ -1,6 +1,6 @@
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Color, Style, visible_width};
+use crate::primitive::{Color, Component, Finalization, Style, visible_width};
 use crate::primitive::{Line, Span};
 use crate::terminal_image::{
     ImageDisplayOptions, ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -414,6 +414,95 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub fn finalization(&self) -> Finalization {
+        match self {
+            Self::ThinkingBlock { phase, .. } => match phase {
+                ThinkingPhase::Streaming => Finalization::Live,
+                ThinkingPhase::Complete => Finalization::Finalized,
+            },
+            Self::ToolRun { component } => component.finalization(),
+            Self::ShellRun { component } => component.finalization(),
+            Self::ApprovalPrompt(data) => {
+                if data.resolved.is_some() {
+                    Finalization::Finalized
+                } else {
+                    Finalization::Live
+                }
+            }
+            Self::Compaction { phase, percent, .. } => {
+                if *phase == Some(neo_agent_core::CompactionPhase::Applying) && *percent >= 100 {
+                    Finalization::Finalized
+                } else {
+                    Finalization::Live
+                }
+            }
+            Self::McpStartupStatus { data } => {
+                if matches!(data.phase, McpStartupPhase::Connecting) {
+                    Finalization::Live
+                } else {
+                    Finalization::Finalized
+                }
+            }
+            Self::QueuedMessage { .. } => Finalization::Live,
+            Self::Delegate { component } => component.finalization(),
+            Self::DelegateGroup { component } => component.finalization(),
+            Self::DelegateSwarm { component } => component.finalization(),
+            Self::Workflow { component } => component.finalization(),
+            Self::Banner(_)
+            | Self::UserMessage { .. }
+            | Self::AssistantMessage { .. }
+            | Self::Image { .. }
+            | Self::Status { .. }
+            | Self::GoalCard { .. }
+            | Self::SkillActivation { .. } => Finalization::Finalized,
+        }
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        if self.finalization() == Finalization::Finalized {
+            return false;
+        }
+        match self {
+            Self::ThinkingBlock { phase, .. } => {
+                *phase = ThinkingPhase::Complete;
+                true
+            }
+            Self::ToolRun { component } => component.set_terminal_status(
+                crate::shell::ToolStatusKind::Cancelled,
+                Some("Interrupted when terminal exited".to_owned()),
+            ),
+            Self::ShellRun { component } => component.interrupt(),
+            Self::ApprovalPrompt(data) => {
+                data.resolved = Some("Interrupted when terminal exited".to_owned());
+                true
+            }
+            Self::Compaction { percent, .. } => {
+                let percent = *percent;
+                *self = Self::status(format!(
+                    "Compaction interrupted at {percent}% when terminal exited"
+                ));
+                true
+            }
+            Self::McpStartupStatus { data } => {
+                data.phase = McpStartupPhase::Failed {
+                    message: "Interrupted when terminal exited".to_owned(),
+                };
+                true
+            }
+            Self::QueuedMessage { text, .. } => {
+                let text = text.clone();
+                *self = Self::status(format!("Queued message not sent before exit: {text}"));
+                true
+            }
+            Self::Delegate { component } => component.interrupt(),
+            Self::DelegateGroup { component } => component.interrupt(),
+            Self::DelegateSwarm { component } => component.interrupt(),
+            Self::Workflow { component } => component.interrupt(),
+            _ => false,
+        }
+    }
+
+    #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         self.render_with_activity_frame(width, theme, 0)
     }
@@ -631,6 +720,35 @@ impl TranscriptEntry {
             Self::DelegateSwarm { component } => component.on_render_tick(now_ms),
             Self::McpStartupStatus { data } => {
                 matches!(data.phase, McpStartupPhase::Connecting)
+            }
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn has_visible_animation(&self) -> bool {
+        match self {
+            Self::ThinkingBlock {
+                phase: ThinkingPhase::Streaming,
+                ..
+            }
+            | Self::McpStartupStatus {
+                data:
+                    McpStartupStatusData {
+                        phase: McpStartupPhase::Connecting,
+                        ..
+                    },
+            }
+            | Self::Compaction { .. } => true,
+            Self::ToolRun { component } => component.has_visible_animation(),
+            Self::Delegate { component } => {
+                Component::finalization(component) == Finalization::Live
+            }
+            Self::DelegateGroup { component } => {
+                Component::finalization(component) == Finalization::Live
+            }
+            Self::DelegateSwarm { component } => {
+                Component::finalization(component) == Finalization::Live
             }
             _ => false,
         }

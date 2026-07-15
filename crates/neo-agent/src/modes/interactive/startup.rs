@@ -80,11 +80,10 @@ impl InteractiveController {
                         )?;
                         return Ok(());
                     }
+                    render(&mut self.tui)?;
                 }
                 None => tokio::task::yield_now().await,
             }
-            self.tui.chrome_mut().advance_activity_frame();
-            render(&mut self.tui)?;
         }
     }
 

@@ -1,5 +1,5 @@
-use crate::primitive::Line;
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::{Component, Finalization, Line};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::transcript::{
@@ -151,14 +151,19 @@ struct CachedRender {
     ansi_lines: Vec<String>,
 }
 
+/// Stable identity for an entry in a [`TranscriptStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TranscriptEntryId(u64);
+
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptStore {
     entries: Vec<TranscriptEntry>,
+    entry_ids: Vec<TranscriptEntryId>,
+    entry_revisions: Vec<u64>,
+    next_entry_id: u64,
     suppressed_tool_run_ids: Vec<String>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
-    can_coalesce_thinking: bool,
-    separate_next_thinking_delta: bool,
     viewport: TranscriptViewport,
     /// Per-entry render cache, parallel to `entries`. `None` means the entry
     /// needs re-rendering (new, mutated, or width changed).
@@ -175,15 +180,10 @@ impl TranscriptStore {
     pub fn push(&mut self, entry: TranscriptEntry) {
         if matches!(entry, TranscriptEntry::ThinkingBlock { .. }) {
             self.active_thinking = None;
-            self.can_coalesce_thinking = false;
-            self.separate_next_thinking_delta = false;
         } else {
             self.mark_visible_boundary();
         }
-        let index = self.entries.len();
-        self.entries.push(entry);
-        self.render_cache.push(None);
-        self.mark_dirty_from(index);
+        self.append_entry(entry);
     }
 
     pub fn start_assistant(&mut self) {
@@ -191,11 +191,8 @@ impl TranscriptStore {
             return;
         }
         self.mark_visible_boundary();
-        let index = self.entries.len();
-        self.entries.push(TranscriptEntry::assistant_message(""));
-        self.active_assistant = Some(self.entries.len() - 1);
-        self.render_cache.push(None);
-        self.mark_dirty_from(index);
+        let index = self.append_entry(TranscriptEntry::assistant_message(""));
+        self.active_assistant = Some(index);
     }
 
     pub fn append_assistant_delta(&mut self, text: &str) {
@@ -206,28 +203,21 @@ impl TranscriptStore {
         if let Some(TranscriptEntry::AssistantMessage { content }) = self.entries.get_mut(index) {
             content.push_str(text);
         }
-        self.invalidate_cache(index);
+        self.touch_entry(index);
     }
 
     pub fn finish_assistant(&mut self) {
-        self.active_assistant = None;
+        if let Some(index) = self.active_assistant.take() {
+            self.touch_entry(index);
+        }
     }
 
     pub fn start_thinking(&mut self) {
         if self.active_thinking.is_some() {
             return;
         }
-        if self.resume_previous_visual_thinking() {
-            return;
-        }
-        let index = self.entries.len();
-        self.entries
-            .push(TranscriptEntry::thinking_streaming(String::new()));
-        self.active_thinking = Some(self.entries.len() - 1);
-        self.can_coalesce_thinking = false;
-        self.separate_next_thinking_delta = false;
-        self.render_cache.push(None);
-        self.mark_dirty_from(index);
+        let index = self.append_entry(TranscriptEntry::thinking_streaming(String::new()));
+        self.active_thinking = Some(index);
     }
 
     pub fn append_thinking_delta(&mut self, text: &str) {
@@ -239,15 +229,9 @@ impl TranscriptStore {
             return;
         };
         if let Some(TranscriptEntry::ThinkingBlock { content, .. }) = self.entries.get_mut(index) {
-            if self.separate_next_thinking_delta && !text.is_empty() {
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                self.separate_next_thinking_delta = false;
-            }
             content.push_str(text);
         }
-        self.invalidate_cache(index);
+        self.touch_entry(index);
     }
 
     pub fn finish_thinking(&mut self) {
@@ -255,10 +239,8 @@ impl TranscriptStore {
             if let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
             {
                 *phase = ThinkingPhase::Complete;
-                self.can_coalesce_thinking = true;
-                self.separate_next_thinking_delta = false;
             }
-            self.invalidate_cache(index);
+            self.touch_entry(index);
         }
     }
 
@@ -284,15 +266,79 @@ impl TranscriptStore {
         self.push(TranscriptEntry::shell_run(component));
     }
 
-    pub fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCallComponent> {
+    #[must_use]
+    pub fn tool(&self, id: &str) -> Option<&ToolCallComponent> {
+        self.entries.iter().find_map(|entry| match entry {
+            TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
+            _ => None,
+        })
+    }
+
+    pub fn mutate_tool(
+        &mut self,
+        id: &str,
+        mutate: impl FnOnce(&mut ToolCallComponent) -> bool,
+    ) -> bool {
         let index = self.entries.iter().position(
             |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
-        )?;
-        self.invalidate_cache(index);
-        match self.entries.get_mut(index)? {
-            TranscriptEntry::ToolRun { component } => Some(component),
+        );
+        let Some(index) = index else {
+            return false;
+        };
+        self.mutate_entry(index, |entry| match entry {
+            TranscriptEntry::ToolRun { component } => mutate(component),
+            _ => false,
+        })
+    }
+
+    pub fn mutate_shell_run(
+        &mut self,
+        id: &str,
+        mutate: impl FnOnce(&mut ShellRunComponent) -> bool,
+    ) -> bool {
+        let index = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::ShellRun { component } if component.id() == id),
+        );
+        let Some(index) = index else {
+            return false;
+        };
+        self.mutate_entry(index, |entry| match entry {
+            TranscriptEntry::ShellRun { component } => mutate(component),
+            _ => false,
+        })
+    }
+
+    pub fn mutate_approval(
+        &mut self,
+        id: &str,
+        mutate: impl FnOnce(&mut ApprovalPromptData) -> bool,
+    ) -> bool {
+        let index = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.id == id),
+        );
+        let Some(index) = index else {
+            return false;
+        };
+        self.mutate_entry(index, |entry| match entry {
+            TranscriptEntry::ApprovalPrompt(data) => mutate(data),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn shell_run(&self, id: &str) -> Option<&ShellRunComponent> {
+        self.entries.iter().find_map(|entry| match entry {
+            TranscriptEntry::ShellRun { component } if component.id() == id => Some(component),
             _ => None,
-        }
+        })
+    }
+
+    #[must_use]
+    pub fn approval(&self, id: &str) -> Option<&ApprovalPromptData> {
+        self.entries.iter().find_map(|entry| match entry {
+            TranscriptEntry::ApprovalPrompt(data) if data.id == id => Some(data),
+            _ => None,
+        })
     }
 
     pub fn suppress_tool_run(&mut self, id: &str) {
@@ -322,29 +368,6 @@ impl TranscriptStore {
             .any(|existing| existing == id)
     }
 
-    pub fn shell_run_mut(&mut self, id: &str) -> Option<&mut ShellRunComponent> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| matches!(entry, TranscriptEntry::ShellRun { component } if component.id() == id))?;
-        self.invalidate_cache(index);
-        match self.entries.get_mut(index)? {
-            TranscriptEntry::ShellRun { component } => Some(component),
-            _ => None,
-        }
-    }
-
-    pub fn approval_mut(&mut self, id: &str) -> Option<&mut ApprovalPromptData> {
-        let index = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.id == id),
-        )?;
-        self.invalidate_cache(index);
-        match self.entries.get_mut(index)? {
-            TranscriptEntry::ApprovalPrompt(data) => Some(data),
-            _ => None,
-        }
-    }
-
     pub fn insert_approval_after_tool_or_push(&mut self, data: ApprovalPromptData) {
         self.mark_visible_boundary();
         let insert_at = self
@@ -355,10 +378,7 @@ impl TranscriptStore {
             )
             .map(|index| index + 1);
         if let Some(index) = insert_at {
-            self.entries
-                .insert(index, TranscriptEntry::ApprovalPrompt(data));
-            self.render_cache.insert(index, None);
-            self.mark_dirty_from(index);
+            self.insert_entry(index, TranscriptEntry::ApprovalPrompt(data));
         } else {
             self.push(TranscriptEntry::ApprovalPrompt(data));
         }
@@ -382,34 +402,75 @@ impl TranscriptStore {
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate(&mut self, turn: u32, snapshot: AgentSnapshot) {
         let id = snapshot.id.as_str().to_owned();
-        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
-                Some(component)
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::DelegateGroup { component } if component.contains(&id)),
+        ) {
+            let preserve_terminal = matches!(
+                &self.entries[index],
+                TranscriptEntry::DelegateGroup { component }
+                    if component.snapshot(&id).is_some_and(|current| {
+                        current.state.is_terminal() && !snapshot.state.is_terminal()
+                    })
+            );
+            if preserve_terminal {
+                return;
             }
-            _ => None,
-        }) {
-            group.upsert(snapshot);
-            self.invalidate_all_cache();
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::DelegateGroup { component } = entry else {
+                    return false;
+                };
+                component.upsert(snapshot)
+            });
             return;
         }
-        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
-            _ => None,
-        }) {
-            let merged = merge_delegate_snapshot(entry.snapshot(), snapshot);
-            entry.update(merged);
-            self.invalidate_all_cache();
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::Delegate { component } if component.id() == id),
+        ) {
+            let merged = match &self.entries[index] {
+                TranscriptEntry::Delegate { component } => {
+                    merge_delegate_snapshot(component.snapshot(), snapshot)
+                }
+                _ => return,
+            };
+            if matches!(
+                &self.entries[index],
+                TranscriptEntry::Delegate { component } if component.snapshot() == &merged
+            ) {
+                return;
+            }
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::Delegate { component } = entry else {
+                    return false;
+                };
+                component.update(merged)
+            });
             return;
         }
-        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::DelegateGroup { component } if component.turn() == turn => {
-                Some(component)
-            }
-            _ => None,
-        }) && is_root_delegate(&snapshot)
+        if is_root_delegate(&snapshot)
+            && let Some(index) = self.entries.iter().position(|entry| {
+                matches!(entry, TranscriptEntry::DelegateGroup { component }
+                    if component.turn() == turn
+                        && component.finalization() == Finalization::Live)
+            })
         {
-            group.upsert(snapshot);
-            self.invalidate_all_cache();
+            let preserve_terminal = matches!(
+                &self.entries[index],
+                TranscriptEntry::DelegateGroup { component }
+                    if component
+                        .snapshot(snapshot.id.as_str())
+                        .is_some_and(|current| {
+                            current.state.is_terminal() && !snapshot.state.is_terminal()
+                        })
+            );
+            if preserve_terminal {
+                return;
+            }
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::DelegateGroup { component } = entry else {
+                    return false;
+                };
+                component.upsert(snapshot)
+            });
             return;
         }
         if is_root_delegate(&snapshot)
@@ -419,23 +480,20 @@ impl TranscriptStore {
                     TranscriptEntry::Delegate { component }
                         if component.turn() == Some(turn)
                             && is_root_delegate(component.snapshot())
+                            && component.finalization() == Finalization::Live
                 )
             })
-            && let TranscriptEntry::Delegate { component } = self.entries.remove(index)
         {
-            let existing = component.into_snapshot();
-            self.entries.insert(
-                index,
-                TranscriptEntry::DelegateGroup {
+            let existing = match &self.entries[index] {
+                TranscriptEntry::Delegate { component } => component.snapshot().clone(),
+                _ => return,
+            };
+            self.mutate_entry(index, |entry| {
+                *entry = TranscriptEntry::DelegateGroup {
                     component: DelegateGroupComponent::new(turn, vec![existing, snapshot]),
-                },
-            );
-            // Delegate→DelegateGroup replacement: both non-cacheable, slot
-            // stays None. Keep render_cache in sync.
-            if index < self.render_cache.len() {
-                self.render_cache[index] = None;
-            }
-            self.mark_dirty_from(index);
+                };
+                true
+            });
             return;
         }
         self.push(TranscriptEntry::Delegate {
@@ -445,28 +503,50 @@ impl TranscriptStore {
 
     pub fn upsert_delegate_progress(&mut self, turn: u32, progress: &AgentProgressSnapshot) {
         let id = progress.agent_id.as_str().to_owned();
-        if let Some(group) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::DelegateGroup { component } if component.contains(&id) => {
-                Some(component)
-            }
-            _ => None,
-        }) {
-            let Some(mut snapshot) = group.snapshot(&id).cloned() else {
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::DelegateGroup { component } if component.contains(&id)),
+        ) {
+            let Some(mut snapshot) = (match &self.entries[index] {
+                TranscriptEntry::DelegateGroup { component } => component.snapshot(&id).cloned(),
+                _ => None,
+            }) else {
                 return;
             };
-            let _ = apply_agent_progress(&mut snapshot, progress);
-            group.upsert(snapshot);
-            self.invalidate_all_cache();
+            if snapshot.state.is_terminal() && !progress.state.is_terminal() {
+                return;
+            }
+            let previous = snapshot.clone();
+            if !apply_agent_progress(&mut snapshot, progress) || snapshot == previous {
+                return;
+            }
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::DelegateGroup { component } = entry else {
+                    return false;
+                };
+                component.upsert(snapshot)
+            });
             return;
         }
-        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
-            _ => None,
-        }) {
-            let mut snapshot = entry.snapshot().clone();
-            let _ = apply_agent_progress(&mut snapshot, progress);
-            entry.update(snapshot);
-            self.invalidate_all_cache();
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::Delegate { component } if component.id() == id),
+        ) {
+            let mut snapshot = match &self.entries[index] {
+                TranscriptEntry::Delegate { component } => component.snapshot().clone(),
+                _ => return,
+            };
+            if snapshot.state.is_terminal() && !progress.state.is_terminal() {
+                return;
+            }
+            let previous = snapshot.clone();
+            if !apply_agent_progress(&mut snapshot, progress) || snapshot == previous {
+                return;
+            }
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::Delegate { component } = entry else {
+                    return false;
+                };
+                component.update(snapshot)
+            });
             return;
         }
         let _ = turn;
@@ -476,15 +556,27 @@ impl TranscriptStore {
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate_swarm(&mut self, snapshot: SwarmSnapshot) {
         let id = snapshot.swarm_id.clone();
-        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == id => {
-                Some(component)
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == id),
+        ) {
+            let merged = match &self.entries[index] {
+                TranscriptEntry::DelegateSwarm { component } => {
+                    merge_swarm_snapshot(component.snapshot(), snapshot)
+                }
+                _ => return,
+            };
+            if matches!(
+                &self.entries[index],
+                TranscriptEntry::DelegateSwarm { component } if component.snapshot() == &merged
+            ) {
+                return;
             }
-            _ => None,
-        }) {
-            let merged = merge_swarm_snapshot(entry.snapshot(), snapshot);
-            entry.update(merged);
-            self.invalidate_all_cache();
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::DelegateSwarm { component } = entry else {
+                    return false;
+                };
+                component.update(merged)
+            });
             return;
         }
         self.push(TranscriptEntry::DelegateSwarm {
@@ -499,16 +591,28 @@ impl TranscriptStore {
         aggregate: SwarmAggregate,
         child_progress: &SwarmChildProgress,
     ) {
-        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
-            TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == swarm_id => {
-                Some(component)
-            }
-            _ => None,
-        }) {
-            let mut snapshot = entry.snapshot().clone();
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == swarm_id),
+        ) {
+            let mut snapshot = match &self.entries[index] {
+                TranscriptEntry::DelegateSwarm { component }
+                    if !swarm_snapshot_is_terminal(component.snapshot()) =>
+                {
+                    component.snapshot().clone()
+                }
+                _ => return,
+            };
+            let previous = snapshot.clone();
             apply_swarm_child_progress(&mut snapshot, child_progress, aggregate, state);
-            entry.update(snapshot);
-            self.invalidate_all_cache();
+            if snapshot == previous {
+                return;
+            }
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::DelegateSwarm { component } = entry else {
+                    return false;
+                };
+                component.update(snapshot)
+            });
         }
     }
 
@@ -520,10 +624,17 @@ impl TranscriptStore {
             .iter()
             .position(|entry| matches!(entry, TranscriptEntry::Workflow { component } if component.id() == id));
         if let Some(index) = existing_index {
-            if let Some(TranscriptEntry::Workflow { component }) = self.entries.get_mut(index) {
-                component.update(snapshot);
+            if self.entries[index].finalization() == Finalization::Finalized
+                && snapshot.state == neo_agent_core::workflow::WorkflowState::Running
+            {
+                return;
             }
-            self.invalidate_cache(index);
+            self.mutate_entry(index, |entry| {
+                let TranscriptEntry::Workflow { component } = entry else {
+                    return false;
+                };
+                component.update(snapshot)
+            });
             return;
         }
         self.push(TranscriptEntry::Workflow {
@@ -536,11 +647,50 @@ impl TranscriptStore {
         &self.entries
     }
 
-    pub fn entries_mut(&mut self) -> &mut [TranscriptEntry] {
-        self.invalidate_all_cache();
-        self.can_coalesce_thinking = false;
-        self.separate_next_thinking_delta = false;
-        &mut self.entries
+    #[must_use]
+    pub fn entry_ids(&self) -> &[TranscriptEntryId] {
+        &self.entry_ids
+    }
+
+    #[must_use]
+    pub fn entry_revisions(&self) -> &[u64] {
+        &self.entry_revisions
+    }
+
+    #[must_use]
+    pub fn entry_finalization(&self, index: usize) -> Option<Finalization> {
+        let entry = self.entries.get(index)?;
+        if self.active_assistant == Some(index) {
+            Some(Finalization::Live)
+        } else {
+            Some(entry.finalization())
+        }
+    }
+
+    pub fn finalize_interrupted_live_entries(&mut self) -> bool {
+        let mut changed = self.active_assistant.is_some() || self.active_thinking.is_some();
+        self.finish_assistant();
+        self.finish_thinking();
+
+        for index in 0..self.entries.len() {
+            changed |= self.mutate_entry(index, TranscriptEntry::interrupt);
+        }
+        changed
+    }
+
+    pub fn mutate_entry(
+        &mut self,
+        index: usize,
+        mutate: impl FnOnce(&mut TranscriptEntry) -> bool,
+    ) -> bool {
+        let changed = match self.entries.get_mut(index) {
+            Some(entry) => mutate(entry),
+            None => return false,
+        };
+        if changed {
+            self.touch_entry(index);
+        }
+        changed
     }
 
     pub(crate) fn invalidate_render_cache(&mut self) {
@@ -563,18 +713,15 @@ impl TranscriptStore {
         if !has_live {
             return false;
         }
-        let mut first_changed = None;
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            if entry.on_render_tick(now_ms) {
-                first_changed.get_or_insert(index);
+        let mut changed = false;
+        for index in 0..self.entries.len() {
+            let entry_changed = self.entries[index].on_render_tick(now_ms);
+            if entry_changed {
+                self.touch_entry(index);
+                changed = true;
             }
         }
-        if let Some(index) = first_changed {
-            self.mark_dirty_from(index);
-            true
-        } else {
-            false
-        }
+        changed
     }
 
     /// Remove the entry at `index`, shifting later entries down. Returns the
@@ -584,12 +731,14 @@ impl TranscriptStore {
         if index >= self.entries.len() {
             return None;
         }
-        self.can_coalesce_thinking = false;
-        self.separate_next_thinking_delta = false;
         let entry = self.entries.remove(index);
+        self.entry_ids.remove(index);
+        self.entry_revisions.remove(index);
         if index < self.render_cache.len() {
             self.render_cache.remove(index);
         }
+        self.active_assistant = adjusted_index_after_remove(self.active_assistant, index);
+        self.active_thinking = adjusted_index_after_remove(self.active_thinking, index);
         self.mark_dirty_from(index);
         Some(entry)
     }
@@ -678,36 +827,59 @@ impl TranscriptStore {
             .collect()
     }
 
-    fn resume_previous_visual_thinking(&mut self) -> bool {
-        if !self.can_coalesce_thinking {
-            return false;
-        }
-        let Some(index) = self.entries.len().checked_sub(1) else {
-            return false;
-        };
-        let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index) else {
-            return false;
-        };
-        if *phase != ThinkingPhase::Complete {
-            return false;
-        }
-
-        *phase = ThinkingPhase::Streaming;
-        self.active_thinking = Some(index);
-        self.can_coalesce_thinking = false;
-        self.separate_next_thinking_delta = true;
-        // Entry transitions from Complete (cached) to Streaming (not cached).
-        self.invalidate_cache(index);
-        true
-    }
-
     fn mark_visible_boundary(&mut self) {
         self.finish_thinking();
-        self.can_coalesce_thinking = false;
-        self.separate_next_thinking_delta = false;
     }
 
     // ── Render cache management ───────────────────────────────────────────
+
+    fn append_entry(&mut self, entry: TranscriptEntry) -> usize {
+        let index = self.entries.len();
+        let id = self.allocate_entry_id();
+        self.entries.push(entry);
+        self.entry_ids.push(id);
+        self.entry_revisions.push(0);
+        self.render_cache.push(None);
+        self.mark_dirty_from(index);
+        index
+    }
+
+    fn insert_entry(&mut self, index: usize, entry: TranscriptEntry) {
+        let id = self.allocate_entry_id();
+        self.entries.insert(index, entry);
+        self.entry_ids.insert(index, id);
+        self.entry_revisions.insert(index, 0);
+        self.render_cache.insert(index, None);
+        if let Some(active) = &mut self.active_assistant
+            && *active >= index
+        {
+            *active += 1;
+        }
+        if let Some(active) = &mut self.active_thinking
+            && *active >= index
+        {
+            *active += 1;
+        }
+        self.mark_dirty_from(index);
+    }
+
+    fn allocate_entry_id(&mut self) -> TranscriptEntryId {
+        let id = TranscriptEntryId(self.next_entry_id);
+        self.next_entry_id = self
+            .next_entry_id
+            .checked_add(1)
+            .expect("transcript entry ID space exhausted");
+        id
+    }
+
+    fn touch_entry(&mut self, index: usize) {
+        if let Some(revision) = self.entry_revisions.get_mut(index) {
+            *revision = revision
+                .checked_add(1)
+                .expect("transcript entry revision space exhausted");
+        }
+        self.invalidate_cache(index);
+    }
 
     /// Invalidate the render cache for a single entry index.
     fn invalidate_cache(&mut self, index: usize) {
@@ -881,6 +1053,12 @@ impl TranscriptStore {
     }
 }
 
+fn adjusted_index_after_remove(active: Option<usize>, removed: usize) -> Option<usize> {
+    active.and_then(|index| {
+        (index != removed).then_some(if index > removed { index - 1 } else { index })
+    })
+}
+
 fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {
     snapshot.path.is_root_child()
 }
@@ -893,6 +1071,9 @@ fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> 
     // Different agents — just take the incoming.
     if current.id != incoming.id {
         return incoming;
+    }
+    if current.state.is_terminal() && !incoming.state.is_terminal() {
+        return current.clone();
     }
     // Cancelled always beats a late Completed for the same run.
     if current.state == AgentLifecycleState::Cancelled
@@ -913,6 +1094,9 @@ fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> 
 fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> SwarmSnapshot {
     if current.swarm_id != incoming.swarm_id {
         return incoming;
+    }
+    if swarm_snapshot_is_terminal(current) && !swarm_snapshot_is_terminal(&incoming) {
+        return current.clone();
     }
 
     let mut children = incoming
@@ -948,6 +1132,13 @@ fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> Swa
         aggregate: SwarmAggregate::from_states(children.iter().map(|child| child.agent.state)),
         children,
     }
+}
+
+fn swarm_snapshot_is_terminal(snapshot: &SwarmSnapshot) -> bool {
+    snapshot
+        .children
+        .iter()
+        .all(|child| child.agent.state.is_terminal())
 }
 
 fn merge_swarm_child(

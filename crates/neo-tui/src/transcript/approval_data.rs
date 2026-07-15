@@ -273,19 +273,36 @@ impl TranscriptPane {
         selected_suggestion: Option<usize>,
         feedback_active: bool,
     ) {
-        if let Some(approval) = self.transcript.approval_mut(id) {
+        let changed = self.transcript.mutate_approval(id, |approval| {
+            let changed = approval.selected != selected
+                || approval.selected_suggestion != selected_suggestion
+                || approval.feedback_active != feedback_active
+                || approval.feedback_input != feedback_input;
+            if !changed {
+                return false;
+            }
             approval.selected = selected;
             approval.selected_suggestion = selected_suggestion;
             approval.feedback_active = feedback_active;
             feedback_input.clone_into(&mut approval.feedback_input);
+            true
+        });
+        if changed {
             self.mark_dirty();
         }
     }
 
     pub fn resolve_approval(&mut self, id: &str, label: impl Into<String>) {
-        if let Some(approval) = self.transcript.approval_mut(id) {
-            approval.resolved = Some(label.into());
+        let label = label.into();
+        let changed = self.transcript.mutate_approval(id, |approval| {
+            if approval.resolved.as_deref() == Some(label.as_str()) && approval.queued_count == 0 {
+                return false;
+            }
+            approval.resolved = Some(label);
             approval.queued_count = 0;
+            true
+        });
+        if changed {
             self.advance_queued_approval();
             self.mark_dirty();
         }
@@ -294,14 +311,22 @@ impl TranscriptPane {
     pub fn resolve_unresolved_approvals(&mut self, label: impl Into<String>) {
         let label = label.into();
         let mut changed = false;
-        for entry in self.transcript.entries_mut() {
-            if let TranscriptEntry::ApprovalPrompt(data) = entry
-                && data.resolved.is_none()
-            {
+        for index in 0..self.transcript.entries().len() {
+            let is_unresolved = matches!(
+                &self.transcript.entries()[index],
+                TranscriptEntry::ApprovalPrompt(data) if data.resolved.is_none()
+            );
+            if !is_unresolved {
+                continue;
+            }
+            changed |= self.transcript.mutate_entry(index, |entry| {
+                let TranscriptEntry::ApprovalPrompt(data) = entry else {
+                    return false;
+                };
                 data.resolved = Some(label.clone());
                 data.queued_count = 0;
-                changed = true;
-            }
+                true
+            });
         }
         if !self.queued_approvals.is_empty() {
             self.queued_approvals.clear();
@@ -328,23 +353,45 @@ impl TranscriptPane {
             prompt.suggestions = suggestions;
         }
 
-        if let Some(approval) = self.transcript.approval_mut(&id) {
-            approval.title = prompt.title;
-            approval.details = prompt.details;
-            approval.queued_label = prompt.queued_label;
-            approval.plan_content = prompt.plan_content;
-            approval.plan_path = prompt.plan_path;
-            approval.suggestions = prompt.suggestions;
-            approval.plan_option_labels = prompt.plan_option_labels;
-            approval.selected_suggestion = None;
-            approval.queued_count = self.queued_approvals.len();
-            approval.resolved = None;
-            approval
-                .session_option_label
-                .clone_from(&session_option_label);
-            approval
-                .prefix_option_label
-                .clone_from(&prefix_option_label);
+        if self
+            .transcript
+            .approval(&id)
+            .is_some_and(|approval| approval.resolved.is_some())
+        {
+            return;
+        }
+        if self.transcript.approval(&id).is_some() {
+            let queued_count = self.queued_approvals.len();
+            self.transcript.mutate_approval(&id, |approval| {
+                let changed = approval.title != prompt.title
+                    || approval.details != prompt.details
+                    || approval.queued_label != prompt.queued_label
+                    || approval.plan_content != prompt.plan_content
+                    || approval.plan_path != prompt.plan_path
+                    || approval.suggestions != prompt.suggestions
+                    || approval.plan_option_labels != prompt.plan_option_labels
+                    || approval.selected_suggestion.is_some()
+                    || approval.queued_count != queued_count
+                    || approval.resolved.is_some()
+                    || approval.session_option_label != session_option_label
+                    || approval.prefix_option_label != prefix_option_label;
+                if !changed {
+                    return false;
+                }
+                approval.title = prompt.title;
+                approval.details = prompt.details;
+                approval.queued_label = prompt.queued_label;
+                approval.plan_content = prompt.plan_content;
+                approval.plan_path = prompt.plan_path;
+                approval.suggestions = prompt.suggestions;
+                approval.plan_option_labels = prompt.plan_option_labels;
+                approval.selected_suggestion = None;
+                approval.queued_count = queued_count;
+                approval.resolved = None;
+                approval.session_option_label = session_option_label;
+                approval.prefix_option_label = prefix_option_label;
+                true
+            });
             return;
         }
 
@@ -366,7 +413,7 @@ impl TranscriptPane {
             suggestions: prompt.suggestions,
             selected_suggestion: None,
         };
-        if self.active_approval_mut().is_some() {
+        if self.active_approval_index().is_some() {
             self.queued_approvals.push_back(data);
             self.update_active_approval_queue_count();
             return;
@@ -376,25 +423,30 @@ impl TranscriptPane {
         self.transcript.insert_approval_after_tool_or_push(data);
     }
 
-    fn active_approval_mut(&mut self) -> Option<&mut ApprovalPromptData> {
-        self.transcript
-            .entries_mut()
-            .iter_mut()
-            .rev()
-            .find_map(|entry| {
-                if let TranscriptEntry::ApprovalPrompt(data) = entry
-                    && data.resolved.is_none()
-                {
-                    return Some(data);
-                }
-                None
-            })
+    fn active_approval_index(&self) -> Option<usize> {
+        self.transcript.entries().iter().rposition(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::ApprovalPrompt(data) if data.resolved.is_none()
+            )
+        })
     }
 
     fn update_active_approval_queue_count(&mut self) {
         let queued_count = self.queued_approvals.len();
-        if let Some(approval) = self.active_approval_mut() {
+        let Some(index) = self.active_approval_index() else {
+            return;
+        };
+        if self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::ApprovalPrompt(approval) = entry else {
+                return false;
+            };
+            if approval.queued_count == queued_count {
+                return false;
+            }
             approval.queued_count = queued_count;
+            true
+        }) {
             self.mark_dirty();
         }
     }

@@ -37,8 +37,25 @@ impl DelegateCardComponent {
         Self::new_with_turn(Some(turn), snapshot)
     }
 
-    pub fn update(&mut self, snapshot: AgentSnapshot) {
+    pub fn update(&mut self, snapshot: AgentSnapshot) -> bool {
+        if self.snapshot == snapshot {
+            return false;
+        }
         self.snapshot = snapshot;
+        true
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        let mut snapshot = self.snapshot.clone();
+        if !crate::transcript::interrupt_agent_snapshot(&mut snapshot) {
+            return false;
+        }
+        self.update(snapshot)
+    }
+
+    #[must_use]
+    pub const fn is_expanded(&self) -> bool {
+        self.expanded
     }
 
     #[must_use]

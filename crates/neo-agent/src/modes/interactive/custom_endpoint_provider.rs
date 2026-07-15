@@ -118,25 +118,25 @@ impl InteractiveController {
         });
     }
 
-    pub(super) async fn poll_pending_custom_endpoint_fetch(&mut self) {
+    pub(super) async fn poll_pending_custom_endpoint_fetch(&mut self) -> bool {
         let Some(pending) = self.pending_custom_endpoint_fetch.take() else {
-            return;
+            return false;
         };
         if !pending.handle.is_finished() {
             if self.custom_endpoint_fetch_still_matches(&pending) {
                 self.pending_custom_endpoint_fetch = Some(pending);
-            } else {
-                pending.handle.abort();
-                self.clear_custom_endpoint_working_label(&pending.working_label);
-                self.push_status("Custom endpoint wizard changed before /models returned");
+                return false;
             }
-            return;
+            pending.handle.abort();
+            self.clear_custom_endpoint_working_label(&pending.working_label);
+            self.push_status("Custom endpoint wizard changed before /models returned");
+            return true;
         }
 
         self.clear_custom_endpoint_working_label(&pending.working_label);
         if !self.custom_endpoint_fetch_still_matches(&pending) {
             self.push_status("Custom endpoint wizard changed before /models returned");
-            return;
+            return true;
         }
         match pending.handle.await {
             Ok(Ok(models)) => {
@@ -157,6 +157,7 @@ impl InteractiveController {
                 self.push_status(format!("Error: Failed to fetch /models: {join_error}"));
             }
         }
+        true
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -214,25 +215,25 @@ impl InteractiveController {
         }
     }
 
-    pub(super) async fn poll_pending_custom_endpoint_test(&mut self) {
+    pub(super) async fn poll_pending_custom_endpoint_test(&mut self) -> bool {
         let Some(pending) = self.pending_custom_endpoint_test.take() else {
-            return;
+            return false;
         };
         if !pending.handle.is_finished() {
             if self.custom_endpoint_test_still_matches(&pending) {
                 self.pending_custom_endpoint_test = Some(pending);
-            } else {
-                pending.handle.abort();
-                self.clear_custom_endpoint_working_label(&pending.working_label);
-                self.push_status("Custom endpoint wizard changed before test returned");
+                return false;
             }
-            return;
+            pending.handle.abort();
+            self.clear_custom_endpoint_working_label(&pending.working_label);
+            self.push_status("Custom endpoint wizard changed before test returned");
+            return true;
         }
 
         self.clear_custom_endpoint_working_label(&pending.working_label);
         if !self.custom_endpoint_test_still_matches(&pending) {
             self.push_status("Custom endpoint wizard changed before test returned");
-            return;
+            return true;
         }
         let result = match pending.handle.await {
             Ok(result) => result,
@@ -245,6 +246,7 @@ impl InteractiveController {
         {
             self.push_status("Custom endpoint wizard is no longer open");
         }
+        true
     }
 
     fn custom_endpoint_fetch_still_matches(&self, pending: &PendingCustomEndpointFetch) -> bool {
@@ -782,7 +784,7 @@ mod tests {
             Some(pending_fetch_for_current_wizard(&controller));
         controller.tui.chrome_mut().close_overlay(overlay_id);
 
-        controller.poll_pending_custom_endpoint_fetch().await;
+        assert!(controller.poll_pending_custom_endpoint_fetch().await);
 
         assert!(controller.pending_custom_endpoint_fetch.is_none());
     }
@@ -837,7 +839,7 @@ mod tests {
         ));
         controller.tui.chrome_mut().close_overlay(overlay_id);
 
-        controller.poll_pending_custom_endpoint_test().await;
+        assert!(controller.poll_pending_custom_endpoint_test().await);
 
         assert!(controller.pending_custom_endpoint_test.is_none());
     }

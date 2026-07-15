@@ -47,18 +47,13 @@ fn live_thinking_shows_spinner_and_tail_window() {
 }
 
 #[test]
-fn live_thinking_spinner_advances_on_render_tick() {
+fn live_thinking_spinner_advances_on_explicit_animation_tick() {
     let mut runtime = TranscriptPane::new(40, 12);
     runtime.push_transcript(TranscriptEntry::thinking_streaming("alpha"));
 
     let first = plain_frame(&mut runtime, 40, 12).join("\n");
-    runtime.render_tick();
-    let second = runtime
-        .frame_ansi_lines()
-        .iter()
-        .map(|line| strip_ansi(line).trim_end().to_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
+    runtime.advance_animation_at_ms(1);
+    let second = plain_frame(&mut runtime, 40, 12).join("\n");
 
     assert!(first.contains("⠋ thinking..."), "first spinner: {first}");
     assert!(second.contains("⠙ thinking..."), "second spinner: {second}");

@@ -30,6 +30,90 @@ fn ansi_for_color(color: Color) -> String {
 }
 
 #[test]
+fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
+    let mut pane = TranscriptPane::new(40, 8);
+    pane.start_assistant_message();
+    for index in 0..8 {
+        pane.append_assistant_delta(&format!("complete paragraph {index}\n\n"));
+    }
+    pane.append_assistant_delta("mutable tail that is still streaming");
+
+    let update = pane.render_terminal_update(40, 8);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(history.contains("complete paragraph 0"));
+    assert!(!live.contains("complete paragraph 0"));
+    assert!(live.contains("mutable tail"));
+    assert!(update.live.len() <= 4, "live rows must fit above chrome");
+}
+
+#[test]
+fn long_unstable_assistant_tail_is_truncated_inside_live_budget() {
+    let mut pane = TranscriptPane::new(30, 8);
+    pane.start_assistant_message();
+    pane.append_assistant_delta(&"unfinished ".repeat(80));
+
+    let update = pane.render_terminal_update(30, 8);
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(update.history.is_empty());
+    assert!(update.live.len() <= 4, "live rows must fit above chrome");
+    assert!(live.contains("earlier rows omitted"));
+}
+
+#[test]
+fn consecutive_streaming_tool_cards_keep_each_header_when_live_budget_truncates() {
+    let mut pane = TranscriptPane::new(80, 8);
+    for (id, path) in [("read-1", "one.rs"), ("read-2", "two.rs")] {
+        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: id.to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({"path": path}),
+        });
+    }
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
+        turn: 1,
+        id: "read-2".to_owned(),
+        name: "Read".to_owned(),
+        partial_result: neo_agent_core::ToolResult::ok(
+            "output-1\noutput-2\noutput-3\noutput-4\noutput-5\nlatest-output",
+        ),
+    });
+
+    let update = pane.render_terminal_update(80, 8);
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(live.matches("Using Read").count(), 2, "live:\n{live}");
+    assert!(live.contains("one.rs"), "live:\n{live}");
+    assert!(live.contains("two.rs"), "live:\n{live}");
+    assert!(live.contains("latest-output"), "live:\n{live}");
+    assert!(update.live.len() <= 4, "live rows: {:#?}", update.live);
+}
+
+#[test]
 fn unchanged_theme_and_size_do_not_schedule_body_rerender() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
     transcript_pane.push_transcript(TranscriptEntry::banner("Welcome to neo"));
@@ -112,7 +196,7 @@ fn mcp_startup_status_updates_pending_spinner_to_green_connected_row() {
         transport: "http".to_owned(),
         phase: McpStartupPhase::Connecting,
     });
-    transcript_pane.render_tick_at_ms_for_test(80);
+    transcript_pane.advance_animation_at_ms(80);
 
     let pending = plain_frame(&mut transcript_pane, 100, 12);
     assert!(
@@ -147,6 +231,71 @@ fn mcp_startup_status_updates_pending_spinner_to_green_connected_row() {
     assert!(
         connected_ansi.contains(&ansi_for_color(theme.status_ok)),
         "{connected_ansi}"
+    );
+    assert_eq!(
+        transcript_pane
+            .transcript()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn mcp_startup_status_updates_pending_spinner_to_red_failed_row() {
+    let theme = TuiTheme::default().with_status_error(Color::Rgb(211, 37, 69));
+    let mut transcript_pane = TranscriptPane::new(100, 12);
+    transcript_pane.set_theme(theme);
+    transcript_pane.set_live_chrome_height(0);
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Connecting,
+    });
+
+    let pending = transcript_pane.render_terminal_update(100, 12);
+    assert!(pending.history.is_empty());
+    assert!(
+        pending
+            .live
+            .iter()
+            .map(|line| strip_ansi(line))
+            .any(|line| line.contains("MCP server \"linear\" connecting"))
+    );
+
+    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+        id: "linear".to_owned(),
+        transport: "http".to_owned(),
+        phase: McpStartupPhase::Failed {
+            message: "timeout connecting to server".to_owned(),
+        },
+    });
+    let failed = transcript_pane.render_terminal_update(100, 12);
+    let failed_ansi = failed
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let failed_plain = strip_ansi(&failed_ansi);
+
+    assert!(
+        failed_plain.contains("✗ MCP server \"linear\" failed · timeout connecting to server"),
+        "{failed_plain}"
+    );
+    assert!(
+        failed_ansi.contains(&ansi_for_color(theme.status_error)),
+        "{failed_ansi}"
+    );
+    assert!(
+        failed
+            .live
+            .iter()
+            .map(|line| strip_ansi(line))
+            .all(|line| !line.contains("connecting"))
     );
     assert_eq!(
         transcript_pane
@@ -367,6 +516,54 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
     assert!(frame.iter().any(|line| line.contains("Approved")));
     assert!(frame.iter().any(|line| line.contains("$ printf 2")));
     assert!(!frame.iter().any(|line| line.contains("queued:")));
+}
+
+#[test]
+fn finalizing_transcript_drops_queued_approvals_before_exit() {
+    let mut transcript_pane = TranscriptPane::new(100, 24);
+
+    for number in 1..=2 {
+        let command = format!("printf {number}");
+        transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: format!("historical-{number}"),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: command.clone(),
+            arguments: serde_json::json!({ "command": command }),
+            session_scope: None,
+            prefix_rule: None,
+            suggestions: vec![],
+        });
+    }
+    transcript_pane.finalize_interrupted_live_entries();
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 2,
+        id: "current".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "printf current".to_owned(),
+        arguments: serde_json::json!({ "command": "printf current" }),
+        session_scope: None,
+        prefix_rule: None,
+        suggestions: vec![],
+    });
+    transcript_pane.resolve_approval("current", "Approved");
+
+    let ids = transcript_pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ApprovalPrompt(data) => Some(data.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"historical-1"));
+    assert!(ids.contains(&"current"));
+    assert!(
+        !ids.contains(&"historical-2"),
+        "queued approval resurrected: {ids:?}"
+    );
 }
 
 #[test]

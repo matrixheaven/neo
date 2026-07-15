@@ -227,33 +227,46 @@ impl InteractiveController {
         Ok(())
     }
 
-    pub(super) async fn refresh_task_browser(&mut self) {
+    pub(super) async fn refresh_task_browser(&mut self) -> bool {
         let Some(config) = self.local_config.as_ref() else {
-            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
-                state.set_footer_message("No config available");
-            }
-            return;
+            return self
+                .tui
+                .chrome_mut()
+                .task_browser_state_mut()
+                .is_some_and(|state| {
+                    let before = state.clone();
+                    state.set_footer_message("No config available");
+                    *state != before
+                });
         };
         let tasks = config.background_tasks.list(false, 50).await;
         let snapshot = task_browser::snapshots_to_browser_snapshot(&tasks);
-        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
-            state.apply_snapshot(&snapshot);
-            state.clear_footer_message();
-        }
+        let changed = self
+            .tui
+            .chrome_mut()
+            .task_browser_state_mut()
+            .is_some_and(|state| {
+                let before = state.clone();
+                state.apply_snapshot(&snapshot);
+                state.clear_footer_message();
+                *state != before
+            });
         self.last_task_browser_refresh = Some(Instant::now());
+        changed
     }
 
-    pub(super) async fn maybe_refresh_task_browser(&mut self) {
+    pub(super) async fn maybe_refresh_task_browser(&mut self) -> bool {
         if self.tui.chrome().task_browser_state().is_none() {
             self.last_task_browser_refresh = None;
-            return;
+            return false;
         }
         let should_refresh = self
             .last_task_browser_refresh
             .is_none_or(|last_refresh| last_refresh.elapsed() >= TASK_BROWSER_REFRESH_INTERVAL);
         if should_refresh {
-            self.refresh_task_browser().await;
+            return self.refresh_task_browser().await;
         }
+        false
     }
 
     pub(super) async fn stop_task_from_browser(&mut self, task_id: String) {
@@ -278,7 +291,9 @@ impl InteractiveController {
             )
             .await;
         match result {
-            Ok(_) => self.refresh_task_browser().await,
+            Ok(_) => {
+                self.refresh_task_browser().await;
+            }
             Err(error) => {
                 if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
                     state.set_footer_message(error.to_string());

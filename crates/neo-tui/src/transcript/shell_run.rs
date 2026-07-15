@@ -3,7 +3,7 @@ use neo_agent_core::tools::format_shell_failure;
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Line, Span, Style};
+use crate::primitive::{Finalization, Line, Span, Style};
 use crate::utils::shell_output::{sanitize_shell_output, split_sanitized_shell_lines};
 
 const MAX_LIVE_OUTPUT_LINES: usize = 12;
@@ -85,13 +85,25 @@ impl ShellRunComponent {
         &self.command
     }
 
-    pub fn append_live_output(&mut self, output: impl AsRef<str>) {
+    #[must_use]
+    pub const fn finalization(&self) -> Finalization {
+        match self.state {
+            ShellRunState::Running => Finalization::Live,
+            ShellRunState::Finished { .. } => Finalization::Finalized,
+        }
+    }
+
+    pub fn append_live_output(&mut self, output: impl AsRef<str>) -> bool {
         let sanitized = sanitize_shell_output(output.as_ref());
+        if sanitized.is_empty() {
+            return false;
+        }
         for line in sanitized.lines() {
             self.live_output_chars += line.chars().count();
             self.live_output.push(line.to_owned());
         }
         self.trim_live_output();
+        true
     }
 
     pub fn finish(
@@ -102,18 +114,51 @@ impl ShellRunComponent {
         signal: Option<i32>,
         outcome: ShellCommandOutcome,
         truncated: bool,
-    ) {
-        self.state = ShellRunState::Finished {
-            stdout: stdout.into(),
-            stderr: stderr.into(),
+    ) -> bool {
+        let stdout = stdout.into();
+        let stderr = stderr.into();
+        let next_state = ShellRunState::Finished {
+            stdout,
+            stderr,
             exit_code,
             signal,
             outcome,
             truncated,
         };
+        if self.state == next_state
+            && self.live_output.is_empty()
+            && self.dropped_live_output_lines == 0
+            && self.live_output_chars == 0
+        {
+            return false;
+        }
+        self.state = next_state;
         self.live_output.clear();
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
+        true
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        if self.finalization() == Finalization::Finalized {
+            return false;
+        }
+        let mut stdout = self.live_output.join("\n");
+        if self.dropped_live_output_lines > 0 {
+            stdout = format!(
+                "... ({} earlier lines)\n{stdout}",
+                self.dropped_live_output_lines
+            );
+        }
+        let truncated = self.dropped_live_output_lines > 0;
+        self.finish(
+            stdout,
+            "Interrupted when terminal exited",
+            None,
+            None,
+            ShellCommandOutcome::Cancelled,
+            truncated,
+        )
     }
 
     #[must_use]

@@ -9,13 +9,17 @@ mod event_handler;
 pub mod pane;
 pub mod partial_json;
 pub mod plan_box;
+mod presentation;
 pub mod shell_run;
 pub mod store;
+mod streaming_prefix;
 mod swarm_card;
 pub mod tool_call;
 pub mod tool_group;
 pub mod tool_renderers;
 mod workflow_card;
+
+use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot};
 
 pub(crate) use child_activity::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, compact_chars, display_elapsed,
@@ -34,9 +38,26 @@ pub use entry::{
 };
 pub use pane::TranscriptPane;
 pub use plan_box::PlanBoxComponent;
+pub use presentation::{
+    FinalizedBlock, FinalizedBlockProof, TranscriptBlockId, TranscriptTerminalUpdate,
+};
 pub use shell_run::{ShellRunComponent, ShellRunState};
-pub use store::{TranscriptSelection, TranscriptStore, TranscriptViewport};
+pub use store::{TranscriptEntryId, TranscriptSelection, TranscriptStore, TranscriptViewport};
 pub use swarm_card::SwarmCardComponent;
 pub use tool_call::{ToolCallComponent, ToolCallState};
 pub use tool_group::{ToolGroup, render_tool_group};
 pub use workflow_card::WorkflowCardComponent;
+
+pub(crate) fn interrupt_agent_snapshot(snapshot: &mut AgentSnapshot) -> bool {
+    if snapshot.state.is_terminal() {
+        return false;
+    }
+    let previous = snapshot.state;
+    snapshot.previous_status = Some(previous);
+    snapshot.state = AgentLifecycleState::Interrupted;
+    snapshot.terminal_at_ms = Some(snapshot.updated_at_ms);
+    snapshot
+        .terminal_status_history
+        .push(AgentLifecycleState::Interrupted);
+    true
+}

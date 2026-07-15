@@ -27,7 +27,6 @@ pub struct ToolCallState {
 pub struct ToolCallComponent {
     state: ToolCallState,
     expanded: bool,
-    progress_lines: Vec<String>,
     live_output: Vec<String>,
     dropped_live_output_lines: usize,
     live_output_chars: usize,
@@ -44,7 +43,6 @@ impl ToolCallComponent {
         Self {
             state,
             expanded: false,
-            progress_lines: Vec::new(),
             live_output: Vec::new(),
             dropped_live_output_lines: 0,
             live_output_chars: 0,
@@ -53,14 +51,20 @@ impl ToolCallComponent {
         }
     }
 
-    pub fn update_call(&mut self, arguments: Option<String>) {
+    pub fn update_call(&mut self, arguments: Option<String>) -> bool {
+        let mut changed = self.state.arguments != arguments;
         if let Some(args) = &arguments
             && !args.is_empty()
             && self.streaming_started_at.is_none()
         {
             self.streaming_started_at = Some(std::time::Instant::now());
+            changed = true;
+        }
+        if !changed {
+            return false;
         }
         self.state.arguments = arguments;
+        true
     }
 
     pub fn update_call_state(
@@ -68,7 +72,17 @@ impl ToolCallComponent {
         name: String,
         arguments: Option<String>,
         status: ToolStatusKind,
-    ) {
+    ) -> bool {
+        let mut changed = self.state.name != name || self.state.status != status;
+        if arguments.is_some() && self.state.arguments != arguments {
+            changed = true;
+        }
+        if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
+            changed = true;
+        }
+        if !changed {
+            return false;
+        }
         self.state.name = name;
         if arguments.is_some() {
             self.state.arguments = arguments;
@@ -77,14 +91,20 @@ impl ToolCallComponent {
         if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
             self.streaming_started_at = Some(std::time::Instant::now());
         }
+        true
     }
 
-    pub fn append_live_output(&mut self, output: impl Into<String>) {
-        for line in output.into().lines() {
+    pub fn append_live_output(&mut self, output: impl Into<String>) -> bool {
+        let output = output.into();
+        if output.is_empty() {
+            return false;
+        }
+        for line in output.lines() {
             self.live_output_chars += line.chars().count();
             self.live_output.push(line.to_owned());
         }
         self.trim_live_output();
+        true
     }
 
     fn trim_live_output(&mut self) {
@@ -107,32 +127,55 @@ impl ToolCallComponent {
         details: Option<serde_json::Value>,
         is_error: bool,
         exit_code: Option<i32>,
-    ) {
-        self.state.result = result;
-        self.state.details = details;
-        self.state.exit_code = exit_code;
-        self.state.status = if is_error {
+    ) -> bool {
+        let status = if is_error {
             ToolStatusKind::Failed
         } else {
             ToolStatusKind::Succeeded
         };
-        self.progress_lines.clear();
+        let changed = self.state.result != result
+            || self.state.details != details
+            || self.state.exit_code != exit_code
+            || self.state.status != status
+            || !self.live_output.is_empty()
+            || self.dropped_live_output_lines != 0
+            || self.live_output_chars != 0
+            || self.streaming_started_at.is_some();
+        if !changed {
+            return false;
+        }
+        self.state.result = result;
+        self.state.details = details;
+        self.state.exit_code = exit_code;
+        self.state.status = status;
         self.live_output.clear();
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
         self.streaming_started_at = None;
+        true
     }
 
-    pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) {
+    pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) -> bool {
+        let changed = self.state.result != result
+            || self.state.details.is_some()
+            || self.state.exit_code.is_some()
+            || self.state.status != status
+            || !self.live_output.is_empty()
+            || self.dropped_live_output_lines != 0
+            || self.live_output_chars != 0
+            || self.streaming_started_at.is_some();
+        if !changed {
+            return false;
+        }
         self.state.result = result;
         self.state.details = None;
         self.state.exit_code = None;
         self.state.status = status;
-        self.progress_lines.clear();
         self.live_output.clear();
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
         self.streaming_started_at = None;
+        true
     }
 
     #[must_use]
@@ -156,8 +199,13 @@ impl ToolCallComponent {
         self.state.arguments.as_deref()
     }
 
-    pub fn set_workspace_dir(&mut self, workspace_dir: impl Into<PathBuf>) {
-        self.workspace_dir = Some(workspace_dir.into());
+    pub fn set_workspace_dir(&mut self, workspace_dir: impl Into<PathBuf>) -> bool {
+        let workspace_dir = workspace_dir.into();
+        if self.workspace_dir.as_ref() == Some(&workspace_dir) {
+            return false;
+        }
+        self.workspace_dir = Some(workspace_dir);
+        true
     }
 
     /// Borrow the underlying tool state (for grouping/rendering snapshots).
@@ -172,8 +220,8 @@ impl ToolCallComponent {
     }
 
     #[must_use]
-    pub fn progress(&self) -> &[String] {
-        &self.progress_lines
+    pub fn has_live_rows(&self) -> bool {
+        self.dropped_live_output_lines > 0 || !self.live_output.is_empty()
     }
 
     #[must_use]
@@ -189,6 +237,13 @@ impl ToolCallComponent {
             }
             ToolStatusKind::Pending | ToolStatusKind::Running => Finalization::Live,
         }
+    }
+
+    #[must_use]
+    pub fn has_visible_animation(&self) -> bool {
+        is_pending_or_running(self.state.status)
+            && is_file_write_tool(&self.state.name)
+            && self.streaming_started_at.is_some()
     }
 }
 
@@ -274,7 +329,6 @@ impl ToolCallComponent {
         }
         if self.state.status == ToolStatusKind::Running {
             let live_style = Style::default().fg(theme.text_muted);
-            rows.extend(wrap_live_rows(&self.progress_lines, width, live_style));
             if self.dropped_live_output_lines > 0 {
                 rows.push(Line::styled(
                     format!("  ... ({} earlier lines)", self.dropped_live_output_lines),

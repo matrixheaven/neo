@@ -18,6 +18,7 @@ pub(super) fn render_mcp_startup_status(
         McpStartupPhase::Connecting => {
             format!("{} {}", spinner(activity_frame), data.message())
         }
+        McpStartupPhase::Failed { .. } => format!("✗ {}", data.message()),
         _ => data.message(),
     };
     super::styled_wrap(&text, width, style)

@@ -26,7 +26,7 @@ fn strip_ansi(text: &str) -> String {
 }
 
 #[test]
-fn transcript_render_frame_preserves_full_history_for_terminal_scrollback() {
+fn canonical_snapshot_retains_full_history_after_terminal_commit() {
     let mut pane = TranscriptPane::new(80, 6);
     pane.set_live_chrome_height(0);
     let status_lines = (0..12)
@@ -35,33 +35,33 @@ fn transcript_render_frame_preserves_full_history_for_terminal_scrollback() {
         .join("\n");
     pane.push_status(status_lines);
 
-    let bottom = pane
-        .render_frame(80, 6)
-        .expect("initial render should be dirty")
-        .join("\n");
-    let bottom_plain = strip_ansi(&bottom);
-    assert!(bottom_plain.contains("status line 00"));
-    assert!(bottom_plain.contains("status line 11"));
+    let update = pane.render_terminal_update(80, 6);
+    pane.acknowledge_history(&update.history);
 
-    pane.scroll_transcript_up(4);
-    let scrolled = pane
-        .render_frame(80, 6)
-        .expect("scrolling should dirty the pane")
-        .join("\n");
-    let scrolled_plain = strip_ansi(&scrolled);
-    assert!(scrolled_plain.contains("status line 00"));
-    assert!(scrolled_plain.contains("status line 04"));
-    assert!(scrolled_plain.contains("status line 07"));
-    assert!(scrolled_plain.contains("status line 11"));
+    let canonical = pane.frame_ansi_lines().join("\n");
+    let canonical = strip_ansi(&canonical);
+    assert!(canonical.contains("status line 00"));
+    assert!(canonical.contains("status line 11"));
+}
 
-    pane.push_status("status line 12");
-    let grown = pane
-        .render_frame(80, 6)
-        .expect("new status should dirty the pane")
+#[test]
+fn terminal_update_does_not_replay_committed_history() {
+    let mut pane = TranscriptPane::new(80, 6);
+    pane.set_live_chrome_height(0);
+    pane.push_status("committed status");
+
+    let first = pane.render_terminal_update(80, 6);
+    let first_history = first
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
         .join("\n");
-    let grown_plain = strip_ansi(&grown);
-    assert!(grown_plain.contains("status line 00"));
-    assert!(grown_plain.contains("status line 04"));
-    assert!(grown_plain.contains("status line 07"));
-    assert!(grown_plain.contains("status line 12"));
+    assert!(strip_ansi(&first_history).contains("committed status"));
+
+    pane.acknowledge_history(&first.history);
+    let second = pane.render_terminal_update(80, 6);
+    assert!(second.history.is_empty());
+    assert!(!strip_ansi(&second.live.join("\n")).contains("committed status"));
 }

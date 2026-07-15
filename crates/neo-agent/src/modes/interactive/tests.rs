@@ -14,6 +14,7 @@ use neo_agent_core::{
 };
 use neo_tui::{
     input::KeybindingAction,
+    screen_output::InlineTerminal,
     shell::{ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
     transcript::TranscriptEntry,
 };
@@ -512,6 +513,27 @@ fn refresh_git_status_now_clears_badge_when_git_unavailable() {
     assert_eq!(controller.chrome().git_status_label(), None);
 }
 
+#[test]
+fn unchanged_git_status_refresh_does_not_report_visible_change() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_git_status_provider(Arc::new(|_| Some("main [+1 -1]".into())));
+    controller
+        .tui
+        .chrome_mut()
+        .set_git_status_label(Some("main [+1 -1]".into()));
+
+    assert!(!controller.refresh_git_status_now());
+
+    controller.set_git_status_provider(Arc::new(|_| Some("main [+2 -1]".into())));
+    assert!(controller.refresh_git_status_now());
+}
+
 fn test_session_summary(
     id: impl Into<String>,
     title: impl Into<String>,
@@ -982,6 +1004,300 @@ async fn image_prompt_submit_renders_user_transcript_with_attachment() {
 }
 
 #[tokio::test]
+async fn idle_terminal_polling_does_not_render_repeated_frames() {
+    struct IdleThenInterruptEvents {
+        remaining_idle_polls: usize,
+    }
+
+    impl TerminalEvents for IdleThenInterruptEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            Ok(InputEvent::Interrupt)
+        }
+
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+            if self.remaining_idle_polls == 0 {
+                return Ok(Some(InputEvent::Interrupt));
+            }
+
+            self.remaining_idle_polls -= 1;
+            std::thread::sleep(timeout);
+            Ok(None)
+        }
+    }
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    assert!(
+        !controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("first interrupt requests confirmation")
+    );
+
+    let mut render_count = 0;
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui, _| {
+                let _ = tui.render_frame(80, 24);
+                render_count += 1;
+                Ok(None)
+            },
+            || Ok(()),
+            IdleThenInterruptEvents {
+                remaining_idle_polls: 3,
+            },
+        )
+        .await
+        .expect("event loop exits after idle polls");
+
+    assert_eq!(
+        render_count, 1,
+        "idle timeout polls must not request frames"
+    );
+}
+
+#[tokio::test]
+async fn animation_deadline_requests_one_follow_up_frame_without_input() {
+    struct IdleThenInterruptEvents {
+        remaining_idle_polls: usize,
+    }
+
+    impl TerminalEvents for IdleThenInterruptEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            Ok(InputEvent::Interrupt)
+        }
+
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+            if self.remaining_idle_polls == 0 {
+                return Ok(Some(InputEvent::Interrupt));
+            }
+            self.remaining_idle_polls -= 1;
+            std::thread::sleep(timeout);
+            Ok(None)
+        }
+    }
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .tui
+        .chrome_mut()
+        .set_custom_working_label(Some("testing animation".to_owned()));
+    assert!(
+        !controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("first interrupt requests confirmation")
+    );
+
+    let mut render_count = 0;
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui, animation_due| {
+                render_count += 1;
+                if animation_due {
+                    tui.advance_animation_at(Instant::now());
+                }
+                let deadline = tui
+                    .chrome()
+                    .working_label()
+                    .map(|_| Instant::now() + Duration::from_millis(1));
+                Ok(deadline)
+            },
+            || Ok(()),
+            IdleThenInterruptEvents {
+                remaining_idle_polls: 1,
+            },
+        )
+        .await
+        .expect("event loop exits after deadline frame");
+
+    assert_eq!(render_count, 2, "one startup and one deadline frame");
+}
+
+#[tokio::test]
+async fn cleared_animation_deadline_does_not_render_again_while_idle() {
+    struct IdleThenInterruptEvents {
+        remaining_idle_polls: usize,
+    }
+
+    impl TerminalEvents for IdleThenInterruptEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            Ok(InputEvent::Interrupt)
+        }
+
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+            if self.remaining_idle_polls == 0 {
+                return Ok(Some(InputEvent::Interrupt));
+            }
+            self.remaining_idle_polls -= 1;
+            std::thread::sleep(timeout);
+            Ok(None)
+        }
+    }
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .tui
+        .chrome_mut()
+        .set_custom_working_label(Some("testing animation".to_owned()));
+    assert!(
+        !controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("first interrupt requests confirmation")
+    );
+
+    let mut render_count = 0;
+    let mut animation_render_count = 0;
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui, animation_due| {
+                render_count += 1;
+                if animation_due {
+                    animation_render_count += 1;
+                    tui.chrome_mut().set_custom_working_label(None);
+                    tui.advance_animation_at(Instant::now());
+                }
+                let frame = tui.render_terminal_frame_at(80, 24, Instant::now());
+                Ok(frame.next_animation_deadline)
+            },
+            || Ok(()),
+            IdleThenInterruptEvents {
+                remaining_idle_polls: 3,
+            },
+        )
+        .await
+        .expect("event loop exits after idle polls");
+
+    assert_eq!(
+        animation_render_count, 1,
+        "only one deadline frame advances animation"
+    );
+    assert!(render_count >= 2);
+}
+
+#[tokio::test]
+async fn chrome_only_btw_update_requests_a_frame() {
+    struct IdleThenInterrupt {
+        idle: bool,
+    }
+
+    impl TerminalEvents for IdleThenInterrupt {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            Ok(InputEvent::Interrupt)
+        }
+
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+            if self.idle {
+                self.idle = false;
+                std::thread::sleep(timeout);
+                Ok(None)
+            } else {
+                Ok(Some(InputEvent::Interrupt))
+            }
+        }
+    }
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.tui.chrome_mut().set_btw_panel_state(Some(
+        neo_tui::widgets::btw_panel::BtwPanelState::new(
+            neo_tui::widgets::btw_panel::BtwSidecar::new("sidecar-1"),
+        ),
+    ));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    sender
+        .send(crate::modes::btw::BtwEvent::Started {
+            sidecar_id: "sidecar-1".to_owned(),
+            prompt: "question".to_owned(),
+        })
+        .expect("send sidecar event");
+    controller.btw_receiver = Some(receiver);
+    assert!(
+        !controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("first interrupt requests confirmation")
+    );
+
+    let mut render_count = 0;
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui, _| {
+                let _ = tui.render_terminal_frame_at(80, 24, Instant::now());
+                render_count += 1;
+                Ok(None)
+            },
+            || Ok(()),
+            IdleThenInterrupt { idle: true },
+        )
+        .await
+        .expect("event loop exits");
+
+    assert_eq!(render_count, 2, "BTW event must request one frame");
+}
+
+#[tokio::test]
+async fn empty_async_polls_report_no_visible_change() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    assert!(!controller.poll_pending_catalog_fetch().await);
+    assert!(!controller.poll_pending_custom_endpoint_fetch().await);
+    assert!(!controller.poll_pending_custom_endpoint_test().await);
+    assert!(!controller.poll_pending_mcp_probe().await);
+}
+
+#[test]
+fn blocking_dialog_events_request_an_immediate_frame() {
+    let question = AgentEvent::QuestionRequested {
+        turn: 1,
+        id: "question-1".to_owned(),
+        questions: Vec::new(),
+    };
+    let text = AgentEvent::TextDelta {
+        turn: 1,
+        text: "delta".to_owned(),
+    };
+
+    assert_eq!(
+        InteractiveController::frame_request_for_agent_event(&question),
+        FrameRequest::Immediate
+    );
+    assert_eq!(
+        InteractiveController::frame_request_for_agent_event(&text),
+        FrameRequest::Coalesced
+    );
+}
+
+#[tokio::test]
 async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
     struct FakeEvents {
         events: std::vec::IntoIter<InputEvent>,
@@ -1024,9 +1340,9 @@ async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
 
     controller
         .run_terminal_loop_with_suspend(
-            |tui| {
+            |tui, _| {
                 rendered.push(render_tui_snapshot(tui));
-                Ok(())
+                Ok(None)
             },
             || Ok(()),
             FakeEvents {
@@ -1137,9 +1453,9 @@ async fn event_loop_inserts_paste_newlines_without_submitting_until_enter() {
 
     controller
         .run_terminal_loop_with_suspend(
-            |tui| {
+            |tui, _| {
                 rendered.push(render_tui_snapshot(tui));
-                Ok(())
+                Ok(None)
             },
             || Ok(()),
             FakeEvents {
@@ -1189,9 +1505,9 @@ async fn event_loop_renders_after_terminal_resize_without_submitting_prompt() {
 
     controller
         .run_terminal_loop_with_suspend(
-            |tui| {
+            |tui, _| {
                 rendered.push(render_tui_snapshot(tui));
-                Ok(())
+                Ok(None)
             },
             || Ok(()),
             FakeEvents {
@@ -1693,6 +2009,110 @@ async fn event_loop_ctrl_d_deletes_forward_until_prompt_is_empty_then_confirms_e
         &controller,
         "Press Ctrl-D again to exit"
     ));
+}
+
+#[tokio::test]
+async fn event_loop_ctrl_d_cancels_active_shell_without_starting_queued_commands() {
+    struct ScriptedEvents(VecDeque<InputEvent>);
+
+    impl TerminalEvents for ScriptedEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.0
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+        }
+    }
+
+    let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let observed_commands = Arc::clone(&commands);
+    let cancel_token = Arc::new(std::sync::Mutex::new(None::<CancellationToken>));
+    let observed_cancel_token = Arc::clone(&cancel_token);
+    let cancellation_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let driver_cancellation_observed = Arc::clone(&cancellation_observed);
+    let driver_started = Arc::new(tokio::sync::Notify::new());
+    let observed_driver_started = Arc::clone(&driver_started);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_shell_driver(Arc::new(move |request| {
+        let observed_commands = Arc::clone(&observed_commands);
+        let observed_cancel_token = Arc::clone(&observed_cancel_token);
+        let driver_cancellation_observed = Arc::clone(&driver_cancellation_observed);
+        let observed_driver_started = Arc::clone(&observed_driver_started);
+        Box::pin(async move {
+            observed_commands
+                .lock()
+                .expect("command lock")
+                .push(request.command);
+            *observed_cancel_token.lock().expect("cancel token lock") =
+                Some(request.cancel_token.clone());
+            observed_driver_started.notify_one();
+            request.cancel_token.cancelled().await;
+            driver_cancellation_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut result = completed_shell_result("");
+            result.exit_code = None;
+            result.outcome = neo_agent_core::ShellCommandOutcome::Cancelled;
+            Ok(result)
+        })
+    }));
+
+    controller.type_text("!");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("enter shell mode");
+    controller.type_text("one");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("start first shell command");
+    controller.type_text("two");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("queue second shell command");
+    tokio::time::timeout(Duration::from_secs(1), driver_started.notified())
+        .await
+        .expect("shell driver starts");
+
+    controller
+        .run_terminal_loop_with_suspend(
+            |_, _| Ok(None),
+            || Ok(()),
+            ScriptedEvents(VecDeque::from([
+                InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")),
+                InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")),
+            ])),
+        )
+        .await
+        .expect("event loop exits");
+
+    assert!(
+        cancel_token
+            .lock()
+            .expect("cancel token lock")
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled),
+        "terminal exit must cancel the active shell"
+    );
+    assert!(cancellation_observed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(commands.lock().expect("command lock").as_slice(), ["one"]);
+    assert!(controller.chrome().pending_input().is_empty());
+    assert!(controller.active_shell_command.is_none());
+    assert!(!controller.chrome().shell_running());
+    assert!(transcript_entries(&controller).iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::ShellRun { component }
+                if component.command() == "one"
+                    && component.finalization()
+                        == neo_tui::primitive::Finalization::Finalized
+        )
+    }));
 }
 
 #[tokio::test]
@@ -5845,57 +6265,16 @@ fn replay_session_into_transcript_uses_persisted_skill_invocation_outcome() {
 }
 
 #[test]
-fn replay_session_into_transcript_suppresses_delegate_tool_when_delegate_card_replays() {
-    let mut transcript = TranscriptPane::new(100, 16);
-    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
-        .start_foreground_delegate_for_test("audit replay duplication");
-    let agent_id = snapshot.id.as_str().to_owned();
-    let loaded = LoadedSessionTranscript::new(
-        "alpha",
-        Vec::new(),
-        [
-            AgentMessage::assistant(
-                [Content::text("delegating")],
-                [neo_agent_core::AgentToolCall {
-                    id: "delegate-tool-1".into(),
-                    name: "Delegate".into(),
-                    raw_arguments: r#"{"task":"audit replay duplication"}"#.into(),
-                }],
-                StopReason::ToolUse,
-            ),
-            AgentMessage::tool_result(
-                "delegate-tool-1",
-                "Delegate",
-                [Content::text(format!("agent_id: {agent_id}"))],
-                false,
-            ),
-        ],
-    )
-    .with_events([
+fn replay_session_into_transcript_restores_persisted_shell_command() {
+    let mut transcript = TranscriptPane::new(80, 12);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
         AgentEvent::MessageAppended {
-            message: AgentMessage::assistant(
-                [Content::text("delegating")],
-                [neo_agent_core::AgentToolCall {
-                    id: "delegate-tool-1".into(),
-                    name: "Delegate".into(),
-                    raw_arguments: r#"{"task":"audit replay duplication"}"#.into(),
-                }],
-                StopReason::ToolUse,
-            ),
-        },
-        AgentEvent::DelegateStarted {
-            turn: 7,
-            agent: snapshot.clone(),
-        },
-        AgentEvent::DelegateFinished {
-            turn: 7,
-            agent: snapshot,
-        },
-        AgentEvent::MessageAppended {
-            message: AgentMessage::tool_result(
-                "delegate-tool-1",
-                "Delegate",
-                [Content::text(format!("agent_id: {agent_id}"))],
+            message: AgentMessage::shell_command(
+                "printf shell-resume",
+                "shell-resume-output",
+                "",
+                Some(0),
+                neo_agent_core::ShellCommandOutcome::Completed,
                 false,
             ),
         },
@@ -5903,210 +6282,319 @@ fn replay_session_into_transcript_suppresses_delegate_tool_when_delegate_card_re
 
     replay_session_into_transcript(&mut transcript, &loaded);
     let rendered = transcript
-        .render_frame(100, 16)
-        .expect("render frame")
+        .render_frame(80, 12)
+        .expect("render replayed shell command")
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered.contains("· Delegate"), "{rendered}");
-    assert!(rendered.contains("audit replay duplication"), "{rendered}");
-    assert!(
-        !rendered.contains("Used Delegate"),
-        "Delegate tool run should be represented by the delegate card only: {rendered}"
-    );
-    assert!(rendered.contains("delegating"), "{rendered}");
+    assert!(rendered.contains("printf shell-resume"), "{rendered}");
+    assert!(rendered.contains("shell-resume-output"), "{rendered}");
 }
 
 #[test]
-fn replay_session_into_transcript_keeps_delegate_card_in_event_order() {
-    let mut transcript = TranscriptPane::new(120, 30);
-    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
-        .start_foreground_delegate_for_test("audit after read");
-    let agent_id = snapshot.id.as_str().to_owned();
-    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::<AgentMessage>::new())
-        .with_events([
-            AgentEvent::MessageAppended {
-                message: AgentMessage::assistant(
-                    [Content::text("inspect then delegate")],
-                    [
-                        neo_agent_core::AgentToolCall {
-                            id: "read-tool-1".into(),
-                            name: "Read".into(),
-                            raw_arguments: r#"{"path":"README.md"}"#.into(),
-                        },
-                        neo_agent_core::AgentToolCall {
-                            id: "delegate-tool-1".into(),
-                            name: "Delegate".into(),
-                            raw_arguments: r#"{"task":"audit after read"}"#.into(),
-                        },
-                    ],
-                    StopReason::ToolUse,
-                ),
+fn replay_session_into_transcript_restores_aggregate_messages_when_no_detail_events_exist() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("aggregate-user"),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("aggregate-assistant")],
+                [neo_agent_core::AgentToolCall {
+                    id: "aggregate-tool".into(),
+                    name: "Read".into(),
+                    raw_arguments: r#"{"path":"aggregate.txt"}"#.into(),
+                }],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "aggregate-tool",
+                "Read",
+                [Content::text("aggregate-result")],
+                false,
+            ),
+        },
+        AgentEvent::TokenUsage {
+            turn: 1,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                input_cache_read_tokens: 0,
+                input_cache_write_tokens: 0,
             },
-            AgentEvent::MessageAppended {
-                message: AgentMessage::tool_result(
-                    "read-tool-1",
-                    "Read",
-                    [Content::text("README contents")],
-                    false,
-                ),
-            },
-            AgentEvent::DelegateStarted {
-                turn: 7,
-                agent: snapshot.clone(),
-            },
-            AgentEvent::DelegateFinished {
-                turn: 7,
-                agent: snapshot,
-            },
-            AgentEvent::MessageAppended {
-                message: AgentMessage::tool_result(
-                    "delegate-tool-1",
-                    "Delegate",
-                    [Content::text(format!("agent_id: {agent_id}"))],
-                    false,
-                ),
-            },
-        ]);
+        },
+    ]);
 
     replay_session_into_transcript(&mut transcript, &loaded);
     let rendered = transcript
-        .render_frame(120, 30)
-        .expect("render frame")
+        .render_frame(100, 20)
+        .expect("render aggregate-only replay")
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let read_index = rendered
-        .find("README contents")
-        .expect("read result visible");
-    let delegate_index = rendered.find("· Delegate").expect("delegate card visible");
-    assert!(
-        read_index < delegate_index,
-        "delegate card should replay at its original event position: {rendered}"
-    );
-    assert!(rendered.contains("Used Read (README.md)"), "{rendered}");
-    assert!(
-        !rendered.contains("Used Delegate"),
-        "restored delegate should be represented by the delegate card only: {rendered}"
-    );
+    assert!(rendered.contains("aggregate-user"), "{rendered}");
+    assert!(rendered.contains("aggregate-assistant"), "{rendered}");
+    assert!(rendered.contains("aggregate.txt"), "{rendered}");
+    assert!(rendered.contains("aggregate-result"), "{rendered}");
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
-fn replay_session_into_transcript_suppresses_only_matching_successful_delegate_tool() {
-    let mut transcript = TranscriptPane::new(120, 20);
-    let snapshot = neo_agent_core::multi_agent::MultiAgentRuntime::new()
-        .start_foreground_delegate_for_test("successful restored delegate");
-    let agent_id = snapshot.id.as_str().to_owned();
-    let loaded = LoadedSessionTranscript::new(
-        "alpha",
-        Vec::new(),
-        [
-            AgentMessage::assistant(
-                [Content::text("trying two delegates")],
-                [
-                    neo_agent_core::AgentToolCall {
-                        id: "delegate-failed".into(),
-                        name: "Delegate".into(),
-                        raw_arguments: r#"{"task":""}"#.into(),
-                    },
-                    neo_agent_core::AgentToolCall {
-                        id: "delegate-success".into(),
-                        name: "Delegate".into(),
-                        raw_arguments: r#"{"task":"successful restored delegate"}"#.into(),
-                    },
-                ],
-                StopReason::ToolUse,
-            ),
-            AgentMessage::tool_result(
-                "delegate-failed",
-                "Delegate",
-                [Content::text(
-                    "invalid input for Delegate: task must not be empty",
-                )],
-                true,
-            ),
-            AgentMessage::tool_result(
-                "delegate-success",
-                "Delegate",
-                [Content::text(format!("agent_id: {agent_id}"))],
-                false,
-            ),
-        ],
-    )
-    .with_events([
+fn replay_session_into_transcript_does_not_duplicate_text_delta_aggregate_without_finish() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::TextDelta {
+            turn: 1,
+            text: "truncated-assistant".to_owned(),
+        },
         AgentEvent::MessageAppended {
             message: AgentMessage::assistant(
-                [Content::text("trying two delegates")],
-                [
-                    neo_agent_core::AgentToolCall {
-                        id: "delegate-failed".into(),
-                        name: "Delegate".into(),
-                        raw_arguments: r#"{"task":""}"#.into(),
-                    },
-                    neo_agent_core::AgentToolCall {
-                        id: "delegate-success".into(),
-                        name: "Delegate".into(),
-                        raw_arguments: r#"{"task":"successful restored delegate"}"#.into(),
-                    },
-                ],
-                StopReason::ToolUse,
-            ),
-        },
-        AgentEvent::MessageAppended {
-            message: AgentMessage::tool_result(
-                "delegate-failed",
-                "Delegate",
-                [Content::text(
-                    "invalid input for Delegate: task must not be empty",
-                )],
-                true,
-            ),
-        },
-        AgentEvent::DelegateStarted {
-            turn: 7,
-            agent: snapshot.clone(),
-        },
-        AgentEvent::DelegateFinished {
-            turn: 7,
-            agent: snapshot,
-        },
-        AgentEvent::MessageAppended {
-            message: AgentMessage::tool_result(
-                "delegate-success",
-                "Delegate",
-                [Content::text(format!("agent_id: {agent_id}"))],
-                false,
+                [Content::text("truncated-assistant")],
+                [],
+                StopReason::EndTurn,
             ),
         },
     ]);
 
     replay_session_into_transcript(&mut transcript, &loaded);
     let rendered = transcript
-        .render_frame(120, 20)
-        .expect("render frame")
+        .render_frame(100, 20)
+        .expect("render truncated replay")
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered.contains("· Delegate"), "{rendered}");
-    assert!(
-        rendered.contains("successful restored delegate"),
+    assert_eq!(
+        rendered.matches("truncated-assistant").count(),
+        1,
         "{rendered}"
     );
-    assert!(rendered.contains("Failed Delegate"), "{rendered}");
+}
+
+#[test]
+fn replay_session_into_transcript_consumes_assistant_coverage_per_occurrence() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("same-assistant")],
+                [],
+                StopReason::EndTurn,
+            ),
+        },
+        AgentEvent::TextDelta {
+            turn: 2,
+            text: "same-assistant".to_owned(),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("same-assistant")],
+                [],
+                StopReason::EndTurn,
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(100, 20)
+        .expect("render repeated aggregate replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(rendered.matches("same-assistant").count(), 2, "{rendered}");
+}
+
+#[test]
+fn replay_session_into_transcript_keeps_uncovered_image_without_repeating_text() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::MessageStarted {
+            turn: 1,
+            id: "assistant-image".to_owned(),
+        },
+        AgentEvent::TextDelta {
+            turn: 1,
+            text: "image-caption".to_owned(),
+        },
+        AgentEvent::MessageFinished {
+            turn: 1,
+            id: "assistant-image".to_owned(),
+            stop_reason: StopReason::EndTurn,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [
+                    Content::text("image-caption"),
+                    Content::Image {
+                        mime_type: "image/png".into(),
+                        data: neo_agent_core::ImageRef::Base64("aGVsbG8=".into()),
+                    },
+                ],
+                [],
+                StopReason::EndTurn,
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let entries = transcript.transcript().entries();
+    let assistant_text_count = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::AssistantMessage { content } if content == "image-caption"
+            )
+        })
+        .count();
+    let image_count = entries
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::Image { .. }))
+        .count();
+
+    assert_eq!(assistant_text_count, 1, "{entries:?}");
+    assert_eq!(image_count, 1, "{entries:?}");
+}
+
+#[test]
+fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assistant() {
+    let tool_call = neo_agent_core::AgentToolCall {
+        id: "ordered-tool".into(),
+        name: "Read".into(),
+        raw_arguments: r#"{"path":"ordered.txt"}"#.into(),
+    };
+    let mut transcript = TranscriptPane::new(110, 24);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::MessageStarted {
+            turn: 1,
+            id: "assistant-before".to_owned(),
+        },
+        AgentEvent::TextDelta {
+            turn: 1,
+            text: "before-tool".to_owned(),
+        },
+        AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: "ordered-tool".to_owned(),
+            name: "Read".to_owned(),
+        },
+        AgentEvent::ToolCallFinished {
+            turn: 1,
+            tool_call: tool_call.clone(),
+        },
+        AgentEvent::MessageFinished {
+            turn: 1,
+            id: "assistant-before".to_owned(),
+            stop_reason: StopReason::ToolUse,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("before-tool")],
+                [tool_call.clone()],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "ordered-tool".to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({"path": "ordered.txt"}),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "ordered-tool".to_owned(),
+            name: "Read".to_owned(),
+            result: neo_agent_core::ToolResult::ok("ordered-result"),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "ordered-tool",
+                "Read",
+                [Content::text("ordered-result")],
+                false,
+            ),
+        },
+        AgentEvent::MessageStarted {
+            turn: 2,
+            id: "assistant-after".to_owned(),
+        },
+        AgentEvent::TextDelta {
+            turn: 2,
+            text: "after-tool".to_owned(),
+        },
+        AgentEvent::MessageFinished {
+            turn: 2,
+            id: "assistant-after".to_owned(),
+            stop_reason: StopReason::EndTurn,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("after-tool")],
+                [],
+                StopReason::EndTurn,
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(110, 24)
+        .expect("render ordered replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(rendered.matches("before-tool").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches("after-tool").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches("ordered-result").count(), 1, "{rendered}");
+}
+
+#[test]
+fn replay_session_into_transcript_discards_historical_pending_approvals() {
+    let mut transcript = TranscriptPane::new(80, 12);
+    let approval = |id: &str| AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: id.to_owned(),
+        operation: neo_agent_core::PermissionOperation::Tool,
+        subject: "Write".to_owned(),
+        arguments: serde_json::json!({"path": format!("{id}.txt")}),
+        session_scope: None,
+        prefix_rule: None,
+        suggestions: Vec::new(),
+    };
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
+        .with_events([approval("historical-1"), approval("historical-2")]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
     assert!(
-        rendered.contains("invalid input for Delegate: task must not be empty"),
-        "{rendered}"
+        transcript
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::ApprovalPrompt(_))),
+        "historical interaction prompts must not be replayed"
     );
+
+    transcript.apply_agent_event(approval("current"));
+    transcript.resolve_approval("current", "Approved");
     assert!(
-        !rendered.contains("Used Delegate"),
-        "successful Delegate tool run should be represented by the delegate card only: {rendered}"
+        transcript
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.resolved.is_none())),
+        "resolving a current approval must not resurrect a historical request"
     );
 }
 
@@ -6234,6 +6722,200 @@ async fn load_session_transcript_preserves_delegate_events_for_replay() {
             .iter()
             .any(|event| matches!(event, AgentEvent::DelegateStarted { .. })),
         "delegate events should be preserved for transcript replay"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn load_session_replay_preserves_interleaved_visible_entry_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
+    let running = runtime.start_foreground_delegate_for_test("restored delegate card");
+    let delegate_id = running.id.clone();
+    let completed = runtime.complete_delegate_for_test(&delegate_id, "done");
+    let tool_calls = vec![
+        neo_agent_core::AgentToolCall {
+            id: "first-tool".into(),
+            name: "Read".into(),
+            raw_arguments: r#"{"path":"first-order.txt"}"#.into(),
+        },
+        neo_agent_core::AgentToolCall {
+            id: "failed-delegate".into(),
+            name: "Delegate".into(),
+            raw_arguments: r#"{"task":"failed delegate marker"}"#.into(),
+        },
+        neo_agent_core::AgentToolCall {
+            id: "later-tool".into(),
+            name: "Bash".into(),
+            raw_arguments: r#"{"command":"later-order-command"}"#.into(),
+        },
+    ];
+    let assistant_message = AgentMessage::assistant(
+        [
+            Content::thinking("resume-thinking", None, false),
+            Content::text("resume-output"),
+            Content::text("resume-summary"),
+        ],
+        tool_calls.clone(),
+        StopReason::ToolUse,
+    );
+    let events = vec![
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("resume-user"),
+        },
+        AgentEvent::MessageStarted {
+            turn: 1,
+            id: "assistant-one".to_owned(),
+        },
+        AgentEvent::ThinkingStarted {
+            turn: 1,
+            id: "thinking-one".to_owned(),
+        },
+        AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: "resume-thinking".to_owned(),
+        },
+        AgentEvent::ThinkingFinished {
+            turn: 1,
+            signature: None,
+            redacted: false,
+        },
+        AgentEvent::TextDelta {
+            turn: 1,
+            text: "resume-output".to_owned(),
+        },
+        AgentEvent::MessageFinished {
+            turn: 1,
+            id: "assistant-one".to_owned(),
+            stop_reason: StopReason::EndTurn,
+        },
+        AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: running,
+        },
+        AgentEvent::DelegateFinished {
+            turn: 1,
+            agent: completed,
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 2,
+            id: "first-tool".to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({ "path": "first-order.txt" }),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 2,
+            id: "first-tool".to_owned(),
+            name: "Read".to_owned(),
+            result: neo_agent_core::ToolResult::ok("first result"),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 2,
+            id: "failed-delegate".to_owned(),
+            name: "Delegate".to_owned(),
+            arguments: serde_json::json!({ "task": "failed delegate marker" }),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 2,
+            id: "failed-delegate".to_owned(),
+            name: "Delegate".to_owned(),
+            result: neo_agent_core::ToolResult::error("failed delegate marker"),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 2,
+            id: "later-tool".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({ "command": "later-order-command" }),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 2,
+            id: "later-tool".to_owned(),
+            name: "Bash".to_owned(),
+            result: neo_agent_core::ToolResult::ok("later result"),
+        },
+        AgentEvent::TextDelta {
+            turn: 2,
+            text: "resume-summary".to_owned(),
+        },
+        AgentEvent::TurnFinished {
+            turn: 2,
+            stop_reason: StopReason::EndTurn,
+        },
+        AgentEvent::MessageAppended {
+            message: assistant_message,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "first-tool",
+                "Read",
+                [Content::text("first result")],
+                false,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "failed-delegate",
+                "Delegate",
+                [Content::text("failed delegate marker")],
+                true,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "later-tool",
+                "Bash",
+                [Content::text("later result")],
+                false,
+            ),
+        },
+    ];
+    for event in &events {
+        writer.append(event).await.expect("append replay event");
+    }
+    writer.flush().await.expect("flush session");
+
+    let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect("load transcript");
+    let mut transcript = TranscriptPane::new(140, 200);
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(140, 200)
+        .expect("render replayed transcript")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let markers = [
+        "resume-user",
+        "resume-thinking",
+        "resume-output",
+        "restored delegate card",
+        "first-order.txt",
+        "failed delegate marker",
+        "later-order-command",
+        "resume-summary",
+    ];
+    let positions = markers
+        .iter()
+        .map(|marker| {
+            rendered
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker:?}: {rendered}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "resume replay order mismatch: {rendered}"
     );
 }
 
@@ -8456,6 +9138,100 @@ async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("Started fresh session"));
     assert!(!snapshot.contains("permission refactor"));
+}
+
+#[tokio::test]
+async fn slash_clear_does_not_request_terminal_scrollback_purge() {
+    let (mut controller, _requests) = controller_with_session_for_new_tests();
+    let mut terminal = InlineTerminal::for_test(80, 24);
+
+    let before_clear = controller.tui.render_terminal_frame(80, 24);
+    terminal
+        .render_to(&mut Vec::new(), &before_clear)
+        .expect("render initial terminal frame");
+    controller.tui.acknowledge_history(&before_clear);
+
+    controller.type_text("/clear");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("/clear submits");
+
+    let after_clear = controller.tui.render_terminal_frame(80, 24);
+    let mut output = Vec::new();
+    terminal
+        .render_to(&mut output, &after_clear)
+        .expect("render cleared terminal frame");
+    let output = String::from_utf8(output).expect("terminal output is UTF-8");
+
+    assert!(!output.contains("\x1b[2J"));
+    assert!(!output.contains("\x1b[3J"));
+}
+
+#[test]
+fn terminal_exit_commits_interrupted_live_entries_before_leave() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.apply_turn_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "write-1".to_owned(),
+        name: "Write".to_owned(),
+        arguments: serde_json::json!({"path": "notes.txt", "content": "draft"}),
+    });
+    controller.tui.transcript_mut().start_assistant_message();
+    controller
+        .tui
+        .transcript_mut()
+        .append_assistant_delta("unfinished assistant text");
+    let mut terminal = InlineTerminal::for_test(80, 24);
+    let initial = controller.tui.render_terminal_frame(80, 24);
+    terminal
+        .render_to(&mut Vec::new(), &initial)
+        .expect("render initial live frame");
+    controller.tui.acknowledge_history(&initial);
+
+    let mut final_frame = None;
+    controller
+        .finalize_and_render_terminal_exit(|tui| {
+            final_frame = Some(tui.render_terminal_frame(80, 24));
+            Ok(())
+        })
+        .expect("finalize and render terminal exit");
+    let final_frame = final_frame.expect("final exit frame");
+    let history = final_frame
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let live = final_frame
+        .live
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        history.contains("unfinished assistant text"),
+        "history:\n{history}\nlive:\n{live}"
+    );
+    assert!(history.contains("Write"), "history:\n{history}");
+    assert!(!live.contains("unfinished assistant text"));
+    let mut output = Vec::new();
+    terminal
+        .render_to(&mut output, &final_frame)
+        .expect("commit interrupted frame");
+    controller.tui.acknowledge_history(&final_frame);
+    terminal.leave(&mut output).expect("leave terminal");
+    let output = String::from_utf8(output).expect("terminal output is UTF-8");
+    assert!(output.contains("unfinished assistant text"));
+    assert!(!output.contains("\x1b[3J"));
 }
 
 #[tokio::test]
@@ -12249,7 +13025,7 @@ async fn task_browser_periodic_refresh_updates_open_browser() {
             .and_then(|instant| instant.checked_sub(Duration::from_millis(1)))
             .expect("now is far enough in the past"),
     );
-    controller.maybe_refresh_task_browser().await;
+    assert!(controller.maybe_refresh_task_browser().await);
 
     let browser = controller
         .chrome()
@@ -12257,6 +13033,17 @@ async fn task_browser_periodic_refresh_updates_open_browser() {
         .expect("browser remains open");
     assert_eq!(browser.snapshot().items().len(), 2);
     assert!(controller.last_task_browser_refresh.is_some());
+
+    controller.last_task_browser_refresh = Some(
+        Instant::now()
+            .checked_sub(TASK_BROWSER_REFRESH_INTERVAL)
+            .and_then(|instant| instant.checked_sub(Duration::from_millis(1)))
+            .expect("now is far enough in the past"),
+    );
+    assert!(
+        !controller.maybe_refresh_task_browser().await,
+        "an unchanged refresh must not request a frame"
+    );
 }
 
 #[tokio::test]
@@ -12609,6 +13396,86 @@ async fn startup_trust_dialog_opens_when_unknown_and_trusts_workspace() {
 }
 
 #[tokio::test]
+async fn startup_trust_idle_poll_does_not_render_another_frame() {
+    struct IdleThenConfirm {
+        idle: bool,
+    }
+
+    impl TerminalEvents for IdleThenConfirm {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            Ok(InputEvent::Action(KeybindingAction::SelectConfirm))
+        }
+
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+            if self.idle {
+                self.idle = false;
+                Ok(None)
+            } else {
+                Ok(Some(InputEvent::Action(KeybindingAction::SelectConfirm)))
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("project");
+    fs::create_dir_all(&project_dir).expect("create project");
+    fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+    let inputs = crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+    config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+    config.project_trusted = false;
+    controller.local_config = Some(config);
+    controller.set_trust_store(crate::trust::ProjectTrustStore::new(
+        temp.path().join("trust.json"),
+    ));
+    let data = crate::trust::trust_dialog_data_from_inputs(
+        crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
+    );
+    let mut render_count = 0;
+
+    controller
+        .resolve_trust_dialog_at_startup(data, IdleThenConfirm { idle: true }, |_| {
+            render_count += 1;
+            Ok(())
+        })
+        .await
+        .expect("resolve trust dialog");
+
+    assert_eq!(render_count, 2, "idle timeout must not render");
+}
+
+#[tokio::test]
+async fn startup_mcp_without_visible_status_does_not_render() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(test_config(temp.path(), temp.path().join(".neo/sessions")));
+    let mut render_count = 0;
+
+    controller
+        .connect_mcp_at_startup(|_, _| {
+            render_count += 1;
+            Ok(None)
+        })
+        .await
+        .expect("MCP startup succeeds");
+
+    assert_eq!(render_count, 0, "unchanged startup poll must not render");
+}
+
+#[tokio::test]
 async fn startup_trust_and_main_loop_share_one_terminal_event_source() {
     struct CountingTerminalEvents {
         events: VecDeque<InputEvent>,
@@ -12664,7 +13531,7 @@ async fn startup_trust_and_main_loop_share_one_terminal_event_source() {
                 polls: Rc::clone(&polls_for_factory),
             }
         },
-        |_| Ok(()),
+        |_, _| Ok(None),
         || Ok(()),
     )
     .await
@@ -12860,6 +13727,34 @@ fn chat_message_text(message: &neo_ai::ChatMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[test]
+fn draining_btw_sidecar_reports_only_real_chrome_updates() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.tui.chrome_mut().set_btw_panel_state(Some(
+        neo_tui::widgets::btw_panel::BtwPanelState::new(
+            neo_tui::widgets::btw_panel::BtwSidecar::new("sidecar-1"),
+        ),
+    ));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    controller.btw_receiver = Some(receiver);
+
+    assert!(!controller.drain_btw_sidecar());
+    sender
+        .send(crate::modes::btw::BtwEvent::Started {
+            sidecar_id: "sidecar-1".to_owned(),
+            prompt: "question".to_owned(),
+        })
+        .expect("send sidecar event");
+    assert!(controller.drain_btw_sidecar());
+    assert!(!controller.drain_btw_sidecar());
 }
 
 #[tokio::test]

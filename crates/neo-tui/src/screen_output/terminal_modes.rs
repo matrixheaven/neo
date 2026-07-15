@@ -1,0 +1,234 @@
+use std::io::{Write, stdout};
+
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::{execute, queue};
+
+use crate::terminal_capabilities::TerminalCapabilities;
+
+pub(super) fn write_enter_output(
+    output: &mut dyn Write,
+    capabilities: TerminalCapabilities,
+) -> std::io::Result<()> {
+    let mut output = output;
+    if capabilities.ansi.bracketed_paste {
+        queue!(&mut output, EnableBracketedPaste)?;
+    }
+    if capabilities.ansi.kitty_keyboard {
+        queue!(
+            &mut output,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            )
+        )?;
+    }
+    output.flush()
+}
+
+pub(super) fn write_leave_output(
+    output: &mut dyn Write,
+    capabilities: TerminalCapabilities,
+) -> std::io::Result<()> {
+    let mut output = output;
+    let mut result = output.write_all(b"\x1b[?25h");
+    if capabilities.ansi.kitty_keyboard
+        && let Err(error) = execute!(&mut output, PopKeyboardEnhancementFlags)
+    {
+        result = Err(error);
+    }
+    if capabilities.ansi.bracketed_paste
+        && let Err(error) = execute!(&mut output, DisableBracketedPaste)
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
+    result
+}
+
+#[derive(Debug)]
+pub(super) struct TerminalModeGuard {
+    capabilities: TerminalCapabilities,
+    active: bool,
+    #[cfg(windows)]
+    windows_input_mode: windows_input_mode::WindowsInputModeGuard,
+}
+
+impl TerminalModeGuard {
+    pub(super) fn enter(capabilities: TerminalCapabilities) -> std::io::Result<Self> {
+        let raw_mode = RawModeGuard::enter()?;
+        #[cfg(windows)]
+        let mut windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
+        let mut output = stdout();
+        if let Err(error) = write_enter_output(&mut output, capabilities) {
+            let _ = write_leave_output(&mut output, capabilities);
+            #[cfg(windows)]
+            windows_input_mode.restore();
+            return Err(error);
+        }
+        raw_mode.disarm();
+        Ok(Self {
+            capabilities,
+            active: true,
+            #[cfg(windows)]
+            windows_input_mode,
+        })
+    }
+
+    pub(super) fn leave(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut output = stdout();
+        let _ = write_leave_output(&mut output, self.capabilities);
+        let _ = output.flush();
+        #[cfg(windows)]
+        self.windows_input_mode.restore();
+        let _ = disable_raw_mode();
+        self.active = false;
+    }
+
+    pub(super) fn resume(&mut self) -> std::io::Result<()> {
+        if self.active {
+            return Ok(());
+        }
+        let raw_mode = RawModeGuard::enter()?;
+        #[cfg(windows)]
+        {
+            self.windows_input_mode = windows_input_mode::WindowsInputModeGuard::enter()?;
+        }
+        let mut output = stdout();
+        if let Err(error) = write_enter_output(&mut output, self.capabilities) {
+            let _ = write_leave_output(&mut output, self.capabilities);
+            #[cfg(windows)]
+            self.windows_input_mode.restore();
+            return Err(error);
+        }
+        raw_mode.disarm();
+        self.active = true;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
+struct RawModeGuard {
+    active: bool,
+}
+
+impl RawModeGuard {
+    fn enter() -> std::io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self { active: true })
+    }
+
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = disable_raw_mode();
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows_input_mode {
+    use std::io;
+
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct WindowsInputModeGuard {
+        original_mode: u32,
+        changed: bool,
+    }
+
+    impl WindowsInputModeGuard {
+        fn inactive() -> Self {
+            Self {
+                original_mode: 0,
+                changed: false,
+            }
+        }
+
+        pub(super) fn enter() -> io::Result<Self> {
+            let stdin = io::stdin();
+            let Ok(mode) = winapi_util::console::mode(&stdin) else {
+                return Ok(Self::inactive());
+            };
+            let vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
+            if vt_mode == mode {
+                return Ok(Self::inactive());
+            }
+            winapi_util::console::set_mode(&stdin, vt_mode)?;
+            Ok(Self {
+                original_mode: mode,
+                changed: true,
+            })
+        }
+
+        pub(super) fn restore(&mut self) {
+            if !self.changed {
+                return;
+            }
+            let stdin = io::stdin();
+            let _ = winapi_util::console::set_mode(&stdin, self.original_mode);
+            self.changed = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::terminal_capabilities::{AnsiCapabilities, TerminalCapabilities};
+
+    use super::{write_enter_output, write_leave_output};
+
+    #[test]
+    fn normal_screen_modes_never_enable_mouse_capture_or_alternate_screen() {
+        let capabilities = TerminalCapabilities {
+            ansi: AnsiCapabilities {
+                bracketed_paste: true,
+                kitty_keyboard: true,
+                ..AnsiCapabilities::default()
+            },
+            ..TerminalCapabilities::default()
+        };
+        let mut enter = Vec::new();
+        write_enter_output(&mut enter, capabilities).expect("enter output");
+        let mut leave = Vec::new();
+        write_leave_output(&mut leave, capabilities).expect("leave output");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&enter),
+            String::from_utf8_lossy(&leave)
+        );
+
+        for forbidden in [
+            "\x1b[?1000h",
+            "\x1b[?1002h",
+            "\x1b[?1003h",
+            "\x1b[?1006h",
+            "\x1b[?1049h",
+        ] {
+            assert!(!output.contains(forbidden), "forbidden mode: {forbidden:?}");
+        }
+        assert!(String::from_utf8_lossy(&enter).contains("\x1b[?2004h"));
+        assert!(String::from_utf8_lossy(&leave).contains("\x1b[?2004l"));
+        assert!(String::from_utf8_lossy(&leave).contains("\x1b[?25h"));
+        assert!(!output.contains("\x1b[2J"));
+        assert!(!output.contains("\x1b[3J"));
+    }
+}

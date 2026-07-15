@@ -274,13 +274,13 @@ impl InteractiveController {
         });
     }
 
-    pub(super) async fn poll_pending_mcp_probe(&mut self) {
+    pub(super) async fn poll_pending_mcp_probe(&mut self) -> bool {
         let Some(pending) = self.pending_mcp_probe.take() else {
-            return;
+            return false;
         };
         if !pending.handle.is_finished() {
             self.pending_mcp_probe = Some(pending);
-            return;
+            return false;
         }
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
@@ -303,6 +303,7 @@ impl InteractiveController {
         // Refresh the MCP manager overlay to reflect the probe results.
         // Updates the existing overlay in-place rather than stacking a new one.
         self.open_mcp_manager().await;
+        true
     }
 
     async fn toggle_mcp_server_enabled(&mut self, id: &str) {

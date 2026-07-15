@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Expandable, Line, next_sequence};
+use crate::primitive::{Expandable, Finalization, Line, next_sequence};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -13,6 +13,8 @@ use crate::transcript::{
     ApprovalPromptData, InlineImageRender, McpStartupStatusData, ShellRunComponent,
     ToolCallComponent, ToolCallState, TranscriptEntry, TranscriptStore,
 };
+
+use super::presentation::{FinalizedBlock, TranscriptPresentation, TranscriptTerminalUpdate};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
@@ -116,6 +118,7 @@ pub struct TranscriptPane {
     theme: TuiTheme,
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
+    presentation: TranscriptPresentation,
     pub(super) skill_store: Option<SkillStore>,
 }
 
@@ -145,6 +148,7 @@ impl TranscriptPane {
             theme: TuiTheme::default(),
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
+            presentation: TranscriptPresentation::default(),
             skill_store: None,
         }
     }
@@ -193,10 +197,19 @@ impl TranscriptPane {
             return;
         }
         self.workspace_root = Some(path);
-        for entry in self.transcript.entries_mut() {
-            if let TranscriptEntry::ToolRun { component } = entry {
-                component.set_workspace_dir(self.workspace_root.clone().unwrap_or_default());
+        for index in 0..self.transcript.entries().len() {
+            if !matches!(
+                self.transcript.entries()[index],
+                TranscriptEntry::ToolRun { .. }
+            ) {
+                continue;
             }
+            self.transcript.mutate_entry(index, |entry| match entry {
+                TranscriptEntry::ToolRun { component } => {
+                    component.set_workspace_dir(self.workspace_root.clone().unwrap_or_default())
+                }
+                _ => false,
+            });
         }
         self.mark_dirty();
     }
@@ -313,17 +326,31 @@ impl TranscriptPane {
         });
     }
 
-    pub fn upsert_mcp_startup_status(&mut self, data: McpStartupStatusData) {
+    pub fn upsert_mcp_startup_status(&mut self, data: McpStartupStatusData) -> bool {
         let existing_index = self
             .transcript
             .entries()
             .iter()
             .position(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { data: existing } if existing.id == data.id));
         if let Some(index) = existing_index {
-            self.transcript.entries_mut()[index] = TranscriptEntry::mcp_startup_status(data);
-            self.mark_dirty();
+            if self.transcript.entry_finalization(index) == Some(Finalization::Finalized) {
+                return false;
+            }
+            let changed = self.transcript.mutate_entry(index, |entry| {
+                let next = TranscriptEntry::mcp_startup_status(data);
+                if *entry == next {
+                    return false;
+                }
+                *entry = next;
+                true
+            });
+            if changed {
+                self.mark_dirty();
+            }
+            changed
         } else {
             self.push_transcript(TranscriptEntry::mcp_startup_status(data));
+            true
         }
     }
 
@@ -597,22 +624,70 @@ impl TranscriptPane {
 
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {
         self.tool_output_expanded = expanded;
-        for entry in self.transcript.entries_mut() {
-            match entry {
-                TranscriptEntry::ToolRun { component } => component.set_expanded(expanded),
+        for index in 0..self.transcript.entries().len() {
+            let is_expandable = matches!(
+                self.transcript.entries()[index],
+                TranscriptEntry::ToolRun { .. }
+                    | TranscriptEntry::ThinkingBlock { .. }
+                    | TranscriptEntry::SkillActivation { .. }
+                    | TranscriptEntry::Delegate { .. }
+                    | TranscriptEntry::DelegateSwarm { .. }
+                    | TranscriptEntry::Workflow { .. }
+            );
+            if !is_expandable {
+                continue;
+            }
+            self.transcript.mutate_entry(index, |entry| match entry {
+                TranscriptEntry::ToolRun { component } => {
+                    if component.is_expanded() == expanded {
+                        return false;
+                    }
+                    component.set_expanded(expanded);
+                    true
+                }
                 TranscriptEntry::ThinkingBlock {
                     expanded: thinking_expanded,
                     ..
-                } => *thinking_expanded = expanded,
+                } => {
+                    if *thinking_expanded == expanded {
+                        return false;
+                    }
+                    *thinking_expanded = expanded;
+                    true
+                }
                 TranscriptEntry::SkillActivation {
                     expanded: skill_expanded,
                     ..
-                } => *skill_expanded = expanded,
-                TranscriptEntry::Delegate { component } => component.set_expanded(expanded),
-                TranscriptEntry::DelegateSwarm { component } => component.set_expanded(expanded),
-                TranscriptEntry::Workflow { component } => component.set_expanded(expanded),
-                _ => {}
-            }
+                } => {
+                    if *skill_expanded == expanded {
+                        return false;
+                    }
+                    *skill_expanded = expanded;
+                    true
+                }
+                TranscriptEntry::Delegate { component } => {
+                    if component.is_expanded() == expanded {
+                        return false;
+                    }
+                    component.set_expanded(expanded);
+                    true
+                }
+                TranscriptEntry::DelegateSwarm { component } => {
+                    if component.is_expanded() == expanded {
+                        return false;
+                    }
+                    component.set_expanded(expanded);
+                    true
+                }
+                TranscriptEntry::Workflow { component } => {
+                    if component.is_expanded() == expanded {
+                        return false;
+                    }
+                    component.set_expanded(expanded);
+                    true
+                }
+                _ => false,
+            });
         }
         self.mark_dirty();
     }
@@ -669,35 +744,22 @@ impl TranscriptPane {
         self.dirty = true;
     }
 
-    pub fn render_tick(&mut self) {
-        self.activity_frame = self.activity_frame.wrapping_add(1);
-        let now_ms = current_time_ms();
-        if self.transcript.tick_live_entries(now_ms) || self.has_streaming_thinking() {
-            self.mark_dirty();
-        }
-        let _ = self.render_frame(self.width, self.height);
-    }
-
     #[must_use]
     pub const fn is_dirty_for_test(&self) -> bool {
         self.dirty
     }
 
-    pub fn render_tick_at_ms_for_test(&mut self, now_ms: u64) {
-        self.activity_frame = self.activity_frame.wrapping_add(1);
-        if self.transcript.tick_live_entries(now_ms) || self.has_streaming_thinking() {
-            self.mark_dirty();
-        }
-    }
-
-    pub fn tick_cached_live_entries_for_parent_render(&mut self) {
-        if self.dirty {
+    pub fn advance_animation_at_ms(&mut self, now_ms: u64) {
+        let has_visible_animation = self
+            .transcript
+            .entries()
+            .iter()
+            .any(TranscriptEntry::has_visible_animation);
+        if !has_visible_animation {
             return;
         }
-        let now_ms = current_time_ms();
-        let live_entries_changed = self.transcript.tick_live_entries(now_ms);
-        if live_entries_changed || self.has_streaming_thinking() {
-            self.activity_frame = self.activity_frame.wrapping_add(1);
+        self.activity_frame = self.activity_frame.wrapping_add(1);
+        if self.transcript.tick_live_entries(now_ms) || has_visible_animation {
             self.mark_dirty();
         }
     }
@@ -706,11 +768,9 @@ impl TranscriptPane {
     /// strings.
     ///
     /// The chrome (prompt box + footer) depends on [`NeoChromeState`] state and is
-    /// appended by the caller via [`render_chrome_lines`] before the
-    /// whole frame is handed to [`crate::screen_output::TuiRenderer::render`].
-    /// This uses the single-buffer model: every screen line lives in one
-    /// `Vec<String>`, so the renderer can diff the whole frame and rewrite only
-    /// what changed.
+    /// appended by the caller via [`render_chrome_lines`]. The terminal path
+    /// partitions this canonical snapshot into immutable history and a bounded
+    /// mutable live surface.
     ///
     /// Returns `None` when the transcript pane has no pending body changes.
     #[must_use]
@@ -725,6 +785,59 @@ impl TranscriptPane {
         let lines = self.render_body_lines(width);
         self.last_frame.clone_from(&lines);
         Some(lines)
+    }
+
+    #[must_use]
+    pub fn render_terminal_update(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> TranscriptTerminalUpdate {
+        self.width = width;
+        self.height = height;
+        let lines = self.render_body_lines(width);
+        self.last_frame.clone_from(&lines);
+        self.dirty = false;
+
+        let content_width = super::chrome_render::frame_content_width(width);
+        self.presentation.render(
+            &mut self.transcript,
+            content_width,
+            &self.theme,
+            self.activity_frame,
+            self.image_render_policy,
+            self.image_capabilities,
+            height.saturating_sub(self.live_chrome_height),
+        )
+    }
+
+    pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
+        self.presentation.acknowledge(blocks);
+    }
+
+    pub fn finalize_interrupted_live_entries(&mut self) -> bool {
+        let mut changed = false;
+        if !self.queued_approvals.is_empty() {
+            self.queued_approvals.clear();
+            changed = true;
+        }
+        for index in 0..self.transcript.entries().len() {
+            changed |= self.transcript.mutate_entry(index, |entry| {
+                let TranscriptEntry::ApprovalPrompt(data) = entry else {
+                    return false;
+                };
+                if data.queued_count == 0 {
+                    return false;
+                }
+                data.queued_count = 0;
+                true
+            });
+        }
+        changed |= self.transcript.finalize_interrupted_live_entries();
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
 
     /// Build the non-chrome body lines without consuming the dirty flag.
@@ -768,8 +881,16 @@ impl TranscriptPane {
     ) {
         use crate::primitive::Expandable as _;
 
-        if let Some(tool) = self.transcript.tool_mut(id) {
-            tool.update_call_state(name, arguments, status);
+        if self.transcript.tool(id).is_some_and(|tool| {
+            tool.finalization() == Finalization::Finalized
+                && matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
+        }) {
+            return;
+        }
+        if self.transcript.has_tool(id) {
+            self.transcript.mutate_tool(id, |tool| {
+                tool.update_call_state(name.clone(), arguments.clone(), status)
+            });
             return;
         }
 
@@ -834,16 +955,18 @@ impl TranscriptPane {
             .collect::<Vec<_>>();
         let mut changed = false;
         for id in ids {
-            let Some(tool) = self.transcript.tool_mut(&id) else {
+            let should_finish = self.transcript.tool(&id).is_some_and(|tool| {
+                matches!(
+                    tool.status(),
+                    ToolStatusKind::Pending | ToolStatusKind::Running
+                )
+            });
+            if !should_finish {
                 continue;
-            };
-            if matches!(
-                tool.status(),
-                ToolStatusKind::Pending | ToolStatusKind::Running
-            ) {
-                tool.set_terminal_status(status, Some(result.to_owned()));
-                changed = true;
             }
+            changed |= self.transcript.mutate_tool(&id, |tool| {
+                tool.set_terminal_status(status, Some(result.to_owned()))
+            });
         }
         if changed {
             self.mark_dirty();
@@ -948,12 +1071,24 @@ impl TranscriptPane {
     }
 
     pub(super) fn apply_expand_state_to_active_thinking(&mut self) {
-        for entry in self.transcript.entries_mut().iter_mut().rev() {
-            if let TranscriptEntry::ThinkingBlock { expanded, .. } = entry {
-                *expanded = self.tool_output_expanded;
-                break;
+        let Some(index) = self
+            .transcript
+            .entries()
+            .iter()
+            .rposition(|entry| matches!(entry, TranscriptEntry::ThinkingBlock { .. }))
+        else {
+            return;
+        };
+        self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::ThinkingBlock { expanded, .. } = entry else {
+                return false;
+            };
+            if *expanded == self.tool_output_expanded {
+                return false;
             }
-        }
+            *expanded = self.tool_output_expanded;
+            true
+        });
     }
 
     pub(super) fn finish_active_text_blocks(&mut self) {
@@ -975,20 +1110,32 @@ impl TranscriptPane {
             .iter()
             .rposition(is_live_compaction_entry)
         {
-            if let TranscriptEntry::Compaction {
-                phase: existing_phase,
-                percent: existing_percent,
-                compacted_message_count: existing_count,
-                tokens_before: existing_tokens,
-                tokens_after: existing_tokens_after,
-            } = &mut self.transcript.entries_mut()[index]
-            {
+            self.transcript.mutate_entry(index, |entry| {
+                let TranscriptEntry::Compaction {
+                    phase: existing_phase,
+                    percent: existing_percent,
+                    compacted_message_count: existing_count,
+                    tokens_before: existing_tokens,
+                    tokens_after: existing_tokens_after,
+                } = entry
+                else {
+                    return false;
+                };
+                if *existing_phase == phase
+                    && *existing_percent == percent
+                    && *existing_count == compacted_message_count
+                    && *existing_tokens == tokens_before
+                    && *existing_tokens_after == tokens_after
+                {
+                    return false;
+                }
                 *existing_phase = phase;
                 *existing_percent = percent;
                 *existing_count = compacted_message_count;
                 *existing_tokens = tokens_before;
                 *existing_tokens_after = tokens_after;
-            }
+                true
+            });
         } else {
             self.transcript.push(TranscriptEntry::Compaction {
                 phase,
@@ -1012,15 +1159,22 @@ impl TranscriptPane {
             .iter()
             .rposition(is_live_compaction_entry)
         {
-            if let TranscriptEntry::Compaction {
-                phase: existing_phase,
-                percent: existing_percent,
-                ..
-            } = &mut self.transcript.entries_mut()[index]
-            {
+            self.transcript.mutate_entry(index, |entry| {
+                let TranscriptEntry::Compaction {
+                    phase: existing_phase,
+                    percent: existing_percent,
+                    ..
+                } = entry
+                else {
+                    return false;
+                };
+                if *existing_phase == Some(phase) && *existing_percent == percent {
+                    return false;
+                }
                 *existing_phase = Some(phase);
                 *existing_percent = percent;
-            }
+                true
+            });
         } else {
             self.upsert_compaction(Some(phase), percent, 0, 0, 0);
             return;
@@ -1143,24 +1297,12 @@ impl TranscriptPane {
         start
     }
 
-    fn has_streaming_thinking(&self) -> bool {
-        self.transcript.entries().iter().any(|entry| {
-            matches!(
-                entry,
-                TranscriptEntry::ThinkingBlock {
-                    phase: crate::transcript::ThinkingPhase::Streaming,
-                    ..
-                }
-            )
-        })
-    }
-
     fn flush_tool_run(&mut self, tool_run: &mut Vec<ToolCallComponent>, width: usize) -> Vec<Line> {
         if tool_run.is_empty() {
             return Vec::new();
         }
         let mut ordered = std::mem::take(tool_run);
-        super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme)
+        super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme).lines
     }
 
     #[cfg(test)]
@@ -1230,15 +1372,6 @@ fn looks_like_plan_file_path(path: &str) -> bool {
         .any(|window| window == ["agents", "main", "plans"])
 }
 
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 fn append_line_transcript_block(rows: &mut Vec<String>, block: Vec<Line>) {
     let first = block.iter().position(|line| !line.is_blank());
     let last = block.iter().rposition(|line| !line.is_blank());
@@ -1257,7 +1390,18 @@ fn append_line_transcript_block(rows: &mut Vec<String>, block: Vec<Line>) {
     );
 }
 
-fn append_ansi_transcript_block(rows: &mut Vec<String>, block: Vec<String>) {
+fn append_ansi_transcript_block(rows: &mut Vec<String>, mut block: Vec<String>) {
+    trim_ansi_transcript_block(&mut block);
+    if block.is_empty() {
+        return;
+    }
+    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
+        rows.push(String::new());
+    }
+    rows.extend(block);
+}
+
+pub(super) fn trim_ansi_transcript_block(block: &mut Vec<String>) {
     let first = block.iter().position(|line| !ansi_line_is_blank(line));
     let last = if block.iter().any(|line| ansi_line_is_image(line)) {
         block.len().checked_sub(1)
@@ -1265,12 +1409,11 @@ fn append_ansi_transcript_block(rows: &mut Vec<String>, block: Vec<String>) {
         block.iter().rposition(|line| !ansi_line_is_blank(line))
     };
     let (Some(first), Some(last)) = (first, last) else {
+        block.clear();
         return;
     };
-    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
-        rows.push(String::new());
-    }
-    rows.extend(block.into_iter().skip(first).take(last - first + 1));
+    block.truncate(last + 1);
+    block.drain(..first);
 }
 
 fn ansi_line_is_blank(line: &str) -> bool {
@@ -1294,7 +1437,7 @@ fn ansi_line_is_blank(line: &str) -> bool {
     true
 }
 
-fn ansi_line_is_image(line: &str) -> bool {
+pub(super) fn ansi_line_is_image(line: &str) -> bool {
     line.contains("\x1b_G") || line.contains("\x1b]1337;File=")
 }
 

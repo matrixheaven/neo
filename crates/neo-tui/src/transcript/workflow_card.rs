@@ -17,8 +17,30 @@ impl WorkflowCardComponent {
         }
     }
 
-    pub fn update(&mut self, snapshot: WorkflowSnapshot) {
+    pub fn update(&mut self, snapshot: WorkflowSnapshot) -> bool {
+        if self.snapshot == snapshot {
+            return false;
+        }
         self.snapshot = snapshot;
+        true
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        if self.snapshot.state != WorkflowState::Running {
+            return false;
+        }
+        self.snapshot.state = WorkflowState::Failed;
+        for step in &mut self.snapshot.steps {
+            if step.state == WorkflowState::Running {
+                step.state = WorkflowState::Failed;
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub const fn is_expanded(&self) -> bool {
+        self.expanded
     }
 
     #[must_use]

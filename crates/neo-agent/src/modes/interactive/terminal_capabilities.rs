@@ -30,19 +30,22 @@ pub fn detect_terminal_capabilities_with_env(
         .to_ascii_lowercase();
     let has_env = |name: &str| env_var(name).is_ok();
 
-    let is_dumb = term == "dumb" || term.is_empty();
     let no_color = has_env("NO_COLOR");
     let ci = has_env("CI");
     let wt_session = has_env("WT_SESSION");
+    let is_windows_conpty = cfg!(windows) || wt_session;
+    let is_dumb = term == "dumb" || (term.is_empty() && !is_windows_conpty);
     let conservative_multiplexer = has_env("TMUX")
         || has_env("STY")
+        || has_env("ZELLIJ")
+        || has_env("ZELLIJ_SESSION_NAME")
         || has_env("SSH_CONNECTION")
         || has_env("SSH_TTY")
         || term.starts_with("screen")
         || term.contains("tmux");
 
     let image_disabled =
-        !is_terminal || is_dumb || no_color || ci || wt_session || conservative_multiplexer;
+        !is_terminal || is_dumb || no_color || ci || is_windows_conpty || conservative_multiplexer;
 
     let image = if image_disabled {
         TerminalImageCapabilities::default()

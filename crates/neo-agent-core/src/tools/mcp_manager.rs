@@ -1086,6 +1086,7 @@ async fn build_client_for_config(
                     args: args.clone(),
                     env: env.clone(),
                     cwd: cwd.clone(),
+                    startup_timeout_ms: config.startup_timeout_ms,
                     tool_timeout_ms: config.tool_timeout_ms,
                 },
                 supervisor,
@@ -2243,8 +2244,7 @@ mod tests {
         });
         client.release_list.notify_one();
 
-        let Err(error) = complete_connection(client.clone(), None, &http_server("discovery"))
-            .await
+        let Err(error) = complete_connection(client.clone(), None, &http_server("discovery")).await
         else {
             panic!("discovery should fail")
         };
@@ -2293,8 +2293,7 @@ mod tests {
 
         let mut config = disabled_server("slow-stdio");
         config.startup_timeout_ms = Some(1);
-        let Err(error) = complete_connection(Arc::new(HangingTailClient), None, &config)
-            .await
+        let Err(error) = complete_connection(Arc::new(HangingTailClient), None, &config).await
         else {
             panic!("discovery should time out")
         };

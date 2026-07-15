@@ -168,15 +168,19 @@ impl InteractiveController {
     }
 
     /// Drain any pending `/btw` sidecar events into the panel state.
-    pub(super) fn drain_btw_sidecar(&mut self) {
+    pub(super) fn drain_btw_sidecar(&mut self) -> bool {
         let Some(receiver) = &mut self.btw_receiver else {
-            return;
+            return false;
         };
+        let mut changed = false;
         while let Ok(event) = receiver.try_recv() {
             if let Some(state) = self.tui.chrome_mut().btw_panel_state_mut() {
+                let before = state.clone();
                 crate::modes::btw::update_btw_panel_state(state, event);
+                changed |= *state != before;
             }
         }
+        changed
     }
 
     /// Send the current composer text to the `/btw` sidecar instead of the main

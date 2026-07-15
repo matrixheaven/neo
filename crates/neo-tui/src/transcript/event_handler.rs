@@ -502,8 +502,10 @@ impl TranscriptPane {
     fn append_tool_call_arguments(&mut self, id: &str, json_fragment: &str) {
         let arguments = self.streaming_tool_args.entry(id.to_owned()).or_default();
         arguments.push_str(json_fragment);
-        if let Some(tool) = self.transcript.tool_mut(id) {
-            tool.update_call(Some(arguments.clone()));
+        if self
+            .transcript
+            .mutate_tool(id, |tool| tool.update_call(Some(arguments.clone())))
+        {
             self.mark_dirty();
         }
     }
@@ -579,17 +581,20 @@ impl TranscriptPane {
 
     fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
         self.upsert_tool(id, name, None, ToolStatusKind::Running);
-        if let Some(tool) = self.transcript.tool_mut(id) {
-            tool.append_live_output(partial_result.content);
+        if self
+            .transcript
+            .mutate_tool(id, |tool| tool.append_live_output(partial_result.content))
+        {
+            self.mark_dirty();
         }
-        self.mark_dirty();
     }
 
     fn update_shell_run(&mut self, id: &str, partial_result: ToolResult) {
-        if let Some(shell_run) = self.transcript.shell_run_mut(id) {
-            shell_run.append_live_output(partial_result.content);
+        if self.transcript.mutate_shell_run(id, |shell_run| {
+            shell_run.append_live_output(partial_result.content)
+        }) {
+            self.mark_dirty();
         }
-        self.mark_dirty();
     }
 
     fn finish_tool_execution(&mut self, turn: u32, id: String, name: String, result: ToolResult) {
@@ -604,8 +609,8 @@ impl TranscriptPane {
         self.streaming_tool_args.remove(&id);
         let is_error = result.is_error;
         let details_for_check = result.details.clone();
-        if let Some(tool) = self.transcript.tool_mut(&id) {
-            let details = result.details;
+        let details = result.details;
+        let changed = self.transcript.mutate_tool(&id, |tool| {
             let exit_code = details
                 .as_ref()
                 .and_then(|details| details.get("exit_code"))
@@ -619,8 +624,8 @@ impl TranscriptPane {
             } else {
                 result.content
             };
-            tool.set_result(Some(content), details, is_error, exit_code);
-        }
+            tool.set_result(Some(content), details, is_error, exit_code)
+        });
         self.reconcile_delegate_tool_result(
             turn,
             &id,
@@ -629,7 +634,9 @@ impl TranscriptPane {
             details_for_check.as_ref(),
         );
         self.completed_tool_result_ids.push(id);
-        self.mark_dirty();
+        if changed {
+            self.mark_dirty();
+        }
     }
 
     fn start_shell_command(&mut self, id: &str, command: &str, cwd: &std::path::Path) {
@@ -663,16 +670,18 @@ impl TranscriptPane {
     ) {
         let detail = shell_finished_detail(exit_code, signal, stdout, stderr, truncated, outcome);
         self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
-        if let Some(tool) = self.transcript.tool_mut(&id) {
+        let changed = self.transcript.mutate_tool(&id, |tool| {
             let is_error = exit_code != Some(0)
                 || !matches!(
                     outcome,
                     ShellCommandOutcome::Completed | ShellCommandOutcome::Backgrounded { .. }
                 );
-            tool.set_result(Some(detail), None, is_error, exit_code);
-        }
+            tool.set_result(Some(detail), None, is_error, exit_code)
+        });
         self.completed_tool_result_ids.push(id);
-        self.mark_dirty();
+        if changed {
+            self.mark_dirty();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -686,14 +695,25 @@ impl TranscriptPane {
         truncated: bool,
         outcome: ShellCommandOutcome,
     ) {
-        if let Some(shell_run) = self.transcript.shell_run_mut(id) {
-            shell_run.finish(stdout, stderr, exit_code, signal, outcome, truncated);
-        } else {
+        let exists = self.transcript.has_shell_run(id);
+        let updated_outcome = outcome.clone();
+        if self.transcript.mutate_shell_run(id, move |shell_run| {
+            shell_run.finish(
+                stdout,
+                stderr,
+                exit_code,
+                signal,
+                updated_outcome,
+                truncated,
+            )
+        }) {
+            self.mark_dirty();
+        } else if !exists {
             self.transcript.push_shell_run(ShellRunComponent::finished(
                 id, "", stdout, stderr, exit_code, signal, outcome, truncated,
             ));
+            self.mark_dirty();
         }
-        self.mark_dirty();
     }
 
     fn push_skill_invocation(

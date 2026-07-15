@@ -50,12 +50,45 @@ impl SwarmCardComponent {
         component
     }
 
-    pub fn update(&mut self, snapshot: SwarmSnapshot) {
+    pub fn update(&mut self, snapshot: SwarmSnapshot) -> bool {
+        if self.snapshot == snapshot {
+            return false;
+        }
         self.snapshot = snapshot;
         self.sync_estimator_from_snapshot(snapshot_time_ms(&self.snapshot));
+        true
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        let mut snapshot = self.snapshot.clone();
+        let mut changed = false;
+        for child in &mut snapshot.children {
+            changed |= crate::transcript::interrupt_agent_snapshot(&mut child.agent);
+        }
+        if !changed {
+            return false;
+        }
+        snapshot.aggregate = neo_agent_core::multi_agent::SwarmAggregate::from_states(
+            snapshot.children.iter().map(|child| child.agent.state),
+        );
+        snapshot.state = snapshot.aggregate.status();
+        self.update(snapshot)
+    }
+
+    #[must_use]
+    pub const fn is_expanded(&self) -> bool {
+        self.expanded
     }
 
     pub fn on_render_tick(&mut self, now_ms: u64) -> bool {
+        if self
+            .snapshot
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal())
+        {
+            return false;
+        }
         self.now_ms = Some(now_ms);
         self.sync_estimator_from_snapshot(now_ms);
         self.estimator.has_pending_catchup()
