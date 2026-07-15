@@ -51,6 +51,7 @@ pub struct NeoChromeState {
     pub(super) btw_panel_state: Option<crate::widgets::btw_panel::BtwPanelState>,
     /// Optional custom label shown in the footer as a working indicator.
     pub(super) custom_working_label: Option<String>,
+    pub(super) mcp_startup_active: bool,
     /// Whether the current model has thinking enabled (shown in the footer).
     pub(super) thinking_enabled: bool,
     /// Optional persistent exit-confirmation message shown in the footer.
@@ -99,6 +100,7 @@ impl NeoChromeState {
             todo_panel_expanded: false,
             btw_panel_state: None,
             custom_working_label: None,
+            mcp_startup_active: false,
             thinking_enabled: false,
             exit_confirmation_label: None,
             git_status_label: None,
@@ -184,7 +186,11 @@ impl NeoChromeState {
         if self.shell_running {
             return Some("shell · esc to cancel".to_owned());
         }
-        matches!(self.mode, ChromeMode::Streaming).then(|| "working · esc interrupt".to_owned())
+        if matches!(self.mode, ChromeMode::Streaming) {
+            return Some("working · esc interrupt".to_owned());
+        }
+        self.mcp_startup_active
+            .then(|| "MCP connecting · esc to interrupt".to_owned())
     }
 
     #[must_use]
@@ -212,6 +218,15 @@ impl NeoChromeState {
     /// Set a custom footer working label. Pass `None` to clear it.
     pub fn set_custom_working_label(&mut self, label: Option<String>) {
         self.custom_working_label = label;
+    }
+
+    #[must_use]
+    pub const fn mcp_startup_active(&self) -> bool {
+        self.mcp_startup_active
+    }
+
+    pub const fn set_mcp_startup_active(&mut self, active: bool) {
+        self.mcp_startup_active = active;
     }
 
     #[must_use]

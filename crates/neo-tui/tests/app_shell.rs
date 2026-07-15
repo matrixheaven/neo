@@ -375,6 +375,22 @@ fn app_shell_working_status_hides_running_tool_names_from_chrome() {
 }
 
 #[test]
+fn app_shell_mcp_startup_shows_interrupt_hint() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_mcp_startup_active(true);
+
+    assert_eq!(
+        app.working_label().as_deref(),
+        Some("MCP connecting · esc to interrupt")
+    );
+    assert!(
+        render_app(100, &app)
+            .iter()
+            .any(|line| line.contains("MCP connecting · esc to interrupt"))
+    );
+}
+
+#[test]
 fn app_shell_updates_context_usage_from_agent_event() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000)));

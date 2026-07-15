@@ -393,7 +393,6 @@ pub(crate) struct InteractiveController {
     pending_interactive_workflow: Option<PendingInteractiveWorkflow>,
     pending_preflight: Option<InteractivePreflightSpec>,
     mcp_manager: Option<McpConnectionManager>,
-    mcp_startup_active: bool,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Kimi-style skill activation prompt waiting to be injected as context for
     /// the next turn.
@@ -784,7 +783,6 @@ impl InteractiveController {
             pending_interactive_workflow: None,
             pending_preflight: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
-            mcp_startup_active: false,
             skill_store: None,
             pending_skill_context: None,
             pending_skill_user_message_to_suppress: None,
@@ -1087,12 +1085,14 @@ impl InteractiveController {
 
         match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
             Ok(snapshots) => {
-                self.mcp_startup_active = snapshots.iter().any(|snapshot| {
-                    matches!(
-                        snapshot.status,
-                        McpServerStatus::Pending | McpServerStatus::Reconnecting
-                    )
-                });
+                self.tui
+                    .chrome_mut()
+                    .set_mcp_startup_active(snapshots.iter().any(|snapshot| {
+                        matches!(
+                            snapshot.status,
+                            McpServerStatus::Pending | McpServerStatus::Reconnecting
+                        )
+                    }));
             }
             Err(error) => {
                 for status in mcp_ops::mcp_startup_failed_statuses(&config, &error.to_string()) {
@@ -1105,12 +1105,12 @@ impl InteractiveController {
     }
 
     async fn poll_mcp_startup(&mut self) -> bool {
-        if !self.mcp_startup_active {
+        if !self.tui.chrome().mcp_startup_active() {
             return false;
         }
         let (Some(config), Some(manager)) = (self.local_config.clone(), self.mcp_manager.clone())
         else {
-            self.mcp_startup_active = false;
+            self.tui.chrome_mut().set_mcp_startup_active(false);
             return false;
         };
         let snapshots = manager.snapshots().await;
@@ -1133,13 +1133,13 @@ impl InteractiveController {
                 .upsert_mcp_startup_status(mcp_ops::mcp_startup_status_from_snapshot(snapshot));
         }
         if settled {
-            self.mcp_startup_active = false;
+            self.tui.chrome_mut().set_mcp_startup_active(false);
         }
         changed
     }
 
     async fn cancel_mcp_startup(&mut self) -> bool {
-        if !self.mcp_startup_active {
+        if !self.tui.chrome().mcp_startup_active() {
             return false;
         }
         if let Some(manager) = self.mcp_manager.clone() {

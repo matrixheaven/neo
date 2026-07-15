@@ -13508,6 +13508,8 @@ async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
     controller.local_config = Some(config.clone());
     let saw_text = Rc::new(Cell::new(false));
     let saw_text_on_render = Rc::clone(&saw_text);
+    let saw_hint = Rc::new(Cell::new(false));
+    let saw_hint_on_render = Rc::clone(&saw_hint);
 
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -13527,6 +13529,11 @@ async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
             move |tui, _| {
                 saw_text_on_render
                     .set(saw_text_on_render.get() || tui.chrome().prompt().text == "x");
+                saw_hint_on_render.set(
+                    saw_hint_on_render.get()
+                        || tui.chrome().working_label().as_deref()
+                            == Some("MCP connecting · esc to interrupt"),
+                );
                 Ok(None)
             },
             || Ok(()),
@@ -13537,6 +13544,7 @@ async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
     .expect("terminal lifecycle succeeds");
 
     assert!(saw_text.get(), "composer input was never rendered");
+    assert!(saw_hint.get(), "MCP interrupt hint was never rendered");
     let snapshot = controller
         .mcp_manager
         .as_ref()
