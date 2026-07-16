@@ -11390,6 +11390,69 @@ async fn active_turn_enter_enqueues_follow_up_instead_of_rejecting() {
 }
 
 #[tokio::test]
+async fn mcp_startup_queues_prompt_then_starts_it_when_settled() {
+    let run_turn: TurnDriver = Arc::new(|_request, channels| {
+        Box::pin(async move {
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+    controller.tui.chrome_mut().set_mcp_startup_active(true);
+
+    controller.type_text("queued during MCP startup");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("prompt should queue while MCP starts");
+
+    assert!(
+        controller.active_turn.is_none(),
+        "MCP startup should defer the prompt instead of creating a turn"
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["queued during MCP startup"]
+    );
+
+    controller.tui.chrome_mut().set_mcp_startup_active(false);
+    controller
+        .start_next_mcp_startup_prompt()
+        .expect("queued prompt should start after MCP settles");
+
+    assert!(
+        controller.active_turn.is_some(),
+        "settled MCP startup should promote the queued prompt"
+    );
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
+    );
+    controller
+        .cancel_active_turn()
+        .await
+        .expect("cleanup active turn");
+}
+
+#[tokio::test]
 async fn active_turn_enter_updates_pending_preview_immediately() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),

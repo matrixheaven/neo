@@ -124,6 +124,8 @@ Neo lets you queue follow-up instructions while the agent is busy, or inject a s
 
 While Neo is executing a turn, just type a new prompt and submit — it joins the **follow-up queue** and runs automatically once the current turn ends.
 
+Prompts submitted while MCP servers are still starting join the same pending queue. Neo starts the first prompt once every enabled server reaches a terminal state; failed or authentication-required servers do not block the prompt.
+
 | Key | Action |
 | --- | --- |
 | `Ctrl+S` | Inject the current input as a **steer** message at the next breakpoint |

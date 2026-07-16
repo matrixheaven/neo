@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 pub struct PendingInputState {
     /// Steers already submitted to the runtime but not yet drained.
     pending_steers: VecDeque<String>,
-    /// Follow-ups queued while a turn is running (FIFO).
+    /// Follow-ups queued while a turn is running or MCP startup is settling (FIFO).
     queued_follow_ups: VecDeque<String>,
     /// Shell commands queued while a turn, compaction, or shell command is running.
     queued_shell_commands: VecDeque<String>,

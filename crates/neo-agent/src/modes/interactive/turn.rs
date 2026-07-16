@@ -219,6 +219,25 @@ impl InteractiveController {
         {
             self.start_shell_command(command).await?;
         }
+        if self.active_shell_command.is_none() {
+            self.start_next_mcp_startup_prompt()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn start_next_mcp_startup_prompt(&mut self) -> Result<()> {
+        if self.active_turn.is_some() || self.tui.chrome().mcp_startup_active() {
+            return Ok(());
+        }
+        let Some(prompt) = self
+            .tui
+            .chrome_mut()
+            .pending_input_mut()
+            .drain_next_follow_up()
+        else {
+            return Ok(());
+        };
+        self.start_turn_from_submitted_prompt(prompt, true)?;
         Ok(())
     }
 

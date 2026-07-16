@@ -1130,6 +1130,10 @@ impl InteractiveController {
         }
         if settled {
             self.tui.chrome_mut().set_mcp_startup_active(false);
+            changed = true;
+            if let Err(error) = self.start_next_mcp_startup_prompt() {
+                self.push_status(format!("Error: {error}"));
+            }
         }
         changed
     }
@@ -1433,6 +1437,11 @@ impl InteractiveController {
             return Ok(());
         }
 
+        if self.tui.chrome().mcp_startup_active() && self.active_turn.is_none() {
+            self.queue_prompt_until_mcp_startup_finishes(&prompt);
+            return Ok(());
+        }
+
         // While a turn or shell command is running, Enter queues the message as
         // a follow-up instead of starting a concurrent workflow.
         if self.active_turn.is_some() || self.active_shell_command.is_some() {
@@ -1604,6 +1613,22 @@ impl InteractiveController {
             .queue_follow_up_optimistic(display_text);
         turn.steer_input
             .push(neo_agent_core::ActiveTurnInput::FollowUp(message));
+    }
+
+    fn queue_prompt_until_mcp_startup_finishes(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        if prompt.starts_with('/') {
+            self.push_status("Slash commands can't be queued — wait for MCP startup to finish");
+            return;
+        }
+        self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        self.tui
+            .chrome_mut()
+            .pending_input_mut()
+            .queue_follow_up(prompt.to_owned());
     }
 
     /// Handle the `PromptSteer` keybinding (Ctrl+S by default).
