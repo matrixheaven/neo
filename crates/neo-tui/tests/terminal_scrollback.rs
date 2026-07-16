@@ -1,7 +1,7 @@
 use neo_agent_core::{AgentEvent, ToolResult};
 use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{InlineTerminal, TerminalFrame};
-use neo_tui::transcript::TranscriptPane;
+use neo_tui::transcript::{FinalizedBlock, TranscriptPane, TranscriptTerminalUpdate};
 
 #[test]
 fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
@@ -21,29 +21,11 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         turn: 1,
         text: "spacing-thinking".to_owned(),
     });
-    let user_thinking = pane.render_terminal_update(80, 24);
-    let banner_tail = user_thinking
-        .history
-        .first()
-        .and_then(|block| {
-            block
-                .lines
-                .iter()
-                .rev()
-                .map(|line| strip_ansi(line).trim().to_owned())
-                .find(|line| !line.is_empty())
-        })
-        .expect("banner tail row");
-    let user_history = user_thinking.history.clone();
-    render_and_process(
-        &mut inline,
-        &mut screen,
-        &TerminalFrame::new(user_thinking.history, user_thinking.live, None),
-        &mut output,
-    );
+    let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    let banner_tail = block_tail_containing(&update.history, "spacing-banner");
     assert_blank_rows_between(&mut screen, &banner_tail, "spacing-user", 1);
     assert_blank_rows_between(&mut screen, "spacing-user", "thinking...", 1);
-    pane.acknowledge_history(&user_history);
+    pane.acknowledge_history(&update.history);
 
     pane.apply_agent_event(AgentEvent::ThinkingFinished {
         turn: 1,
@@ -56,17 +38,10 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "spacing-tool-command" }),
     });
-    let thinking_tool = pane.render_terminal_update(80, 24);
-    let thinking_history = thinking_tool.history.clone();
-    render_and_process(
-        &mut inline,
-        &mut screen,
-        &TerminalFrame::new(thinking_tool.history, thinking_tool.live, None),
-        &mut output,
-    );
+    let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, "spacing-user", "spacing-thinking", 1);
     assert_blank_rows_between(&mut screen, "spacing-thinking", "spacing-tool-command", 1);
-    pane.acknowledge_history(&thinking_history);
+    pane.acknowledge_history(&update.history);
 
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -76,32 +51,8 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
     });
     pane.start_assistant_message();
     pane.append_assistant_delta("spacing-assistant-stable\n\nspacing-assistant-live");
-    let tool_assistant = pane.render_terminal_update(80, 24);
-    let tool_tail = tool_assistant
-        .history
-        .iter()
-        .find(|block| {
-            block
-                .lines
-                .iter()
-                .any(|line| strip_ansi(line).contains("spacing-tool-command"))
-        })
-        .and_then(|block| {
-            block
-                .lines
-                .iter()
-                .rev()
-                .map(|line| strip_ansi(line).trim().to_owned())
-                .find(|line| !line.is_empty())
-        })
-        .expect("completed tool tail row");
-    let tool_history = tool_assistant.history.clone();
-    render_and_process(
-        &mut inline,
-        &mut screen,
-        &TerminalFrame::new(tool_assistant.history, tool_assistant.live, None),
-        &mut output,
-    );
+    let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    let tool_tail = block_tail_containing(&update.history, "spacing-tool-command");
     assert_blank_rows_between(&mut screen, "spacing-thinking", "spacing-tool-command", 1);
     assert_blank_rows_between(&mut screen, &tool_tail, "spacing-assistant-stable", 1);
     assert_blank_rows_between(
@@ -110,20 +61,10 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         "spacing-assistant-live",
         0,
     );
-    pane.acknowledge_history(&tool_history);
+    pane.acknowledge_history(&update.history);
 
     pane.append_assistant_delta(" complete\n\nspacing-assistant-next");
-    let assistant_continuation = pane.render_terminal_update(80, 24);
-    render_and_process(
-        &mut inline,
-        &mut screen,
-        &TerminalFrame::new(
-            assistant_continuation.history,
-            assistant_continuation.live,
-            None,
-        ),
-        &mut output,
-    );
+    render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(
         &mut screen,
         "spacing-assistant-stable",
@@ -367,53 +308,28 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "initial commit");
     pane.acknowledge_history(&committed_frame.history);
 
-    for frame_index in 0..200 {
-        let live = vec![
-            format!("lifecycle-live-frame-{frame_index:03}-row-0"),
-            format!("lifecycle-live-frame-{frame_index:03}-row-1"),
-            format!("lifecycle-live-frame-{frame_index:03}-row-2"),
-        ];
-        render_and_process(
-            &mut inline,
-            &mut screen,
-            &TerminalFrame::new(Vec::new(), live, None),
-            &mut output,
-        );
-    }
+    pump_live_frames(&mut inline, &mut screen, 200, &mut output);
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "200 live frames");
 
-    resize_vt100(&mut screen, 8, 50);
-    inline.resize(50, 8);
-    render_and_process(
-        &mut inline,
+    resize_and_render(
         &mut screen,
-        &TerminalFrame::new(
-            Vec::new(),
-            vec![
-                "lifecycle-live-after-resize-50-row-0".to_owned(),
-                "lifecycle-live-after-resize-50-row-1".to_owned(),
-            ],
-            None,
-        ),
+        &mut inline,
         &mut output,
+        8,
+        50,
+        "lifecycle-live-after-resize-50",
+        2,
     );
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "50x8 resize");
 
-    resize_vt100(&mut screen, 20, 100);
-    inline.resize(100, 20);
-    render_and_process(
-        &mut inline,
+    resize_and_render(
         &mut screen,
-        &TerminalFrame::new(
-            Vec::new(),
-            vec![
-                "lifecycle-live-after-resize-100-row-0".to_owned(),
-                "lifecycle-live-after-resize-100-row-1".to_owned(),
-                "lifecycle-live-after-resize-100-row-2".to_owned(),
-            ],
-            None,
-        ),
+        &mut inline,
         &mut output,
+        20,
+        100,
+        "lifecycle-live-after-resize-100",
+        3,
     );
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "100x20 resize");
 
@@ -461,9 +377,108 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     assert!(!output_text.contains("\x1b[3J"));
     assert!(output_text.contains("\x1b[?25h"));
 
-    let retained = all_terminal_rows(&mut screen);
-    assert_rows_once_in_order(&retained, &shell_rows);
-    assert_sentinels_once_in_order(&retained, &committed_rows);
+    assert_lifecycle_retained(&mut screen, &shell_rows, &committed_rows);
+}
+
+fn render_and_process(
+    inline: &mut InlineTerminal,
+    screen: &mut vt100::Parser,
+    frame: &TerminalFrame,
+    output: &mut Vec<u8>,
+) {
+    let mut transaction = Vec::new();
+    inline
+        .render_to(&mut transaction, frame)
+        .expect("render terminal transaction");
+    screen.process(&transaction);
+    output.extend_from_slice(&transaction);
+}
+
+fn render_update(
+    inline: &mut InlineTerminal,
+    screen: &mut vt100::Parser,
+    pane: &mut TranscriptPane,
+    output: &mut Vec<u8>,
+) -> TranscriptTerminalUpdate {
+    let update = pane.render_terminal_update(80, 24);
+    render_and_process(
+        inline,
+        screen,
+        &TerminalFrame::new(update.history.clone(), update.live.clone(), None),
+        output,
+    );
+    update
+}
+
+fn block_tail_containing(history: &[FinalizedBlock], needle: &str) -> String {
+    history
+        .iter()
+        .find(|block| {
+            block
+                .lines
+                .iter()
+                .any(|line| strip_ansi(line).contains(needle))
+        })
+        .and_then(|block| {
+            block
+                .lines
+                .iter()
+                .rev()
+                .map(|line| strip_ansi(line).trim().to_owned())
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or_else(|| panic!("no history block containing {needle:?}"))
+}
+
+fn pump_live_frames(
+    inline: &mut InlineTerminal,
+    screen: &mut vt100::Parser,
+    count: usize,
+    output: &mut Vec<u8>,
+) {
+    for index in 0..count {
+        let live = (0..3)
+            .map(|row| format!("lifecycle-live-frame-{index:03}-row-{row}"))
+            .collect::<Vec<_>>();
+        render_and_process(
+            inline,
+            screen,
+            &TerminalFrame::new(Vec::new(), live, None),
+            output,
+        );
+    }
+}
+
+fn resize_and_render(
+    screen: &mut vt100::Parser,
+    inline: &mut InlineTerminal,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    live_prefix: &str,
+    live_rows: usize,
+) {
+    resize_vt100(screen, rows, cols);
+    inline.resize(cols, rows);
+    let live = (0..live_rows)
+        .map(|row| format!("{live_prefix}-row-{row}"))
+        .collect::<Vec<_>>();
+    render_and_process(
+        inline,
+        screen,
+        &TerminalFrame::new(Vec::new(), live, None),
+        output,
+    );
+}
+
+fn assert_lifecycle_retained(
+    screen: &mut vt100::Parser,
+    shell_rows: &[String],
+    committed_rows: &[String],
+) {
+    let retained = all_terminal_rows(screen);
+    assert_rows_once_in_order(&retained, shell_rows);
+    assert_sentinels_once_in_order(&retained, committed_rows);
     assert_eq!(
         retained
             .iter()
@@ -486,20 +501,6 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
         stale_current_live.is_empty(),
         "stale rows from the final live anchor: {stale_current_live:?}"
     );
-}
-
-fn render_and_process(
-    inline: &mut InlineTerminal,
-    screen: &mut vt100::Parser,
-    frame: &TerminalFrame,
-    output: &mut Vec<u8>,
-) {
-    let mut transaction = Vec::new();
-    inline
-        .render_to(&mut transaction, frame)
-        .expect("render terminal transaction");
-    screen.process(&transaction);
-    output.extend_from_slice(&transaction);
 }
 
 fn resize_vt100(terminal: &mut vt100::Parser, rows: u16, cols: u16) {

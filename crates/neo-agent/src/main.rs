@@ -42,6 +42,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse_from(std::env::args_os());
 
+    if matches!(cli.command, Some(Command::ProcessGuard)) {
+        let exit_code = i32::from(neo_agent_core::run_process_guard().await.is_err());
+        std::process::exit(exit_code);
+    }
+
     // Determine whether we will enter the interactive TUI. If so, tracing
     // output must NOT go to stderr — it would corrupt the terminal display.
     // Instead, forward structured WARN/ERROR events to the TUI transcript.
@@ -172,6 +177,9 @@ async fn dispatch_command(
     log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
     match command {
+        Some(Command::ProcessGuard) => {
+            anyhow::bail!("process guard must be dispatched before application startup")
+        }
         Some(Command::Run { output, prompt }) => {
             dispatch_run_command(config, session_options, output, prompt).await
         }

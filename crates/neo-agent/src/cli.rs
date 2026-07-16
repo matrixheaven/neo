@@ -42,6 +42,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(name = "__process-guard", hide = true)]
+    ProcessGuard,
     /// Run a single agent task on stdin/file input
     Run {
         #[arg(long, value_enum)]

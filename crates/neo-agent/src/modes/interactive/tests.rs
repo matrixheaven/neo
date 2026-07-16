@@ -7704,6 +7704,21 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
         .start_foreground_delegate_for_test("preserve delegate");
     let live_permission_mode = Arc::clone(&config.live_permission_mode);
     let workspace_policy = Arc::clone(&config.workspace_policy);
+    let first_shell_permit = config
+        .runtime
+        .shell_runtime
+        .try_acquire()
+        .expect("first shell permit");
+    let second_shell_permit = config
+        .runtime
+        .shell_runtime
+        .try_acquire()
+        .expect("second shell permit");
+    fs::write(
+        &config.config_path,
+        "[runtime.shell]\nmax_active_commands = 3\n",
+    )
+    .expect("write refreshed config");
 
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -7728,6 +7743,11 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
     ));
     assert!(Arc::ptr_eq(&reloaded.workspace_policy, &workspace_policy));
     assert_eq!(reloaded.permission_mode, PermissionMode::Yolo);
+    assert_eq!(reloaded.runtime.shell.max_active_commands, 2);
+    assert_eq!(
+        reloaded.runtime.shell_runtime.try_acquire().unwrap_err(),
+        neo_agent_core::tools::ResourceLimitCause::ActiveCommands
+    );
     assert_eq!(
         *reloaded
             .live_permission_mode
@@ -7740,6 +7760,7 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
         reloaded.project_trust,
         crate::trust::ProjectTrustState::NotRequired
     );
+    drop((first_shell_permit, second_shell_permit));
 }
 
 #[test]
@@ -12237,6 +12258,7 @@ fn completed_shell_result(
         truncated: false,
         outcome: neo_agent_core::ShellCommandOutcome::Completed,
         foreground_task_id: None,
+        resource_limit: None,
     }
 }
 

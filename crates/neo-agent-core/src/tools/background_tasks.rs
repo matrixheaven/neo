@@ -1,19 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{fs::File, io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::bash::ShellTermination;
+use super::shell_guard::{
+    GuardStatus, GuardStatusKind, GuardedCommandResult, GuardianClient, TaggedOutput,
+};
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::QuestionEventData;
 
@@ -46,6 +47,8 @@ pub enum BackgroundTaskStatus {
     Failed,
     Cancelled,
     TimedOut,
+    ResourceLimited,
+    ParentExited,
 }
 
 impl BackgroundTaskStatus {
@@ -58,6 +61,8 @@ impl BackgroundTaskStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::ResourceLimited => "resource_limited",
+            Self::ParentExited => "parent_exited",
         }
     }
 
@@ -77,20 +82,17 @@ pub struct CommandOutput {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub resource_limit: Option<super::ResourceLimitDetail>,
 }
 
 pub struct ManagedBackgroundCommand {
-    pub stdout: Arc<Mutex<Vec<u8>>>,
-    pub stderr: Arc<Mutex<Vec<u8>>>,
-    pub stdout_truncated: Arc<Mutex<bool>>,
-    pub stderr_truncated: Arc<Mutex<bool>>,
-    pub stdout_task: JoinHandle<()>,
-    pub stderr_task: JoinHandle<()>,
-    pub try_wait: Arc<
-        dyn Fn() -> BoxFuture<'static, std::io::Result<Option<ShellTermination>>> + Send + Sync,
-    >,
-    pub cleanup: Arc<dyn Fn() -> BoxFuture<'static, ShellTermination> + Send + Sync>,
-    pub drain: Arc<dyn Fn(JoinHandle<()>) -> BoxFuture<'static, ()> + Send + Sync>,
+    pub(crate) client: GuardianClient,
+}
+
+impl ManagedBackgroundCommand {
+    pub(crate) const fn new(client: GuardianClient) -> Self {
+        Self { client }
+    }
 }
 
 #[derive(Clone)]
@@ -138,16 +140,18 @@ struct BackgroundTaskRecord {
     started_at: Instant,
     state: BackgroundTaskState,
     detached: bool,
-    deadline: Option<Instant>,
-    detach_timeout: Option<Duration>,
+}
+
+#[derive(Deserialize)]
+struct PersistedTaskIdentity {
+    schema_version: u32,
+    task_id: String,
 }
 
 #[derive(Clone, Default)]
 pub struct BackgroundTaskManager {
     inner: Arc<Mutex<HashMap<String, BackgroundTaskRecord>>>,
     persistence_dir: Option<Arc<PathBuf>>,
-    persistent_outputs: Arc<Mutex<HashMap<String, Arc<Mutex<File>>>>>,
-    persistence_errors: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskManager {
@@ -168,6 +172,10 @@ impl BackgroundTaskManager {
     pub fn with_persistence_dir(mut self, path: PathBuf) -> Self {
         self.persistence_dir = Some(Arc::new(path));
         self
+    }
+
+    pub(crate) fn persistence_dir(&self) -> Option<&PathBuf> {
+        self.persistence_dir.as_deref()
     }
 
     #[must_use]
@@ -201,8 +209,6 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::BashRunning(command),
                 detached: true,
-                deadline: None,
-                detach_timeout: None,
             },
         );
         Ok(ToolResult::ok(format!(
@@ -236,104 +242,6 @@ impl BackgroundTaskManager {
         })))
     }
 
-    pub(crate) async fn append_persistent_output(
-        &self,
-        task_id: &str,
-        chunk: &str,
-    ) -> Result<(), ToolError> {
-        let result = self.append_persistent_output_inner(task_id, chunk).await;
-        if let Err(error) = &result {
-            self.record_persistence_error(task_id, error.to_string())
-                .await;
-        }
-        result
-    }
-
-    async fn append_persistent_output_inner(
-        &self,
-        task_id: &str,
-        chunk: &str,
-    ) -> Result<(), ToolError> {
-        let Some(root) = &self.persistence_dir else {
-            return Ok(());
-        };
-        let file = self.persistent_output_file(root, task_id).await?;
-        let mut file = file.lock().await;
-        file.write_all(chunk.as_bytes()).await?;
-        Ok(())
-    }
-
-    async fn persistent_output_file(
-        &self,
-        root: &Path,
-        task_id: &str,
-    ) -> Result<Arc<Mutex<File>>, ToolError> {
-        if let Some(file) = self.persistent_outputs.lock().await.get(task_id).cloned() {
-            return Ok(file);
-        }
-
-        let output = root.join(task_id).join("output.log");
-        if let Some(parent) = output.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let opened = Arc::new(Mutex::new(
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(output)
-                .await?,
-        ));
-        let mut outputs = self.persistent_outputs.lock().await;
-        Ok(Arc::clone(
-            outputs
-                .entry(task_id.to_owned())
-                .or_insert_with(|| Arc::clone(&opened)),
-        ))
-    }
-
-    async fn finish_persistent_output(&self, task_id: &str) -> Result<(), ToolError> {
-        let Some(file) = self.persistent_outputs.lock().await.remove(task_id) else {
-            return Ok(());
-        };
-        file.lock().await.flush().await?;
-        Ok(())
-    }
-
-    async fn close_persistent_output(&self, task_id: &str) {
-        if let Err(err) = self.finish_persistent_output(task_id).await {
-            self.record_persistence_error(task_id, err.to_string())
-                .await;
-        }
-    }
-
-    async fn record_persistence_error(&self, task_id: &str, error: String) {
-        tracing::warn!(task_id, error = %error, "failed to persist background task output");
-        self.persistence_errors
-            .lock()
-            .await
-            .entry(task_id.to_owned())
-            .or_insert(error);
-    }
-
-    #[cfg(test)]
-    pub async fn persist_task_output_for_test(
-        &self,
-        task_id: &str,
-        chunk: &str,
-    ) -> Result<(), ToolError> {
-        self.append_persistent_output(task_id, chunk).await
-    }
-
-    #[cfg(test)]
-    pub async fn finish_task_output_for_test(&self, task_id: &str) -> Result<(), ToolError> {
-        self.finish_persistent_output(task_id).await
-    }
-
-    #[cfg(test)]
-    pub async fn persistent_output_count_for_test(&self) -> usize {
-        self.persistent_outputs.lock().await.len()
-    }
-
     pub async fn start_question(&self, task_id: String, description: String) -> ToolResult {
         self.inner.lock().await.insert(
             task_id.clone(),
@@ -342,8 +250,6 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::QuestionWaiting,
                 detached: true,
-                deadline: None,
-                detach_timeout: None,
             },
         );
         ToolResult::ok(format!(
@@ -403,8 +309,6 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state,
                 detached: true,
-                deadline: None,
-                detach_timeout: None,
             },
         );
         task_id
@@ -458,8 +362,6 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::DelegateSwarmRunning { snapshot },
                 detached: true,
-                deadline: None,
-                detach_timeout: None,
             },
         );
         task_id
@@ -585,10 +487,9 @@ impl BackgroundTaskManager {
         description: String,
         command: ManagedBackgroundCommand,
         _max_output_bytes: usize,
-        detach_timeout: Duration,
     ) -> Result<String, ToolError> {
         let task_id = Self::next_bash_task_id();
-        self.start_bash_foreground_with_task_id(task_id, description, command, detach_timeout)
+        self.start_bash_foreground_with_task_id(task_id, description, command)
             .await
     }
 
@@ -597,7 +498,6 @@ impl BackgroundTaskManager {
         task_id: String,
         description: String,
         command: ManagedBackgroundCommand,
-        detach_timeout: Duration,
     ) -> Result<String, ToolError> {
         self.inner.lock().await.insert(
             task_id.clone(),
@@ -606,15 +506,13 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::BashRunning(command),
                 detached: false,
-                deadline: None,
-                detach_timeout: Some(detach_timeout),
             },
         );
         Ok(task_id)
     }
 
     pub async fn detach(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
-        {
+        let client = {
             let mut tasks = self.inner.lock().await;
             let Some(record) = tasks.get_mut(task_id) else {
                 return Err(ToolError::InvalidInput {
@@ -622,22 +520,24 @@ impl BackgroundTaskManager {
                     message: format!("unknown background task `{task_id}`"),
                 });
             };
-            if !matches!(record.state, BackgroundTaskState::BashRunning(_)) {
+            let BackgroundTaskState::BashRunning(command) = &record.state else {
                 return Err(ToolError::InvalidInput {
                     tool: "TaskDetach".to_owned(),
                     message: format!("background task `{task_id}` is not running"),
                 });
-            }
+            };
             record.detached = true;
-            record.deadline = record
-                .detach_timeout
-                .map(|timeout| Instant::now() + timeout);
-        }
+            command.client.clone()
+        };
+        client.set_background_deadline().await?;
         self.snapshot(task_id).await
     }
 
     pub async fn list(&self, active_only: bool, limit: usize) -> Vec<BackgroundTaskSnapshot> {
-        let task_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        let mut task_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        task_ids.extend(self.persisted_task_ids().await);
+        task_ids.sort();
+        task_ids.dedup();
         let mut snapshots = Vec::new();
         for task_id in task_ids {
             if let Ok(snapshot) = self.snapshot(&task_id).await
@@ -662,15 +562,7 @@ impl BackgroundTaskManager {
         loop {
             let snapshot = self.snapshot(task_id).await?;
             if !block || !snapshot.status.is_active() || Instant::now() >= deadline {
-                let mut result = snapshot_result(&snapshot, max_output_bytes);
-                if let Some(error) = self.persistence_errors.lock().await.get(task_id).cloned() {
-                    result.content.push_str("\npersistence_error: ");
-                    result.content.push_str(&error);
-                    if let Some(details) = result.details.as_mut() {
-                        details["persistence_error"] = json!(error);
-                    }
-                }
-                return Ok(result);
+                return Ok(snapshot_result(&snapshot, max_output_bytes));
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -867,22 +759,13 @@ impl BackgroundTaskManager {
                 description,
                 command,
             } => {
-                let termination = (command.cleanup)().await;
-                (command.drain)(command.stdout_task).await;
-                (command.drain)(command.stderr_task).await;
-                self.close_persistent_output(task_id).await;
-                let output = output_from_command_buffers(
-                    termination,
-                    command.stdout,
-                    command.stderr,
-                    command.stdout_truncated,
-                    command.stderr_truncated,
-                )
-                .await;
+                let result = command.client.stop().await;
+                let status = background_status(&result);
+                let output = command_output_from_guard(result);
                 let snapshot = BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Bash,
-                    status: BackgroundTaskStatus::Cancelled,
+                    status,
                     description: description.clone(),
                     elapsed: started_at.elapsed(),
                     output: Some(output.clone()),
@@ -895,13 +778,8 @@ impl BackgroundTaskManager {
                     BackgroundTaskRecord {
                         description,
                         started_at,
-                        state: BackgroundTaskState::BashFinished {
-                            status: BackgroundTaskStatus::Cancelled,
-                            output,
-                        },
+                        state: BackgroundTaskState::BashFinished { status, output },
                         detached: true,
-                        deadline: None,
-                        detach_timeout: None,
                     },
                 );
                 Ok(snapshot_result(&snapshot, max_output_bytes))
@@ -910,12 +788,130 @@ impl BackgroundTaskManager {
     }
 
     pub async fn snapshot(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
-        self.snapshot_inner(task_id)
-            .await
+        if let Some(snapshot) = self.snapshot_inner(task_id).await {
+            return Ok(snapshot);
+        }
+        self.persisted_snapshot(task_id)
+            .await?
             .ok_or_else(|| ToolError::InvalidInput {
                 tool: "TaskOutput".to_owned(),
                 message: format!("unknown background task `{task_id}`"),
             })
+    }
+
+    async fn persisted_task_ids(&self) -> Vec<String> {
+        let Some(root) = &self.persistence_dir else {
+            return Vec::new();
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(root.as_path()).await else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if let Some(task_id) = name
+                .strip_suffix(".status.json")
+                .or_else(|| name.strip_suffix(".running.json"))
+                .filter(|task_id| !task_id.starts_with("terminal-"))
+            {
+                ids.push(task_id.to_owned());
+            }
+        }
+        ids
+    }
+
+    async fn persisted_snapshot(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
+        let Some(root) = &self.persistence_dir else {
+            return Ok(None);
+        };
+        validate_persisted_task_id(task_id, root)?;
+        let final_path = root.join(format!("{task_id}.status.json"));
+        let running_path = root.join(format!("{task_id}.running.json"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut running_validated = false;
+        loop {
+            match tokio::fs::read(&final_path).await {
+                Ok(bytes) => {
+                    let status: GuardStatus = serde_json::from_slice(&bytes)
+                        .map_err(|error| invalid_recovery_data(task_id, &final_path, error))?;
+                    validate_persisted_task_identity(
+                        task_id,
+                        &final_path,
+                        status.schema_version,
+                        &status.task_id,
+                    )?;
+                    let output = tokio::fs::read(root.join(format!("{task_id}.log")))
+                        .await
+                        .unwrap_or_default();
+                    let task_status = background_status_from_kind(status.exit.status);
+                    return Ok(Some(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Bash,
+                        status: task_status,
+                        description: task_id.to_owned(),
+                        elapsed: Duration::ZERO,
+                        output: Some(CommandOutput {
+                            exit_code: status.exit.exit_code,
+                            signal: status.exit.signal,
+                            stdout: String::from_utf8_lossy(&output).into_owned(),
+                            stderr: String::new(),
+                            stdout_truncated: status.exit.omitted_log_bytes > 0,
+                            stderr_truncated: false,
+                            resource_limit: status.exit.resource_limit,
+                        }),
+                        answers: None,
+                        delegate: None,
+                        swarm: None,
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(ToolError::Io(error)),
+            }
+            if !running_validated {
+                match tokio::fs::read(&running_path).await {
+                    Ok(bytes) => {
+                        let running: PersistedTaskIdentity = serde_json::from_slice(&bytes)
+                            .map_err(|error| {
+                                invalid_recovery_data(task_id, &running_path, error)
+                            })?;
+                        validate_persisted_task_identity(
+                            task_id,
+                            &running_path,
+                            running.schema_version,
+                            &running.task_id,
+                        )?;
+                        running_validated = true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(ToolError::Io(error)),
+                }
+            }
+            if Instant::now() >= deadline {
+                if !running_validated {
+                    return Ok(None);
+                }
+                return Ok(Some(BackgroundTaskSnapshot {
+                    task_id: task_id.to_owned(),
+                    kind: BackgroundTaskKind::Bash,
+                    status: BackgroundTaskStatus::ParentExited,
+                    description: task_id.to_owned(),
+                    elapsed: Duration::ZERO,
+                    output: None,
+                    answers: None,
+                    delegate: None,
+                    swarm: None,
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn is_detached(&self, task_id: &str) -> bool {
@@ -964,294 +960,137 @@ impl BackgroundTaskManager {
             })
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn snapshot_inner(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
-        #[allow(clippy::large_enum_variant)]
-        enum SnapshotAction {
-            Ready(BackgroundTaskSnapshot),
-            Running {
-                started_at: Instant,
-                description: String,
-                stdout: Arc<Mutex<Vec<u8>>>,
-                stderr: Arc<Mutex<Vec<u8>>>,
-                stdout_truncated: Arc<Mutex<bool>>,
-                stderr_truncated: Arc<Mutex<bool>>,
-            },
-            Timeout {
-                started_at: Instant,
-                description: String,
-                command: ManagedBackgroundCommand,
-            },
-            Finish {
-                started_at: Instant,
-                description: String,
-                command: ManagedBackgroundCommand,
-                termination: ShellTermination,
-            },
-        }
-
-        let action = {
+        let running = {
             let mut tasks = self.inner.lock().await;
             let record = tasks.get_mut(task_id)?;
-            match &mut record.state {
-                BackgroundTaskState::BashFinished { status, output } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
+            if let BackgroundTaskState::BashRunning(command) = &record.state {
+                let started_at = record.started_at;
+                let description = record.description.clone();
+                if let Some(result) = command.client.final_result() {
+                    let status = background_status(&result);
+                    let output = command_output_from_guard(result);
+                    record.state = BackgroundTaskState::BashFinished {
+                        status,
+                        output: output.clone(),
+                    };
+                    return Some(BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::Bash,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: Some(output.clone()),
+                        status,
+                        description,
+                        elapsed: started_at.elapsed(),
+                        output: Some(output),
                         answers: None,
                         delegate: None,
                         swarm: None,
-                    })
+                    });
                 }
-                BackgroundTaskState::QuestionWaiting => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Question,
-                        status: BackgroundTaskStatus::WaitingForUser,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: None,
-                        swarm: None,
-                    })
-                }
-                BackgroundTaskState::QuestionFinished { status, answers } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Question,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: answers.clone(),
-                        delegate: None,
-                        swarm: None,
-                    })
-                }
-                BackgroundTaskState::DelegateRunning { snapshot } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Delegate,
-                        status: BackgroundTaskStatus::Running,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: Some(snapshot.clone()),
-                        swarm: None,
-                    })
-                }
-                BackgroundTaskState::DelegateFinished { status, snapshot } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Delegate,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: Some(snapshot.clone()),
-                        swarm: None,
-                    })
-                }
-                BackgroundTaskState::DelegateSwarmRunning { snapshot } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::DelegateSwarm,
-                        status: BackgroundTaskStatus::Running,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: None,
-                        swarm: Some(snapshot.clone()),
-                    })
-                }
-                BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
-                    SnapshotAction::Ready(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::DelegateSwarm,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: None,
-                        swarm: Some(snapshot.clone()),
-                    })
-                }
-                BackgroundTaskState::BashRunning(_command)
-                    if record.detached
-                        && record
-                            .deadline
-                            .is_some_and(|deadline| deadline <= Instant::now()) =>
-                {
-                    let record = tasks.remove(task_id).expect("record still exists");
-                    let BackgroundTaskState::BashRunning(command) = record.state else {
-                        unreachable!();
-                    };
-                    SnapshotAction::Timeout {
-                        started_at: record.started_at,
-                        description: record.description,
-                        command,
-                    }
-                }
-                BackgroundTaskState::BashRunning(command) => match (command.try_wait)().await {
-                    Ok(Some(termination)) => {
-                        let record = tasks.remove(task_id).expect("record still exists");
-                        let BackgroundTaskState::BashRunning(command) = record.state else {
-                            unreachable!();
-                        };
-                        SnapshotAction::Finish {
-                            started_at: record.started_at,
-                            description: record.description,
-                            command,
-                            termination,
-                        }
-                    }
-                    Ok(None) | Err(_) => SnapshotAction::Running {
-                        started_at: record.started_at,
-                        description: record.description.clone(),
-                        stdout: command.stdout.clone(),
-                        stderr: command.stderr.clone(),
-                        stdout_truncated: command.stdout_truncated.clone(),
-                        stderr_truncated: command.stderr_truncated.clone(),
-                    },
-                },
+                Some((started_at, description, command.client.clone()))
+            } else {
+                None
             }
         };
-
-        match action {
-            SnapshotAction::Ready(snapshot) => Some(snapshot),
-            SnapshotAction::Running {
-                started_at,
+        if let Some((started_at, description, client)) = running {
+            let live_output = client.output().await;
+            let output = command_output_from_live(&live_output);
+            return Some(BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Bash,
+                status: BackgroundTaskStatus::Running,
                 description,
-                stdout,
-                stderr,
-                stdout_truncated,
-                stderr_truncated,
-            } => {
-                let stdout = stdout.lock().await;
-                let stderr = stderr.lock().await;
-                let stdout_truncated = *stdout_truncated.lock().await;
-                let stderr_truncated = *stderr_truncated.lock().await;
-                Some(BackgroundTaskSnapshot {
-                    task_id: task_id.to_owned(),
-                    kind: BackgroundTaskKind::Bash,
-                    status: BackgroundTaskStatus::Running,
-                    description,
-                    elapsed: started_at.elapsed(),
-                    output: Some(output_from_locked_buffers(
-                        ShellTermination {
-                            exit_code: None,
-                            signal: None,
-                        },
-                        &stdout,
-                        &stderr,
-                        stdout_truncated,
-                        stderr_truncated,
-                    )),
-                    answers: None,
-                    delegate: None,
-                    swarm: None,
-                })
-            }
-            SnapshotAction::Timeout {
-                started_at,
-                description,
-                command,
-            } => {
-                let termination = (command.cleanup)().await;
-                (command.drain)(command.stdout_task).await;
-                (command.drain)(command.stderr_task).await;
-                self.close_persistent_output(task_id).await;
-                let output = output_from_command_buffers(
-                    termination,
-                    command.stdout,
-                    command.stderr,
-                    command.stdout_truncated,
-                    command.stderr_truncated,
-                )
-                .await;
-                let snapshot = BackgroundTaskSnapshot {
-                    task_id: task_id.to_owned(),
-                    kind: BackgroundTaskKind::Bash,
-                    status: BackgroundTaskStatus::TimedOut,
-                    description: description.clone(),
-                    elapsed: started_at.elapsed(),
-                    output: Some(output.clone()),
-                    answers: None,
-                    delegate: None,
-                    swarm: None,
-                };
-                self.inner.lock().await.insert(
-                    task_id.to_owned(),
-                    BackgroundTaskRecord {
-                        description,
-                        started_at,
-                        state: BackgroundTaskState::BashFinished {
-                            status: BackgroundTaskStatus::TimedOut,
-                            output,
-                        },
-                        detached: true,
-                        deadline: None,
-                        detach_timeout: None,
-                    },
-                );
-                Some(snapshot)
-            }
-            SnapshotAction::Finish {
-                started_at,
-                description,
-                command,
-                termination,
-            } => {
-                (command.drain)(command.stdout_task).await;
-                (command.drain)(command.stderr_task).await;
-                self.close_persistent_output(task_id).await;
-                let output = output_from_command_buffers(
-                    termination,
-                    command.stdout,
-                    command.stderr,
-                    command.stdout_truncated,
-                    command.stderr_truncated,
-                )
-                .await;
-                let status = if output.exit_code == Some(0) {
-                    BackgroundTaskStatus::Completed
-                } else {
-                    BackgroundTaskStatus::Failed
-                };
-                let snapshot = BackgroundTaskSnapshot {
-                    task_id: task_id.to_owned(),
-                    kind: BackgroundTaskKind::Bash,
-                    status,
-                    description: description.clone(),
-                    elapsed: started_at.elapsed(),
-                    output: Some(output.clone()),
-                    answers: None,
-                    delegate: None,
-                    swarm: None,
-                };
-                self.inner.lock().await.insert(
-                    task_id.to_owned(),
-                    BackgroundTaskRecord {
-                        description,
-                        started_at,
-                        state: BackgroundTaskState::BashFinished { status, output },
-                        detached: true,
-                        deadline: None,
-                        detach_timeout: None,
-                    },
-                );
-                Some(snapshot)
-            }
+                elapsed: started_at.elapsed(),
+                output: Some(output),
+                answers: None,
+                delegate: None,
+                swarm: None,
+            });
         }
+
+        let tasks = self.inner.lock().await;
+        let record = tasks.get(task_id)?;
+        Some(match &record.state {
+            BackgroundTaskState::BashRunning(_) => unreachable!("handled running bash"),
+            BackgroundTaskState::BashFinished { status, output } => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Bash,
+                status: *status,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: Some(output.clone()),
+                answers: None,
+                delegate: None,
+                swarm: None,
+            },
+            BackgroundTaskState::QuestionWaiting => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Question,
+                status: BackgroundTaskStatus::WaitingForUser,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: None,
+            },
+            BackgroundTaskState::QuestionFinished { status, answers } => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Question,
+                status: *status,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: None,
+                answers: answers.clone(),
+                delegate: None,
+                swarm: None,
+            },
+            BackgroundTaskState::DelegateRunning { snapshot } => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Delegate,
+                status: BackgroundTaskStatus::Running,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: None,
+                answers: None,
+                delegate: Some(snapshot.clone()),
+                swarm: None,
+            },
+            BackgroundTaskState::DelegateFinished { status, snapshot } => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Delegate,
+                status: *status,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: None,
+                answers: None,
+                delegate: Some(snapshot.clone()),
+                swarm: None,
+            },
+            BackgroundTaskState::DelegateSwarmRunning { snapshot } => BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::DelegateSwarm,
+                status: BackgroundTaskStatus::Running,
+                description: record.description.clone(),
+                elapsed: record.started_at.elapsed(),
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: Some(snapshot.clone()),
+            },
+            BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
+                BackgroundTaskSnapshot {
+                    task_id: task_id.to_owned(),
+                    kind: BackgroundTaskKind::DelegateSwarm,
+                    status: *status,
+                    description: record.description.clone(),
+                    elapsed: record.started_at.elapsed(),
+                    output: None,
+                    answers: None,
+                    delegate: None,
+                    swarm: Some(snapshot.clone()),
+                }
+            }
+        })
     }
 }
 
@@ -1394,7 +1233,11 @@ impl Tool for TaskOutputTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: TaskOutputInput = parse_input(self.name(), input)?;
-            let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+            let max_output_bytes = input
+                .max_output_bytes
+                .unwrap_or(ctx.max_output_bytes)
+                .min(ctx.max_output_bytes)
+                .min(ctx.shell_runtime.limits().max_output_bytes);
 
             if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.task_id) {
                 return Ok(
@@ -1484,7 +1327,11 @@ impl Tool for TaskStopTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: TaskStopInput = parse_input(self.name(), input)?;
-            let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+            let max_output_bytes = input
+                .max_output_bytes
+                .unwrap_or(ctx.max_output_bytes)
+                .min(ctx.max_output_bytes)
+                .min(ctx.shell_runtime.limits().max_output_bytes);
             // For swarms, cancel non-terminal children via the runtime and update
             // the background task record, then return the result.
             if input.task_id.starts_with("swarm_") {
@@ -1677,7 +1524,11 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         }
         if output.exit_code != Some(0) && !matches!(snapshot.status, BackgroundTaskStatus::Running)
         {
-            let failure_msg = crate::tools::format_shell_failure(output.exit_code, output.signal);
+            let failure_msg = match snapshot.status {
+                BackgroundTaskStatus::ResourceLimited => "Resource limit exceeded.".to_owned(),
+                BackgroundTaskStatus::ParentExited => "Owner process exited.".to_owned(),
+                _ => crate::tools::format_shell_failure(output.exit_code, output.signal),
+            };
             if !content.ends_with('\n') && !content.is_empty() {
                 content.push('\n');
             }
@@ -1696,13 +1547,19 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         details["stdout_truncated"] = json!(output.stdout_truncated || stdout_truncated);
         details["stderr_truncated"] = json!(output.stderr_truncated || stderr_truncated);
         details["truncated"] = json!(truncated);
+        if let Some(limit) = &output.resource_limit {
+            details["resource_limit"] = json!(limit);
+        }
     }
     if let Some(answers) = &snapshot.answers {
         details["answers"] = json!(answers);
     }
     let ok = !matches!(
         snapshot.status,
-        BackgroundTaskStatus::Failed | BackgroundTaskStatus::TimedOut
+        BackgroundTaskStatus::Failed
+            | BackgroundTaskStatus::TimedOut
+            | BackgroundTaskStatus::ResourceLimited
+            | BackgroundTaskStatus::ParentExited
     );
     let result = if ok {
         ToolResult::ok(content)
@@ -1740,59 +1597,105 @@ fn format_elapsed(elapsed: Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
-pub async fn output_from_buffers(
+fn background_status(result: &GuardedCommandResult) -> BackgroundTaskStatus {
+    background_status_from_kind(result.exit.status)
+}
+
+fn background_status_from_kind(status: GuardStatusKind) -> BackgroundTaskStatus {
+    match status {
+        GuardStatusKind::Completed => BackgroundTaskStatus::Completed,
+        GuardStatusKind::Failed => BackgroundTaskStatus::Failed,
+        GuardStatusKind::Cancelled => BackgroundTaskStatus::Cancelled,
+        GuardStatusKind::TimedOut => BackgroundTaskStatus::TimedOut,
+        GuardStatusKind::ResourceLimited => BackgroundTaskStatus::ResourceLimited,
+        GuardStatusKind::ParentExited => BackgroundTaskStatus::ParentExited,
+    }
+}
+
+fn validate_persisted_task_identity(
+    requested_task_id: &str,
+    path: &std::path::Path,
+    schema_version: u32,
+    persisted_task_id: &str,
+) -> Result<(), ToolError> {
+    if schema_version != 1 {
+        return Err(invalid_recovery_data(
+            requested_task_id,
+            path,
+            format!("unsupported schema version {schema_version}; expected 1"),
+        ));
+    }
+    if persisted_task_id != requested_task_id {
+        return Err(invalid_recovery_data(
+            requested_task_id,
+            path,
+            format!(
+                "persisted task id `{persisted_task_id}` does not match requested task id `{requested_task_id}`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_persisted_task_id(task_id: &str, root: &std::path::Path) -> Result<(), ToolError> {
+    if task_id.is_empty()
+        || !task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(invalid_recovery_data(
+            task_id,
+            root,
+            "task id must contain only ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_recovery_data(
+    task_id: &str,
+    path: &std::path::Path,
+    error: impl std::fmt::Display,
+) -> ToolError {
+    ToolError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "recover background task `{task_id}` from {}: {error}",
+            path.display()
+        ),
+    ))
+}
+
+fn command_output_from_guard(result: GuardedCommandResult) -> CommandOutput {
+    let mut output = command_output(
+        result.exit.exit_code,
+        result.exit.signal,
+        &result.output,
+        result.exit.omitted_output_bytes,
+    );
+    output.resource_limit = result.exit.resource_limit;
+    output
+}
+
+fn command_output_from_live(output: &TaggedOutput) -> CommandOutput {
+    let omitted = output.omitted_bytes;
+    command_output(None, None, output, omitted)
+}
+
+fn command_output(
     exit_code: Option<i32>,
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-) -> CommandOutput {
-    let stdout = stdout.lock().await;
-    let stderr = stderr.lock().await;
-    output_from_locked_buffers(
-        ShellTermination {
-            exit_code,
-            signal: None,
-        },
-        &stdout,
-        &stderr,
-        false,
-        false,
-    )
-}
-
-pub async fn output_from_command_buffers(
-    termination: ShellTermination,
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    stdout_truncated: Arc<Mutex<bool>>,
-    stderr_truncated: Arc<Mutex<bool>>,
-) -> CommandOutput {
-    let stdout_truncated = *stdout_truncated.lock().await;
-    let stderr_truncated = *stderr_truncated.lock().await;
-    let stdout = stdout.lock().await;
-    let stderr = stderr.lock().await;
-    output_from_locked_buffers(
-        termination,
-        &stdout,
-        &stderr,
-        stdout_truncated,
-        stderr_truncated,
-    )
-}
-
-fn output_from_locked_buffers(
-    termination: ShellTermination,
-    stdout: &[u8],
-    stderr: &[u8],
-    stdout_truncated: bool,
-    stderr_truncated: bool,
+    signal: Option<i32>,
+    output: &TaggedOutput,
+    omitted_bytes: u64,
 ) -> CommandOutput {
     CommandOutput {
-        exit_code: termination.exit_code,
-        signal: termination.signal,
-        stdout: String::from_utf8_lossy(stdout).into_owned(),
-        stderr: String::from_utf8_lossy(stderr).into_owned(),
-        stdout_truncated,
-        stderr_truncated,
+        exit_code,
+        signal,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout_truncated: omitted_bytes > 0,
+        stderr_truncated: omitted_bytes > 0,
+        resource_limit: None,
     }
 }
 
@@ -1843,144 +1746,7 @@ pub fn format_collected_answers(questions: &[QuestionEventData], answers: &[Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fake_command(
-        exit_code: Option<i32>,
-        stdout: &str,
-        stderr: &str,
-    ) -> ManagedBackgroundCommand {
-        let wait_exit_code = exit_code;
-        let cleanup_exit_code = exit_code;
-        ManagedBackgroundCommand {
-            stdout: Arc::new(Mutex::new(stdout.as_bytes().to_vec())),
-            stderr: Arc::new(Mutex::new(stderr.as_bytes().to_vec())),
-            stdout_truncated: Arc::new(Mutex::new(false)),
-            stderr_truncated: Arc::new(Mutex::new(false)),
-            stdout_task: tokio::spawn(async {}),
-            stderr_task: tokio::spawn(async {}),
-            try_wait: Arc::new(move || {
-                let exit_code = wait_exit_code;
-                Box::pin(async move {
-                    Ok(exit_code.map(|code| ShellTermination {
-                        exit_code: Some(code),
-                        signal: None,
-                    }))
-                })
-            }),
-            cleanup: Arc::new(move || {
-                let exit_code = cleanup_exit_code;
-                Box::pin(async move {
-                    exit_code.map_or(
-                        ShellTermination {
-                            exit_code: None,
-                            signal: None,
-                        },
-                        |code| ShellTermination {
-                            exit_code: Some(code),
-                            signal: None,
-                        },
-                    )
-                })
-            }),
-            drain: Arc::new(|handle| {
-                Box::pin(async move {
-                    let _ = handle.await;
-                })
-            }),
-        }
-    }
-
-    fn result_task_id(result: &ToolResult) -> String {
-        result
-            .details
-            .as_ref()
-            .and_then(|details| details["task_id"].as_str())
-            .expect("task id detail")
-            .to_owned()
-    }
-
-    #[tokio::test]
-    async fn background_task_manager_persists_output_under_agent_tasks_dir() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tasks_dir = temp.path().join("agents").join("main").join("tasks");
-        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks_dir.clone());
-
-        manager
-            .persist_task_output_for_test("bash-12345678", "hello\n")
-            .await
-            .expect("persist output");
-
-        assert_eq!(
-            tokio::fs::read_to_string(tasks_dir.join("bash-12345678").join("output.log"))
-                .await
-                .expect("read output"),
-            "hello\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn background_task_manager_keeps_persistent_output_open_until_finished() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tasks_dir = temp.path().join("agents").join("main").join("tasks");
-        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks_dir.clone());
-
-        manager
-            .persist_task_output_for_test("bash-12345678", "hello")
-            .await
-            .expect("persist first output");
-        manager
-            .persist_task_output_for_test("bash-12345678", " world\n")
-            .await
-            .expect("persist second output");
-
-        assert_eq!(manager.persistent_output_count_for_test().await, 1);
-        manager
-            .finish_task_output_for_test("bash-12345678")
-            .await
-            .expect("finish output");
-        assert_eq!(manager.persistent_output_count_for_test().await, 0);
-        assert_eq!(
-            tokio::fs::read_to_string(tasks_dir.join("bash-12345678").join("output.log"))
-                .await
-                .expect("read output"),
-            "hello world\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn persistence_failure_is_visible_in_typed_task_output() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let blocked_root = temp.path().join("not-a-directory");
-        tokio::fs::write(&blocked_root, b"file").await.unwrap();
-        let manager = BackgroundTaskManager::new().with_persistence_dir(blocked_root);
-        manager
-            .start_bash_with_task_id(
-                "bash-persistence".to_owned(),
-                "persistent task".to_owned(),
-                fake_command(None, "", ""),
-                1024,
-            )
-            .await
-            .unwrap();
-
-        manager
-            .persist_task_output_for_test("bash-persistence", "chunk")
-            .await
-            .expect_err("persistence root is a file");
-        let result = manager
-            .output("bash-persistence", false, Duration::ZERO, 1024)
-            .await
-            .unwrap();
-
-        assert!(result.content.contains("persistence_error:"));
-        assert!(
-            result
-                .details
-                .as_ref()
-                .and_then(|details| details["persistence_error"].as_str())
-                .is_some()
-        );
-    }
+    use crate::{ShellLimits, ShellRuntime, ToolAccess};
 
     #[tokio::test]
     async fn manager_lists_active_and_completed_questions() {
@@ -2032,33 +1798,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_finishes_bash_and_truncates_output() {
-        let manager = BackgroundTaskManager::new();
-        let started = manager
-            .start_bash(
-                "run fake command".to_owned(),
-                fake_command(Some(0), "abcdef", "stderr"),
-                3,
+    async fn task_output_clamps_persisted_log_to_context_and_runtime_limits() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let tasks = tempfile::tempdir().expect("tasks");
+        tokio::fs::write(
+            tasks.path().join("bash-test.status.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "task_id": "bash-test",
+                "started_at_ms": 1,
+                "finished_at_ms": 2,
+                "exit": {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "signal": null,
+                    "resource_limit": null,
+                    "omitted_output_bytes": 0,
+                    "omitted_log_bytes": 0
+                },
+                "cleanup_errors": []
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("write status");
+        tokio::fs::write(tasks.path().join("bash-test.log"), b"0123456789")
+            .await
+            .expect("write log");
+        let limits = ShellLimits {
+            max_output_bytes: 4,
+            ..ShellLimits::default()
+        };
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+        let mut context = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_access(ToolAccess::all())
+            .with_background_tasks(manager)
+            .with_shell_runtime(ShellRuntime::new(
+                limits,
+                PathBuf::from("unused-guardian"),
+                workspace.path().join("runtime"),
+            ));
+        context.max_output_bytes = 8;
+
+        let result = TaskOutputTool
+            .execute(
+                &context,
+                json!({ "task_id": "bash-test", "max_output_bytes": 100 }),
             )
             .await
-            .expect("bash task should start");
-        let task_id = result_task_id(&started);
+            .expect("task output");
 
-        let output = manager
-            .output(&task_id, false, Duration::from_millis(1), 3)
-            .await
-            .expect("bash task should be readable");
-        assert!(output.content.contains("status: completed"));
-        assert!(output.content.contains("[output]\nabcstd"));
-        assert!(output.content.contains("[output truncated]"));
-
-        let details = output.details.expect("details");
-        assert_eq!(details["kind"], "bash");
-        assert_eq!(details["status"], "completed");
-        assert_eq!(details["exit_code"], 0);
-        assert_eq!(details["stdout"], "abc");
-        assert_eq!(details["stderr"], "std");
-        assert_eq!(details["truncated"], true);
+        assert_eq!(result.details.as_ref().unwrap()["stdout"], "0123");
+        assert_eq!(result.details.as_ref().unwrap()["truncated"], true);
     }
 
     #[test]
@@ -2185,32 +1977,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_output_tool_reads_task() {
-        let manager = BackgroundTaskManager::new();
-        let started = manager
-            .start_bash(
-                "run fake command".to_owned(),
-                fake_command(Some(0), "hello", ""),
-                1024,
-            )
-            .await
-            .expect("bash task should start");
-        let task_id = result_task_id(&started);
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path())
-            .unwrap()
-            .with_background_tasks(manager);
-        let tool = TaskOutputTool;
-        let result = tool
-            .execute(&ctx, json!({"task_id": task_id}))
-            .await
-            .expect("execute");
-        assert!(!result.is_error);
-        assert!(result.content.contains("task_id:"));
-        assert!(result.content.contains("status:"));
-    }
-
-    #[tokio::test]
     async fn task_output_tool_reads_runtime_delegate_without_background_record() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext::new(dir.path()).unwrap();
@@ -2257,98 +2023,159 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_stop_tool_stops_running_bash() {
-        let manager = BackgroundTaskManager::new();
-        let started = manager
-            .start_bash(
-                "run fake command".to_owned(),
-                fake_command(Some(0), "hello", ""),
-                1024,
-            )
-            .await
-            .expect("bash task should start");
-        let task_id = result_task_id(&started);
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path())
-            .unwrap()
-            .with_access(crate::ToolAccess::all())
-            .with_background_tasks(manager);
-        let tool = TaskStopTool;
-        let result = tool
-            .execute(&ctx, json!({"task_id": task_id, "reason": "test done"}))
-            .await
-            .expect("execute");
-        assert!(!result.is_error);
-        assert!(result.content.contains("task_id:"));
-        assert!(result.content.contains("status: cancelled"));
+    async fn resume_converges_stale_running_guard_without_claiming_status_file() {
+        let tasks = tempfile::tempdir().expect("tasks");
+        let task_id = "bash-stale";
+        let running = tasks.path().join(format!("{task_id}.running.json"));
+        let final_status = tasks.path().join(format!("{task_id}.status.json"));
+        tokio::fs::write(
+            &running,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "task_id": task_id,
+                "guardian_pid": 1,
+                "started_at_ms": 1
+            }))
+            .expect("serialize running marker"),
+        )
+        .await
+        .expect("write running marker");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+
+        let snapshot = manager.snapshot(task_id).await.expect("restore stale task");
+
+        assert_eq!(snapshot.status, BackgroundTaskStatus::ParentExited);
+        assert!(!final_status.exists());
     }
 
     #[tokio::test]
-    async fn task_stop_tool_requires_shell_permission() {
-        let manager = BackgroundTaskManager::new();
-        let started = manager
-            .start_bash(
-                "run fake command".to_owned(),
-                fake_command(Some(0), "hello", ""),
-                1024,
-            )
-            .await
-            .expect("bash task should start");
-        let task_id = result_task_id(&started);
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path())
-            .unwrap()
-            .with_access(crate::ToolAccess {
-                file_read: true,
-                file_write: false,
-                shell: false,
-                tool: true,
-                user_question: false,
-            })
-            .with_background_tasks(manager);
-        let tool = TaskStopTool;
-        let result = tool.execute(&ctx, json!({"task_id": task_id})).await;
-        assert!(result.is_err());
+    async fn persisted_recovery_rejects_untrusted_task_identity() {
+        let task_id = "bash-target";
+        for suffix in ["status", "running"] {
+            for (schema_version, persisted_task_id) in [(2, task_id), (1, "bash-other")] {
+                let tasks = tempfile::tempdir().expect("tasks");
+                let record = if suffix == "status" {
+                    json!({
+                        "schema_version": schema_version,
+                        "task_id": persisted_task_id,
+                        "started_at_ms": 1,
+                        "finished_at_ms": 2,
+                        "exit": {
+                            "status": "completed",
+                            "exit_code": 0,
+                            "signal": null,
+                            "resource_limit": null,
+                            "omitted_output_bytes": 0,
+                            "omitted_log_bytes": 0
+                        },
+                        "cleanup_errors": []
+                    })
+                } else {
+                    json!({
+                        "schema_version": schema_version,
+                        "task_id": persisted_task_id,
+                        "guardian_pid": 1,
+                        "started_at_ms": 1
+                    })
+                };
+                tokio::fs::write(
+                    tasks.path().join(format!("{task_id}.{suffix}.json")),
+                    serde_json::to_vec(&record).expect("serialize record"),
+                )
+                .await
+                .expect("write persisted record");
+                let manager =
+                    BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+
+                let error = match manager.snapshot(task_id).await {
+                    Ok(_) => panic!("invalid persisted identity must not restore the target task"),
+                    Err(error) => error,
+                };
+
+                assert!(matches!(
+                    &error,
+                    ToolError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
+                ));
+                assert!(error.to_string().contains("recover background task"));
+            }
+        }
     }
 
     #[tokio::test]
-    #[allow(clippy::duration_suboptimal_units)]
-    async fn foreground_bash_task_can_be_detached() {
-        let manager = BackgroundTaskManager::new();
-        let task_id = manager
-            .start_bash_foreground(
-                "long command".to_owned(),
-                fake_command(None, "", ""),
-                1024,
-                Duration::from_secs(600),
-            )
-            .await
-            .expect("foreground task id");
+    async fn persisted_recovery_rejects_unsafe_task_id_before_path_resolution() {
+        let tasks = tempfile::tempdir().expect("tasks");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
 
-        let snapshot = manager.detach(&task_id).await.expect("detach");
-        assert_eq!(snapshot.status, BackgroundTaskStatus::Running);
-        assert_eq!(snapshot.task_id, task_id);
+        for task_id in ["../escape", r"..\escape", "C:escape", "bash:stream"] {
+            let error = match manager.persisted_snapshot(task_id).await {
+                Ok(_) => panic!("unsafe task id must be rejected"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(
+                &error,
+                ToolError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
+            ));
+        }
     }
 
-    #[tokio::test]
-    async fn detach_resets_deadline_to_background_timeout() {
-        let manager = BackgroundTaskManager::new();
-        let task_id = manager
-            .start_bash_foreground(
-                "long command".to_owned(),
-                fake_command(None, "", ""),
-                1024,
-                Duration::from_millis(80),
+    #[test]
+    fn disappeared_persisted_identity_is_not_reported_as_parent_exited() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let tasks = tempfile::tempdir().expect("tasks");
+            let task_id = "bash-race";
+            let running = tasks.path().join(format!("{task_id}.running.json"));
+            std::fs::write(
+                &running,
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "task_id": task_id,
+                    "guardian_pid": 1,
+                    "started_at_ms": 1
+                }))
+                .expect("serialize running marker"),
             )
-            .await
-            .expect("foreground task id");
+            .expect("write running marker");
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        manager.detach(&task_id).await.expect("detach");
-        tokio::time::sleep(Duration::from_millis(40)).await;
+            let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+            let release =
+                std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let blocker_release = release.clone();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).expect("signal blocker");
+                let (lock, condvar) = &*blocker_release;
+                let mut released = lock.lock().expect("lock release");
+                while !*released {
+                    released = condvar.wait(released).expect("wait release");
+                }
+            });
+            started_rx.recv().expect("blocking worker started");
 
-        let snapshot = manager.snapshot(&task_id).await.expect("snapshot");
-        assert_eq!(snapshot.status, BackgroundTaskStatus::Running);
+            let manager =
+                BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+            let mut recovery = Box::pin(manager.persisted_snapshot(task_id));
+            assert!(matches!(
+                futures::poll!(&mut recovery),
+                std::task::Poll::Pending
+            ));
+            std::fs::remove_file(running).expect("remove running marker");
+            let (lock, condvar) = &*release;
+            *lock.lock().expect("lock release") = true;
+            condvar.notify_one();
+            blocker.await.expect("blocking worker");
+
+            assert!(
+                recovery
+                    .await
+                    .expect("recover disappeared marker")
+                    .is_none()
+            );
+        });
     }
 
     #[test]

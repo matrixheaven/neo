@@ -18,6 +18,7 @@ mod process_supervisor;
 mod read;
 mod sessions;
 mod shell_env;
+mod shell_guard;
 mod skills_manager;
 mod terminal;
 mod todo;
@@ -98,7 +99,10 @@ pub use mcp::{
 };
 pub use mcp_manager::*;
 pub use process_supervisor::ProcessSupervisor;
-mod terminal_process;
+pub use shell_guard::{
+    GuardLimits, ResourceLimitCause, ResourceLimitDetail, ShellLimits, ShellLimitsError,
+    ShellRuntime, run_process_guard, scavenge_completed_runtime_instances,
+};
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).
 pub use ask_user::{
@@ -108,8 +112,7 @@ pub use ask_user::{
 pub use background_tasks::{
     BackgroundTaskKind, BackgroundTaskManager, BackgroundTaskSnapshot, BackgroundTaskStatus,
     CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskStopTool,
-    cap_output_details, cap_plain_output, format_collected_answers, output_from_buffers,
-    task_list_result,
+    cap_output_details, cap_plain_output, format_collected_answers, task_list_result,
 };
 pub use bash::{
     ShellExecutionRequest, ShellExecutionResult, ShellTermination, execute_model_bash_for_runtime,
@@ -161,6 +164,8 @@ pub enum ToolError {
     InvalidInput { tool: String, message: String },
     #[error("command timed out after {timeout_ms} ms")]
     CommandTimedOut { timeout_ms: u64 },
+    #[error("shell resource limit exceeded: {cause:?}")]
+    ResourceLimited { cause: ResourceLimitCause },
     #[error("tool execution cancelled")]
     Cancelled,
     #[error("mcp error from {server_id}/{tool_name}: {message}")]
@@ -188,6 +193,7 @@ pub struct ToolContext {
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
     pub background_tasks: BackgroundTaskManager,
+    pub shell_runtime: ShellRuntime,
     /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
     /// Parent runtime config used to construct real child `AgentRuntime` instances.
@@ -224,6 +230,7 @@ impl std::fmt::Debug for ToolContext {
             .field("cancel_token", &self.cancel_token)
             .field("process_supervisor", &self.process_supervisor)
             .field("background_tasks", &self.background_tasks)
+            .field("shell_runtime", &self.shell_runtime)
             .field("multi_agent", &self.multi_agent)
             .field("child_config", &self.child_config.is_some())
             .field("child_model", &self.child_model.is_some())
@@ -251,6 +258,7 @@ impl ToolContext {
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
             background_tasks: BackgroundTaskManager::new(),
+            shell_runtime: ShellRuntime::default(),
             multi_agent: MultiAgentRuntime::new(),
             child_config: None,
             child_model: None,
@@ -310,6 +318,14 @@ impl ToolContext {
             .map_or(background_tasks.clone(), |tasks_dir| {
                 background_tasks.with_persistence_dir(tasks_dir)
             });
+        self
+    }
+
+    #[must_use]
+    pub fn with_shell_runtime(mut self, shell_runtime: ShellRuntime) -> Self {
+        self.bash_timeout = Duration::from_secs(shell_runtime.limits().foreground_timeout_secs);
+        self.max_output_bytes = shell_runtime.limits().max_output_bytes;
+        self.shell_runtime = shell_runtime;
         self
     }
 
@@ -722,21 +738,6 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn cap_output(content: &str, max_bytes: usize) -> (String, bool) {
-    if content.len() <= max_bytes {
-        return (format!("{content}\ntruncated: false"), false);
-    }
-    let mut capped = String::new();
-    for character in content.chars() {
-        let next_len = capped.len() + character.len_utf8();
-        if next_len > max_bytes {
-            break;
-        }
-        capped.push(character);
-    }
-    (format!("{capped}\ntruncated: true"), true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,35 +745,6 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-
-    #[tokio::test]
-    async fn tool_context_agent_session_context_persists_main_task_output() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let session = tempfile::tempdir().expect("session");
-        let ctx = ToolContext::new(workspace.path())
-            .expect("tool context")
-            .with_agent_session_context(session.path(), crate::session::MAIN_AGENT_ID);
-
-        ctx.background_tasks
-            .persist_task_output_for_test("bash-12345678", "hello\n")
-            .await
-            .expect("persist output");
-
-        assert_eq!(
-            tokio::fs::read_to_string(
-                session
-                    .path()
-                    .join("agents")
-                    .join("main")
-                    .join("tasks")
-                    .join("bash-12345678")
-                    .join("output.log")
-            )
-            .await
-            .expect("read output"),
-            "hello\n"
-        );
-    }
 
     #[test]
     fn tool_context_resolve_workspace_path_uses_added_read_root() {

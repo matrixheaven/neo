@@ -8,13 +8,16 @@ use std::{env, fs};
 use anyhow::Context;
 use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::multi_agent::MultiAgentRuntime;
-use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
+use neo_agent_core::{
+    PermissionMode, QueueMode, ShellLimits, ShellRuntime, ToolExecutionMode,
+    scavenge_completed_runtime_instances,
+};
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::notify::NotificationMode;
 
 use super::types::{
-    FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileTuiConfig,
-    default_runtime_compaction_keep_recent_messages,
+    FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileRuntimeShellConfig,
+    FileTuiConfig, default_runtime_compaction_keep_recent_messages,
     default_runtime_compaction_max_estimated_tokens,
 };
 use super::{
@@ -27,6 +30,27 @@ const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
 static PROCESS_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+static SHELL_RUNTIME_ROOTS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+
+fn process_shell_runtime_root(runtime_dir: &Path) -> PathBuf {
+    let roots = SHELL_RUNTIME_ROOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut roots = roots
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(root) = roots.get(runtime_dir) {
+        return root.clone();
+    }
+    if let Err(error) = scavenge_completed_runtime_instances(runtime_dir) {
+        tracing::warn!(%error, "failed to scavenge completed shell runtime instances");
+    }
+    let root = runtime_dir
+        .join(format!("neo-{}", uuid::Uuid::new_v4()))
+        .join("agents")
+        .join(neo_agent_core::session::MAIN_AGENT_ID)
+        .join("tasks");
+    roots.insert(runtime_dir.to_path_buf(), root.clone());
+    root
+}
 
 impl AppConfig {
     #[allow(clippy::too_many_lines)]
@@ -90,8 +114,18 @@ impl AppConfig {
         } else {
             file_config.permission_mode.unwrap_or_default()
         };
-        let runtime = runtime_from_file(file_config.runtime);
+        let mut runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
+        let runtime_dir = config_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", config_path.display()))?
+            .join("runtime");
+        let runtime_root = process_shell_runtime_root(&runtime_dir);
+        runtime.shell_runtime = ShellRuntime::new(
+            runtime.shell,
+            env::current_exe().context("failed to resolve Neo executable for shell guardian")?,
+            runtime_root,
+        );
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
         let theme = themes::resolve_theme()?;
@@ -203,7 +237,41 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
             .tool_execution_mode
             .unwrap_or(ToolExecutionMode::Parallel),
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
+        shell: runtime_shell_from_file(runtime.shell),
+        shell_runtime: ShellRuntime::default(),
     }
+}
+
+fn runtime_shell_from_file(shell: Option<FileRuntimeShellConfig>) -> ShellLimits {
+    let mut limits = ShellLimits::default();
+    let Some(shell) = shell else {
+        return limits;
+    };
+    if let Some(value) = shell.foreground_timeout_secs {
+        limits.foreground_timeout_secs = value;
+    }
+    if let Some(value) = shell.background_timeout_secs {
+        limits.background_timeout_secs = value;
+    }
+    if let Some(value) = shell.max_active_commands {
+        limits.max_active_commands = value;
+    }
+    if let Some(value) = shell.max_parallelism {
+        limits.max_parallelism = value;
+    }
+    if let Some(value) = shell.max_descendant_processes {
+        limits.max_descendant_processes = value;
+    }
+    if let Some(value) = shell.max_tree_memory_percent {
+        limits.max_tree_memory_percent = value;
+    }
+    if let Some(value) = shell.max_output_bytes {
+        limits.max_output_bytes = value;
+    }
+    if let Some(value) = shell.max_background_log_bytes {
+        limits.max_background_log_bytes = value;
+    }
+    limits
 }
 
 #[cfg(test)]
@@ -250,6 +318,7 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
 }
 
 fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
+    config.shell.validate().map_err(anyhow::Error::new)?;
     if let Some(temperature) = config.temperature {
         anyhow::ensure!(
             temperature.is_finite() && temperature >= 0.0,

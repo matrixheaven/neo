@@ -287,7 +287,7 @@ impl InteractiveController {
             .stop(
                 &task_id,
                 "Stopped from Task Browser",
-                SHELL_MAX_OUTPUT_BYTES,
+                config.runtime.shell.max_output_bytes,
             )
             .await;
         match result {

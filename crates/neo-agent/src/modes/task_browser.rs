@@ -234,6 +234,8 @@ fn map_status(status: BackgroundTaskStatus) -> TaskBrowserStatus {
         BackgroundTaskStatus::Failed => TaskBrowserStatus::Failed,
         BackgroundTaskStatus::Cancelled => TaskBrowserStatus::Cancelled,
         BackgroundTaskStatus::TimedOut => TaskBrowserStatus::TimedOut,
+        BackgroundTaskStatus::ResourceLimited => TaskBrowserStatus::ResourceLimited,
+        BackgroundTaskStatus::ParentExited => TaskBrowserStatus::ParentExited,
     }
 }
 
@@ -285,6 +287,7 @@ mod tests {
                 stderr: "warn".to_owned(),
                 stdout_truncated: true,
                 stderr_truncated: false,
+                resource_limit: None,
             }),
             answers: None,
             delegate: None,

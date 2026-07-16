@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::permission::ApprovalRequest;
 use crate::multi_agent::MultiAgentRuntime;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
-use crate::tools::BackgroundTaskManager;
+use crate::tools::{BackgroundTaskManager, ShellRuntime};
 use crate::workspace_policy::WorkspaceAccessPolicy;
 use crate::{
     AgentMessage, AgentToolCall, PermissionApprovalDecision, PermissionMode, PlanMode,
@@ -160,6 +160,9 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub background_tasks: BackgroundTaskManager,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub shell_runtime: ShellRuntime,
     /// Shared manual `/compact` request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by the TUI and taken by runtime compaction.
@@ -217,6 +220,7 @@ impl AgentConfig {
             agent_id: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
+            shell_runtime: ShellRuntime::default(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
             cached_tool_spec_tokens: std::sync::OnceLock::new(),
@@ -285,6 +289,12 @@ impl AgentConfig {
         workspace_policy: Arc<RwLock<Option<WorkspaceAccessPolicy>>>,
     ) -> Self {
         self.workspace_policy = workspace_policy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_shell_runtime(mut self, shell_runtime: ShellRuntime) -> Self {
+        self.shell_runtime = shell_runtime;
         self
     }
 

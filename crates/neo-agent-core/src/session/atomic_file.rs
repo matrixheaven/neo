@@ -14,6 +14,38 @@ pub(crate) fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     }
 }
 
+pub(crate) fn write_file_atomic_create_new(
+    path: &Path,
+    content: &[u8],
+) -> io::Result<AtomicWriteStatus> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    ensure_safe_directory_tree(parent)?;
+    reject_reparse_or_symlink_if_present(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("session");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    if let Err(error) = write_temp_file(&temp_path, content) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::hard_link(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    let _ = fs::remove_file(&temp_path);
+    match sync_parent_dir(parent) {
+        Ok(()) => Ok(AtomicWriteStatus::Durable),
+        Err(error) => Ok(AtomicWriteStatus::CommittedUnsynced(error)),
+    }
+}
+
 pub(crate) fn write_file_atomic_status(
     path: &Path,
     content: &[u8],

@@ -5,7 +5,7 @@ use std::{
 };
 
 use neo_agent_core::multi_agent::MultiAgentRuntime;
-use neo_agent_core::{BackgroundTaskManager, WorkspaceAccessPolicy};
+use neo_agent_core::{BackgroundTaskManager, ShellLimits, ShellRuntime, WorkspaceAccessPolicy};
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
@@ -126,6 +126,8 @@ impl AppConfig {
         self.workspace_policy = Arc::clone(&current.workspace_policy);
         self.background_tasks = current.background_tasks.clone();
         self.multi_agent = current.multi_agent.clone();
+        self.runtime.shell = current.runtime.shell;
+        self.runtime.shell_runtime = current.runtime.shell_runtime.clone();
     }
 
     /// The canonical `provider/model` display label for the configured default
@@ -166,6 +168,9 @@ pub struct RuntimeConfig {
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
     pub compaction: Option<RuntimeCompactionConfig>,
+    pub shell: ShellLimits,
+    #[serde(skip)]
+    pub shell_runtime: ShellRuntime,
 }
 
 impl Default for RuntimeConfig {
@@ -179,6 +184,8 @@ impl Default for RuntimeConfig {
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
             compaction: Some(RuntimeCompactionConfig::default()),
+            shell: ShellLimits::default(),
+            shell_runtime: ShellRuntime::default(),
         }
     }
 }
@@ -306,6 +313,73 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.runtime.follow_up_queue_mode, QueueMode::All);
+    }
+
+    #[test]
+    fn config_defaults_shell_limits() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
+        assert_eq!(config.runtime.shell.max_active_commands, 2);
+        assert_eq!(config.runtime.shell.background_timeout_secs, 1_800);
+        assert_eq!(config.runtime.shell.max_output_bytes, 65_536);
+        let task_suffix = std::path::Path::new("agents").join("main").join("tasks");
+        assert!(
+            config
+                .runtime
+                .shell_runtime
+                .runtime_root()
+                .ends_with(task_suffix)
+        );
+    }
+
+    #[test]
+    fn config_reuses_process_shell_runtime_root() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let first = load_config(config_path.clone(), project_dir.clone());
+        let second = load_config(config_path, project_dir);
+
+        assert_eq!(
+            first.runtime.shell_runtime.runtime_root(),
+            second.runtime.shell_runtime.runtime_root()
+        );
+    }
+
+    #[test]
+    fn config_loads_shell_limit_overrides() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r"
+[runtime.shell]
+max_active_commands = 1
+max_parallelism = 2
+",
+        );
+        let config = load_config(config_path, project_dir);
+        assert_eq!(config.runtime.shell.max_active_commands, 1);
+        assert_eq!(config.runtime.shell.max_parallelism, 2);
+        assert_eq!(config.runtime.shell.background_timeout_secs, 1_800);
+    }
+
+    #[test]
+    fn config_rejects_shell_limits_that_round_static_memory_to_zero() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r"
+[runtime.shell]
+max_active_commands = 51
+",
+        );
+        let error = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.shell.max_tree_memory_percent")
+        );
     }
 
     #[test]

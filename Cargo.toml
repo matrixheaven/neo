@@ -46,10 +46,11 @@ sha2 = "0.10.9"
 skim = { version = "5.0.0", default-features = false }
 sse-stream = "0.2"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+sysinfo = "0.37.2"
 tar = "0.4.46"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-util", "sync", "net"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-util", "io-std", "sync", "net"] }
 tokio-util = "0.7.17"
 toml = "0.9.8"
 tracing = "0.1.43"

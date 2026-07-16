@@ -26,6 +26,8 @@ pub enum TaskBrowserStatus {
     Failed,
     Cancelled,
     TimedOut,
+    ResourceLimited,
+    ParentExited,
 }
 
 impl TaskBrowserStatus {
@@ -43,6 +45,8 @@ impl TaskBrowserStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed out",
+            Self::ResourceLimited => "resource limited",
+            Self::ParentExited => "owner exited",
         }
     }
 
@@ -52,13 +56,24 @@ impl TaskBrowserStatus {
             Self::Running => "●",
             Self::Waiting => "◼",
             Self::Completed => "✓",
-            Self::Failed | Self::Cancelled | Self::TimedOut => "✕",
+            Self::Failed
+            | Self::Cancelled
+            | Self::TimedOut
+            | Self::ResourceLimited
+            | Self::ParentExited => "✕",
         }
     }
 
     #[must_use]
     pub const fn is_interrupted(self) -> bool {
-        matches!(self, Self::Failed | Self::Cancelled | Self::TimedOut)
+        matches!(
+            self,
+            Self::Failed
+                | Self::Cancelled
+                | Self::TimedOut
+                | Self::ResourceLimited
+                | Self::ParentExited
+        )
     }
 }
 

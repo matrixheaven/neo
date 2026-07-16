@@ -21,8 +21,9 @@ use super::tool_arguments::prepare_tool_arguments;
 use crate::skills::SkillStoreHandle;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
-    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, SkillInvocationOutcome,
-    SkillInvocationSource, ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
+    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ResourceLimitDetail,
+    SkillInvocationOutcome, SkillInvocationSource, ToolAccess, ToolContext, ToolError,
+    ToolRegistry, ToolResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -640,9 +641,71 @@ async fn run_model_bash_with_cancel(
     tokio::select! {
         biased;
         result = execute_model_bash_for_runtime(tool_context, arguments.clone()) => {
-            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
+            result.unwrap_or_else(|error| model_bash_error_result(tool_context, error))
         }
         () = cancel_token.cancelled() => cancelled_tool_result(),
+    }
+}
+
+fn model_bash_error_result(tool_context: &ToolContext, error: ToolError) -> ToolResult {
+    let ToolError::ResourceLimited { cause } = error else {
+        return ToolResult::error(error.to_string());
+    };
+    let configured =
+        u64::try_from(tool_context.shell_runtime.limits().max_active_commands).unwrap_or(u64::MAX);
+    ToolResult::error("Resource limit exceeded.").with_details(serde_json::json!({
+        "exit_code": null,
+        "signal": null,
+        "stdout": "",
+        "stderr": "",
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "truncated": false,
+        "outcome": "resource_limited",
+        "resource_limit": ResourceLimitDetail {
+            cause,
+            configured: Some(configured),
+            observed: Some(configured.saturating_add(1)),
+        },
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ShellLimits, ShellRuntime};
+
+    #[tokio::test]
+    async fn model_bash_admission_rejection_returns_resource_limit_details() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let limits = ShellLimits {
+            max_active_commands: 1,
+            ..ShellLimits::default()
+        };
+        let runtime = ShellRuntime::new(
+            limits,
+            PathBuf::from("unused-guardian"),
+            workspace.path().join("runtime"),
+        );
+        let _permit = runtime.try_acquire().expect("occupy admission slot");
+        let context = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_access(ToolAccess::all())
+            .with_shell_runtime(runtime);
+
+        let result = run_model_bash_with_cancel(
+            &serde_json::json!({ "command": "printf rejected" }),
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
+        let details = result.details.expect("structured rejection details");
+
+        assert!(result.is_error);
+        assert_eq!(details["outcome"], "resource_limited");
+        assert_eq!(details["resource_limit"]["cause"], "active_commands");
+        assert_eq!(details["resource_limit"]["configured"], 1);
+        assert_eq!(details["resource_limit"]["observed"], 2);
     }
 }
 
@@ -684,6 +747,7 @@ fn default_tool_context(
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
+                .with_shell_runtime(config.shell_runtime.clone())
                 .with_multi_agent(multi_agent)
                 .with_child_runtime(config.clone(), model, registry, turn);
             if let Some(session_directory) = &config.session_directory {

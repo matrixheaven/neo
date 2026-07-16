@@ -268,7 +268,9 @@ fn render_finished_output(
     error_style: Style,
     muted_style: Style,
 ) -> Vec<Line> {
-    let style = if exit_code == Some(0) && matches!(outcome, ShellCommandOutcome::Completed) {
+    let style = if matches!(outcome, ShellCommandOutcome::ResourceLimited) {
+        muted_style
+    } else if exit_code == Some(0) && matches!(outcome, ShellCommandOutcome::Completed) {
         body_style
     } else {
         error_style
@@ -282,6 +284,7 @@ fn render_finished_output(
         let line_style = if line.starts_with("Moved to background")
             || line.starts_with("Cancelled")
             || line.starts_with("Timed out")
+            || line.starts_with("Resource limit")
             || line == "[output truncated]"
         {
             muted_style
@@ -312,6 +315,9 @@ pub(crate) fn finished_plain_lines(
         ShellCommandOutcome::TimedOut => {
             lines.push("Timed out.".to_owned());
         }
+        ShellCommandOutcome::ResourceLimited => {
+            lines.push("Resource limit exceeded.".to_owned());
+        }
         ShellCommandOutcome::Completed => {
             if exit_code != Some(0) {
                 lines.push(format_shell_failure(exit_code, signal));
@@ -338,4 +344,53 @@ fn wrap_prefixed(line: &str, width: usize, style: Style) -> Vec<Line> {
         .into_iter()
         .map(|segment| Line::styled(format!("{PREFIX}{segment}"), style))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_limited_shell_outcome_finalizes_with_terminal_message() {
+        assert_eq!(
+            finished_plain_lines(
+                "",
+                "",
+                None,
+                None,
+                &ShellCommandOutcome::ResourceLimited,
+                false,
+            ),
+            ["Resource limit exceeded."]
+        );
+        let component = ShellRunComponent::finished(
+            "shell-1",
+            "cargo nextest --workspace",
+            "",
+            "",
+            None,
+            None,
+            ShellCommandOutcome::ResourceLimited,
+            false,
+        );
+        assert_eq!(component.finalization(), Finalization::Finalized);
+
+        let theme = TuiTheme::default();
+        let rows = ShellRunComponent::finished(
+            "shell-2",
+            "cargo nextest --workspace",
+            "partial output",
+            "",
+            None,
+            None,
+            ShellCommandOutcome::ResourceLimited,
+            false,
+        )
+        .render(80, &theme);
+        assert!(rows[1..].iter().all(|line| {
+            line.spans()
+                .iter()
+                .all(|span| span.style().fg == Some(theme.text_muted))
+        }));
+    }
 }

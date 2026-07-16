@@ -5,7 +5,13 @@ use std::{thread, time::Duration};
 
 use portable_pty::Child;
 
-pub(crate) struct TerminalProcessTree {
+#[cfg(windows)]
+use std::{
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+};
+
+pub(super) struct TerminalProcessTree {
     child: Box<dyn Child + Send + Sync>,
     #[cfg(unix)]
     group: Option<rustix::process::Pid>,
@@ -44,7 +50,7 @@ impl Drop for TerminalProcessTree {
 
 impl TerminalProcessTree {
     #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn new(child: Box<dyn Child + Send + Sync>) -> io::Result<Self> {
+    pub(super) fn new(child: Box<dyn Child + Send + Sync>) -> io::Result<Self> {
         #[cfg(windows)]
         let mut child = child;
         #[cfg(unix)]
@@ -93,11 +99,15 @@ impl TerminalProcessTree {
         })
     }
 
-    pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
+    pub(super) fn try_wait(&mut self) -> io::Result<Option<i32>> {
         self.child.try_wait().map(|status| status.map(exit_code))
     }
 
-    pub(crate) fn terminate_and_wait(&mut self) -> io::Result<Option<i32>> {
+    pub(super) fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    pub(super) fn terminate_and_wait(&mut self) -> io::Result<Option<i32>> {
         #[cfg(unix)]
         {
             let Some(group) = self.group else {
@@ -107,7 +117,7 @@ impl TerminalProcessTree {
                 ));
             };
             terminate_process_group(group, rustix::process::Signal::TERM)?;
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(500));
             terminate_process_group(group, rustix::process::Signal::KILL)?;
             let status = self.child.wait()?;
             self.group = None;
@@ -117,7 +127,7 @@ impl TerminalProcessTree {
         #[cfg(windows)]
         {
             drop(self.job.take());
-            return self.child.wait().map(|status| Some(exit_code(status)));
+            self.child.wait().map(|status| Some(exit_code(status)))
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -166,12 +176,68 @@ fn terminate_process_group(
 ) -> io::Result<()> {
     match rustix::process::kill_process_group(group, signal) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
-        // After the session leader exits during the TERM grace period, macOS
-        // reports its now-empty PTY process group as EPERM instead of ESRCH.
         #[cfg(target_os = "macos")]
         Err(rustix::io::Errno::PERM) if signal == rustix::process::Signal::KILL => Ok(()),
         Err(error) => Err(io::Error::other(format!(
             "signal terminal process group with {signal:?}: {error}"
         ))),
+    }
+}
+
+#[cfg(windows)]
+pub(super) struct WindowsLaunchBarrier {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsLaunchBarrier {
+    pub(super) fn new(runtime_dir: &Path) -> Self {
+        Self {
+            path: runtime_dir.join(format!(".neo-process-ready-{}", uuid::Uuid::new_v4())),
+        }
+    }
+
+    pub(super) fn wait_command(&self) -> String {
+        let command = format!(
+            "if exist \"{}\" exit /b 0 else exit /b 1",
+            self.path.display()
+        );
+        format!(
+            "until cmd.exe //d //c {}; do sleep 0.01; done;",
+            quote_posix_shell(&command)
+        )
+    }
+
+    pub(super) fn release(&self) -> io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map(|_| ())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsLaunchBarrier {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(windows)]
+fn quote_posix_shell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_barrier_disables_msys_switch_path_conversion() {
+        let temp = tempfile::tempdir().unwrap();
+        let barrier = WindowsLaunchBarrier::new(temp.path());
+
+        assert!(barrier.wait_command().contains("cmd.exe //d //c"));
     }
 }

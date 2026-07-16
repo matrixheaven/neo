@@ -18,6 +18,7 @@ pub(super) struct ShellRunRequest {
     pub(super) max_output_bytes: usize,
     pub(super) cancel_token: CancellationToken,
     pub(super) background_tasks: neo_agent_core::tools::BackgroundTaskManager,
+    pub(super) shell_runtime: neo_agent_core::tools::ShellRuntime,
     pub(super) event_tx: mpsc::UnboundedSender<AgentEvent>,
 }
 
@@ -58,6 +59,7 @@ pub(super) struct RunningShellCommand {
     pub(super) cancel_token: CancellationToken,
     pub(super) background_tasks: neo_agent_core::tools::BackgroundTaskManager,
     pub(super) foreground_task_id: Option<String>,
+    pub(super) max_output_bytes: usize,
     pub(super) events: mpsc::UnboundedReceiver<AgentEvent>,
 }
 
@@ -93,16 +95,23 @@ impl InteractiveController {
             .as_ref()
             .map(|config| config.background_tasks.clone())
             .unwrap_or_default();
+        let shell_runtime = self
+            .local_config
+            .as_ref()
+            .map(|config| config.runtime.shell_runtime.clone())
+            .unwrap_or_default();
+        let shell_limits = shell_runtime.limits();
         let (event_tx, events) = mpsc::unbounded_channel();
         let request = ShellRunRequest {
             id: id.clone(),
             command: command.clone(),
             cwd: self.workspace_root.clone(),
-            foreground_timeout: SHELL_FOREGROUND_TIMEOUT,
-            background_timeout: SHELL_BACKGROUND_TIMEOUT,
-            max_output_bytes: SHELL_MAX_OUTPUT_BYTES,
+            foreground_timeout: Duration::from_secs(shell_limits.foreground_timeout_secs),
+            background_timeout: Duration::from_secs(shell_limits.background_timeout_secs),
+            max_output_bytes: shell_limits.max_output_bytes,
             cancel_token: cancel_token.clone(),
             background_tasks: background_tasks.clone(),
+            shell_runtime,
             event_tx,
         };
         let task = tokio::spawn((self.shell_driver)(request));
@@ -121,6 +130,7 @@ impl InteractiveController {
             cancel_token,
             background_tasks,
             foreground_task_id: None,
+            max_output_bytes: shell_limits.max_output_bytes,
             events,
         });
         Ok(())
@@ -163,17 +173,39 @@ impl InteractiveController {
             .task
             .await
             .map_err(|error| anyhow::anyhow!("interactive shell task failed: {error}"))?;
-        let result = result.unwrap_or_else(|error| neo_agent_core::tools::ShellExecutionResult {
-            stdout: String::new(),
-            stderr: error.to_string(),
-            exit_code: None,
-            signal: None,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            truncated: false,
-            outcome: ShellCommandOutcome::Cancelled,
-            foreground_task_id: None,
-        });
+        let result = match result {
+            Ok(result) => result,
+            Err(ShellDriverError::Tool(neo_agent_core::ToolError::ResourceLimited { cause })) => {
+                neo_agent_core::tools::ShellExecutionResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    signal: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    truncated: false,
+                    outcome: ShellCommandOutcome::ResourceLimited,
+                    foreground_task_id: None,
+                    resource_limit: Some(neo_agent_core::ResourceLimitDetail {
+                        cause,
+                        configured: None,
+                        observed: None,
+                    }),
+                }
+            }
+            Err(error) => neo_agent_core::tools::ShellExecutionResult {
+                stdout: String::new(),
+                stderr: error.to_string(),
+                exit_code: None,
+                signal: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                truncated: false,
+                outcome: ShellCommandOutcome::Cancelled,
+                foreground_task_id: None,
+                resource_limit: None,
+            },
+        };
         self.finish_shell_command(shell.id, shell.command, result)
             .await?;
         self.start_next_queued_after_shell().await
@@ -203,8 +235,21 @@ impl InteractiveController {
         &mut self,
         id: String,
         command: String,
-        result: neo_agent_core::tools::ShellExecutionResult,
+        mut result: neo_agent_core::tools::ShellExecutionResult,
     ) -> Result<()> {
+        if let Some(limit) = &result.resource_limit {
+            if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+                result.stderr.push('\n');
+            }
+            result.stderr.push_str("Resource limit: ");
+            result.stderr.push_str(limit.cause.as_str());
+            if let (Some(observed), Some(configured)) = (limit.observed, limit.configured) {
+                result
+                    .stderr
+                    .push_str(&format!(" (observed {observed}, limit {configured})"));
+            }
+            result.stderr.push('.');
+        }
         self.apply_turn_event(AgentEvent::ShellCommandFinished {
             turn: 0,
             id,
@@ -353,7 +398,7 @@ impl InteractiveController {
                     .stop(
                         &task.task_id,
                         "Cancelled foreground shell command",
-                        SHELL_MAX_OUTPUT_BYTES,
+                        shell.max_output_bytes,
                     )
                     .await;
             }
@@ -372,6 +417,7 @@ impl InteractiveController {
                 truncated: false,
                 outcome: ShellCommandOutcome::Cancelled,
                 foreground_task_id,
+                resource_limit: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;
@@ -397,6 +443,7 @@ impl InteractiveController {
                     signal: None,
                     stdout_truncated: false,
                     stderr_truncated: false,
+                    resource_limit: None,
                 },
             );
             shell.task.abort();
@@ -416,6 +463,7 @@ impl InteractiveController {
                     task_id: task_id.into(),
                 },
                 foreground_task_id: shell.foreground_task_id,
+                resource_limit: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;

@@ -1010,6 +1010,7 @@ mod tests {
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
+                ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1097,6 +1098,7 @@ mod tests {
                 follow_up_queue_mode: QueueMode::OneAtATime,
                 tool_execution_mode: ToolExecutionMode::Sequential,
                 compaction: None,
+                ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1382,6 +1384,7 @@ mod tests {
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
+                ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1465,6 +1468,7 @@ mod tests {
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
+                ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),

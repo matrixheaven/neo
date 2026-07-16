@@ -323,6 +323,7 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
     match details.get("outcome").and_then(serde_json::Value::as_str) {
         Some("cancelled") => ShellCommandOutcome::Cancelled,
         Some("timed_out") => ShellCommandOutcome::TimedOut,
+        Some("resource_limited") => ShellCommandOutcome::ResourceLimited,
         Some("backgrounded") => {
             let task_id = details
                 .get("task_id")
@@ -401,20 +402,36 @@ pub(super) fn emit_terminal_events(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            if output.is_empty() {
-                return;
-            }
             let truncated = details
                 .get("truncated")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            emitter.emit(AgentEvent::TerminalSessionOutput {
-                turn,
-                id: tool_call.id.to_string(),
-                handle,
-                output,
-                truncated,
-            });
+            if !output.is_empty() {
+                emitter.emit(AgentEvent::TerminalSessionOutput {
+                    turn,
+                    id: tool_call.id.to_string(),
+                    handle: handle.clone(),
+                    output,
+                    truncated,
+                });
+            }
+            let status = details
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("running");
+            if status != "running" {
+                let exit_code = details
+                    .get("exit_code")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok());
+                emitter.emit(AgentEvent::TerminalSessionFinished {
+                    turn,
+                    id: tool_call.id.to_string(),
+                    handle,
+                    status: status.to_owned(),
+                    exit_code,
+                });
+            }
         }
         Some("stop") => {
             let status = details
@@ -496,6 +513,47 @@ mod tests {
             AgentEvent::GoalStarted {
                 turn: 7,
                 objective: "Second goal".to_owned(),
+            }
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_read_emits_finished_for_empty_natural_exit() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path()).expect("tool context");
+        let call = AgentToolCall {
+            id: "tool-read".into(),
+            name: "Terminal".into(),
+            raw_arguments: json!({ "mode": "read" }).to_string().into(),
+        };
+        let result = ToolResult::ok("").with_details(json!({
+            "handle": "terminal-1",
+            "status": "completed",
+            "exit_code": 0,
+            "output": "",
+            "truncated": false,
+        }));
+
+        emit_terminal_events(
+            3,
+            &json!({ "mode": "read" }),
+            &call,
+            &result,
+            &context,
+            &mut emitter,
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("finished").expect("event"),
+            AgentEvent::TerminalSessionFinished {
+                turn: 3,
+                id: "tool-read".to_owned(),
+                handle: "terminal-1".to_owned(),
+                status: "completed".to_owned(),
+                exit_code: Some(0),
             }
         );
         assert!(rx.try_recv().is_err());

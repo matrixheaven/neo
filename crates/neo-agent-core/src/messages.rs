@@ -12,6 +12,7 @@ pub enum ShellCommandOutcome {
     Completed,
     Cancelled,
     TimedOut,
+    ResourceLimited,
     Backgrounded { task_id: Arc<str> },
 }
 
@@ -22,6 +23,7 @@ impl ShellCommandOutcome {
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::ResourceLimited => "resource_limited",
             Self::Backgrounded { .. } => "backgrounded",
         }
     }

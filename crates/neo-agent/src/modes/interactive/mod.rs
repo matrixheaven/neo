@@ -173,11 +173,6 @@ type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const TASK_BROWSER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-#[allow(clippy::duration_suboptimal_units)]
-const SHELL_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(120);
-#[allow(clippy::duration_suboptimal_units)]
-const SHELL_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(600);
-const SHELL_MAX_OUTPUT_BYTES: usize = 200_000;
 
 fn mcp_manager_with_oauth_service() -> McpConnectionManager {
     let supervisor = ProcessSupervisor::default();
@@ -732,6 +727,7 @@ impl InteractiveController {
                         cancel_token: request.cancel_token,
                         stream_update: Some(stream_update),
                         background_tasks: Some(request.background_tasks),
+                        shell_runtime: request.shell_runtime,
                     },
                 )
                 .await
