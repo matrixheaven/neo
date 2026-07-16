@@ -17,12 +17,14 @@ use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
 pub mod agent_state;
 pub(crate) mod atomic_file;
+mod event_persistence;
 pub mod export;
 pub mod index;
 pub mod layout;
 pub mod workspace;
 
 pub use agent_state::{SessionAgentKind, SessionAgentRecord, SessionState, SessionStateStore};
+pub use event_persistence::SessionEventPersistence;
 pub use index::{SessionIndex, SessionIndexEntry, SessionIndexError};
 pub use layout::{
     AGENTS_DIR, GOALS_DIR, MAIN_AGENT_ID, PLANS_DIR, SESSION_STATE_FILE, TASKS_DIR, WIRE_FILE,

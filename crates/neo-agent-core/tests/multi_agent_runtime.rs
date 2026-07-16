@@ -598,7 +598,7 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
 }
 
 #[tokio::test]
-async fn failed_child_run_flushes_partial_agent_wire() {
+async fn failed_child_run_discards_partial_model_attempt_from_agent_wire() {
     use neo_agent_core::{
         multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},
         session::{JsonlSessionReader, SessionState, SessionStateStore, agent_wire_path},
@@ -620,15 +620,13 @@ async fn failed_child_run_flushes_partial_agent_wire() {
         Ok(AiStreamEvent::TextDelta {
             text: "partial child answer".to_owned(),
         }),
-        Err(AiError::Stream {
+        Err(AiError::Transport {
             message: "child stream failed".to_owned(),
         }),
     ]]);
-    let deps = ChildRuntimeDeps::new(
-        AgentConfig::for_model(harness.model()),
-        harness.client(),
-        Arc::new(ToolRegistry::new()),
-    );
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    let deps = ChildRuntimeDeps::new(config, harness.client(), Arc::new(ToolRegistry::new()));
     let request = DelegateRequest {
         task: "fail after partial".to_owned(),
         resume: None,
@@ -646,7 +644,7 @@ async fn failed_child_run_flushes_partial_agent_wire() {
     let wire = agent_wire_path(session_dir, output.snapshot.id.as_str());
     let replayed = JsonlSessionReader::read_all(&wire)
         .await
-        .expect("read partial wire");
+        .expect("read wire");
 
     assert!(
         replayed.iter().any(|event| matches!(
@@ -658,7 +656,7 @@ async fn failed_child_run_flushes_partial_agent_wire() {
         "{replayed:#?}"
     );
     assert!(
-        replayed
+        !replayed
             .iter()
             .any(|event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "partial child answer")),
         "{replayed:#?}"

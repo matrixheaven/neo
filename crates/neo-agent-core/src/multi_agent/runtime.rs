@@ -1788,6 +1788,7 @@ async fn run_agent_snapshot(
     } else {
         None
     };
+    let mut persistence = crate::session::SessionEventPersistence::default();
     let child_runtime =
         AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);
@@ -1810,9 +1811,19 @@ async fn run_agent_snapshot(
                 return Err(err.to_string());
             }
         };
-        if let Some(child_writer) = writer.as_mut()
-            && let Err(err) = child_writer.append_event(&event).await
-        {
+        let write_result = if let Some(child_writer) = writer.as_mut() {
+            let mut result = Ok(());
+            for persisted in persistence.persisted_events(&event) {
+                if let Err(error) = child_writer.append_event(&persisted).await {
+                    result = Err(error);
+                    break;
+                }
+            }
+            result
+        } else {
+            Ok(())
+        };
+        if let Err(err) = write_result {
             cancel_token.cancel();
             drain_child_stream(&mut stream).await;
             let _ = flush_child_writer(&mut writer).await;

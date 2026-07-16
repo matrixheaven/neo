@@ -23,7 +23,6 @@ use session_mgmt::{
 };
 
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
 };
@@ -31,7 +30,7 @@ use std::{
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::goal::GoalManager;
-use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEventPersistence};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
     ListSkillsTool, McpConnectionManager, MessageOrigin, MoveSkillTool, PendingQuestion,
@@ -607,7 +606,7 @@ async fn finish_prompt_turn(
         {
             assistant_text.push_str(&message.text());
         }
-        if let Some(persisted) = persistence.persisted_event(&event) {
+        for persisted in persistence.persisted_events(&event) {
             writer.append_event(&persisted).await?;
         }
         events.push(event);
@@ -770,136 +769,16 @@ async fn append_streaming_event(
     if let Some(text) = effect.assistant_text {
         assistant_text.push_str(&text);
     }
-    if effect.persist
-        && let Some(persisted) = persistence.persisted_event(event)
-    {
-        writer.append_event(&persisted).await?;
+    if effect.persist {
+        for persisted in persistence.persisted_events(event) {
+            writer.append_event(&persisted).await?;
+        }
     }
     if effect.forward {
         let _ = event_tx.send(Ok(event.clone()));
         events.push(event.clone());
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct SessionEventPersistence {
-    agents: HashMap<String, PersistedAgentProgress>,
-    swarm_agents: HashMap<String, HashMap<String, PersistedAgentProgress>>,
-}
-
-impl SessionEventPersistence {
-    fn persisted_event(&mut self, event: &AgentEvent) -> Option<AgentEvent> {
-        match event {
-            AgentEvent::DelegateStarted { agent, .. }
-            | AgentEvent::DelegateFinished { agent, .. } => {
-                self.agents.insert(
-                    agent.id.as_str().to_owned(),
-                    PersistedAgentProgress::from_progress(agent.progress_snapshot()),
-                );
-                Some(event.clone())
-            }
-            AgentEvent::DelegateUpdated { turn, agent } => {
-                let progress = agent.progress_snapshot();
-                let agent_id = progress.agent_id.as_str().to_owned();
-                let gate = self.agents.entry(agent_id).or_default();
-                gate.should_persist(progress).then(|| {
-                    let progress = gate.last_progress.clone().expect("progress recorded");
-                    AgentEvent::DelegateProgressUpdated {
-                        turn: *turn,
-                        progress,
-                    }
-                })
-            }
-            AgentEvent::DelegateSwarmStarted { swarm, .. }
-            | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
-                let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
-                for child in &swarm.children {
-                    swarm_gates.insert(
-                        child.agent.id.as_str().to_owned(),
-                        PersistedAgentProgress::from_progress(child.agent.progress_snapshot()),
-                    );
-                }
-                Some(event.clone())
-            }
-            AgentEvent::DelegateSwarmUpdated { turn, swarm } => {
-                let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
-                for child in &swarm.children {
-                    let progress = child.agent.progress_snapshot();
-                    let agent_id = progress.agent_id.as_str().to_owned();
-                    let gate = swarm_gates.entry(agent_id).or_default();
-                    if gate.should_persist(progress) {
-                        let progress = gate.last_progress.clone().expect("progress recorded");
-                        return Some(AgentEvent::DelegateSwarmProgressUpdated {
-                            turn: *turn,
-                            swarm_id: swarm.swarm_id.clone(),
-                            state: swarm.state,
-                            aggregate: swarm.aggregate,
-                            child_progress: neo_agent_core::multi_agent::SwarmChildProgress {
-                                item_index: child.item_index,
-                                progress,
-                            },
-                        });
-                    }
-                }
-                None
-            }
-            _ => Some(event.clone()),
-        }
-    }
-}
-
-#[derive(Default)]
-struct PersistedAgentProgress {
-    last_progress: Option<neo_agent_core::multi_agent::AgentProgressSnapshot>,
-    last_text_persisted_at_ms: u64,
-}
-
-impl PersistedAgentProgress {
-    fn from_progress(progress: neo_agent_core::multi_agent::AgentProgressSnapshot) -> Self {
-        let last_text_persisted_at_ms = progress.updated_at_ms;
-        Self {
-            last_progress: Some(progress),
-            last_text_persisted_at_ms,
-        }
-    }
-
-    fn should_persist(
-        &mut self,
-        progress: neo_agent_core::multi_agent::AgentProgressSnapshot,
-    ) -> bool {
-        const TEXT_PROGRESS_GATE_MS: u64 = 750;
-        let Some(last) = &self.last_progress else {
-            self.last_text_persisted_at_ms = progress.updated_at_ms;
-            self.last_progress = Some(progress);
-            return true;
-        };
-        let structural_changed = progress.state != last.state
-            || progress.mode != last.mode
-            || progress.detached_from_foreground != last.detached_from_foreground
-            || progress.terminal_reason != last.terminal_reason
-            || progress.run_count != last.run_count
-            || progress.live_messages_received != last.live_messages_received
-            || progress.tool_count != last.tool_count
-            || progress.token_count != last.token_count
-            || progress.cache_read_token_count != last.cache_read_token_count
-            || progress.cache_write_token_count != last.cache_write_token_count
-            || progress.last_tool != last.last_tool
-            || progress.outcome != last.outcome;
-        let text_changed = progress.latest_text != last.latest_text
-            && progress
-                .updated_at_ms
-                .saturating_sub(self.last_text_persisted_at_ms)
-                >= TEXT_PROGRESS_GATE_MS;
-        if structural_changed || text_changed {
-            if text_changed {
-                self.last_text_persisted_at_ms = progress.updated_at_ms;
-            }
-            self.last_progress = Some(progress);
-            return true;
-        }
-        false
-    }
 }
 
 fn streaming_event_effect(event: &AgentEvent, user_message: &AgentMessage) -> StreamingEventEffect {
