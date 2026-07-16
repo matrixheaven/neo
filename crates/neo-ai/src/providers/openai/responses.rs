@@ -494,6 +494,45 @@ impl ParseState {
                 self.ingest_completed(value);
                 self.terminal = true;
             }
+            Some("error") => {
+                let nested = value.get("error");
+                let numeric_code = value
+                    .get("code")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("code"))
+                            .and_then(Value::as_u64)
+                    })
+                    .map(|code| code.to_string());
+                let code = value
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("code"))
+                            .and_then(Value::as_str)
+                    })
+                    .or_else(|| value.get("status").and_then(Value::as_str))
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("status"))
+                            .and_then(Value::as_str)
+                    })
+                    .or_else(|| value.get("type").and_then(Value::as_str))
+                    .or(numeric_code.as_deref());
+                let message = value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("message"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or("provider returned an error")
+                    .to_owned();
+                return Err(stream_failure(code, message));
+            }
             Some("response.failed" | "response.incomplete") => {
                 let response = value.get("response").unwrap_or(&Value::Null);
                 let status = response

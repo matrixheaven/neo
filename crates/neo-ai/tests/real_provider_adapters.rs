@@ -1599,6 +1599,32 @@ async fn openai_responses_stream_rate_limit_error_is_retryable() {
 }
 
 #[tokio::test]
+async fn openai_responses_top_level_stream_rate_limit_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "type": "error",
+        "code": "rate_limit_exceeded",
+        "message": "slow down"
+    })])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::RateLimit {
+            retry_after: None,
+            message
+        } if message == "slow down"
+    ));
+}
+
+#[tokio::test]
 async fn openai_responses_client_returns_protocol_error_for_incomplete_streams() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-incomplete" } }),
