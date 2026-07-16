@@ -38,17 +38,25 @@ impl InteractiveController {
         if self.handle_rich_dialog_event(event.clone()).await? {
             return Ok(false);
         }
-        if self.tui.chrome().transcript_browser_state().is_some()
-            && match &event {
-                InputEvent::Action(KeybindingAction::AppClear) => true,
-                InputEvent::Key(key) => self
-                    .keybindings
-                    .matching_actions(key)
-                    .contains(&KeybindingAction::AppClear),
-                _ => false,
+        if self.tui.chrome().transcript_browser_state().is_some() {
+            let global_action = match &event {
+                InputEvent::Action(
+                    action @ (KeybindingAction::AppClear
+                    | KeybindingAction::AppExit
+                    | KeybindingAction::AppSuspend),
+                ) => Some(*action),
+                InputEvent::Key(key) => [
+                    KeybindingAction::AppClear,
+                    KeybindingAction::AppExit,
+                    KeybindingAction::AppSuspend,
+                ]
+                .into_iter()
+                .find(|action| self.keybindings.matches(key, *action)),
+                _ => None,
+            };
+            if let Some(action) = global_action {
+                return self.handle_keybinding_action(action).await;
             }
-        {
-            return self.handle_app_clear_action().await;
         }
         if self.handle_transcript_browser_event(&event) {
             return Ok(false);

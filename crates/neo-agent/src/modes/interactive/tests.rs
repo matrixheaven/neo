@@ -4664,6 +4664,116 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
 }
 
 #[tokio::test]
+async fn transcript_browser_routes_default_and_custom_suspend_exit_keys() {
+    let mut default_controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    default_controller
+        .tui
+        .chrome_mut()
+        .open_transcript_browser(false);
+
+    let suspend = default_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+z").expect("valid key")))
+        .await
+        .expect("default suspend key is handled");
+    let first_exit = default_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+        .await
+        .expect("default exit key requests confirmation");
+    let second_exit = default_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+        .await
+        .expect("default exit key confirms exit");
+
+    assert!(!suspend);
+    assert!(default_controller.take_suspend_requested());
+    assert!(!first_exit);
+    assert!(second_exit);
+
+    let mut custom_controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    custom_controller.keybindings.set_user_bindings([
+        (
+            KeybindingAction::AppSuspend,
+            vec![KeyId::new("s").expect("valid key")],
+        ),
+        (
+            KeybindingAction::AppExit,
+            vec![KeyId::new("x").expect("valid key")],
+        ),
+    ]);
+    custom_controller
+        .tui
+        .chrome_mut()
+        .open_transcript_browser(false);
+
+    let suspend = custom_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("s").expect("valid key")))
+        .await
+        .expect("custom suspend key is handled");
+    let first_exit = custom_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("x").expect("valid key")))
+        .await
+        .expect("custom exit key requests confirmation");
+    let second_exit = custom_controller
+        .handle_input_event(InputEvent::Key(KeyId::new("x").expect("valid key")))
+        .await
+        .expect("custom exit key confirms exit");
+
+    assert!(!suspend);
+    assert!(custom_controller.take_suspend_requested());
+    assert!(!first_exit);
+    assert!(second_exit);
+}
+
+#[tokio::test]
+async fn transcript_browser_routes_direct_global_actions_and_consumes_prompt_input() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.tui.chrome_mut().open_transcript_browser(false);
+
+    let ordinary_input = controller
+        .handle_input_event(InputEvent::Insert('a'))
+        .await
+        .expect("ordinary input is consumed by the browser");
+    let suspend = controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::AppSuspend))
+        .await
+        .expect("direct suspend action is handled");
+    let first_exit = controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::AppExit))
+        .await
+        .expect("direct exit action requests confirmation");
+    let second_exit = controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::AppExit))
+        .await
+        .expect("direct exit action confirms exit");
+
+    assert!(!ordinary_input);
+    assert_eq!(controller.chrome().prompt().text, "");
+    assert!(controller.chrome().transcript_browser_state().is_some());
+    assert!(!suspend);
+    assert!(controller.take_suspend_requested());
+    assert!(!first_exit);
+    assert!(second_exit);
+}
+
+#[tokio::test]
 async fn transcript_browser_interrupt_cancels_active_turn() {
     let captured_token = Arc::new(std::sync::Mutex::new(None));
     let observed_token = Arc::clone(&captured_token);
