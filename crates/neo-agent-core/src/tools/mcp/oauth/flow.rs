@@ -54,12 +54,7 @@ impl McpOAuthFlow {
     }
 
     pub fn complete(self, _timeout: Duration) -> Result<(), McpOAuthError> {
-        let Self {
-            identity: _,
-            service: _,
-            manager: _,
-            ..
-        } = self;
+        let Self { .. } = self;
 
         Err(McpOAuthError::Flow(
             "OAuth flow completion is not wired yet".to_owned(),
