@@ -92,8 +92,6 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
-        self.transcript
-            .set_activity_frame(self.chrome.activity_frame());
         let mut lines = self
             .transcript
             .render_frame(width, height)
@@ -116,6 +114,7 @@ impl NeoTui {
     ) -> TerminalFrame {
         if let Some(lines) = self.render_transcript_browser_frame(width, height) {
             let next_animation_deadline = (self.chrome.working_label().is_some()
+                || self.transcript.has_visible_animation()
                 || self.transcript.has_live_entries())
             .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
             return TerminalFrame::with_surface(
@@ -146,9 +145,6 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
-        self.transcript
-            .set_activity_frame(self.chrome.activity_frame());
-
         let mut update = self.transcript.render_terminal_update(width, height);
         for block in &mut update.history {
             apply_gutter(&mut block.lines);
@@ -193,12 +189,8 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
-        self.transcript
-            .set_activity_frame(self.chrome.activity_frame());
         let state = self.chrome.transcript_browser_state_mut()?;
-        let mut lines =
-            self.transcript
-                .render_browser_rows(state, frame_content_width(width), height);
+        let mut lines = self.transcript.render_browser_rows(state, width, height);
         apply_gutter(&mut lines);
         Some(lines)
     }

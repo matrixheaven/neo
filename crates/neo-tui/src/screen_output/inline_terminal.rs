@@ -153,15 +153,6 @@ impl InlineTerminal {
 
         let mut live_bytes = Vec::new();
         if let Err(error) = next_live.render_to(&mut live_bytes, frame.live.clone(), frame.cursor) {
-            if entering_review {
-                if let Some(modes) = &mut self.modes {
-                    modes.set_review_active(false);
-                }
-            } else if leaving_review {
-                if let Some(modes) = &mut self.modes {
-                    modes.set_review_active(true);
-                }
-            }
             return Err(error);
         }
         transaction.extend_from_slice(&live_bytes);
@@ -323,17 +314,15 @@ fn recover_review_transition(
     output: &mut dyn Write,
     entering: bool,
 ) {
-    if let Some(modes) = modes {
-        if entering {
-            modes.set_review_active(true);
-            modes.leave();
-        } else {
-            modes.set_review_active(true);
-        }
-    } else if entering {
+    if entering {
         let _ = write_leave_review_output(output);
     } else {
         let _ = write_enter_review_output(output);
+    }
+    if let Some(modes) = modes {
+        // Keep the guard aligned with the pre-transition state so the next
+        // frame can retry the transition on the same writer.
+        modes.set_review_active(!entering);
     }
 }
 
@@ -358,7 +347,10 @@ fn append_history_lines(output: &mut String, lines: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+
     use super::*;
+    use crate::screen_output::terminal_modes::TerminalModeGuard;
 
     #[test]
     fn resize_invalidates_live_cache() {
@@ -376,5 +368,126 @@ mod tests {
             .render_to(&mut redraw, vec!["live".to_owned()], None)
             .expect("live redraw after resize");
         assert!(String::from_utf8(redraw).unwrap().contains("live"));
+    }
+
+    #[test]
+    fn failed_review_transitions_roll_back_on_same_writer_and_retry() {
+        let mut terminal = InlineTerminal::for_test(80, 12);
+        terminal.modes = Some(TerminalModeGuard::for_test());
+        let review =
+            TerminalFrame::with_surface(Vec::new(), vec!["review".to_owned()], None, true, None);
+        let normal =
+            TerminalFrame::with_surface(Vec::new(), vec!["normal".to_owned()], None, false, None);
+
+        let mut enter_failure = FailOnceAfterBytes::new(1);
+        let enter_result = terminal.render_to(&mut enter_failure, &review);
+        let enter_rollback_output = String::from_utf8(enter_failure.output);
+        let enter_failure_surface = terminal.review_surface;
+        let enter_failure_guard_review = terminal
+            .modes
+            .as_ref()
+            .expect("test mode guard")
+            .review_active_for_test();
+
+        let mut enter_retry = Vec::new();
+        let enter_retry_result = terminal.render_to(&mut enter_retry, &review);
+        let enter_retry_output = String::from_utf8(enter_retry);
+
+        let mut leave_failure = FailOnceAfterBytes::new(1);
+        let leave_result = terminal.render_to(&mut leave_failure, &normal);
+        let leave_rollback_output = String::from_utf8(leave_failure.output);
+        let leave_failure_surface = terminal.review_surface;
+        let (guard_active, leave_failure_guard_review) = {
+            let guard = terminal.modes.as_ref().expect("test mode guard");
+            (guard.active_for_test(), guard.review_active_for_test())
+        };
+
+        let mut leave_retry = Vec::new();
+        let leave_retry_result = terminal.render_to(&mut leave_retry, &normal);
+        let leave_retry_output = String::from_utf8(leave_retry);
+        let final_surface = terminal.review_surface;
+        let final_guard_review = terminal
+            .modes
+            .as_ref()
+            .expect("test mode guard")
+            .review_active_for_test();
+        terminal
+            .modes
+            .as_mut()
+            .expect("test mode guard")
+            .disarm_for_test();
+
+        assert!(enter_result.is_err());
+        assert!(!enter_failure_surface);
+        assert!(!enter_failure_guard_review);
+        assert!(
+            enter_rollback_output
+                .expect("enter rollback output")
+                .contains("?1049l")
+        );
+        assert!(enter_retry_result.is_ok());
+        assert!(
+            enter_retry_output
+                .expect("enter retry output")
+                .contains("?1049h")
+        );
+
+        assert!(leave_result.is_err());
+        assert!(leave_failure_surface);
+        assert!(guard_active);
+        assert!(leave_failure_guard_review);
+        assert!(
+            leave_rollback_output
+                .expect("leave rollback output")
+                .contains("?1049h")
+        );
+        assert!(leave_retry_result.is_ok());
+        assert!(
+            leave_retry_output
+                .expect("leave retry output")
+                .contains("?1049l")
+        );
+        assert!(!final_surface);
+        assert!(!final_guard_review);
+    }
+
+    struct FailOnceAfterBytes {
+        output: Vec<u8>,
+        remaining: usize,
+        failed: bool,
+    }
+
+    impl FailOnceAfterBytes {
+        const fn new(remaining: usize) -> Self {
+            Self {
+                output: Vec::new(),
+                remaining,
+                failed: false,
+            }
+        }
+    }
+
+    impl Write for FailOnceAfterBytes {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.failed {
+                self.output.extend_from_slice(bytes);
+                return Ok(bytes.len());
+            }
+            if self.remaining == 0 {
+                self.failed = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected failure",
+                ));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.output.extend_from_slice(&bytes[..written]);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

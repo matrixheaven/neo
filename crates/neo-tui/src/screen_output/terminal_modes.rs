@@ -144,22 +144,45 @@ impl TerminalModeGuard {
         if !self.active || self.review_active {
             return Ok(());
         }
-        write_enter_review_output(output)?;
-        self.review_active = true;
-        Ok(())
+        write_enter_review_output(output)
     }
 
     pub(super) fn leave_review(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
         if !self.review_active {
             return Ok(());
         }
-        write_leave_review_output(output)?;
-        self.review_active = false;
-        Ok(())
+        write_leave_review_output(output)
     }
 
     pub(super) const fn set_review_active(&mut self, active: bool) {
         self.review_active = active;
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self {
+            capabilities: TerminalCapabilities::default(),
+            active: true,
+            review_active: false,
+            #[cfg(windows)]
+            windows_input_mode: windows_input_mode::WindowsInputModeGuard::for_test(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn review_active_for_test(&self) -> bool {
+        self.review_active
+    }
+
+    #[cfg(test)]
+    pub(super) const fn active_for_test(&self) -> bool {
+        self.active
+    }
+
+    #[cfg(test)]
+    pub(super) const fn disarm_for_test(&mut self) {
+        self.active = false;
+        self.review_active = false;
     }
 }
 
@@ -210,6 +233,11 @@ mod windows_input_mode {
                 original_mode: 0,
                 changed: false,
             }
+        }
+
+        #[cfg(test)]
+        pub(super) const fn for_test() -> Self {
+            Self::inactive()
         }
 
         pub(super) fn enter() -> io::Result<Self> {

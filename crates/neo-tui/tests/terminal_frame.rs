@@ -4,7 +4,7 @@ use std::time::Instant;
 use neo_tui::NeoTui;
 use neo_tui::primitive::strip_ansi;
 use neo_tui::shell::NeoChromeState;
-use neo_tui::transcript::TranscriptPane;
+use neo_tui::transcript::{TranscriptBrowserState, TranscriptEntry, TranscriptPane, apply_gutter};
 
 #[test]
 fn terminal_frame_acknowledges_history_without_replaying_live_chrome() {
@@ -105,6 +105,39 @@ fn transcript_browser_frame_is_bounded_and_marked_review_surface() {
     assert!(frame.review_surface);
     assert!(frame.history.is_empty());
     assert!(frame.live.len() <= 12);
+}
+
+#[test]
+fn transcript_browser_uses_terminal_width_before_gutter() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(20, 8);
+    transcript.push_transcript(TranscriptEntry::assistant_message(
+        "0123456789012345678901234567890123456789",
+    ));
+
+    let mut expected_pane = transcript.clone();
+    let mut expected_state = TranscriptBrowserState::new(false);
+    let mut expected = expected_pane.render_browser_rows(&mut expected_state, 20, 8);
+    apply_gutter(&mut expected);
+
+    let mut tui = NeoTui::new(chrome, transcript);
+    tui.chrome_mut().open_transcript_browser(false);
+    let frame = tui.render_terminal_frame_at(20, 8, Instant::now());
+
+    assert_eq!(frame.live, expected);
+}
+
+#[test]
+fn transcript_browser_frame_requests_deadline_for_streaming_thinking() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.push_transcript(TranscriptEntry::thinking_streaming("still thinking"));
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    tui.chrome_mut().open_transcript_browser(false);
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+
+    assert!(frame.next_animation_deadline.is_some());
 }
 
 #[test]

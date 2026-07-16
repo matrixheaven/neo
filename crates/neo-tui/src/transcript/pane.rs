@@ -687,11 +687,7 @@ impl TranscriptPane {
     }
 
     pub fn advance_animation_at_ms(&mut self, now_ms: u64) {
-        let has_visible_animation = self
-            .transcript
-            .entries()
-            .iter()
-            .any(TranscriptEntry::has_visible_animation);
+        let has_visible_animation = self.has_visible_animation();
         if !has_visible_animation {
             return;
         }
@@ -704,6 +700,14 @@ impl TranscriptPane {
     #[must_use]
     pub(crate) fn has_live_entries(&self) -> bool {
         self.transcript.has_live_entries()
+    }
+
+    #[must_use]
+    pub(crate) fn has_visible_animation(&self) -> bool {
+        self.transcript
+            .entries()
+            .iter()
+            .any(TranscriptEntry::has_visible_animation)
     }
 
     /// Render a single flat frame of all non-chrome content lines as ANSI
