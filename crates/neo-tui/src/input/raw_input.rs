@@ -186,6 +186,17 @@ fn is_sgr_mouse_payload(payload: &str) -> bool {
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+pub(super) fn parse_sgr_mouse_button(data: &str) -> Option<u16> {
+    let payload = data.strip_prefix("\x1b[")?;
+    if !payload.starts_with('<') || !payload.ends_with('M') || !is_sgr_mouse_payload(payload) {
+        return None;
+    }
+    payload[1..]
+        .split(';')
+        .next()
+        .and_then(|button| button.parse().ok())
+}
+
 fn is_complete_osc_sequence(data: &str) -> SequenceStatus {
     if !data.starts_with("\x1b]") {
         return SequenceStatus::Complete;

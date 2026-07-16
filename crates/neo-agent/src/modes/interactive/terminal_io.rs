@@ -190,7 +190,9 @@ impl NeoTerminal {
         let frame = tui.render_terminal_frame_at(usize::from(cols), usize::from(rows), now);
         let mut output = std::io::stdout().lock();
         self.tui.render_to(&mut output, &frame)?;
-        tui.acknowledge_history(&frame);
+        if !frame.review_surface {
+            tui.acknowledge_history(&frame);
+        }
         Ok(frame.next_animation_deadline)
     }
 

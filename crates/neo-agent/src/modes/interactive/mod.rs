@@ -1212,6 +1212,12 @@ impl InteractiveController {
                     if self.take_suspend_requested() {
                         suspend()?;
                     }
+                    render_due_frame(
+                        &mut frame_scheduler,
+                        &mut self.tui,
+                        &mut render,
+                        Instant::now(),
+                    )?;
                 }
                 None => tokio::task::yield_now().await,
             }

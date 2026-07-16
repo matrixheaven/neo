@@ -38,6 +38,9 @@ impl InteractiveController {
         if self.handle_rich_dialog_event(event.clone()).await? {
             return Ok(false);
         }
+        if self.handle_transcript_browser_event(&event) {
+            return Ok(false);
+        }
         if self.handle_prompt_edit_event(&event) {
             return Ok(false);
         }
@@ -66,6 +69,82 @@ impl InteractiveController {
         }
 
         Ok(false)
+    }
+
+    fn handle_transcript_browser_event(&mut self, event: &InputEvent) -> bool {
+        let toggles_output = match event {
+            InputEvent::Action(KeybindingAction::ToolOutputToggle) => true,
+            InputEvent::Key(key) => self
+                .keybindings
+                .matching_actions(key)
+                .contains(&KeybindingAction::ToolOutputToggle),
+            _ => false,
+        };
+
+        if self.tui.chrome().transcript_browser_state().is_none() {
+            if !toggles_output || !self.transcript().has_committed_expandable_entries() {
+                return false;
+            }
+            let expanded = !self.transcript().tool_output_expanded();
+            self.tui.chrome_mut().open_transcript_browser(expanded);
+            if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {
+                state.follow_bottom();
+            }
+            self.transcript_mut().mark_dirty();
+            return true;
+        }
+
+        if matches!(event, InputEvent::Cancel)
+            || matches!(event, InputEvent::Key(key) if key.as_str() == "escape")
+            || matches!(event, InputEvent::Action(KeybindingAction::SelectCancel))
+        {
+            self.tui.chrome_mut().close_transcript_browser();
+            self.transcript_mut().mark_dirty();
+            return true;
+        }
+        if toggles_output {
+            if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {
+                state.toggle();
+            }
+            self.transcript_mut().mark_dirty();
+            return true;
+        }
+
+        let scroll = match event {
+            InputEvent::ScrollUp(rows) => Some((true, *rows)),
+            InputEvent::ScrollDown(rows) => Some((false, *rows)),
+            InputEvent::Key(key) => match key.as_str() {
+                "up" => Some((true, 1)),
+                "down" => Some((false, 1)),
+                "pageup" => Some((true, 8)),
+                "pagedown" => Some((false, 8)),
+                _ => None,
+            },
+            InputEvent::Action(KeybindingAction::EditorCursorUp | KeybindingAction::SelectUp) => {
+                Some((true, 1))
+            }
+            InputEvent::Action(
+                KeybindingAction::EditorCursorDown | KeybindingAction::SelectDown,
+            ) => Some((false, 1)),
+            InputEvent::Action(KeybindingAction::EditorPageUp | KeybindingAction::SelectPageUp) => {
+                Some((true, 8))
+            }
+            InputEvent::Action(
+                KeybindingAction::EditorPageDown | KeybindingAction::SelectPageDown,
+            ) => Some((false, 8)),
+            _ => None,
+        };
+        if let Some((up, rows)) = scroll {
+            if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {
+                if up {
+                    state.scroll_up(rows);
+                } else {
+                    state.scroll_down(rows);
+                }
+            }
+            self.transcript_mut().mark_dirty();
+        }
+        true
     }
 
     fn follow_transcript_tail(&mut self) {

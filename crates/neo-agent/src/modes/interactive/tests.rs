@@ -1299,6 +1299,101 @@ fn blocking_dialog_events_request_an_immediate_frame() {
 }
 
 #[tokio::test]
+async fn ctrl_o_renders_before_queued_tool_finish() {
+    struct ScriptedEvents(VecDeque<InputEvent>);
+
+    impl TerminalEvents for ScriptedEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.0
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+        }
+    }
+
+    let (finish_queued_tx, finish_queued_rx) = tokio::sync::oneshot::channel();
+    let finish_queued_tx = Arc::new(std::sync::Mutex::new(Some(finish_queued_tx)));
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        let finish_queued_tx = Arc::clone(&finish_queued_tx);
+        Box::pin(async move {
+            channels.send_event(AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                result: ToolResult::ok("write complete"),
+            });
+            let sender = finish_queued_tx.lock().expect("finish sender lock").take();
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+    let content = (1..=12)
+        .map(|line| format!("live-line-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    controller
+        .transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "write-1".to_owned(),
+            name: "Write".to_owned(),
+            arguments: serde_json::json!({
+                "path": "artifact.txt",
+                "content": content,
+            }),
+        });
+    controller.start_turn_with_prompt(Vec::new());
+    finish_queued_rx.await.expect("finish event queued");
+
+    let mut rendered = Vec::new();
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui, _| {
+                let frame = tui.render_terminal_frame_at(80, 24, Instant::now());
+                let text = frame
+                    .history
+                    .iter()
+                    .flat_map(|block| block.lines.iter())
+                    .chain(frame.live.iter())
+                    .map(|line| neo_tui::primitive::strip_ansi(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !frame.review_surface {
+                    tui.acknowledge_history(&frame);
+                }
+                rendered.push(text);
+                Ok(frame.next_animation_deadline)
+            },
+            || Ok(()),
+            ScriptedEvents(VecDeque::from([
+                InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")),
+                InputEvent::Interrupt,
+                InputEvent::Interrupt,
+                InputEvent::Interrupt,
+            ])),
+        )
+        .await
+        .expect("event loop exits");
+
+    let first_after_ctrl_o = rendered.get(1).expect("frame after ctrl-o");
+    assert!(first_after_ctrl_o.contains("Using Write"));
+    assert!(first_after_ctrl_o.contains("live-line-12"));
+    assert!(!first_after_ctrl_o.contains("Used Write"));
+}
+
+#[tokio::test]
 async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
     struct FakeEvents {
         events: std::vec::IntoIter<InputEvent>,
@@ -4412,25 +4507,48 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.transcript_mut().sync_transcript_view(30, 6);
+    for index in 0..30 {
+        controller
+            .transcript_mut()
+            .push_status(format!("browser-row-{index}"));
+    }
+    controller.tui.chrome_mut().open_transcript_browser(false);
+    let initial = controller.tui.render_terminal_frame(80, 6).live;
 
     controller
         .handle_input_event(InputEvent::ScrollUp(3))
         .await
-        .expect("wheel up scrolls transcript toward older rows");
-    assert_eq!(transcript_scrollback(&controller), 3);
-
-    controller
-        .handle_input_event(InputEvent::ScrollDown(2))
-        .await
-        .expect("wheel down scrolls transcript toward newest rows");
-    assert_eq!(transcript_scrollback(&controller), 1);
+        .expect("wheel up scrolls browser toward older rows");
+    let wheel_up = controller.tui.render_terminal_frame(80, 6).live;
+    assert_ne!(wheel_up, initial);
 
     controller
         .handle_input_event(InputEvent::ScrollDown(3))
         .await
-        .expect("wheel down follows tail at bottom");
-    assert_eq!(transcript_scrollback(&controller), 0);
+        .expect("wheel down returns browser to newest rows");
+    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+        .await
+        .expect("up scrolls browser toward older rows");
+    assert_ne!(controller.tui.render_terminal_frame(80, 6).live, initial);
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+        .await
+        .expect("down returns browser to newest rows");
+    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("pageup").expect("valid key")))
+        .await
+        .expect("page up scrolls browser toward older rows");
+    assert_ne!(controller.tui.render_terminal_frame(80, 6).live, initial);
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("pagedown").expect("valid key")))
+        .await
+        .expect("page down returns browser to newest rows");
+    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
 }
 
 #[tokio::test]
@@ -4481,7 +4599,7 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
 }
 
 #[tokio::test]
-async fn event_loop_ctrl_o_toggles_tool_detail() {
+async fn ctrl_o_enters_and_leaves_transcript_browser() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -4505,17 +4623,40 @@ async fn event_loop_ctrl_o_toggles_tool_detail() {
             name: "Read".to_owned(),
             result: ToolResult::ok("expanded file content"),
         });
-    controller
-        .transcript_mut()
-        .select_visible_transcript_entry();
+    let frame = controller.tui.render_terminal_frame(80, 24);
+    controller.tui.acknowledge_history(&frame);
+    assert!(controller.transcript().has_committed_expandable_entries());
 
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("ctrl-o key toggles tool detail");
+        .expect("ctrl-o opens transcript browser");
 
-    assert!(controller.chrome().focused_overlay().is_none());
-    assert!(controller.transcript().tool_output_expanded());
+    let browser = controller
+        .chrome()
+        .transcript_browser_state()
+        .expect("transcript browser opens");
+    assert!(browser.expanded());
+    assert!(!controller.transcript().tool_output_expanded());
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
+        .await
+        .expect("ctrl-o toggles browser expansion");
+    assert!(
+        !controller
+            .chrome()
+            .transcript_browser_state()
+            .expect("transcript browser remains open")
+            .expanded()
+    );
+
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("escape closes transcript browser");
+    assert!(controller.chrome().transcript_browser_state().is_none());
+    assert!(!controller.transcript().tool_output_expanded());
 }
 
 #[tokio::test]

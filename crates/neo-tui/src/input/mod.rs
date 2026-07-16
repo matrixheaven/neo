@@ -115,6 +115,14 @@ impl InputParser {
             return Vec::new();
         }
 
+        if let Some(button) = raw_input::parse_sgr_mouse_button(seq) {
+            return match button & !(4 | 8 | 16) {
+                64 => vec![InputEvent::ScrollUp(3)],
+                65 => vec![InputEvent::ScrollDown(3)],
+                _ => Vec::new(),
+            };
+        }
+
         // Try printable key first (for text insertion)
         if let Some(ch) = decode_printable_key(seq) {
             return vec![InputEvent::Insert(ch)];
@@ -452,28 +460,34 @@ mod tests {
     }
 
     #[test]
-    fn raw_sgr_mouse_wheel_up_is_ignored() {
+    fn sgr_mouse_wheel_maps_to_transcript_scroll_events() {
         let mut parser = InputParser::new();
         assert_eq!(
             parser.feed_bytes(b"\x1b[<64;20;10M"),
-            Vec::<InputEvent>::new()
+            vec![InputEvent::ScrollUp(3)]
         );
-    }
-
-    #[test]
-    fn raw_sgr_mouse_wheel_down_is_ignored() {
-        let mut parser = InputParser::new();
         assert_eq!(
             parser.feed_bytes(b"\x1b[<65;20;10M"),
-            Vec::<InputEvent>::new()
+            vec![InputEvent::ScrollDown(3)]
         );
-    }
-
-    #[test]
-    fn raw_sgr_mouse_release_is_ignored() {
-        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<68;20;10M"),
+            vec![InputEvent::ScrollUp(3)]
+        );
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<73;20;10M"),
+            vec![InputEvent::ScrollDown(3)]
+        );
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<81;20;10M"),
+            vec![InputEvent::ScrollDown(3)]
+        );
         assert_eq!(
             parser.feed_bytes(b"\x1b[<64;20;10m"),
+            Vec::<InputEvent>::new()
+        );
+        assert_eq!(
+            parser.feed_bytes(b"\x1b[<0;20;10M"),
             Vec::<InputEvent>::new()
         );
     }
