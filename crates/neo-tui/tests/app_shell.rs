@@ -12,6 +12,7 @@ use neo_tui::terminal_image::{
 };
 use neo_tui::transcript::{TranscriptImageAttachment, TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
+use std::time::Instant;
 
 fn write_session_scope() -> neo_agent_core::SessionApprovalScope {
     neo_agent_core::SessionApprovalScope {
@@ -147,6 +148,23 @@ fn app_shell_explicit_animation_tick_animates_transcript_thinking_spinner() {
 
     assert!(first.contains("⠋ thinking..."), "first frame: {first}");
     assert!(second.contains("⠙ thinking..."), "second frame: {second}");
+}
+
+#[test]
+fn live_delegate_keeps_animation_deadline_when_live_surface_is_hidden() {
+    let chrome = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
+    let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
+    let agent = runtime.start_foreground_delegate_for_test("live task");
+    let mut transcript = TranscriptPane::new(80, 1);
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::DelegateStarted { turn: 1, agent });
+    let mut tui = neo_tui::NeoTui::new(chrome, transcript);
+
+    let frame = tui.render_terminal_frame_at(80, 1, Instant::now());
+
+    assert!(
+        frame.next_animation_deadline.is_some(),
+        "live delegates must keep the refresh deadline even when the live surface has no rows"
+    );
 }
 
 #[test]

@@ -603,7 +603,7 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: b
 fn format_tool_summary(verb: &str, name: &str, summary: Option<&str>) -> String {
     match summary {
         Some(summary) if !summary.trim().is_empty() => {
-            format!("{verb} {name} ({})", one_line(summary))
+            format!("{verb} {name} · {}", one_line(summary))
         }
         _ => format!("{verb} {name}"),
     }
@@ -731,5 +731,18 @@ fn state_label(state: AgentLifecycleState) -> &'static str {
         AgentLifecycleState::Cancelled => "cancelled",
         AgentLifecycleState::TimedOut => "timed out",
         AgentLifecycleState::Interrupted => "interrupted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tool_summary;
+
+    #[test]
+    fn tool_summary_separates_result_with_a_middle_dot() {
+        assert_eq!(
+            format_tool_summary("Used", "Bash", Some("Stored: result")),
+            "Used Bash · Stored: result"
+        );
     }
 }

@@ -701,16 +701,7 @@ impl TranscriptStore {
         // Fast path: if no live-capable entries exist, skip the full scan.
         // This avoids an O(n) iteration over all entries every 50ms tick
         // when there are no delegates, MCP connections, or streaming blocks.
-        let has_live = self.entries.iter().any(|e| {
-            matches!(
-                e,
-                TranscriptEntry::Delegate { .. }
-                    | TranscriptEntry::DelegateGroup { .. }
-                    | TranscriptEntry::DelegateSwarm { .. }
-                    | TranscriptEntry::McpStartupStatus { .. }
-            )
-        });
-        if !has_live {
+        if !self.has_live_entries() {
             return false;
         }
         let mut changed = false;
@@ -722,6 +713,19 @@ impl TranscriptStore {
             }
         }
         changed
+    }
+
+    #[must_use]
+    pub fn has_live_entries(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Delegate { .. }
+                    | TranscriptEntry::DelegateGroup { .. }
+                    | TranscriptEntry::DelegateSwarm { .. }
+                    | TranscriptEntry::McpStartupStatus { .. }
+            )
+        })
     }
 
     /// Remove the entry at `index`, shifting later entries down. Returns the

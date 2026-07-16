@@ -764,6 +764,11 @@ impl TranscriptPane {
         }
     }
 
+    #[must_use]
+    pub(crate) fn has_live_entries(&self) -> bool {
+        self.transcript.has_live_entries()
+    }
+
     /// Render a single flat frame of all non-chrome content lines as ANSI
     /// strings.
     ///

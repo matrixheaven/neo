@@ -136,8 +136,9 @@ impl NeoTui {
         }
         let cursor = append_chrome(&mut update.live, chrome_render);
         let next_animation_deadline = (self.chrome.working_label().is_some()
-            || update.has_visible_animation)
-            .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+            || update.has_visible_animation
+            || self.transcript.has_live_entries())
+        .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
         TerminalFrame::with_animation_deadline(
             update.history,
             update.live,
