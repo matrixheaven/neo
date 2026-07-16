@@ -26,7 +26,7 @@ impl SessionEventPersistence {
                 self.attempt.push(event.clone());
                 Vec::new()
             }
-            AgentEvent::RetryScheduled { .. } => {
+            AgentEvent::RetryScheduled { .. } | AgentEvent::CompactionStarted { .. } => {
                 self.attempt.clear();
                 vec![event.clone()]
             }
@@ -149,7 +149,10 @@ impl PersistedAgentProgress {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AgentEvent, AgentMessage, AgentTokenUsage, AgentToolCall, Content, StopReason};
+    use crate::{
+        AgentEvent, AgentMessage, AgentTokenUsage, AgentToolCall, CompactionReason, Content,
+        StopReason,
+    };
 
     use super::SessionEventPersistence;
 
@@ -168,6 +171,14 @@ mod tests {
             delay_ms: 10,
             error_code: "provider.transport_error".to_owned(),
             message: "retry".to_owned(),
+        }
+    }
+
+    fn compaction_started() -> AgentEvent {
+        AgentEvent::CompactionStarted {
+            reason: CompactionReason::Threshold,
+            tokens_before: 100,
+            message_count: 4,
         }
     }
 
@@ -259,5 +270,28 @@ mod tests {
         expected.extend(winning_details);
         expected.push(message_appended("winning"));
         assert_eq!(projected, expected);
+
+        let mut persistence = SessionEventPersistence::default();
+        assert!(
+            persistence
+                .persisted_events(&text_delta("overflow partial"))
+                .is_empty()
+        );
+        let mut projected = persistence.persisted_events(&compaction_started());
+        assert_eq!(projected, vec![compaction_started()]);
+        assert!(
+            persistence
+                .persisted_events(&text_delta("overflow winning"))
+                .is_empty()
+        );
+        projected.extend(persistence.persisted_events(&message_appended("overflow winning")));
+        assert_eq!(
+            projected,
+            vec![
+                compaction_started(),
+                text_delta("overflow winning"),
+                message_appended("overflow winning")
+            ]
+        );
     }
 }
