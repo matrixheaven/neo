@@ -256,7 +256,7 @@ Files:
 - Modify docs/superpowers/specs/2026-07-13-immutable-terminal-scrollback-design.md
 
 Interfaces:
-- Normal frames retain append-only history until the review surface is entered; review frames carry no history blocks and never call acknowledge_history.
+- Normal frames retain append-only history until the review surface is entered; review frames carry no history blocks, and the centralized acknowledge_history boundary ignores them without advancing the normal ledger.
 - TranscriptPresentation remains the normal-screen ledger. Its committed-revision mismatch guard remains a safety invariant for the primary screen, while browser snapshots bypass it without mutating or acknowledging it.
 - No production or test code treats a committed revision mismatch as a user-visible history update; review rendering is the only path that reflows committed content.
 - The design document states the final two-surface contract: primary native scrollback is immutable; historical reflow happens only in the app-owned review surface.
@@ -268,7 +268,7 @@ Add exact assertions to terminal_scrollback.rs that a committed tool remains byt
 - [ ] Step 2: Run migration tests and confirm RED against the old history-only behavior.
 
     cargo test --package neo-tui --test terminal_scrollback committed_tool_review_does_not_duplicate_native_scrollback --exact --nocapture
-    cargo test --package neo-tui --test terminal_scrollback review_frames_never_acknowledge_history --exact --nocapture
+    cargo test --package neo-tui --test terminal_scrollback review_acknowledgement_does_not_advance_normal_history_ledger --exact --nocapture
 
 Expected: assertion failures until the browser path is the only way to reflow committed content.
 
