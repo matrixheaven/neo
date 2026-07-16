@@ -132,6 +132,7 @@ impl TranscriptPane {
             | AgentEvent::DelegateSwarmUpdated { turn, swarm }
             | AgentEvent::DelegateSwarmFinished { turn, swarm } => {
                 self.transcript.upsert_delegate_swarm(swarm.clone());
+                self.apply_expand_state_to_delegate_swarm(&swarm.swarm_id);
                 self.record_delegate_absorption_target(
                     *turn,
                     AbsorbedToolKind::DelegateSwarm,
@@ -153,6 +154,7 @@ impl TranscriptPane {
                     *aggregate,
                     child_progress,
                 );
+                self.apply_expand_state_to_delegate_swarm(swarm_id);
                 self.record_delegate_absorption_target(
                     *turn,
                     AbsorbedToolKind::DelegateSwarm,
@@ -726,6 +728,25 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::skill_invocation(
             names, source, outcome, body,
         ));
+    }
+
+    fn apply_expand_state_to_delegate_swarm(&mut self, swarm_id: &str) {
+        let Some(index) = self.transcript.entries().iter().position(
+            |entry| matches!(entry, TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == swarm_id),
+        ) else {
+            return;
+        };
+        let Some(entry) = self.transcript.entries().get(index).cloned() else {
+            return;
+        };
+        let expanded = self.apply_expand_state_to_entry(entry);
+        self.transcript.mutate_entry(index, |entry| {
+            if *entry == expanded {
+                return false;
+            }
+            *entry = expanded;
+            true
+        });
     }
 
     fn push_goal_card(

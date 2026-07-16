@@ -260,6 +260,21 @@ fn terminal_delegate_ignores_late_running_snapshot() {
 }
 
 #[test]
+fn delegate_group_replacement_preserves_entry_identity() {
+    let mut store = TranscriptStore::new();
+    store.upsert_delegate(1, agent_snapshot("first", AgentLifecycleState::Running));
+    let entry_id = store.entry_ids()[0];
+
+    store.upsert_delegate(1, agent_snapshot("second", AgentLifecycleState::Running));
+
+    assert_eq!(store.entry_ids()[0], entry_id);
+    assert!(matches!(
+        store.entries()[0],
+        TranscriptEntry::DelegateGroup { .. }
+    ));
+}
+
+#[test]
 fn terminal_swarm_ignores_late_snapshot_with_running_child() {
     let mut store = TranscriptStore::new();
     store.upsert_delegate_swarm(swarm_snapshot(

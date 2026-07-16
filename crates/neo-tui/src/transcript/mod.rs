@@ -1,4 +1,5 @@
 mod approval_data;
+mod browser;
 mod child_activity;
 pub mod chrome_render;
 mod delegate_card;
@@ -21,6 +22,7 @@ mod workflow_card;
 
 use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot};
 
+pub use browser::TranscriptBrowserState;
 pub(crate) use child_activity::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, compact_chars, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,

@@ -1,6 +1,6 @@
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Color, Component, Finalization, Style, visible_width};
+use crate::primitive::{Color, Component, Expandable, Finalization, Style, visible_width};
 use crate::primitive::{Line, Span};
 use crate::terminal_image::{
     ImageDisplayOptions, ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -415,6 +415,49 @@ impl TranscriptEntry {
             objective: objective.into(),
             detail: detail.map(Into::into),
             turns,
+        }
+    }
+
+    #[must_use]
+    pub fn is_expandable(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolRun { .. }
+                | Self::ThinkingBlock { .. }
+                | Self::SkillActivation { .. }
+                | Self::DelegateSwarm { .. }
+        )
+    }
+
+    pub fn set_expanded(&mut self, expanded: bool) -> bool {
+        match self {
+            Self::ToolRun { component } => {
+                if component.is_expanded() == expanded {
+                    return false;
+                }
+                component.set_expanded(expanded);
+                true
+            }
+            Self::ThinkingBlock {
+                expanded: current, ..
+            }
+            | Self::SkillActivation {
+                expanded: current, ..
+            } => {
+                if *current == expanded {
+                    return false;
+                }
+                *current = expanded;
+                true
+            }
+            Self::DelegateSwarm { component } => {
+                if component.is_expanded() == expanded {
+                    return false;
+                }
+                component.set_expanded(expanded);
+                true
+            }
+            _ => false,
         }
     }
 

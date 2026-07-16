@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Expandable, Finalization, Line, next_sequence};
+use crate::primitive::{Finalization, Line, next_sequence};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
     ApprovalPromptData, InlineImageRender, McpStartupStatusData, ShellRunComponent,
-    ToolCallComponent, ToolCallState, TranscriptEntry, TranscriptStore,
+    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptStore,
 };
 
 use super::presentation::{FinalizedBlock, TranscriptPresentation, TranscriptTerminalUpdate};
@@ -625,82 +625,19 @@ impl TranscriptPane {
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {
         self.tool_output_expanded = expanded;
         for index in 0..self.transcript.entries().len() {
-            let is_expandable = matches!(
-                self.transcript.entries()[index],
-                TranscriptEntry::ToolRun { .. }
-                    | TranscriptEntry::ThinkingBlock { .. }
-                    | TranscriptEntry::SkillActivation { .. }
-                    | TranscriptEntry::Delegate { .. }
-                    | TranscriptEntry::DelegateSwarm { .. }
-                    | TranscriptEntry::Workflow { .. }
-            );
-            if !is_expandable {
-                continue;
-            }
-            self.transcript.mutate_entry(index, |entry| match entry {
-                TranscriptEntry::ToolRun { component } => {
-                    if component.is_expanded() == expanded {
-                        return false;
-                    }
-                    component.set_expanded(expanded);
-                    true
-                }
-                TranscriptEntry::ThinkingBlock {
-                    expanded: thinking_expanded,
-                    ..
-                } => {
-                    if *thinking_expanded == expanded {
-                        return false;
-                    }
-                    *thinking_expanded = expanded;
-                    true
-                }
-                TranscriptEntry::SkillActivation {
-                    expanded: skill_expanded,
-                    ..
-                } => {
-                    if *skill_expanded == expanded {
-                        return false;
-                    }
-                    *skill_expanded = expanded;
-                    true
-                }
-                TranscriptEntry::Delegate { component } => {
-                    if component.is_expanded() == expanded {
-                        return false;
-                    }
-                    component.set_expanded(expanded);
-                    true
-                }
-                TranscriptEntry::DelegateSwarm { component } => {
-                    if component.is_expanded() == expanded {
-                        return false;
-                    }
-                    component.set_expanded(expanded);
-                    true
-                }
-                TranscriptEntry::Workflow { component } => {
-                    if component.is_expanded() == expanded {
-                        return false;
-                    }
-                    component.set_expanded(expanded);
-                    true
-                }
-                _ => false,
-            });
+            self.transcript
+                .mutate_entry(index, |entry| entry.set_expanded(expanded));
         }
         self.mark_dirty();
     }
 
     pub fn toggle_tool_output_expanded(&mut self) -> bool {
-        if !self.transcript.entries().iter().any(|entry| {
-            matches!(
-                entry,
-                TranscriptEntry::ToolRun { .. }
-                    | TranscriptEntry::ThinkingBlock { .. }
-                    | TranscriptEntry::SkillActivation { .. }
-            )
-        }) {
+        if !self
+            .transcript
+            .entries()
+            .iter()
+            .any(TranscriptEntry::is_expandable)
+        {
             return false;
         }
         self.set_tool_output_expanded(!self.tool_output_expanded);
@@ -816,6 +753,40 @@ impl TranscriptPane {
         )
     }
 
+    #[must_use]
+    pub fn has_committed_expandable_entries(&self) -> bool {
+        self.transcript
+            .entries()
+            .iter()
+            .enumerate()
+            .any(|(index, entry)| {
+                entry.is_expandable()
+                    && self
+                        .transcript
+                        .entry_ids()
+                        .get(index)
+                        .is_some_and(|id| self.presentation.is_committed(*id))
+            })
+    }
+
+    #[must_use]
+    pub fn render_browser_rows(
+        &mut self,
+        state: &mut TranscriptBrowserState,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
+        let mut snapshot = self.clone();
+        snapshot.width = width;
+        snapshot.height = height;
+        snapshot.set_tool_output_expanded(state.expanded());
+        let rows = snapshot.render_body_lines(width);
+        state.viewport.sync(rows.len(), height);
+        let range = state.viewport.visible_row_range(rows.len(), height);
+        self.dirty = false;
+        rows[range].to_vec()
+    }
+
     pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
         self.presentation.acknowledge(blocks);
     }
@@ -884,8 +855,6 @@ impl TranscriptPane {
         arguments: Option<String>,
         status: ToolStatusKind,
     ) {
-        use crate::primitive::Expandable as _;
-
         if self.transcript.tool(id).is_some_and(|tool| {
             tool.finalization() == Finalization::Finalized
                 && matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
@@ -909,11 +878,11 @@ impl TranscriptPane {
             status,
             exit_code: None,
         });
-        component.set_expanded(self.tool_output_expanded);
         if let Some(workspace_root) = &self.workspace_root {
             component.set_workspace_dir(workspace_root.clone());
         }
-        self.transcript.push(TranscriptEntry::tool_run(component));
+        let entry = self.apply_expand_state_to_entry(TranscriptEntry::tool_run(component));
+        self.transcript.push(entry);
     }
 
     pub(super) fn remember_tool_call(&mut self, turn: u32, id: &str, name: &str) {
@@ -1069,9 +1038,7 @@ impl TranscriptPane {
     }
 
     fn apply_expand_state_to_entry(&self, mut entry: TranscriptEntry) -> TranscriptEntry {
-        if let TranscriptEntry::ThinkingBlock { expanded, .. } = &mut entry {
-            *expanded = self.tool_output_expanded;
-        }
+        entry.set_expanded(self.tool_output_expanded);
         entry
     }
 
@@ -1084,16 +1051,8 @@ impl TranscriptPane {
         else {
             return;
         };
-        self.transcript.mutate_entry(index, |entry| {
-            let TranscriptEntry::ThinkingBlock { expanded, .. } = entry else {
-                return false;
-            };
-            if *expanded == self.tool_output_expanded {
-                return false;
-            }
-            *expanded = self.tool_output_expanded;
-            true
-        });
+        self.transcript
+            .mutate_entry(index, |entry| entry.set_expanded(self.tool_output_expanded));
     }
 
     pub(super) fn finish_active_text_blocks(&mut self) {

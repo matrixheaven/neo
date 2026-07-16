@@ -1,20 +1,16 @@
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
+use crate::primitive::{Color, Component, Finalization, Line, Span, Style};
 use neo_agent_core::workflow::{WorkflowSnapshot, WorkflowState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowCardComponent {
     snapshot: WorkflowSnapshot,
-    expanded: bool,
 }
 
 impl WorkflowCardComponent {
     #[must_use]
     pub fn new(snapshot: WorkflowSnapshot) -> Self {
-        Self {
-            snapshot,
-            expanded: false,
-        }
+        Self { snapshot }
     }
 
     pub fn update(&mut self, snapshot: WorkflowSnapshot) -> bool {
@@ -36,11 +32,6 @@ impl WorkflowCardComponent {
             }
         }
         true
-    }
-
-    #[must_use]
-    pub const fn is_expanded(&self) -> bool {
-        self.expanded
     }
 
     #[must_use]
@@ -113,12 +104,6 @@ fn workflow_state_color(state: WorkflowState, theme: &TuiTheme) -> Color {
         WorkflowState::Completed => theme.status_ok,
         WorkflowState::Failed => theme.status_error,
         WorkflowState::Running => theme.status_warn,
-    }
-}
-
-impl Expandable for WorkflowCardComponent {
-    fn set_expanded(&mut self, expanded: bool) {
-        self.expanded = expanded;
     }
 }
 

@@ -151,6 +151,10 @@ pub(super) struct TranscriptPresentation {
 }
 
 impl TranscriptPresentation {
+    pub(super) fn is_committed(&self, id: TranscriptEntryId) -> bool {
+        self.committed_entry_revisions.contains_key(&id)
+    }
+
     #[allow(
         clippy::too_many_arguments,
         clippy::too_many_lines,

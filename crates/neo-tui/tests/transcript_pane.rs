@@ -1,7 +1,9 @@
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
-use neo_tui::transcript::{McpStartupPhase, McpStartupStatusData, TranscriptEntry, TranscriptPane};
+use neo_tui::transcript::{
+    McpStartupPhase, McpStartupStatusData, TranscriptBrowserState, TranscriptEntry, TranscriptPane,
+};
 
 /// Strip ANSI + trim from a frame line, for content assertions.
 fn plain(line: &str) -> String {
@@ -1648,5 +1650,39 @@ fn skill_activation_toggle_expands_collapsed_body() {
         expanded
             .iter()
             .all(|line| !line.contains("ctrl+o to expand"))
+    );
+}
+
+#[test]
+fn browser_snapshot_expands_and_collapses_committed_tool_without_mutating_source() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.transcript_mut()
+        .push_tool_run("tool-1", "Read", Some("{\"path\":\"a\"}".to_owned()));
+    let _ = pane.render_terminal_update(80, 20);
+    let mut browser = TranscriptBrowserState::new(true);
+
+    let expanded = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
+    assert!(expanded.contains("{\"path\":\"a\"}"));
+    assert!(!pane.tool_output_expanded());
+
+    browser.toggle();
+    let collapsed = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
+    assert!(!collapsed.contains("{\"path\":\"a\"}"));
+    assert!(!pane.tool_output_expanded());
+}
+
+#[test]
+fn browser_rows_are_bounded_and_scrollable() {
+    let mut pane = TranscriptPane::new(80, 20);
+    for index in 0..40 {
+        pane.push_status(format!("row-{index}"));
+    }
+    let mut browser = TranscriptBrowserState::new(false);
+    assert_eq!(pane.render_browser_rows(&mut browser, 80, 5).len(), 5);
+    browser.scroll_up(usize::MAX);
+    assert!(
+        pane.render_browser_rows(&mut browser, 80, 5)
+            .join("\n")
+            .contains("row-0")
     );
 }

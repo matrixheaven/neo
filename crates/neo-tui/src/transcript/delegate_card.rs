@@ -1,7 +1,7 @@
 use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot, AgentTerminalReason};
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Component, Expandable, Finalization, Line, Span, Style};
+use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
@@ -12,7 +12,6 @@ use crate::transcript::{
 pub struct DelegateCardComponent {
     turn: Option<u32>,
     snapshot: AgentSnapshot,
-    expanded: bool,
     now_ms: Option<u64>,
 }
 
@@ -27,7 +26,6 @@ impl DelegateCardComponent {
         Self {
             turn,
             snapshot,
-            expanded: false,
             now_ms: None,
         }
     }
@@ -51,11 +49,6 @@ impl DelegateCardComponent {
             return false;
         }
         self.update(snapshot)
-    }
-
-    #[must_use]
-    pub const fn is_expanded(&self) -> bool {
-        self.expanded
     }
 
     #[must_use]
@@ -148,12 +141,6 @@ impl DelegateCardComponent {
         }
 
         lines
-    }
-}
-
-impl Expandable for DelegateCardComponent {
-    fn set_expanded(&mut self, expanded: bool) {
-        self.expanded = expanded;
     }
 }
 
