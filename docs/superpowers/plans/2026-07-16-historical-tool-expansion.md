@@ -38,10 +38,12 @@
 ### Task 1: Canonical Expandable State And Review Snapshot
 
 Files:
+- Modify crates/neo-tui/src/transcript/presentation.rs
 - Create crates/neo-tui/src/transcript/browser.rs
 - Modify crates/neo-tui/src/transcript/entry/mod.rs
 - Modify crates/neo-tui/src/transcript/pane.rs
 - Modify crates/neo-tui/src/transcript/store.rs
+- Modify crates/neo-tui/src/transcript/presentation.rs (read-only committed-entry query)
 - Modify crates/neo-tui/src/transcript/mod.rs
 - Modify crates/neo-tui/src/transcript/event_handler.rs
 - Modify crates/neo-tui/src/transcript/delegate_card.rs
