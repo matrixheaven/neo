@@ -89,6 +89,33 @@ pub enum AgentEvent {
     TurnStarted {
         turn: u32,
     },
+    RetryScheduled {
+        turn: u32,
+        retry: u32,
+        max_retries: u32,
+        delay_ms: u64,
+        error_code: String,
+        message: String,
+    },
+    RetryStarted {
+        turn: u32,
+        retry: u32,
+        max_retries: u32,
+    },
+    RetryResumed {
+        turn: u32,
+        retry: u32,
+    },
+    RetrySucceeded {
+        turn: u32,
+        retries_used: u32,
+    },
+    RetryExhausted {
+        turn: u32,
+        retries_used: u32,
+        error_code: String,
+        message: String,
+    },
     MessageStarted {
         turn: u32,
         id: String,
@@ -623,6 +650,18 @@ mod tests {
         assert!(json.contains("\"retry_after\":30"));
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, back);
+
+        let event = AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+            delay_ms: 500,
+            error_code: "provider.transport_error".into(),
+            message: "body closed".into(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize retry event");
+        let decoded: AgentEvent = serde_json::from_str(&json).expect("deserialize retry event");
+        assert_eq!(decoded, event);
     }
 
     #[test]

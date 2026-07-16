@@ -89,6 +89,11 @@ impl EventEmitter {
             AgentEvent::TodoUpdated { todos, .. } => {
                 context.todos.clone_from(todos);
             }
+            AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryResumed { .. }
+            | AgentEvent::RetrySucceeded { .. }
+            | AgentEvent::RetryExhausted { .. } => {}
             _ => {}
         }
     }

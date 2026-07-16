@@ -12,6 +12,7 @@ mod image_blobs;
 mod permission;
 mod plan_orchestration;
 mod queue;
+mod retry;
 mod skill_dispatch;
 mod stream_aggregator;
 mod tokens;

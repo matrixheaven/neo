@@ -523,9 +523,6 @@ where
                     last_progress_chars = summary.len();
                 }
             }
-            Ok(AiStreamEvent::Error { message }) => {
-                return Err(CompactionError::Llm(message));
-            }
             Ok(_) => {}
             Err(err) => return Err(CompactionError::Llm(err.to_string())),
         }

@@ -19,7 +19,8 @@ use super::plan_orchestration::{
 use super::queue::{
     SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
 };
-use super::stream_aggregator::run_model_turn;
+use super::retry::{retry_delay, wait_for_retry};
+use super::stream_aggregator::run_model_attempt;
 use super::tool_dispatch::{
     continues_after_terminating_batch, execute_tool_calls, terminates_tool_batch,
 };
@@ -41,8 +42,8 @@ fn should_recover_from_overflow(err: &AgentRuntimeError) -> bool {
     matches!(ai_err, AiError::ContextOverflow { .. })
 }
 
-/// Run `run_model_turn`, recovering from `ContextOverflow` via forced
-/// compaction + a single retry. Non-recoverable errors are propagated.
+/// Run one logical model turn, recovering from `ContextOverflow` via forced
+/// compaction while sharing one network retry policy across both requests.
 async fn run_model_turn_with_recovery(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
@@ -51,23 +52,84 @@ async fn run_model_turn_with_recovery(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
-    let model_result = run_model_turn(
-        Arc::clone(model),
-        config,
-        request,
-        turn,
-        emitter,
-        cancel_token.clone(),
-    )
-    .await;
-
-    match model_result {
-        Ok(result) => Ok(result),
-        Err(e) => {
-            if !should_recover_from_overflow(&e) {
-                return Err(e);
+    emitter.emit(AgentEvent::TurnStarted { turn });
+    let result =
+        match run_model_request_with_retries(model, config, &request, turn, emitter, cancel_token)
+            .await
+        {
+            Err(error) if should_recover_from_overflow(&error) => {
+                recover_from_overflow(model, config, emitter, cancel_token, turn).await
             }
-            recover_from_overflow(model, config, emitter, cancel_token, turn).await
+            result => result,
+        }?;
+
+    let stop_reason = match &result {
+        Some(AgentMessage::Assistant { stop_reason, .. }) => *stop_reason,
+        _ => StopReason::EndTurn,
+    };
+    emit_effective_context_window(config, emitter, turn).await;
+    emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
+    Ok(result)
+}
+
+async fn run_model_request_with_retries(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    request: &neo_ai::ChatRequest,
+    turn: u32,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Result<Option<AgentMessage>, AgentRuntimeError> {
+    let mut retries_used = 0_u32;
+    loop {
+        if retries_used > 0 {
+            emitter.emit(AgentEvent::RetryStarted {
+                turn,
+                retry: retries_used,
+                max_retries: config.max_retries,
+            });
+        }
+        match run_model_attempt(
+            Arc::clone(model),
+            request.clone(),
+            turn,
+            emitter,
+            cancel_token,
+            (retries_used > 0).then_some(retries_used),
+        )
+        .await
+        {
+            Ok(message) => {
+                if retries_used > 0 {
+                    emitter.emit(AgentEvent::RetrySucceeded { turn, retries_used });
+                }
+                return Ok(message);
+            }
+            Err(AgentRuntimeError::Model(error)) if error.is_retryable() => {
+                if retries_used >= config.max_retries {
+                    emitter.emit(AgentEvent::RetryExhausted {
+                        turn,
+                        retries_used,
+                        error_code: error.code().to_owned(),
+                        message: error.to_string(),
+                    });
+                    return Err(error.into());
+                }
+
+                let next_retry = retries_used.saturating_add(1);
+                let delay = retry_delay(&error, next_retry);
+                emitter.emit(AgentEvent::RetryScheduled {
+                    turn,
+                    retry: next_retry,
+                    max_retries: config.max_retries,
+                    delay_ms: delay.as_millis().try_into().unwrap_or(u64::MAX),
+                    error_code: error.code().to_owned(),
+                    message: error.to_string(),
+                });
+                wait_for_retry(delay, cancel_token).await?;
+                retries_used = next_retry;
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -109,20 +171,7 @@ async fn recover_from_overflow(
 
     // Rebuild request with compacted context and retry once.
     let retry_request = chat_request(config, &emitter.context, &ProjectionPlan::disabled()).await;
-    run_model_turn(
-        Arc::clone(model),
-        config,
-        retry_request,
-        turn,
-        emitter,
-        cancel_token.clone(),
-    )
-    .await
-    .map_err(|_| {
-        AgentRuntimeError::Model(AiError::Stream {
-            message: "compaction recovery failed after context overflow".into(),
-        })
-    })
+    run_model_request_with_retries(model, config, &retry_request, turn, emitter, cancel_token).await
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -167,9 +216,50 @@ pub(super) async fn run_agent_turn(
         .await?;
         let request = chat_request(&config, &emitter.context, &projection_plan).await;
         validate_model_capabilities(&request)?;
-        let assistant =
-            run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
-                .await?;
+        let assistant = match run_model_turn_with_recovery(
+            &model,
+            &config,
+            request,
+            turn,
+            emitter,
+            &cancel_token,
+        )
+        .await
+        {
+            Ok(assistant) => assistant,
+            Err(AgentRuntimeError::Model(AiError::Cancelled)) => {
+                emitter.emit(AgentEvent::TurnFinished {
+                    turn,
+                    stop_reason: StopReason::Cancelled,
+                });
+                final_turn = turn;
+                final_stop_reason = StopReason::Cancelled;
+                break;
+            }
+            Err(AgentRuntimeError::Model(error)) => {
+                let retry_after = match &error {
+                    AiError::RateLimit { retry_after, .. }
+                    | AiError::Server { retry_after, .. } => {
+                        retry_after.as_ref().map(std::time::Duration::as_secs)
+                    }
+                    _ => None,
+                };
+                emitter.emit(AgentEvent::Error {
+                    turn,
+                    message: error.to_string(),
+                    code: Some(error.code().to_owned()),
+                    retry_after,
+                });
+                emitter.emit(AgentEvent::TurnFinished {
+                    turn,
+                    stop_reason: StopReason::Error,
+                });
+                final_turn = turn;
+                final_stop_reason = StopReason::Error;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         final_turn = turn;
         if let Some(AgentMessage::Assistant { stop_reason, .. }) = &assistant {
             final_stop_reason = *stop_reason;

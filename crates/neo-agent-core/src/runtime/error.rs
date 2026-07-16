@@ -45,11 +45,11 @@ mod tests {
     }
 
     #[test]
-    fn model_error_code_for_network() {
-        let err = AgentRuntimeError::Model(neo_ai::AiError::Network {
+    fn model_error_code_for_transport() {
+        let err = AgentRuntimeError::Model(neo_ai::AiError::Transport {
             message: "timeout".into(),
         });
-        assert_eq!(err.code(), Some("provider.network_error"));
+        assert_eq!(err.code(), Some("provider.transport_error"));
     }
 
     #[test]

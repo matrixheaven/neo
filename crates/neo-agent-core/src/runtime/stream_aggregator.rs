@@ -4,40 +4,46 @@ use futures::StreamExt;
 use neo_ai::{AiStreamEvent, ChatRequest, ModelClient};
 use tokio_util::sync::CancellationToken;
 
-use super::config::AgentConfig;
 use super::error::AgentRuntimeError;
 use super::events::EventEmitter;
-use super::turn_loop::emit_effective_context_window;
 use crate::{AgentEvent, AgentMessage, AgentTokenUsage, AgentToolCall, Content, StopReason};
 
-pub(super) async fn run_model_turn(
+pub(super) async fn run_model_attempt(
     model: Arc<dyn ModelClient>,
-    config: &AgentConfig,
     request: ChatRequest,
     turn: u32,
     emitter: &mut EventEmitter,
-    cancel_token: CancellationToken,
+    cancel_token: &CancellationToken,
+    resumed_retry: Option<u32>,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
-    emitter.emit(AgentEvent::TurnStarted { turn });
     let mut state = ModelTurnState::new();
     let mut stream = model.stream_chat(request);
+    let mut resumed_retry = resumed_retry;
 
-    while let Some(event) = next_model_event(&mut stream, &cancel_token).await {
+    while let Some(event) = next_model_event(&mut stream, cancel_token).await {
         if cancel_token.is_cancelled() {
-            state.finish_current_message(turn, StopReason::Cancelled, emitter);
-            break;
+            return Err(neo_ai::AiError::Cancelled.into());
         }
-        state.apply_model_event(turn, event?, emitter);
+        let event = event?;
+        if let Some(retry) = resumed_retry.take() {
+            emitter.emit(AgentEvent::RetryResumed { turn, retry });
+        }
+        let completed = matches!(event, AiStreamEvent::MessageEnd { .. });
+        state.apply_model_event(turn, event, emitter);
+        if completed {
+            let stop_reason = state.stop_reason;
+            let message = state.into_assistant_message(stop_reason);
+            emitter.emit(AgentEvent::MessageAppended {
+                message: message.clone(),
+            });
+            return Ok(Some(message));
+        }
     }
 
-    let stop_reason = state.stop_reason;
-    let message = state.into_assistant_message(stop_reason);
-    emitter.emit(AgentEvent::MessageAppended {
-        message: message.clone(),
-    });
-    emit_effective_context_window(config, emitter, turn).await;
-    emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
-    Ok(Some(message))
+    Err(neo_ai::AiError::Transport {
+        message: "model stream ended before MessageEnd".into(),
+    }
+    .into())
 }
 
 struct ModelTurnState {
@@ -94,15 +100,6 @@ impl ModelTurnState {
                     emitter.emit(AgentEvent::TokenUsage { turn, usage });
                 }
                 self.finish_current_message(turn, stop_reason.into(), emitter);
-            }
-            AiStreamEvent::Error { message } => {
-                emitter.emit(AgentEvent::Error {
-                    turn,
-                    message: message.clone(),
-                    code: None,
-                    retry_after: None,
-                });
-                self.finish_current_message(turn, StopReason::Error, emitter);
             }
         }
     }

@@ -501,11 +501,10 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
     }
     drop(stream);
 
-    assert!(events.contains(&AgentEvent::MessageFinished {
-        turn: 1,
-        id: "msg_cancel".to_owned(),
-        stop_reason: StopReason::Cancelled,
-    }));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::MessageFinished { id, .. } if id == "msg_cancel"
+    )));
     assert!(events.contains(&AgentEvent::TurnFinished {
         turn: 1,
         stop_reason: StopReason::Cancelled,
@@ -521,6 +520,15 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
         event,
         AgentEvent::TextDelta { text, .. } if text == "late"
     )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::MessageAppended {
+            message: AgentMessage::Assistant { .. },
+        }
+    )));
+    assert!(!context.messages().iter().any(|message| {
+        matches!(message, AgentMessage::Assistant { .. }) || message.text().contains("partial")
+    }));
 }
 
 #[tokio::test]
@@ -1460,6 +1468,10 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
                 usage: None,
             }),
         ],
+        vec![Err(AiError::RateLimit {
+            message: "retry compacted request".to_owned(),
+            retry_after: Some(Duration::ZERO),
+        })],
         vec![
             Ok(AiStreamEvent::MessageStart {
                 id: "retry".to_owned(),
@@ -1483,6 +1495,7 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
     let mut config = AgentConfig::for_model(harness.model())
         .with_system_prompt("system ".repeat(4_000))
         .with_compaction(CompactionSettings::new(usize::MAX, 1));
+    config.max_retries = 1;
     config.model.capabilities.max_context_tokens = Some(200_000);
 
     let events = collect_turn_events(
@@ -1493,7 +1506,12 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
     )
     .await;
 
-    assert_eq!(harness.requests().len(), 3);
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        serde_json::to_value(&requests[2]).expect("serialize compacted request"),
+        serde_json::to_value(&requests[3]).expect("serialize retried compacted request")
+    );
     assert!(
         events
             .iter()
@@ -1508,6 +1526,10 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
         _ => None,
     });
     assert!(observed_max.is_some_and(|max| max > 1_000));
+    assert!(events.contains(&AgentEvent::RetrySucceeded {
+        turn: 1,
+        retries_used: 1,
+    }));
 }
 
 #[tokio::test]
@@ -2144,37 +2166,187 @@ async fn runtime_emits_empty_todo_update_for_clear() {
 }
 
 #[tokio::test]
-async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
-    let harness = FakeHarness::from_events([
-        AiStreamEvent::MessageStart {
-            id: "msg_error".to_owned(),
-        },
-        AiStreamEvent::Error {
-            message: "provider failed".to_owned(),
-        },
+async fn stream_retries_transport_error() {
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::Transport {
+            message: "eof".into(),
+        })],
+        vec![
+            Ok(AiStreamEvent::MessageStart { id: "b".into() }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "complete".into(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
     ]);
-    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 1;
     let mut context = AgentContext::new();
 
-    let events = runtime
-        .run_turn(&mut context, AgentMessage::user_text("fail"))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("error event should remain in-band");
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("retry"),
+    )
+    .await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&requests[0]).expect("serialize first request"),
+        serde_json::to_value(&requests[1]).expect("serialize replayed request")
+    );
+
+    let lifecycle = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnStarted { .. } => Some("turn_started"),
+            AgentEvent::RetryScheduled { .. } => Some("retry_scheduled"),
+            AgentEvent::RetryStarted { .. } => Some("retry_started"),
+            AgentEvent::RetryResumed { .. } => Some("retry_resumed"),
+            AgentEvent::RetrySucceeded { .. } => Some("retry_succeeded"),
+            AgentEvent::TurnFinished { .. } => Some("turn_finished"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle,
+        [
+            "turn_started",
+            "retry_scheduled",
+            "retry_started",
+            "retry_resumed",
+            "retry_succeeded",
+            "turn_finished",
+        ]
+    );
+    let resumed = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::RetryResumed { .. }))
+        .expect("retry should resume on its first valid event");
+    assert!(matches!(
+        events.get(resumed + 1),
+        Some(AgentEvent::MessageStarted { id, .. }) if id == "b"
+    ));
+
+    let scheduled = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
+        .expect("retry should be scheduled");
+    assert!(matches!(
+        scheduled,
+        AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 1,
+            delay_ms: 500..=625,
+            error_code,
+            message,
+        } if error_code == "provider.transport_error" && message == "transport error: eof"
+    ));
+}
+
+#[tokio::test]
+async fn retry_does_not_append_failed_attempt() {
+    let harness = FakeHarness::from_result_turns([
+        vec![
+            Ok(AiStreamEvent::MessageStart { id: "a".into() }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "partial".into(),
+            }),
+        ],
+        vec![
+            Ok(AiStreamEvent::MessageStart { id: "b".into() }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "complete".into(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 1;
+    let mut context = AgentContext::new();
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("retry partial"),
+    )
+    .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TextDelta { text, .. } if text == "partial"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled {
+            error_code,
+            message,
+            ..
+        } if error_code == "provider.transport_error"
+            && message == "transport error: model stream ended before MessageEnd"
+    )));
+    let appended = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended {
+                message: message @ AgentMessage::Assistant { .. },
+            } => Some(message.text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(appended, ["complete"]);
+    assert!(
+        !context
+            .messages()
+            .iter()
+            .any(|message| matches!(message, AgentMessage::Assistant { .. })
+                && message.text().contains("partial"))
+    );
+}
+
+#[tokio::test]
+async fn retry_budget_zero_emits_exhausted_error() {
+    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Transport {
+        message: "provider failed".into(),
+    })]]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    let mut context = AgentContext::new();
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("fail"),
+    )
+    .await;
 
     assert!(events.contains(&AgentEvent::Error {
         turn: 1,
-        message: "provider failed".to_owned(),
-        code: None,
+        message: "transport error: provider failed".to_owned(),
+        code: Some("provider.transport_error".to_owned()),
         retry_after: None,
     }));
-    assert!(events.contains(&AgentEvent::MessageFinished {
+    assert!(events.contains(&AgentEvent::RetryExhausted {
         turn: 1,
-        id: "msg_error".to_owned(),
-        stop_reason: StopReason::Error,
+        retries_used: 0,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: provider failed".to_owned(),
     }));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled { .. } | AgentEvent::RetryStarted { .. }
+    )));
     assert!(events.contains(&AgentEvent::TurnFinished {
         turn: 1,
         stop_reason: StopReason::Error,
@@ -2186,6 +2358,145 @@ async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
             stop_reason: StopReason::Error,
         })
     );
+    assert_eq!(harness.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn retry_exhaustion_reports_final_error() {
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::RateLimit {
+            message: "busy".into(),
+            retry_after: Some(Duration::ZERO),
+        })],
+        vec![Err(AiError::Server {
+            status: 503,
+            message: "still busy".into(),
+            retry_after: Some(Duration::ZERO),
+        })],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 1;
+    let mut context = AgentContext::new();
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("retry once"),
+    )
+    .await;
+
+    assert!(events.contains(&AgentEvent::RetryExhausted {
+        turn: 1,
+        retries_used: 1,
+        error_code: "provider.server_error".to_owned(),
+        message: "server error (503): still busy".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::Error {
+        turn: 1,
+        message: "server error (503): still busy".to_owned(),
+        code: Some("provider.server_error".to_owned()),
+        retry_after: Some(0),
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RetryResumed { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RetrySucceeded { .. }))
+    );
+    assert_eq!(harness.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn retry_does_not_retry_protocol_failure() {
+    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
+        message: "invalid frame".into(),
+    })]]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 5;
+    let mut context = AgentContext::new();
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("broken protocol"),
+    )
+    .await;
+
+    assert!(events.contains(&AgentEvent::Error {
+        turn: 1,
+        message: "protocol error: invalid frame".to_owned(),
+        code: Some("provider.protocol_error".to_owned()),
+        retry_after: None,
+    }));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryResumed { .. }
+            | AgentEvent::RetrySucceeded { .. }
+            | AgentEvent::RetryExhausted { .. }
+    )));
+    assert_eq!(harness.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn retry_backoff_is_cancellable() {
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::Transport {
+            message: "eof".into(),
+        })],
+        vec![Ok(AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        })],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.max_retries = 1;
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("cancel retry"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+
+    while let Some(event) = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("retry lifecycle should not stall")
+    {
+        let event = event.expect("cancelled retry should remain in-band");
+        let scheduled = matches!(event, AgentEvent::RetryScheduled { .. });
+        events.push(event);
+        if scheduled {
+            cancel.cancel();
+        }
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: StopReason::Cancelled,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryStarted { .. } | AgentEvent::RetryResumed { .. }
+    )));
+    assert_eq!(harness.requests().len(), 1);
 }
 
 #[tokio::test]
