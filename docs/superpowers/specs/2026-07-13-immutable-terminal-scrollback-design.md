@@ -99,6 +99,32 @@ The presentation layer tracks a stable identity and revision for each canonical
 entry. An entry can move from live to committed exactly once after its visual
 state becomes terminal. Committed entries cannot return to live state.
 
+## Final Two-Surface Contract
+
+The normal screen and the historical review surface have separate physical
+owners:
+
+- The normal screen writes finalized blocks to native terminal scrollback and
+  owns only the bounded live suffix. Once bytes are acknowledged, ANSI has no
+  portable address for them; Neo therefore never expands, collapses, clears, or
+  replays those rows in place.
+- Ctrl+O enters an app-owned alternate-screen TranscriptBrowser. It clones the
+  canonical TranscriptStore and owns its viewport, width/height reflow, and
+  browser scroll offset. Browser rows are review-only and never enter the
+  normal presentation ledger.
+- Normal input remains routed to the terminal emulator for wheel scrolling and
+  selection. Browser input is routed to the browser state until Ctrl+O or
+  cancel leaves it; suspend/resume restores the normal live anchor without
+  replaying committed history.
+- Review frames contain only bounded live rows, carry no history append blocks,
+  and are never passed to `acknowledge_history`. Leaving review appends only
+  history finalized while the browser was open.
+
+Both surfaces preserve the no-clear invariant: normal lifecycle output and
+review transitions emit neither `CSI 2 J` nor `CSI 3 J`. In particular, `CSI
+3 J` is never a recovery path because it would purge shell history that Neo
+cannot reconstruct.
+
 ## Render Transaction
 
 Each draw produces one logical transaction:

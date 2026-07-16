@@ -39,7 +39,7 @@ impl TerminalFrame {
     }
 
     #[must_use]
-    pub const fn with_surface(
+    pub fn with_surface(
         history: Vec<FinalizedBlock>,
         live: Vec<String>,
         cursor: Option<CursorPos>,
@@ -117,6 +117,7 @@ impl InlineTerminal {
         let entering_review = frame.review_surface && !self.review_surface;
         let leaving_review = !frame.review_surface && self.review_surface;
         let mut transaction = Vec::new();
+        // Keep the primary live anchor while the alternate review screen owns the renderer.
         let saved_normal_live = entering_review.then(|| self.live.clone());
 
         if entering_review {

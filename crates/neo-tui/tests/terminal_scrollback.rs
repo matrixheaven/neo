@@ -1,7 +1,11 @@
 use neo_agent_core::{AgentEvent, ToolResult};
+use neo_tui::NeoTui;
 use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{InlineTerminal, TerminalFrame};
-use neo_tui::transcript::{FinalizedBlock, TranscriptPane, TranscriptTerminalUpdate};
+use neo_tui::shell::NeoChromeState;
+use neo_tui::transcript::{
+    FinalizedBlock, TranscriptBrowserState, TranscriptPane, TranscriptTerminalUpdate,
+};
 
 #[test]
 fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
@@ -440,6 +444,105 @@ fn leaving_review_appends_history_finalized_while_browser_was_open() {
         1,
         "new history was lost or replayed after review: {retained:#?}"
     );
+}
+
+#[test]
+fn committed_tool_review_does_not_duplicate_native_scrollback() {
+    let mut screen = vt100::Parser::new(12, 80, 128);
+    let mut inline = InlineTerminal::for_test(80, 12);
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "review-tool".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({ "path": "review-committed-tool" }),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "review-tool".to_owned(),
+        name: "Read".to_owned(),
+        result: ToolResult::ok("review-committed-tool-result"),
+    });
+
+    let committed = pane.render_terminal_update(80, 12);
+    assert!(!committed.history.is_empty());
+    let primary_frame = TerminalFrame::new(
+        committed.history.clone(),
+        vec!["primary-review-anchor".to_owned()],
+        None,
+    );
+    render_and_process(&mut inline, &mut screen, &primary_frame, &mut Vec::new());
+    pane.acknowledge_history(&committed.history);
+    let primary_before_review = all_terminal_rows(&mut screen);
+
+    let mut browser = TranscriptBrowserState::new(true);
+    let expanded_rows = pane.render_browser_rows(&mut browser, 80, 12);
+    assert!(
+        expanded_rows
+            .iter()
+            .any(|row| row.contains("review-committed-tool"))
+    );
+    let expanded = TerminalFrame::with_surface(Vec::new(), expanded_rows, None, true, None);
+    assert!(expanded.history.is_empty());
+    render_and_process(&mut inline, &mut screen, &expanded, &mut Vec::new());
+
+    browser.toggle();
+    let collapsed_rows = pane.render_browser_rows(&mut browser, 80, 12);
+    assert!(
+        collapsed_rows
+            .iter()
+            .all(|row| !row.contains("review-committed-tool-result"))
+    );
+    let collapsed = TerminalFrame::with_surface(Vec::new(), collapsed_rows, None, true, None);
+    assert!(collapsed.history.is_empty());
+    render_and_process(&mut inline, &mut screen, &collapsed, &mut Vec::new());
+
+    let after_review =
+        TerminalFrame::new(Vec::new(), vec!["primary-review-anchor".to_owned()], None);
+    render_and_process(&mut inline, &mut screen, &after_review, &mut Vec::new());
+    let primary_after_review = all_terminal_rows(&mut screen);
+
+    assert_eq!(primary_after_review, primary_before_review);
+    assert_eq!(
+        primary_after_review
+            .iter()
+            .filter(|row| row.contains("review-committed-tool"))
+            .count(),
+        1,
+        "committed tool must remain exactly once in native scrollback: {primary_after_review:#?}"
+    );
+}
+
+#[test]
+fn review_frames_never_acknowledge_history() {
+    let chrome = NeoChromeState::new("neo", "session", "model", ".".into());
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "review-ack-tool".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({ "path": "README.md" }),
+    });
+    transcript.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "review-ack-tool".to_owned(),
+        name: "Read".to_owned(),
+        result: ToolResult::ok("contents"),
+    });
+    let mut tui = NeoTui::new(chrome, transcript);
+    let normal = tui.render_terminal_frame(80, 12);
+    assert!(!normal.history.is_empty());
+    assert!(!tui.transcript().has_committed_expandable_entries());
+
+    tui.chrome_mut().open_transcript_browser(true);
+    let review = tui.render_terminal_frame(80, 12);
+    assert!(review.review_surface);
+    assert!(review.history.is_empty());
+    tui.acknowledge_history(&review);
+    assert!(!tui.transcript().has_committed_expandable_entries());
+
+    tui.acknowledge_history(&normal);
+    assert!(tui.transcript().has_committed_expandable_entries());
 }
 
 fn render_and_process(
