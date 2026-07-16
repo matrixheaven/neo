@@ -10,9 +10,8 @@ pub(super) fn render_mcp_startup_status(
     let style = Style::default().fg(match data.phase {
         McpStartupPhase::Connecting => theme.status_pending,
         McpStartupPhase::Connected { .. } => theme.status_ok,
-        McpStartupPhase::NeedsAuth { .. } => theme.status_warn,
+        McpStartupPhase::NeedsAuth { .. } | McpStartupPhase::Cancelled => theme.status_warn,
         McpStartupPhase::Failed { .. } => theme.status_error,
-        McpStartupPhase::Cancelled => theme.status_warn,
         McpStartupPhase::Disabled => theme.text_muted,
     });
     let text = match data.phase {

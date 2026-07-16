@@ -12,12 +12,12 @@ use std::{
 
 use tokio::{
     io::AsyncRead,
-    process::{ChildStdin, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::{Mutex, oneshot, watch},
 };
 
 use super::{
-    ShellRuntime,
+    ShellCommandPermit, ShellRuntime,
     output::{TaggedHeadTailBuffer, TaggedOutput},
     protocol::{
         GuardRequest, GuardResponse, GuardResponsePart, GuardTaskKind, MAX_FRAME_BODY,
@@ -171,136 +171,38 @@ impl GuardianClient {
         rows: Option<u16>,
         stream_update: Option<ToolUpdateCallback>,
     ) -> Result<Self, ToolError> {
-        let permit = runtime
-            .try_acquire()
-            .map_err(|cause| ToolError::ResourceLimited { cause })?;
-        std::fs::create_dir_all(status_dir)?;
-        let mut child = Command::new(runtime.guardian_executable())
-            .arg("__process-guard")
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let mut control = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("guardian stdin was not piped"))?;
-        let mut response = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("guardian stdout was not piped"))?;
-        write_request(
-            &mut control,
-            &GuardRequest::Start {
-                request_id: 1,
-                request: StartRequest {
-                    task_id,
-                    kind,
-                    command: command_text,
-                    limits: runtime.guard_limits(timeout, max_output_bytes),
-                    status_dir: status_dir.to_path_buf(),
-                    cols,
-                    rows,
-                },
-            },
-        )
-        .await
-        .map_err(protocol_error)?;
         let stream_limit = max_output_bytes.min(runtime.limits().max_output_bytes);
-        let started = tokio::time::timeout(
-            START_TIMEOUT,
-            read_logical_response(&mut response, stream_limit),
-        )
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guardian start timed out"))?
-        .map_err(protocol_error)?;
-        let GuardResponse::Started {
-            request_id: 1,
-            guardian_pid,
-            command_pid,
-            command_start_id,
-        } = started
-        else {
-            return Err(ToolError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "guardian did not acknowledge Start",
-            )));
-        };
+        let (control, response, child, permit, guardian_pid, command_pid, command_start_id) =
+            spawn_guardian_and_handshake(GuardianStartArgs {
+                runtime,
+                task_id,
+                kind,
+                command_text,
+                cwd,
+                status_dir,
+                timeout,
+                max_output_bytes,
+                cols,
+                rows,
+                stream_limit,
+            })
+            .await?;
 
         let output = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(stream_limit)));
-        let reader_output = Arc::clone(&output);
-        let callback_tx = stream_update.map(|callback| {
-            let (callback_tx, mut callback_rx) = tokio::sync::mpsc::channel::<String>(32);
-            tokio::spawn(async move {
-                while let Some(update) = callback_rx.recv().await {
-                    callback(&update);
-                }
-            });
-            callback_tx
-        });
+        let callback_tx = stream_update.map(build_callback_channel);
         let responses = Arc::new(Mutex::new(PendingResponses::default()));
-        let reader_responses = Arc::clone(&responses);
         let (final_tx, final_result) = watch::channel(None);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let mut streamed = 0usize;
-            let final_value = loop {
-                match read_logical_response(&mut response, stream_limit).await {
-                    Ok(GuardResponse::Output { stream, data }) => {
-                        reader_output.lock().await.push(stream, &data);
-                        if streamed < stream_limit {
-                            let retained = &data[..data.len().min(stream_limit - streamed)];
-                            streamed = streamed.saturating_add(retained.len());
-                            if let Some(callback_tx) = &callback_tx {
-                                let _ = callback_tx
-                                    .try_send(String::from_utf8_lossy(retained).into_owned());
-                            }
-                        }
-                    }
-                    Ok(GuardResponse::Exited {
-                        exit,
-                        stdout,
-                        stderr,
-                    }) => {
-                        let omitted_bytes = exit.omitted_output_bytes;
-                        break GuardedCommandResult {
-                            exit,
-                            output: TaggedOutput {
-                                stdout,
-                                stderr,
-                                omitted_bytes,
-                            },
-                        };
-                    }
-                    Ok(
-                        reply @ (GuardResponse::Ack { request_id }
-                        | GuardResponse::Busy { request_id }
-                        | GuardResponse::Snapshot { request_id, .. }
-                        | GuardResponse::Error { request_id, .. }),
-                    ) => {
-                        if let Some(sender) =
-                            reader_responses.lock().await.pending.remove(&request_id)
-                        {
-                            let _ = sender.send(reply);
-                        }
-                    }
-                    Ok(GuardResponse::Started { .. }) => {}
-                    Err(_) => {
-                        emergency_cleanup(command_pid, command_start_id).await;
-                        break failed_result();
-                    }
-                }
-            };
-            let _ = final_tx.send(Some(final_value));
-            let pending = reader_responses.lock().await.close();
-            for (request_id, sender) in pending {
-                let _ = sender.send(GuardResponse::Error {
-                    request_id,
-                    message: "guardian exited before request completed".to_owned(),
-                });
-            }
-            let _ = child.wait().await;
+        spawn_reader_task(ReaderTaskArgs {
+            response,
+            child,
+            command_pid,
+            command_start_id,
+            output: Arc::clone(&output),
+            callback_tx,
+            responses: Arc::clone(&responses),
+            final_tx,
+            permit,
+            stream_limit,
         });
 
         Ok(Self {
@@ -457,6 +359,188 @@ impl GuardianClient {
             ))
         })
     }
+}
+
+struct GuardianStartArgs<'a> {
+    runtime: &'a ShellRuntime,
+    task_id: String,
+    kind: GuardTaskKind,
+    command_text: String,
+    cwd: &'a Path,
+    status_dir: &'a Path,
+    timeout: Duration,
+    max_output_bytes: usize,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    stream_limit: usize,
+}
+
+async fn spawn_guardian_and_handshake(
+    args: GuardianStartArgs<'_>,
+) -> Result<
+    (
+        ChildStdin,
+        ChildStdout,
+        Child,
+        ShellCommandPermit,
+        u32,
+        u32,
+        u64,
+    ),
+    ToolError,
+> {
+    let permit = args
+        .runtime
+        .try_acquire()
+        .map_err(|cause| ToolError::ResourceLimited { cause })?;
+    std::fs::create_dir_all(args.status_dir)?;
+    let mut child = Command::new(args.runtime.guardian_executable())
+        .arg("__process-guard")
+        .current_dir(args.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut control = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("guardian stdin was not piped"))?;
+    let mut response = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("guardian stdout was not piped"))?;
+    write_request(
+        &mut control,
+        &GuardRequest::Start {
+            request_id: 1,
+            request: StartRequest {
+                task_id: args.task_id,
+                kind: args.kind,
+                command: args.command_text,
+                limits: args
+                    .runtime
+                    .guard_limits(args.timeout, args.max_output_bytes),
+                status_dir: args.status_dir.to_path_buf(),
+                cols: args.cols,
+                rows: args.rows,
+            },
+        },
+    )
+    .await
+    .map_err(protocol_error)?;
+    let started = tokio::time::timeout(
+        START_TIMEOUT,
+        read_logical_response(&mut response, args.stream_limit),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guardian start timed out"))?
+    .map_err(protocol_error)?;
+    let GuardResponse::Started {
+        request_id: 1,
+        guardian_pid,
+        command_pid,
+        command_start_id,
+    } = started
+    else {
+        return Err(ToolError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "guardian did not acknowledge Start",
+        )));
+    };
+
+    Ok((
+        control,
+        response,
+        child,
+        permit,
+        guardian_pid,
+        command_pid,
+        command_start_id,
+    ))
+}
+
+struct ReaderTaskArgs {
+    response: ChildStdout,
+    child: Child,
+    command_pid: u32,
+    command_start_id: u64,
+    output: Arc<Mutex<TaggedHeadTailBuffer>>,
+    callback_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    responses: Arc<Mutex<PendingResponses>>,
+    final_tx: watch::Sender<Option<GuardedCommandResult>>,
+    permit: ShellCommandPermit,
+    stream_limit: usize,
+}
+
+fn spawn_reader_task(mut args: ReaderTaskArgs) {
+    tokio::spawn(async move {
+        let _permit = args.permit;
+        let mut streamed = 0usize;
+        let final_value = loop {
+            match read_logical_response(&mut args.response, args.stream_limit).await {
+                Ok(GuardResponse::Output { stream, data }) => {
+                    args.output.lock().await.push(stream, &data);
+                    if streamed < args.stream_limit {
+                        let retained = &data[..data.len().min(args.stream_limit - streamed)];
+                        streamed = streamed.saturating_add(retained.len());
+                        if let Some(callback_tx) = &args.callback_tx {
+                            let _ = callback_tx
+                                .try_send(String::from_utf8_lossy(retained).into_owned());
+                        }
+                    }
+                }
+                Ok(GuardResponse::Exited {
+                    exit,
+                    stdout,
+                    stderr,
+                }) => {
+                    let omitted_bytes = exit.omitted_output_bytes;
+                    break GuardedCommandResult {
+                        exit,
+                        output: TaggedOutput {
+                            stdout,
+                            stderr,
+                            omitted_bytes,
+                        },
+                    };
+                }
+                Ok(
+                    reply @ (GuardResponse::Ack { request_id }
+                    | GuardResponse::Busy { request_id }
+                    | GuardResponse::Snapshot { request_id, .. }
+                    | GuardResponse::Error { request_id, .. }),
+                ) => {
+                    if let Some(sender) = args.responses.lock().await.pending.remove(&request_id) {
+                        let _ = sender.send(reply);
+                    }
+                }
+                Ok(GuardResponse::Started { .. }) => {}
+                Err(_) => {
+                    emergency_cleanup(args.command_pid, args.command_start_id).await;
+                    break failed_result();
+                }
+            }
+        };
+        let _ = args.final_tx.send(Some(final_value));
+        let pending = args.responses.lock().await.close();
+        for (request_id, sender) in pending {
+            let _ = sender.send(GuardResponse::Error {
+                request_id,
+                message: "guardian exited before request completed".to_owned(),
+            });
+        }
+        let _ = args.child.wait().await;
+    });
+}
+
+fn build_callback_channel(callback: ToolUpdateCallback) -> tokio::sync::mpsc::Sender<String> {
+    let (callback_tx, mut callback_rx) = tokio::sync::mpsc::channel::<String>(32);
+    tokio::spawn(async move {
+        while let Some(update) = callback_rx.recv().await {
+            callback(&update);
+        }
+    });
+    callback_tx
 }
 
 async fn read_logical_response<R>(

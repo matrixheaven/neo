@@ -187,7 +187,7 @@ mod tests {
     fn hanging_stdio_server_never_answers() {
         if std::env::var_os("NEO_STDIO_HANG_HELPER").is_some() {
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::thread::sleep(std::time::Duration::from_mins(1));
             }
         }
     }

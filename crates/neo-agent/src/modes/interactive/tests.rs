@@ -9,7 +9,8 @@ use std::{
 
 use clap::Parser as _;
 use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, MessageOrigin, PermissionMode, StopReason, ToolResult,
+    AgentEvent, AgentMessage, Content, MessageOrigin, PermissionMode, ShellLimits, ShellRuntime,
+    StopReason, ToolResult,
     skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
 };
 use neo_tui::{
@@ -51,8 +52,8 @@ async fn interactive_session_path_uses_main_agent_wire() {
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .expect("session id");
-    let neo_home = config.sessions_dir.parent().expect("neo home");
-    let indexed = neo_agent_core::session::SessionIndex::new(neo_home)
+    let neo_home = crate::config::neo_home().expect("neo home");
+    let indexed = neo_agent_core::session::SessionIndex::new(&neo_home)
         .find(session_id)
         .expect("read session index")
         .expect("interactive session should be indexed");
@@ -12467,6 +12468,24 @@ async fn shell_mode_uses_spec_timeouts_for_user_commands() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut config = test_config(temp.path(), sessions_dir);
+    config.runtime.shell = ShellLimits {
+        foreground_timeout_secs: 120,
+        background_timeout_secs: 600,
+        ..ShellLimits::default()
+    };
+    config.runtime.shell_runtime = ShellRuntime::new(
+        config.runtime.shell,
+        config
+            .runtime
+            .shell_runtime
+            .guardian_executable()
+            .to_path_buf(),
+        config.runtime.shell_runtime.runtime_root().to_path_buf(),
+    );
+    controller.local_config = Some(config);
     controller.set_shell_driver(Arc::new(move |request| {
         let captured_timeouts = Arc::clone(&captured_timeouts);
         Box::pin(async move {

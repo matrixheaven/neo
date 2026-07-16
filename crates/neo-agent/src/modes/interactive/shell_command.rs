@@ -244,9 +244,7 @@ impl InteractiveController {
             result.stderr.push_str("Resource limit: ");
             result.stderr.push_str(limit.cause.as_str());
             if let (Some(observed), Some(configured)) = (limit.observed, limit.configured) {
-                result
-                    .stderr
-                    .push_str(&format!(" (observed {observed}, limit {configured})"));
+                let _ = write!(result.stderr, " (observed {observed}, limit {configured})");
             }
             result.stderr.push('.');
         }

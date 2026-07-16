@@ -17,6 +17,7 @@ use tokio::{
     process::{Child, Command},
     sync::{Mutex, mpsc},
     task::JoinHandle,
+    time::{Instant, Sleep},
 };
 
 #[cfg(windows)]
@@ -61,6 +62,31 @@ pub async fn run_process_guard() -> io::Result<()> {
     run_process_guard_io(tokio::io::stdin(), tokio::io::stdout()).await
 }
 
+type SupervisionBreak = (
+    GuardStatusKind,
+    Option<std::process::ExitStatus>,
+    Option<ResourceLimitDetail>,
+    Option<String>,
+);
+
+#[derive(Debug)]
+struct SupervisionResult {
+    status_kind: GuardStatusKind,
+    exit_status: Option<std::process::ExitStatus>,
+    resource_limit: Option<ResourceLimitDetail>,
+    response_error: Option<String>,
+    response_open: bool,
+}
+
+struct OutputTasks {
+    output: Arc<Mutex<TaggedHeadTailBuffer>>,
+    log_tx: mpsc::Sender<Vec<u8>>,
+    log_task: JoinHandle<io::Result<u64>>,
+    stdout_task: Option<JoinHandle<io::Result<()>>>,
+    stderr_task: Option<JoinHandle<io::Result<()>>>,
+    dropped_log_bytes: Arc<AtomicU64>,
+}
+
 async fn run_process_guard_io<R, W>(mut control: R, response: W) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
@@ -98,8 +124,75 @@ where
         write_running_status(&start, started_at_ms),
     )?;
 
+    let (mut writer, response_tx) = spawn_response_writer(response);
+    let (mut process, mut sampler) =
+        start_bash_process(&start, &response_tx, start_request_id).await?;
+    let output_tasks = spawn_output_tasks(&mut process, &start, &response_tx).await?;
+
+    let result = run_supervision_loop(
+        &mut process,
+        &mut sampler,
+        &mut control,
+        &mut writer,
+        &response_tx,
+        &start,
+    )
+    .await?;
+    if !result.response_open {
+        writer.abort();
+    }
+
+    let (exit_status, mut cleanup_errors) = terminate_process(
+        &mut process,
+        &mut sampler,
+        result.exit_status,
+        result.response_error,
+    )
+    .await;
+    let (retained, omitted_log_bytes, mut errors) = await_output_and_log(output_tasks).await;
+    cleanup_errors.append(&mut errors);
+
+    let exit = guard_exit(
+        result.status_kind,
+        exit_status,
+        &retained,
+        result.resource_limit,
+        omitted_log_bytes,
+    );
+    let final_status = build_final_status(&start, started_at_ms, exit.clone(), cleanup_errors);
+    let final_write = final_status_guard
+        .write(&final_status)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+    if result.response_open {
+        let _ = response_tx
+            .send(GuardResponse::Exited {
+                exit,
+                stdout: retained.stdout,
+                stderr: retained.stderr,
+            })
+            .await;
+    }
+    drop(response_tx);
+    if result.response_open {
+        writer
+            .await
+            .map_err(|error| io::Error::other(format!("join guardian writer: {error}")))??;
+    }
+    match final_write {
+        AtomicWriteStatus::Durable => Ok(()),
+        AtomicWriteStatus::CommittedUnsynced(error) => Err(error),
+    }
+}
+
+fn spawn_response_writer<W>(
+    response: W,
+) -> (JoinHandle<io::Result<()>>, mpsc::Sender<GuardResponse>)
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (response_tx, mut response_rx) = mpsc::channel(RESPONSE_QUEUE_CAPACITY);
-    let mut writer = tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         let mut response = response;
         while let Some(message) = response_rx.recv().await {
             write_response(&mut response, &message)
@@ -108,8 +201,15 @@ where
         }
         Ok::<(), io::Error>(())
     });
+    (writer, response_tx)
+}
 
-    let mut process = GuardedBashProcess::spawn(&start)?;
+async fn start_bash_process(
+    start: &StartRequest,
+    response_tx: &mpsc::Sender<GuardResponse>,
+    start_request_id: u64,
+) -> io::Result<(GuardedBashProcess, ProcessSampler)> {
+    let mut process = GuardedBashProcess::spawn(start)?;
     let command_pid = process.child.id().unwrap_or_default();
     let mut sampler = ProcessSampler::new(command_pid);
     let command_start_id = process_start_id(command_pid);
@@ -118,7 +218,7 @@ where
         return Err(io::Error::other("cannot establish Bash process identity"));
     }
     try_send_response(
-        &response_tx,
+        response_tx,
         GuardResponse::Started {
             request_id: start_request_id,
             guardian_pid: std::process::id(),
@@ -126,11 +226,18 @@ where
             command_start_id,
         },
     )?;
+    Ok((process, sampler))
+}
 
+async fn spawn_output_tasks(
+    process: &mut GuardedBashProcess,
+    start: &StartRequest,
+    response_tx: &mpsc::Sender<GuardResponse>,
+) -> io::Result<OutputTasks> {
     let output = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(
         start.limits.max_output_bytes,
     )));
-    let log_file = tokio::fs::File::create(log_path(&start)).await?;
+    let log_file = tokio::fs::File::create(log_path(start)).await?;
     let (log_tx, log_rx) = mpsc::channel(LOG_QUEUE_CAPACITY);
     let dropped_log_bytes = Arc::new(AtomicU64::new(0));
     let log_truncated = Arc::new(AtomicBool::new(false));
@@ -157,13 +264,33 @@ where
             Arc::clone(&log_truncated),
         )
     });
+    Ok(OutputTasks {
+        output,
+        log_tx,
+        log_task,
+        stdout_task,
+        stderr_task,
+        dropped_log_bytes,
+    })
+}
 
+async fn run_supervision_loop<R>(
+    process: &mut GuardedBashProcess,
+    sampler: &mut ProcessSampler,
+    control: &mut R,
+    mut writer: &mut JoinHandle<io::Result<()>>,
+    response_tx: &mpsc::Sender<GuardResponse>,
+    start: &StartRequest,
+) -> io::Result<SupervisionResult>
+where
+    R: AsyncRead + Unpin,
+{
     let deadline = tokio::time::sleep(Duration::from_millis(start.limits.timeout_ms));
     tokio::pin!(deadline);
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
     let mut response_open = true;
-    let (status_kind, exit_status, resource_limit, response_error) = 'supervision: loop {
+    let result = loop {
         tokio::select! {
             writer_result = &mut writer => {
                 response_open = false;
@@ -174,94 +301,152 @@ where
                 };
                 break (GuardStatusKind::ParentExited, None, None, Some(error));
             }
-            request = read_request(&mut control) => {
+            request = read_request(control) => {
                 match request {
-                    Ok(GuardRequest::Stop { request_id }) => {
-                        if let Err(error) = try_send_response(&response_tx, GuardResponse::Ack { request_id }) {
-                            response_open = false;
-                            break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                        }
-                        break (GuardStatusKind::Cancelled, None, None, None);
-                    }
-                    Ok(GuardRequest::SetBackgroundDeadline { request_id }) => {
-                        deadline.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + Duration::from_millis(start.limits.background_timeout_ms),
-                        );
-                        if let Err(error) = try_send_response(&response_tx, GuardResponse::Ack { request_id }) {
-                            response_open = false;
-                            break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
+                    Ok(request) => {
+                        if let Some(tuple) = handle_request(
+                            &request,
+                            response_tx,
+                            start,
+                            deadline.as_mut(),
+                            &mut response_open,
+                        ) {
+                            break tuple;
                         }
                     }
-                    Ok(_) => {
-                        if let Err(error) = try_send_response(&response_tx, GuardResponse::Error {
-                            request_id: 0,
-                            message: "request is not valid for Bash".to_owned(),
-                        }) {
-                            response_open = false;
-                            break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(status) = process.child.try_wait()? {
-                            let kind = if status.success() {
-                                GuardStatusKind::Completed
-                            } else {
-                                GuardStatusKind::Failed
-                            };
-                            break (kind, Some(status), None, None);
-                        }
-                        if protocol_is_eof(&error) {
-                            break (GuardStatusKind::ParentExited, None, None, None);
-                        }
-                        break (GuardStatusKind::Failed, None, None, None);
-                    }
+                    Err(error) => break handle_request_error(&error, process)?,
                 }
             }
             () = &mut deadline => break (GuardStatusKind::TimedOut, None, None, None),
             _ = poll.tick() => {
                 if let Some(status) = process.child.try_wait()? {
-                    let kind = if status.success() {
-                        GuardStatusKind::Completed
-                    } else {
-                        GuardStatusKind::Failed
-                    };
-                    break (kind, Some(status), None, None);
+                    break (status_kind_for_exit(status), Some(status), None, None);
                 }
             }
             _ = resource_poll.tick() => {
                 match check_resource_tick(
                     || process.child.try_wait(),
-                    || sampler.exceeded_limit(&start),
+                    || sampler.exceeded_limit(start),
                 )? {
                     ResourceTick::Exited(status) => {
-                        let kind = if status.success() {
-                            GuardStatusKind::Completed
-                        } else {
-                            GuardStatusKind::Failed
-                        };
-                        break (kind, Some(status), None, None);
+                        break (status_kind_for_exit(status), Some(status), None, None)
                     }
                     ResourceTick::Limited(limit) => {
-                        break (GuardStatusKind::ResourceLimited, None, Some(limit), None);
+                        break (GuardStatusKind::ResourceLimited, None, Some(limit), None)
                     }
                     ResourceTick::Running => {}
                 }
             }
         }
     };
-    if !response_open {
-        writer.abort();
+    Ok(SupervisionResult {
+        status_kind: result.0,
+        exit_status: result.1,
+        resource_limit: result.2,
+        response_error: result.3,
+        response_open,
+    })
+}
+
+fn handle_request(
+    request: &GuardRequest,
+    response_tx: &mpsc::Sender<GuardResponse>,
+    start: &StartRequest,
+    mut deadline: std::pin::Pin<&mut Sleep>,
+    response_open: &mut bool,
+) -> Option<SupervisionBreak> {
+    match request {
+        GuardRequest::Stop { request_id } => {
+            let error = send_response_or_close(
+                response_tx,
+                GuardResponse::Ack {
+                    request_id: *request_id,
+                },
+                response_open,
+            );
+            let status_kind = if error.is_some() {
+                GuardStatusKind::ParentExited
+            } else {
+                GuardStatusKind::Cancelled
+            };
+            Some((status_kind, None, None, error))
+        }
+        GuardRequest::SetBackgroundDeadline { request_id } => {
+            deadline
+                .as_mut()
+                .reset(Instant::now() + Duration::from_millis(start.limits.background_timeout_ms));
+            send_response_or_close(
+                response_tx,
+                GuardResponse::Ack {
+                    request_id: *request_id,
+                },
+                response_open,
+            )
+            .map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
+        }
+        _ => {
+            let error = send_response_or_close(
+                response_tx,
+                GuardResponse::Error {
+                    request_id: 0,
+                    message: "request is not valid for Bash".to_owned(),
+                },
+                response_open,
+            );
+            error.map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
+        }
     }
+}
+
+fn send_response_or_close(
+    response_tx: &mpsc::Sender<GuardResponse>,
+    response: GuardResponse,
+    response_open: &mut bool,
+) -> Option<String> {
+    try_send_response(response_tx, response).err().map(|error| {
+        *response_open = false;
+        error.to_string()
+    })
+}
+
+fn handle_request_error(
+    error: &ProtocolError,
+    process: &mut GuardedBashProcess,
+) -> io::Result<SupervisionBreak> {
+    if let Some(status) = process.child.try_wait()? {
+        return Ok((status_kind_for_exit(status), Some(status), None, None));
+    }
+    let status_kind = if protocol_is_eof(error) {
+        GuardStatusKind::ParentExited
+    } else {
+        GuardStatusKind::Failed
+    };
+    Ok((status_kind, None, None, None))
+}
+
+fn status_kind_for_exit(status: std::process::ExitStatus) -> GuardStatusKind {
+    if status.success() {
+        GuardStatusKind::Completed
+    } else {
+        GuardStatusKind::Failed
+    }
+}
+
+async fn terminate_process(
+    process: &mut GuardedBashProcess,
+    sampler: &mut ProcessSampler,
+    exit_status: Option<std::process::ExitStatus>,
+    response_error: Option<String>,
+) -> (Option<std::process::ExitStatus>, Vec<String>) {
     let mut cleanup_errors = response_error.into_iter().collect::<Vec<_>>();
     let exit_status = match exit_status {
         Some(status) => {
-            if let Err(error) = process.terminate_remaining_group(&mut sampler).await {
+            if let Err(error) = process.terminate_remaining_group(sampler).await {
                 cleanup_errors.push(error.to_string());
             }
             Some(status)
         }
-        None => match process.terminate_and_wait(&mut sampler).await {
+        None => match process.terminate_and_wait(sampler).await {
             Ok(status) => Some(status),
             Err(error) => {
                 cleanup_errors.push(error.to_string());
@@ -270,6 +455,19 @@ where
             }
         },
     };
+    (exit_status, cleanup_errors)
+}
+
+async fn await_output_and_log(tasks: OutputTasks) -> (TaggedOutput, u64, Vec<String>) {
+    let OutputTasks {
+        output,
+        log_tx,
+        log_task,
+        stdout_task,
+        stderr_task,
+        dropped_log_bytes,
+    } = tasks;
+    let mut errors = Vec::new();
     tokio::join!(
         drain_output_task(stdout_task),
         drain_output_task(stderr_task)
@@ -278,57 +476,35 @@ where
     let omitted_log_bytes = match log_task.await {
         Ok(Ok(omitted)) => omitted,
         Ok(Err(error)) => {
-            cleanup_errors.push(error.to_string());
+            errors.push(error.to_string());
             0
         }
         Err(error) => {
-            cleanup_errors.push(format!("join guardian log writer: {error}"));
+            errors.push(format!("join guardian log writer: {error}"));
             0
         }
     }
     .saturating_add(dropped_log_bytes.load(Ordering::Relaxed));
-
     let retained = {
         let mut output = output.lock().await;
         std::mem::replace(&mut *output, TaggedHeadTailBuffer::new(0)).finish()
     };
-    let exit = guard_exit(
-        status_kind,
-        exit_status,
-        &retained,
-        resource_limit,
-        omitted_log_bytes,
-    );
-    let final_status = GuardStatus {
+    (retained, omitted_log_bytes, errors)
+}
+
+fn build_final_status(
+    start: &StartRequest,
+    started_at_ms: u64,
+    exit: GuardExit,
+    cleanup_errors: Vec<String>,
+) -> GuardStatus {
+    GuardStatus {
         schema_version: 1,
         task_id: start.task_id.clone(),
         started_at_ms,
         finished_at_ms: unix_time_ms(),
-        exit: exit.clone(),
+        exit,
         cleanup_errors,
-    };
-    let final_write = final_status_guard
-        .write(&final_status)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-
-    if response_open {
-        let _ = response_tx
-            .send(GuardResponse::Exited {
-                exit,
-                stdout: retained.stdout,
-                stderr: retained.stderr,
-            })
-            .await;
-    }
-    drop(response_tx);
-    if response_open {
-        writer
-            .await
-            .map_err(|error| io::Error::other(format!("join guardian writer: {error}")))??;
-    }
-    match final_write {
-        AtomicWriteStatus::Durable => Ok(()),
-        AtomicWriteStatus::CommittedUnsynced(error) => Err(error),
     }
 }
 

@@ -1115,7 +1115,10 @@ impl CustomEndpointWizardState {
         }
     }
 
-    #[allow(clippy::cast_sign_loss, reason = "delta is non-negative in this branch")]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "delta is non-negative in this branch"
+    )]
     fn move_selection(&mut self, delta: isize) -> InputResult {
         let count = self.selection_count();
         if count == 0 {
@@ -1129,7 +1132,10 @@ impl CustomEndpointWizardState {
         InputResult::Handled
     }
 
-    #[allow(clippy::match_same_arms, reason = "selection counts are coincidentally equal across unrelated steps")]
+    #[allow(
+        clippy::match_same_arms,
+        reason = "selection counts are coincidentally equal across unrelated steps"
+    )]
     fn selection_count(&self) -> usize {
         match self.step {
             WizardStep::Provider | WizardStep::EndpointAuth | WizardStep::AuthSource => 3,

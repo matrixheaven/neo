@@ -641,13 +641,13 @@ async fn run_model_bash_with_cancel(
     tokio::select! {
         biased;
         result = execute_model_bash_for_runtime(tool_context, arguments.clone()) => {
-            result.unwrap_or_else(|error| model_bash_error_result(tool_context, error))
+            result.unwrap_or_else(|error| model_bash_error_result(tool_context, &error))
         }
         () = cancel_token.cancelled() => cancelled_tool_result(),
     }
 }
 
-fn model_bash_error_result(tool_context: &ToolContext, error: ToolError) -> ToolResult {
+fn model_bash_error_result(tool_context: &ToolContext, error: &ToolError) -> ToolResult {
     let ToolError::ResourceLimited { cause } = error else {
         return ToolResult::error(error.to_string());
     };
@@ -663,50 +663,11 @@ fn model_bash_error_result(tool_context: &ToolContext, error: ToolError) -> Tool
         "truncated": false,
         "outcome": "resource_limited",
         "resource_limit": ResourceLimitDetail {
-            cause,
+            cause: *cause,
             configured: Some(configured),
             observed: Some(configured.saturating_add(1)),
         },
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ShellLimits, ShellRuntime};
-
-    #[tokio::test]
-    async fn model_bash_admission_rejection_returns_resource_limit_details() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let limits = ShellLimits {
-            max_active_commands: 1,
-            ..ShellLimits::default()
-        };
-        let runtime = ShellRuntime::new(
-            limits,
-            PathBuf::from("unused-guardian"),
-            workspace.path().join("runtime"),
-        );
-        let _permit = runtime.try_acquire().expect("occupy admission slot");
-        let context = ToolContext::new(workspace.path())
-            .expect("tool context")
-            .with_access(ToolAccess::all())
-            .with_shell_runtime(runtime);
-
-        let result = run_model_bash_with_cancel(
-            &serde_json::json!({ "command": "printf rejected" }),
-            &context,
-            &CancellationToken::new(),
-        )
-        .await;
-        let details = result.details.expect("structured rejection details");
-
-        assert!(result.is_error);
-        assert_eq!(details["outcome"], "resource_limited");
-        assert_eq!(details["resource_limit"]["cause"], "active_commands");
-        assert_eq!(details["resource_limit"]["configured"], 1);
-        assert_eq!(details["resource_limit"]["observed"], 2);
-    }
 }
 
 fn default_tool_context(
@@ -778,4 +739,43 @@ fn default_tool_context(
             }
         })
         .map_err(AgentRuntimeError::Tool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ShellLimits, ShellRuntime};
+
+    #[tokio::test]
+    async fn model_bash_admission_rejection_returns_resource_limit_details() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let limits = ShellLimits {
+            max_active_commands: 1,
+            ..ShellLimits::default()
+        };
+        let runtime = ShellRuntime::new(
+            limits,
+            PathBuf::from("unused-guardian"),
+            workspace.path().join("runtime"),
+        );
+        let _permit = runtime.try_acquire().expect("occupy admission slot");
+        let context = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_access(ToolAccess::all())
+            .with_shell_runtime(runtime);
+
+        let result = run_model_bash_with_cancel(
+            &serde_json::json!({ "command": "printf rejected" }),
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
+        let details = result.details.expect("structured rejection details");
+
+        assert!(result.is_error);
+        assert_eq!(details["outcome"], "resource_limited");
+        assert_eq!(details["resource_limit"]["cause"], "active_commands");
+        assert_eq!(details["resource_limit"]["configured"], 1);
+        assert_eq!(details["resource_limit"]["observed"], 2);
+    }
 }

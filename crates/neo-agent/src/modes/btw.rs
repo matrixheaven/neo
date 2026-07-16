@@ -287,9 +287,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::config::{
-        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
-    };
+    use crate::config::{AppConfig, Defaults, McpConfig, RuntimeConfig, TuiConfig};
     use crate::trust;
     use neo_tui::widgets::btw_panel::BtwSidecar;
 
@@ -318,18 +316,7 @@ mod tests {
                 steering_queue_mode: QueueMode::All,
                 follow_up_queue_mode: QueueMode::All,
                 tool_execution_mode: ToolExecutionMode::Sequential,
-                compaction: Some(RuntimeCompactionConfig {
-                    enabled: true,
-                    max_estimated_tokens: 8_000,
-                    keep_recent_messages: 8,
-                    trigger_ratio: 0.85,
-                    reserved_context_tokens: 50_000,
-                    max_recent_messages: 4,
-                    micro_enabled: false,
-                    micro_keep_recent: 20,
-                    max_rounds: 5,
-                    max_retry_attempts: 5,
-                }),
+                compaction: None,
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),

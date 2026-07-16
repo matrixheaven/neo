@@ -95,13 +95,11 @@ impl WorkspaceAccessPolicy {
         }
     }
 
-    fn resolve_missing_read_path(
-        &self,
-        candidate: &Path,
-    ) -> Result<PathBuf, WorkspaceAccessError> {
-        let parent = candidate
-            .parent()
-            .map_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf(), Path::to_path_buf);
+    fn resolve_missing_read_path(&self, candidate: &Path) -> Result<PathBuf, WorkspaceAccessError> {
+        let parent = candidate.parent().map_or_else(
+            || self.primary_root().unwrap_or(Path::new(".")).to_path_buf(),
+            Path::to_path_buf,
+        );
         let canonical_parent = parent.canonicalize()?;
         let file_name =
             candidate
@@ -130,9 +128,10 @@ impl WorkspaceAccessPolicy {
             Err(error) => return Err(WorkspaceAccessError::Io(error)),
         }
 
-        let parent = candidate
-            .parent()
-            .map_or_else(|| self.primary_root().unwrap_or(Path::new(".")).to_path_buf(), Path::to_path_buf);
+        let parent = candidate.parent().map_or_else(
+            || self.primary_root().unwrap_or(Path::new(".")).to_path_buf(),
+            Path::to_path_buf,
+        );
         let canonical_parent = parent.canonicalize()?;
         let file_name =
             candidate

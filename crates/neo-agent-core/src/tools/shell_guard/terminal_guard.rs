@@ -9,11 +9,14 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
+    task::JoinHandle,
+    time::{Instant, Sleep},
 };
 
 #[cfg(windows)]
 use super::process_tree::WindowsLaunchBarrier;
 use super::{
+    ResourceLimitDetail,
     guardian::{
         ProcessSampler, ResourceTick, check_resource_tick, process_start_id, try_send_response,
     },
@@ -31,6 +34,31 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RESOURCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+type TerminalSupervisionBreak = (
+    GuardStatusKind,
+    Option<i32>,
+    Option<ResourceLimitDetail>,
+    Option<String>,
+);
+
+#[derive(Debug)]
+struct TerminalSupervisionResult {
+    status: GuardStatusKind,
+    exit_code: Option<i32>,
+    resource_limit: Option<ResourceLimitDetail>,
+    response_error: Option<String>,
+    response_open: bool,
+}
+
+struct TerminalGuardState {
+    response_tx: mpsc::Sender<GuardResponse>,
+    response_writer: JoinHandle<io::Result<()>>,
+    terminal: GuardedTerminal,
+    sampler: ProcessSampler,
+    final_status_guard: FinalStatusGuard,
+    started_at_ms: u64,
+}
+
 pub(super) async fn run_terminal_guard<R, W>(
     mut control: R,
     response: W,
@@ -41,19 +69,37 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let mut state = start_terminal_guard(response, start_request_id, &start)?;
+    let result = run_terminal_supervision_loop(
+        &mut control,
+        &mut state.terminal,
+        &mut state.sampler,
+        &mut state.response_writer,
+        &state.response_tx,
+        &start,
+    )
+    .await?;
+    finalize_terminal(state, result, &start).await
+}
+
+fn start_terminal_guard(
+    response: impl AsyncWrite + Unpin + Send + 'static,
+    start_request_id: u64,
+    start: &StartRequest,
+) -> io::Result<TerminalGuardState> {
     std::fs::create_dir_all(&start.status_dir)?;
     let started_at_ms = unix_time_ms();
     let final_status_path = start
         .status_dir
         .join(format!("{}.status.json", start.task_id));
-    let mut final_status_guard = FinalStatusGuard::after_running_write(
+    let final_status_guard = FinalStatusGuard::after_running_write(
         final_status_path,
         start.task_id.clone(),
         started_at_ms,
-        write_running_status(&start, started_at_ms),
+        write_running_status(start, started_at_ms),
     )?;
     let (response_tx, mut response_rx) = mpsc::channel(RESPONSE_QUEUE_CAPACITY);
-    let mut response_writer = tokio::spawn(async move {
+    let response_writer = tokio::spawn(async move {
         let mut response = response;
         while let Some(message) = response_rx.recv().await {
             write_response(&mut response, &message)
@@ -62,12 +108,11 @@ where
         }
         Ok::<(), io::Error>(())
     });
-
     let cols = start.cols.unwrap_or(80).max(1);
     let rows = start.rows.unwrap_or(24).max(1);
-    let mut terminal = GuardedTerminal::spawn(&start, cols, rows, response_tx.clone())?;
+    let mut terminal = GuardedTerminal::spawn(start, cols, rows, response_tx.clone())?;
     let command_pid = terminal.process_id();
-    let mut sampler = ProcessSampler::new(command_pid);
+    let sampler = ProcessSampler::new(command_pid);
     let command_start_id = process_start_id(command_pid);
     if command_start_id == 0 {
         let _ = terminal.stop();
@@ -84,14 +129,34 @@ where
             command_start_id,
         },
     )?;
+    Ok(TerminalGuardState {
+        response_tx,
+        response_writer,
+        terminal,
+        sampler,
+        final_status_guard,
+        started_at_ms,
+    })
+}
 
+async fn run_terminal_supervision_loop<R>(
+    control: &mut R,
+    terminal: &mut GuardedTerminal,
+    sampler: &mut ProcessSampler,
+    mut response_writer: &mut JoinHandle<io::Result<()>>,
+    response_tx: &mpsc::Sender<GuardResponse>,
+    start: &StartRequest,
+) -> io::Result<TerminalSupervisionResult>
+where
+    R: AsyncRead + Unpin,
+{
     let deadline = tokio::time::sleep(Duration::from_millis(start.limits.timeout_ms));
     tokio::pin!(deadline);
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
     let mut writer_poll = tokio::time::interval(Duration::from_millis(10));
     let mut response_open = true;
-    let (status, exit_code, resource_limit, response_error) = 'supervision: loop {
+    let result = 'supervision: loop {
         tokio::select! {
             writer_result = &mut response_writer => {
                 response_open = false;
@@ -102,97 +167,46 @@ where
                 };
                 break (GuardStatusKind::ParentExited, None, None, Some(error));
             }
-            request = read_request(&mut control) => match request {
-                Ok(GuardRequest::Write { request_id, data }) => {
-                    if let Err(error) = terminal.enqueue_write(request_id, data, &response_tx) {
-                        response_open = false;
-                        break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
+            request = read_request(control) => {
+                match request {
+                    Ok(request) => {
+                        if let Some(tuple) = handle_terminal_request(
+                            &request,
+                            terminal,
+                            response_tx,
+                            start,
+                            deadline.as_mut(),
+                            &mut response_open,
+                        ) {
+                            break tuple;
+                        }
                     }
+                    Err(error) => break handle_terminal_request_error(&error, terminal)?,
                 }
-                Ok(GuardRequest::Read { request_id, offset, max_bytes }) => {
-                    let snapshot = terminal.read(
-                        offset,
-                        max_bytes.min(start.limits.max_output_bytes),
-                    );
-                    if let Err(error) = try_send_response(&response_tx, GuardResponse::Snapshot {
-                        request_id,
-                        offset: snapshot.next_offset,
-                        total: snapshot.total,
-                        discarded: snapshot.discarded,
-                        data: snapshot.data,
-                    }) {
-                        response_open = false;
-                        break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                    }
-                }
-                Ok(GuardRequest::Resize { request_id, cols, rows }) => {
-                    let response = match terminal.resize(cols.max(1), rows.max(1)) {
-                        Ok(()) => GuardResponse::Ack { request_id },
-                        Err(error) => GuardResponse::Error { request_id, message: error.to_string() },
-                    };
-                    if let Err(error) = try_send_response(&response_tx, response) {
-                        response_open = false;
-                        break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                    }
-                }
-                Ok(GuardRequest::Stop { request_id }) => {
-                    if let Err(error) = try_send_response(&response_tx, GuardResponse::Ack { request_id }) {
-                        response_open = false;
-                        break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                    }
-                    break (GuardStatusKind::Cancelled, None, None, None);
-                }
-                Ok(GuardRequest::SetBackgroundDeadline { request_id }) => {
-                    deadline.as_mut().reset(
-                        tokio::time::Instant::now()
-                            + Duration::from_millis(start.limits.background_timeout_ms),
-                    );
-                    if let Err(error) = try_send_response(&response_tx, GuardResponse::Ack { request_id }) {
-                        response_open = false;
-                        break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
-                    }
-                }
-                Ok(GuardRequest::Start { .. }) => {}
-                Err(error) => {
-                    if let Some(code) = terminal.try_wait()? {
-                        let status = if code == 0 {
-                            GuardStatusKind::Completed
-                        } else {
-                            GuardStatusKind::Failed
-                        };
-                        break (status, Some(code), None, None);
-                    }
-                    if protocol_is_eof(&error) {
-                        break (GuardStatusKind::ParentExited, None, None, None);
-                    }
-                    break (GuardStatusKind::Failed, None, None, None);
-                }
-            },
+            }
             () = &mut deadline => break (GuardStatusKind::TimedOut, None, None, None),
             _ = poll.tick() => {
                 if let Some(code) = terminal.try_wait()? {
-                    let status = if code == 0 { GuardStatusKind::Completed } else { GuardStatusKind::Failed };
-                    break (status, Some(code), None, None);
+                    break (status_kind_for_exit_code(code), Some(code), None, None);
                 }
             }
             _ = resource_poll.tick() => {
                 match check_resource_tick(
                     || terminal.try_wait(),
-                    || sampler.exceeded_limit(&start),
+                    || sampler.exceeded_limit(start),
                 )? {
                     ResourceTick::Exited(code) => {
-                        let status = if code == 0 { GuardStatusKind::Completed } else { GuardStatusKind::Failed };
-                        break (status, Some(code), None, None);
+                        break (status_kind_for_exit_code(code), Some(code), None, None)
                     }
                     ResourceTick::Limited(limit) => {
-                        break (GuardStatusKind::ResourceLimited, None, Some(limit), None);
+                        break (GuardStatusKind::ResourceLimited, None, Some(limit), None)
                     }
                     ResourceTick::Running => {}
                 }
             }
             _ = writer_poll.tick() => {
                 for response in terminal.take_write_responses() {
-                    if let Err(error) = try_send_response(&response_tx, response) {
+                    if let Err(error) = try_send_response(response_tx, response) {
                         response_open = false;
                         break 'supervision (GuardStatusKind::ParentExited, None, None, Some(error.to_string()));
                     }
@@ -200,22 +214,158 @@ where
             }
         }
     };
-    if !response_open {
-        response_writer.abort();
-    }
+    Ok(TerminalSupervisionResult {
+        status: result.0,
+        exit_code: result.1,
+        resource_limit: result.2,
+        response_error: result.3,
+        response_open,
+    })
+}
 
-    let mut cleanup_errors = response_error.into_iter().collect::<Vec<_>>();
+fn handle_terminal_request(
+    request: &GuardRequest,
+    terminal: &mut GuardedTerminal,
+    response_tx: &mpsc::Sender<GuardResponse>,
+    start: &StartRequest,
+    mut deadline: std::pin::Pin<&mut Sleep>,
+    response_open: &mut bool,
+) -> Option<TerminalSupervisionBreak> {
+    match request {
+        GuardRequest::Write { request_id, data } => {
+            if let Err(error) = terminal.enqueue_write(*request_id, data.clone(), response_tx) {
+                *response_open = false;
+                return Some((
+                    GuardStatusKind::ParentExited,
+                    None,
+                    None,
+                    Some(error.to_string()),
+                ));
+            }
+            None
+        }
+        GuardRequest::Read {
+            request_id,
+            offset,
+            max_bytes,
+        } => {
+            let snapshot = terminal.read(*offset, (*max_bytes).min(start.limits.max_output_bytes));
+            let error = send_response_or_close(
+                response_tx,
+                GuardResponse::Snapshot {
+                    request_id: *request_id,
+                    offset: snapshot.next_offset,
+                    total: snapshot.total,
+                    discarded: snapshot.discarded,
+                    data: snapshot.data,
+                },
+                response_open,
+            );
+            error.map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
+        }
+        GuardRequest::Resize {
+            request_id,
+            cols,
+            rows,
+        } => {
+            let response = match terminal.resize((*cols).max(1), (*rows).max(1)) {
+                Ok(()) => GuardResponse::Ack {
+                    request_id: *request_id,
+                },
+                Err(error) => GuardResponse::Error {
+                    request_id: *request_id,
+                    message: error.to_string(),
+                },
+            };
+            let error = send_response_or_close(response_tx, response, response_open);
+            error.map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
+        }
+        GuardRequest::Stop { request_id } => {
+            let error = send_response_or_close(
+                response_tx,
+                GuardResponse::Ack {
+                    request_id: *request_id,
+                },
+                response_open,
+            );
+            let status = if error.is_some() {
+                GuardStatusKind::ParentExited
+            } else {
+                GuardStatusKind::Cancelled
+            };
+            Some((status, None, None, error))
+        }
+        GuardRequest::SetBackgroundDeadline { request_id } => {
+            deadline
+                .as_mut()
+                .reset(Instant::now() + Duration::from_millis(start.limits.background_timeout_ms));
+            send_response_or_close(
+                response_tx,
+                GuardResponse::Ack {
+                    request_id: *request_id,
+                },
+                response_open,
+            )
+            .map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
+        }
+        GuardRequest::Start { .. } => None,
+    }
+}
+
+fn handle_terminal_request_error(
+    error: &super::protocol::ProtocolError,
+    terminal: &mut GuardedTerminal,
+) -> io::Result<TerminalSupervisionBreak> {
+    if let Some(code) = terminal.try_wait()? {
+        return Ok((status_kind_for_exit_code(code), Some(code), None, None));
+    }
+    let status = if protocol_is_eof(error) {
+        GuardStatusKind::ParentExited
+    } else {
+        GuardStatusKind::Failed
+    };
+    Ok((status, None, None, None))
+}
+
+fn status_kind_for_exit_code(code: i32) -> GuardStatusKind {
+    if code == 0 {
+        GuardStatusKind::Completed
+    } else {
+        GuardStatusKind::Failed
+    }
+}
+
+fn send_response_or_close(
+    response_tx: &mpsc::Sender<GuardResponse>,
+    response: GuardResponse,
+    response_open: &mut bool,
+) -> Option<String> {
+    try_send_response(response_tx, response).err().map(|error| {
+        *response_open = false;
+        error.to_string()
+    })
+}
+
+async fn finalize_terminal(
+    mut state: TerminalGuardState,
+    result: TerminalSupervisionResult,
+    start: &StartRequest,
+) -> io::Result<()> {
+    if !result.response_open {
+        state.response_writer.abort();
+    }
+    let mut cleanup_errors = result.response_error.into_iter().collect::<Vec<_>>();
     #[cfg(unix)]
     {
-        sampler.refresh_descendants();
+        state.sampler.refresh_descendants();
         if let Err(error) = super::guardian::signal_descendants(
-            &sampler.descendants(),
+            &state.sampler.descendants(),
             rustix::process::Signal::TERM,
         ) {
             cleanup_errors.push(error.to_string());
         }
     }
-    let cleanup_exit = match terminal.stop() {
+    let cleanup_exit = match state.terminal.stop() {
         Ok(exit) => exit,
         Err(error) => {
             cleanup_errors.push(error.to_string());
@@ -224,36 +374,38 @@ where
     };
     #[cfg(unix)]
     {
-        sampler.refresh_descendants();
+        state.sampler.refresh_descendants();
         if let Err(error) = super::guardian::signal_descendants(
-            &sampler.descendants(),
+            &state.sampler.descendants(),
             rustix::process::Signal::KILL,
         ) {
             cleanup_errors.push(error.to_string());
         }
     }
-    let exit_code = exit_code.or(cleanup_exit);
-    let output = terminal.full_output(start.limits.max_output_bytes);
+    let exit_code = result.exit_code.or(cleanup_exit);
+    let output = state.terminal.full_output(start.limits.max_output_bytes);
     let exit = GuardExit {
-        status,
+        status: result.status,
         exit_code,
         signal: None,
-        resource_limit,
+        resource_limit: result.resource_limit,
         omitted_output_bytes: output.omitted,
         omitted_log_bytes: 0,
     };
-    let final_write = final_status_guard
+    let final_write = state
+        .final_status_guard
         .write(&GuardStatus {
             schema_version: 1,
             task_id: start.task_id.clone(),
-            started_at_ms,
+            started_at_ms: state.started_at_ms,
             finished_at_ms: unix_time_ms(),
             exit: exit.clone(),
             cleanup_errors,
         })
         .map_err(|error| io::Error::other(error.to_string()))?;
-    if response_open {
-        let _ = response_tx
+    if result.response_open {
+        let _ = state
+            .response_tx
             .send(GuardResponse::Exited {
                 exit,
                 stdout: output.data,
@@ -261,9 +413,9 @@ where
             })
             .await;
     }
-    drop(response_tx);
-    if response_open {
-        response_writer.await.map_err(|error| {
+    drop(state.response_tx);
+    if result.response_open {
+        state.response_writer.await.map_err(|error| {
             io::Error::other(format!("join terminal response writer: {error}"))
         })??;
     }
@@ -295,8 +447,8 @@ impl GuardedTerminal {
         let pair = native_pty_system()
             .openpty(pty_size(cols, rows))
             .map_err(pty_error)?;
-        let mut reader = pair.master.try_clone_reader().map_err(pty_error)?;
-        let mut writer = pair.master.take_writer().map_err(pty_error)?;
+        let reader = pair.master.try_clone_reader().map_err(pty_error)?;
+        let writer = pair.master.take_writer().map_err(pty_error)?;
         let shell = resolved_shell().map_err(|error| io::Error::other(error.to_string()))?;
         let cwd = std::env::current_dir()?;
         #[cfg(windows)]
@@ -360,34 +512,8 @@ impl GuardedTerminal {
             start.limits.max_output_bytes,
         )));
         let reader_output = Arc::clone(&output);
-        let (reader_done_tx, reader_done) = std::sync::mpsc::sync_channel(0);
-        let reader_thread = std::thread::spawn(move || {
-            let mut chunk = [0u8; 8 * 1024];
-            while let Ok(read) = reader.read(&mut chunk) {
-                if read == 0 {
-                    break;
-                }
-                reader_output
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(&chunk[..read]);
-            }
-            let _ = reader_done_tx.send(());
-        });
-        let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(1);
-        let (write_response_tx, write_responses) = std::sync::mpsc::channel();
-        let _writer_thread = std::thread::spawn(move || {
-            while let Ok((request_id, data)) = write_rx.recv() {
-                let response = match writer.write_all(&data).and_then(|()| writer.flush()) {
-                    Ok(()) => GuardResponse::Ack { request_id },
-                    Err(error) => GuardResponse::Error {
-                        request_id,
-                        message: error.to_string(),
-                    },
-                };
-                let _ = write_response_tx.send(response);
-            }
-        });
+        let (reader_thread, reader_done) = Self::spawn_terminal_reader(reader, reader_output);
+        let (write_tx, write_responses) = Self::spawn_terminal_writer(writer);
         Ok(Self {
             process,
             master: pair.master,
@@ -399,6 +525,50 @@ impl GuardedTerminal {
             #[cfg(windows)]
             _launch_barrier: launch_barrier,
         })
+    }
+
+    fn spawn_terminal_reader(
+        mut reader: Box<dyn Read + Send>,
+        output: Arc<StdMutex<TerminalOutputBuffer>>,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        let (reader_done_tx, reader_done) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let mut chunk = [0u8; 8 * 1024];
+            while let Ok(read) = reader.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                output
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(&chunk[..read]);
+            }
+            let _ = reader_done_tx.send(());
+        });
+        (thread, reader_done)
+    }
+
+    fn spawn_terminal_writer(
+        mut writer: Box<dyn Write + Send>,
+    ) -> (
+        std::sync::mpsc::SyncSender<(u64, Vec<u8>)>,
+        std::sync::mpsc::Receiver<GuardResponse>,
+    ) {
+        let (write_tx, write_rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(1);
+        let (write_response_tx, write_responses) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok((request_id, data)) = write_rx.recv() {
+                let response = match writer.write_all(&data).and_then(|()| writer.flush()) {
+                    Ok(()) => GuardResponse::Ack { request_id },
+                    Err(error) => GuardResponse::Error {
+                        request_id,
+                        message: error.to_string(),
+                    },
+                };
+                let _ = write_response_tx.send(response);
+            }
+        });
+        (write_tx, write_responses)
     }
 
     fn process_id(&self) -> u32 {

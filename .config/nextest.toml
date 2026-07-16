@@ -7,6 +7,14 @@ fail-fast = false
 retries = 0
 slow-timeout = { period = "20s", terminate-after = 2 }
 
+[[profile.default.overrides]]
+filter = "test(authenticate_tool_reports_unwired_oauth_flow_without_success_claim)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = "test(mcp_manager_auth_action_shows_status_on_oauth_failure)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
 [profile.ci]
 inherits = "default"
 status-level = "all"

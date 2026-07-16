@@ -961,43 +961,34 @@ impl BackgroundTaskManager {
     }
 
     async fn snapshot_inner(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
-        let running = {
-            let mut tasks = self.inner.lock().await;
-            let record = tasks.get_mut(task_id)?;
-            if let BackgroundTaskState::BashRunning(command) = &record.state {
-                let started_at = record.started_at;
-                let description = record.description.clone();
-                if let Some(result) = command.client.final_result() {
-                    let status = background_status(&result);
-                    let output = command_output_from_guard(result);
-                    record.state = BackgroundTaskState::BashFinished {
-                        status,
-                        output: output.clone(),
-                    };
-                    return Some(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Bash,
-                        status,
-                        description,
-                        elapsed: started_at.elapsed(),
-                        output: Some(output),
-                        answers: None,
-                        delegate: None,
-                        swarm: None,
-                    });
-                }
-                Some((started_at, description, command.client.clone()))
-            } else {
-                None
-            }
+        if let Some(snapshot) = self.take_bash_running_snapshot(task_id).await {
+            return Some(snapshot);
+        }
+
+        let tasks = self.inner.lock().await;
+        let record = tasks.get(task_id)?;
+        Some(Self::snapshot_from_record(record, task_id))
+    }
+
+    async fn take_bash_running_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+        let mut tasks = self.inner.lock().await;
+        let record = tasks.get_mut(task_id)?;
+        let BackgroundTaskState::BashRunning(command) = &record.state else {
+            return None;
         };
-        if let Some((started_at, description, client)) = running {
-            let live_output = client.output().await;
-            let output = command_output_from_live(&live_output);
+        let started_at = record.started_at;
+        let description = record.description.clone();
+        if let Some(result) = command.client.final_result() {
+            let status = background_status(&result);
+            let output = command_output_from_guard(result);
+            record.state = BackgroundTaskState::BashFinished {
+                status,
+                output: output.clone(),
+            };
             return Some(BackgroundTaskSnapshot {
                 task_id: task_id.to_owned(),
                 kind: BackgroundTaskKind::Bash,
-                status: BackgroundTaskStatus::Running,
+                status,
                 description,
                 elapsed: started_at.elapsed(),
                 output: Some(output),
@@ -1006,72 +997,91 @@ impl BackgroundTaskManager {
                 swarm: None,
             });
         }
+        let live_output = command.client.output().await;
+        let output = command_output_from_live(&live_output);
+        Some(BackgroundTaskSnapshot {
+            task_id: task_id.to_owned(),
+            kind: BackgroundTaskKind::Bash,
+            status: BackgroundTaskStatus::Running,
+            description,
+            elapsed: started_at.elapsed(),
+            output: Some(output),
+            answers: None,
+            delegate: None,
+            swarm: None,
+        })
+    }
 
-        let tasks = self.inner.lock().await;
-        let record = tasks.get(task_id)?;
-        Some(match &record.state {
+    fn snapshot_from_record(
+        record: &BackgroundTaskRecord,
+        task_id: &str,
+    ) -> BackgroundTaskSnapshot {
+        let elapsed = record.started_at.elapsed();
+        let description = record.description.clone();
+        let task_id = task_id.to_owned();
+        match &record.state {
             BackgroundTaskState::BashRunning(_) => unreachable!("handled running bash"),
             BackgroundTaskState::BashFinished { status, output } => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::Bash,
                 status: *status,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: Some(output.clone()),
                 answers: None,
                 delegate: None,
                 swarm: None,
             },
             BackgroundTaskState::QuestionWaiting => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::Question,
                 status: BackgroundTaskStatus::WaitingForUser,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: None,
                 answers: None,
                 delegate: None,
                 swarm: None,
             },
             BackgroundTaskState::QuestionFinished { status, answers } => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::Question,
                 status: *status,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: None,
                 answers: answers.clone(),
                 delegate: None,
                 swarm: None,
             },
             BackgroundTaskState::DelegateRunning { snapshot } => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::Delegate,
                 status: BackgroundTaskStatus::Running,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: None,
                 answers: None,
                 delegate: Some(snapshot.clone()),
                 swarm: None,
             },
             BackgroundTaskState::DelegateFinished { status, snapshot } => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::Delegate,
                 status: *status,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: None,
                 answers: None,
                 delegate: Some(snapshot.clone()),
                 swarm: None,
             },
             BackgroundTaskState::DelegateSwarmRunning { snapshot } => BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
+                task_id,
                 kind: BackgroundTaskKind::DelegateSwarm,
                 status: BackgroundTaskStatus::Running,
-                description: record.description.clone(),
-                elapsed: record.started_at.elapsed(),
+                description,
+                elapsed,
                 output: None,
                 answers: None,
                 delegate: None,
@@ -1079,18 +1089,18 @@ impl BackgroundTaskManager {
             },
             BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
                 BackgroundTaskSnapshot {
-                    task_id: task_id.to_owned(),
+                    task_id,
                     kind: BackgroundTaskKind::DelegateSwarm,
                     status: *status,
-                    description: record.description.clone(),
-                    elapsed: record.started_at.elapsed(),
+                    description,
+                    elapsed,
                     output: None,
                     answers: None,
                     delegate: None,
                     swarm: Some(snapshot.clone()),
                 }
             }
-        })
+        }
     }
 }
 
@@ -2087,9 +2097,8 @@ mod tests {
                 let manager =
                     BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
 
-                let error = match manager.snapshot(task_id).await {
-                    Ok(_) => panic!("invalid persisted identity must not restore the target task"),
-                    Err(error) => error,
+                let Err(error) = manager.snapshot(task_id).await else {
+                    panic!("invalid persisted identity must not restore the target task")
                 };
 
                 assert!(matches!(
@@ -2107,9 +2116,8 @@ mod tests {
         let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
 
         for task_id in ["../escape", r"..\escape", "C:escape", "bash:stream"] {
-            let error = match manager.persisted_snapshot(task_id).await {
-                Ok(_) => panic!("unsafe task id must be rejected"),
-                Err(error) => error,
+            let Err(error) = manager.persisted_snapshot(task_id).await else {
+                panic!("unsafe task id must be rejected")
             };
 
             assert!(matches!(

@@ -197,7 +197,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("task.status.json");
 
-        let error = match FinalStatusGuard::after_running_write(
+        let Err(error) = FinalStatusGuard::after_running_write(
             path.clone(),
             "task-1",
             1,
@@ -206,9 +206,8 @@ mod tests {
                     io::Error::other("sync failed"),
                 ),
             ),
-        ) {
-            Ok(_) => panic!("committed-unsynced running status must return the sync error"),
-            Err(error) => error,
+        ) else {
+            panic!("committed-unsynced running status must return the sync error")
         };
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -221,14 +220,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("task.status.json");
 
-        let error = match FinalStatusGuard::after_running_write(
+        let Err(error) = FinalStatusGuard::after_running_write(
             path.clone(),
             "task-1",
             1,
             Err(io::Error::other("write failed")),
-        ) {
-            Ok(_) => panic!("uncommitted running status must return the write error"),
-            Err(error) => error,
+        ) else {
+            panic!("uncommitted running status must return the write error")
         };
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
