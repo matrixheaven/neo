@@ -55,12 +55,11 @@ pub fn estimate_swarm_progress(input: &SwarmProgressInput) -> f32 {
         .as_secs_f32()
         .max(1.0);
 
-    // Weighted contributions.  Terminal agents are fully certain (weight 1.0).
-    // Running agents get a per-agent weight derived from their log-normal
-    // time-credit.  Queued / suspended agents contribute zero progress and
-    // zero weight (no information).
+    // Every child owns one share of swarm progress. Terminal agents contribute
+    // fully; running agents contribute confidence-discounted fractional
+    // credit; queued / suspended agents contribute zero progress.
     let mut weighted_sum = terminal as f32; // terminal agents at progress=1.0
-    let mut weight_sum = terminal as f32;
+    let weight_sum = input.total as f32;
 
     for dur in &input.running_durations {
         let elapsed_ms = dur.as_secs_f32().max(0.0);
@@ -68,7 +67,6 @@ pub fn estimate_swarm_progress(input: &SwarmProgressInput) -> f32 {
         // Confidence weight: low at start, approaches 1.0 as time_credit → 1.
         let weight = cfg.min_running_weight + (1.0 - cfg.min_running_weight) * time_credit;
         weighted_sum += time_credit * cfg.unfinished_progress_cap * weight;
-        weight_sum += weight;
     }
 
     if weight_sum <= 0.0 {
@@ -530,6 +528,32 @@ mod tests {
             running_durations: vec![Duration::from_secs(50)],
         });
         assert!(late > early, "late={late} should be > early={early}");
+    }
+
+    #[test]
+    fn queued_items_reduce_swarm_progress() {
+        let without_queued = estimate_swarm_progress(&SwarmProgressInput {
+            total: 2,
+            completed: 1,
+            failed: 0,
+            running: 1,
+            queued: 0,
+            suspended: 0,
+            median_completed_duration: Some(Duration::from_secs(60)),
+            running_durations: vec![Duration::from_secs(30)],
+        });
+        let with_queued = estimate_swarm_progress(&SwarmProgressInput {
+            total: 3,
+            completed: 1,
+            failed: 0,
+            running: 1,
+            queued: 1,
+            suspended: 0,
+            median_completed_duration: Some(Duration::from_secs(60)),
+            running_durations: vec![Duration::from_secs(30)],
+        });
+
+        assert!(with_queued < without_queued);
     }
 
     // -- Fix 4: per-agent durations --

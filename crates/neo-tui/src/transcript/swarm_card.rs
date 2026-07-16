@@ -166,7 +166,7 @@ impl SwarmCardComponent {
                 ),
                 Span::styled(
                     format!(
-                        "] {:.0}% · bayes estimate · max {}",
+                        "] {:.0}% · max {}",
                         progress * 100.0,
                         self.snapshot.max_concurrency,
                     ),
@@ -432,13 +432,15 @@ impl SwarmCardComponent {
             return 1.0;
         }
         let mut weighted_sum = 0.0_f32;
-        let mut weight_sum = 0.0_f32;
+        // Every child owns one share of swarm progress. Confidence scales the
+        // evidence from unfinished children; queued children remain at zero
+        // progress instead of disappearing from the denominator.
+        let weight_sum = self
+            .cached_child_progress
+            .iter()
+            .fold(0.0_f32, |acc, _| acc + 1.0);
         for entry in &self.cached_child_progress {
             weighted_sum += entry.progress * entry.confidence;
-            weight_sum += entry.confidence;
-        }
-        if weight_sum <= 0.0 {
-            return 0.0;
         }
         (weighted_sum / weight_sum).clamp(0.0, 0.95)
     }

@@ -652,7 +652,7 @@ fn delegate_group_child_rows_keep_left_border_muted() {
 }
 
 #[test]
-fn option_b_collapsed_swarm_shows_names_badges_and_bayes_progress() {
+fn option_b_collapsed_swarm_shows_names_badges_and_progress() {
     let mut iris = option_b_delegate(
         "iris",
         "Iris",
@@ -726,7 +726,7 @@ fn option_b_collapsed_swarm_shows_names_badges_and_bayes_progress() {
         "{text}"
     );
     assert!(header.contains("progress ["), "{text}");
-    assert!(header.contains("bayes estimate"), "{text}");
+    assert!(!header.contains("bayes estimate"), "{text}");
     assert!(
         !rows.iter().any(|row| row.starts_with("  progress [")),
         "progress belongs in the swarm summary header, not its own child-like row: {text}"
@@ -1802,7 +1802,7 @@ fn option_b_swarm_transcript_absorbs_matching_tool_header() {
     assert!(!text.contains("Used DelegateSwarm"), "{text}");
     assert!(text.contains("DelegateSwarm · running"), "{text}");
     assert!(text.contains("progress ["), "{text}");
-    assert!(text.contains("bayes estimate"), "{text}");
+    assert!(!text.contains("bayes estimate"), "{text}");
 }
 
 #[test]
@@ -2631,6 +2631,26 @@ fn swarm_card_progress_starts_near_zero_when_all_children_queued() {
         "{joined}"
     );
     assert!(!joined.contains("100%"), "{joined}");
+}
+
+#[test]
+fn swarm_card_counts_queued_children_in_aggregate_progress() {
+    let without_queued = SwarmCardComponent::new(swarm_with_child_states(vec![
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Running,
+    ]));
+    let with_queued = SwarmCardComponent::new(swarm_with_child_states(vec![
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Running,
+        AgentLifecycleState::Queued,
+    ]));
+
+    assert!(
+        with_queued.weighted_progress() < without_queued.weighted_progress(),
+        "queued children must count as zero-progress tasks: with_queued={} without_queued={}",
+        with_queued.weighted_progress(),
+        without_queued.weighted_progress(),
+    );
 }
 
 #[test]
