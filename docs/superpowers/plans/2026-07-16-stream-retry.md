@@ -356,17 +356,18 @@ loop {
         Err(AgentRuntimeError::Model(error))
             if error.is_retryable() && retries_used < config.max_retries =>
         {
-            retries_used += 1;
-            let delay = retry_delay(&error, retries_used);
+            let next_retry = retries_used.saturating_add(1);
+            let delay = retry_delay(&error, next_retry);
             emitter.emit(AgentEvent::RetryScheduled {
                 turn,
-                retry: retries_used,
+                retry: next_retry,
                 max_retries: config.max_retries,
                 delay_ms: delay.as_millis().try_into().unwrap_or(u64::MAX),
                 error_code: error.code().to_owned(),
                 message: error.to_string(),
             });
             wait_for_retry(delay, cancel_token).await?;
+            retries_used = next_retry;
         }
         Err(error) => return Err(error),
     }
@@ -638,7 +639,7 @@ Use the same field name, default, count semantics, cap, and cancellation behavio
 Run:
 
 ~~~
-rg -n "request\\.options\\.retries|cancel_token|AiStreamEvent::Error|AiError::Stream|AiError::Network|DEFAULT_MAX_ATTEMPTS" crates
+rg -n "pub (retries|cancel_token):|request\\.options\\.(retries|cancel_token)|AiStreamEvent::Error|AiError::Stream|AiError::Network|DEFAULT_MAX_ATTEMPTS" crates/neo-ai crates/neo-agent-core
 ~~~
 
 Every hit must be removed or migrated to the canonical runtime path. Do not add aliases or fallback branches for removed fields.
