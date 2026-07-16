@@ -38,6 +38,18 @@ impl InteractiveController {
         if self.handle_rich_dialog_event(event.clone()).await? {
             return Ok(false);
         }
+        if self.tui.chrome().transcript_browser_state().is_some()
+            && match &event {
+                InputEvent::Action(KeybindingAction::AppClear) => true,
+                InputEvent::Key(key) => self
+                    .keybindings
+                    .matching_actions(key)
+                    .contains(&KeybindingAction::AppClear),
+                _ => false,
+            }
+        {
+            return self.handle_app_clear_action().await;
+        }
         if self.handle_transcript_browser_event(&event) {
             return Ok(false);
         }
@@ -75,14 +87,15 @@ impl InteractiveController {
         if matches!(event, InputEvent::Interrupt) {
             return false;
         }
-        let toggles_output = match event {
-            InputEvent::Action(KeybindingAction::ToolOutputToggle) => true,
-            InputEvent::Key(key) => self
-                .keybindings
-                .matching_actions(key)
-                .contains(&KeybindingAction::ToolOutputToggle),
-            _ => false,
+        let key_actions = match event {
+            InputEvent::Key(key) => self.keybindings.matching_actions(key),
+            _ => Vec::new(),
         };
+        let matches_action = |action: KeybindingAction| {
+            matches!(event, InputEvent::Action(candidate) if *candidate == action)
+                || key_actions.contains(&action)
+        };
+        let toggles_output = matches_action(KeybindingAction::ToolOutputToggle);
 
         if self.tui.chrome().transcript_browser_state().is_none() {
             if !toggles_output || !self.transcript().has_committed_expandable_entries() {
@@ -99,7 +112,7 @@ impl InteractiveController {
 
         if matches!(event, InputEvent::Cancel)
             || matches!(event, InputEvent::Key(key) if key.as_str() == "escape")
-            || matches!(event, InputEvent::Action(KeybindingAction::SelectCancel))
+            || matches_action(KeybindingAction::SelectCancel)
         {
             self.tui.chrome_mut().close_transcript_browser();
             self.transcript_mut().mark_dirty();
@@ -113,29 +126,35 @@ impl InteractiveController {
             return true;
         }
 
-        let scroll = match event {
-            InputEvent::ScrollUp(rows) => Some((true, *rows)),
-            InputEvent::ScrollDown(rows) => Some((false, *rows)),
-            InputEvent::Key(key) => match key.as_str() {
-                "up" => Some((true, 1)),
-                "down" => Some((false, 1)),
-                "pageup" => Some((true, 8)),
-                "pagedown" => Some((false, 8)),
+        let scroll = if matches_action(KeybindingAction::EditorCursorUp)
+            || matches_action(KeybindingAction::SelectUp)
+        {
+            Some((true, 1))
+        } else if matches_action(KeybindingAction::EditorCursorDown)
+            || matches_action(KeybindingAction::SelectDown)
+        {
+            Some((false, 1))
+        } else if matches_action(KeybindingAction::EditorPageUp)
+            || matches_action(KeybindingAction::SelectPageUp)
+        {
+            Some((true, 8))
+        } else if matches_action(KeybindingAction::EditorPageDown)
+            || matches_action(KeybindingAction::SelectPageDown)
+        {
+            Some((false, 8))
+        } else {
+            match event {
+                InputEvent::ScrollUp(rows) => Some((true, *rows)),
+                InputEvent::ScrollDown(rows) => Some((false, *rows)),
+                InputEvent::Key(key) => match key.as_str() {
+                    "up" => Some((true, 1)),
+                    "down" => Some((false, 1)),
+                    "pageup" => Some((true, 8)),
+                    "pagedown" => Some((false, 8)),
+                    _ => None,
+                },
                 _ => None,
-            },
-            InputEvent::Action(KeybindingAction::EditorCursorUp | KeybindingAction::SelectUp) => {
-                Some((true, 1))
             }
-            InputEvent::Action(
-                KeybindingAction::EditorCursorDown | KeybindingAction::SelectDown,
-            ) => Some((false, 1)),
-            InputEvent::Action(KeybindingAction::EditorPageUp | KeybindingAction::SelectPageUp) => {
-                Some((true, 8))
-            }
-            InputEvent::Action(
-                KeybindingAction::EditorPageDown | KeybindingAction::SelectPageDown,
-            ) => Some((false, 8)),
-            _ => None,
         };
         if let Some((up, rows)) = scroll {
             if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {

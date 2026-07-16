@@ -4507,6 +4507,10 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
+    controller.keybindings.set_user_bindings([(
+        KeybindingAction::EditorCursorUp,
+        vec![KeyId::new("k").expect("valid key")],
+    )]);
     for index in 0..30 {
         controller
             .transcript_mut()
@@ -4529,9 +4533,9 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
     assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
 
     controller
-        .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+        .handle_input_event(InputEvent::Key(KeyId::new("k").expect("valid key")))
         .await
-        .expect("up scrolls browser toward older rows");
+        .expect("configured cursor-up scrolls browser toward older rows");
     assert_ne!(controller.tui.render_terminal_frame(80, 6).live, initial);
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
@@ -4711,9 +4715,9 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
         .clone()
         .expect("turn token captured");
     controller
-        .handle_input_event(InputEvent::Interrupt)
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
         .await
-        .expect("interrupt reaches global handler");
+        .expect("ctrl-c reaches global handler");
 
     let cancelled = token.is_cancelled();
     let active_turn_cleared = controller.active_turn.is_none();
