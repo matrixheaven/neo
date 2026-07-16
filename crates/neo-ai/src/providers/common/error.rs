@@ -82,7 +82,7 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
 
 /// Unified error type for all provider wire clients.
 ///
-/// Variant set is the union of the four legacy private `ProviderError` enums.
+/// Variant set is shared by all provider wire clients.
 /// `HttpStatus` carries an optional response body excerpt and an optional
 /// `Retry-After` duration parsed from the response headers.
 #[derive(Debug)]
@@ -94,21 +94,12 @@ pub(crate) enum ProviderError {
         retry_after: Option<Duration>,
     },
     Transport(reqwest::Error),
-    Stream(String),
+    Protocol(String),
     Url(String),
     Unsupported(String),
 }
 
 impl ProviderError {
-    /// Whether a failed request is worth retrying.
-    pub(crate) const fn is_retryable(&self) -> bool {
-        match self {
-            Self::HttpStatus { status, .. } => *status == 429 || *status >= 500,
-            Self::Transport(_) => true,
-            Self::Header(_) | Self::Stream(_) | Self::Url(_) | Self::Unsupported(_) => false,
-        }
-    }
-
     /// Convert into the public [`AiError`] type, branching by HTTP status.
     pub(crate) fn into_ai_error(self) -> AiError {
         match self {
@@ -127,22 +118,28 @@ impl ProviderError {
                     400 | 413 | 422 if is_context_overflow(&excerpt) => {
                         AiError::ContextOverflow { message: excerpt }
                     }
+                    408 => AiError::Server {
+                        status,
+                        message: excerpt,
+                        retry_after,
+                    },
                     s if s >= 500 => AiError::Server {
                         status,
                         message: excerpt,
+                        retry_after,
                     },
-                    _ => AiError::Stream {
+                    _ => AiError::Protocol {
                         message: format!("http status {status}: {excerpt}"),
                     },
                 }
             }
-            Self::Transport(err) => AiError::Network {
+            Self::Transport(err) => AiError::Transport {
                 message: format!("transport error: {err}"),
             },
             Self::Header(message)
-            | Self::Stream(message)
+            | Self::Protocol(message)
             | Self::Url(message)
-            | Self::Unsupported(message) => AiError::Stream { message },
+            | Self::Unsupported(message) => AiError::Protocol { message },
         }
     }
 }
@@ -178,10 +175,36 @@ mod tests {
         let err = ProviderError::HttpStatus {
             status: 503,
             body: Some("Service Unavailable".into()),
-            retry_after: None,
+            retry_after: Some(Duration::from_secs(7)),
         };
         let ai = err.into_ai_error();
-        assert_eq!(ai.code(), "provider.server_error");
+        assert!(matches!(
+            ai,
+            AiError::Server {
+                status: 503,
+                retry_after: Some(delay),
+                ..
+            } if delay == Duration::from_secs(7)
+        ));
+    }
+
+    #[test]
+    fn http_status_408_maps_to_retryable_server() {
+        let err = ProviderError::HttpStatus {
+            status: 408,
+            body: Some("Request Timeout".into()),
+            retry_after: Some(Duration::from_secs(2)),
+        };
+        let ai = err.into_ai_error();
+        assert!(ai.is_retryable());
+        assert!(matches!(
+            ai,
+            AiError::Server {
+                status: 408,
+                retry_after: Some(delay),
+                ..
+            } if delay == Duration::from_secs(2)
+        ));
     }
 
     #[test]
@@ -195,14 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn http_status_413_without_context_pattern_maps_to_stream() {
+    fn http_status_413_without_context_pattern_maps_to_protocol() {
         let err = ProviderError::HttpStatus {
             status: 413,
             body: Some("Payload Too Large".into()),
             retry_after: None,
         };
         let ai = err.into_ai_error();
-        assert_eq!(ai.code(), "provider.stream_error");
+        assert_eq!(ai.code(), "provider.protocol_error");
     }
 
     #[test]

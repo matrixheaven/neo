@@ -31,10 +31,9 @@ impl OpenAiResponsesClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        crate::providers::common::http::open_response(&request, |req| {
-            Box::pin(self.open_response_once(req))
-        })
-        .await
+        self.open_response_once(&request)
+            .await
+            .map_err(ProviderError::into_ai_error)
     }
 
     async fn open_response_once(
@@ -318,7 +317,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream {
+                    vec![Err(AiError::Transport {
                         message: format!("transport error: {err}"),
                     })]
                 }
@@ -382,10 +381,12 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Protocol {
             message: format!("invalid SSE JSON: {err}"),
         })?;
-        self.parser.ingest(&value);
+        self.parser
+            .ingest(&value)
+            .map_err(ProviderError::into_ai_error)?;
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
     }
@@ -397,7 +398,7 @@ impl IncrementalSse {
 
         self.stopped = true;
         if !self.saw_done && !self.parser.saw_terminal() {
-            return vec![Err(AiError::Stream {
+            return vec![Err(AiError::Transport {
                 message: "missing SSE done marker".to_owned(),
             })];
         }
@@ -461,7 +462,7 @@ impl Default for ParseState {
 }
 
 impl ParseState {
-    fn ingest(&mut self, value: &Value) {
+    fn ingest(&mut self, value: &Value) -> Result<(), ProviderError> {
         match value.get("type").and_then(Value::as_str) {
             Some("response.created") => {
                 let id = value
@@ -486,19 +487,26 @@ impl ParseState {
             Some("response.reasoning_summary_text.delta") => self.ingest_thinking_delta(value),
             Some("response.reasoning_summary_text.done") => self.ingest_thinking_text_done(value),
             Some("response.reasoning_summary_part.done") => self.ingest_thinking_done(value),
-            Some("response.output_item.done") => self.ingest_output_item_done(value),
-            Some("response.output_item.added") => self.ingest_item_added(value),
-            Some("response.function_call_arguments.delta") => self.ingest_tool_delta(value),
+            Some("response.output_item.done") => self.ingest_output_item_done(value)?,
+            Some("response.output_item.added") => self.ingest_item_added(value)?,
+            Some("response.function_call_arguments.delta") => self.ingest_tool_delta(value)?,
             Some("response.completed") => {
                 self.ingest_completed(value);
                 self.terminal = true;
             }
             Some("response.failed" | "response.incomplete") => {
-                self.last_stop_reason = StopReason::Error;
-                self.terminal = true;
+                let status = value
+                    .get("response")
+                    .and_then(|response| response.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed");
+                return Err(ProviderError::Protocol(format!(
+                    "provider response ended with status {status}"
+                )));
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn drain_events(&mut self) -> Vec<AiStreamEvent> {
@@ -547,10 +555,10 @@ impl ParseState {
             }));
     }
 
-    fn ingest_item_added(&mut self, value: &Value) {
+    fn ingest_item_added(&mut self, value: &Value) -> Result<(), ProviderError> {
         let item = value.get("item").unwrap_or(&Value::Null);
         if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            return;
+            return Ok(());
         }
 
         self.ensure_started("response".to_owned());
@@ -576,11 +584,10 @@ impl ParseState {
             });
             match events {
                 Ok(events) => self.push_tool_events(events),
-                Err(err) => self.events.push(AiStreamEvent::Error {
-                    message: err.to_string(),
-                }),
+                Err(err) => return Err(ProviderError::Protocol(err.to_string())),
             }
         }
+        Ok(())
     }
 
     fn ingest_thinking_started(&mut self, value: &Value) {
@@ -649,7 +656,7 @@ impl ParseState {
         self.flush_thinking_ready();
     }
 
-    fn ingest_output_item_done(&mut self, value: &Value) {
+    fn ingest_output_item_done(&mut self, value: &Value) -> Result<(), ProviderError> {
         let item = value.get("item").unwrap_or(&Value::Null);
 
         // Handle function_call items as authoritative final tool-call data.
@@ -684,15 +691,13 @@ impl ParseState {
             );
             match events {
                 Ok(events) => self.push_tool_events(events),
-                Err(err) => self.events.push(AiStreamEvent::Error {
-                    message: err.to_string(),
-                }),
+                Err(err) => return Err(ProviderError::Protocol(err.to_string())),
             }
-            return;
+            return Ok(());
         }
 
         if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            return;
+            return Ok(());
         }
         let item_id = item
             .get("id")
@@ -724,9 +729,10 @@ impl ParseState {
         part.signature = Some(item.to_string());
         part.done = true;
         self.flush_thinking_ready();
+        Ok(())
     }
 
-    fn ingest_tool_delta(&mut self, value: &Value) {
+    fn ingest_tool_delta(&mut self, value: &Value) -> Result<(), ProviderError> {
         let item_id = value
             .get("item_id")
             .and_then(Value::as_str)
@@ -749,10 +755,9 @@ impl ParseState {
         });
         match events {
             Ok(events) => self.push_tool_events(events),
-            Err(err) => self.events.push(AiStreamEvent::Error {
-                message: err.to_string(),
-            }),
+            Err(err) => return Err(ProviderError::Protocol(err.to_string())),
         }
+        Ok(())
     }
 
     fn ingest_completed(&mut self, value: &Value) {
@@ -781,7 +786,7 @@ impl ParseState {
         let tool_events = self
             .tool_calls
             .finish_all()
-            .map_err(|err| ProviderError::Stream(err.to_string()))?;
+            .map_err(|err| ProviderError::Protocol(err.to_string()))?;
         self.push_tool_events(tool_events);
 
         if self.saw_tool_call {

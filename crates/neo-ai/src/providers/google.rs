@@ -31,8 +31,9 @@ impl GoogleGenerativeAiClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req)))
+        self.open_response_once(&request)
             .await
+            .map_err(ProviderError::into_ai_error)
     }
 
     async fn open_response_once(
@@ -205,7 +206,7 @@ fn content_body(
                             &tool_call.raw_arguments,
                         )
                         .map_err(|err| {
-                            ProviderError::Stream(format!(
+                            ProviderError::Protocol(format!(
                                 "invalid raw tool arguments for Google replay tool call '{}': {err}",
                                 tool_call.id
                             ))
@@ -345,7 +346,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream {
+                    vec![Err(AiError::Transport {
                         message: format!("transport error: {err}"),
                     })]
                 }
@@ -402,7 +403,7 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Protocol {
             message: format!("invalid SSE JSON: {err}"),
         })?;
         self.parser.ingest(&value)?;
@@ -416,6 +417,11 @@ impl IncrementalSse {
         }
 
         self.stopped = true;
+        if !self.parser.saw_terminal() {
+            return vec![Err(AiError::Transport {
+                message: "missing terminal marker".to_owned(),
+            })];
+        }
         self.parser.finish_events().into_iter().map(Ok).collect()
     }
 }
@@ -428,6 +434,7 @@ struct ParseState {
     next_thought_index: u64,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
+    terminal: bool,
     finished: bool,
 }
 
@@ -441,6 +448,7 @@ impl Default for ParseState {
             next_thought_index: 0,
             last_stop_reason: StopReason::EndTurn,
             usage: None,
+            terminal: false,
             finished: false,
         }
     }
@@ -472,6 +480,10 @@ impl ParseState {
         self.finished
     }
 
+    const fn saw_terminal(&self) -> bool {
+        self.terminal
+    }
+
     fn ensure_started(&mut self) {
         if self.started {
             return;
@@ -494,6 +506,7 @@ impl ParseState {
         }
 
         if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+            self.terminal = true;
             self.last_stop_reason = if self.tool_args.is_empty() {
                 stop_reason(reason)
             } else {
@@ -561,7 +574,7 @@ impl ParseState {
             .get("args")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let fragment = serde_json::to_string(&args).map_err(|err| AiError::Stream {
+        let fragment = serde_json::to_string(&args).map_err(|err| AiError::Protocol {
             message: format!("invalid tool arguments: {err}"),
         })?;
 
@@ -646,7 +659,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ProviderError::Stream(message) if message.contains("invalid raw tool arguments"))
+            matches!(err, ProviderError::Protocol(message) if message.contains("invalid raw tool arguments"))
         );
     }
 }

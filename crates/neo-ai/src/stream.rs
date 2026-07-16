@@ -21,7 +21,7 @@ pub fn collect_tool_arguments(
     }
 
     if !saw_delta {
-        return Err(AiError::Stream {
+        return Err(AiError::Protocol {
             message: format!("missing tool arguments for tool call {tool_call_id}"),
         });
     }
@@ -30,7 +30,7 @@ pub fn collect_tool_arguments(
 }
 
 fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, AiError> {
-    serde_json::from_str(raw).map_err(|err| AiError::Stream {
+    serde_json::from_str(raw).map_err(|err| AiError::Protocol {
         message: format!("invalid tool arguments: {err}"),
     })
 }

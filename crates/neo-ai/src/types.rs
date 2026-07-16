@@ -425,9 +425,6 @@ pub enum AiStreamEvent {
         stop_reason: StopReason,
         usage: Option<TokenUsage>,
     },
-    Error {
-        message: String,
-    },
 }
 
 pub trait ModelClient: Send + Sync {

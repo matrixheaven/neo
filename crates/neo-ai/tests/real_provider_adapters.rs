@@ -235,7 +235,6 @@ fn tool_result_request(api: ApiKind, is_error: bool) -> ChatRequest {
         )],
         options: RequestOptions {
             max_tokens: Some(64),
-            retries: Some(0),
             ..RequestOptions::default()
         },
     }
@@ -291,7 +290,6 @@ fn multi_tool_result_request(api: ApiKind) -> ChatRequest {
         ],
         options: RequestOptions {
             max_tokens: Some(64),
-            retries: Some(0),
             ..RequestOptions::default()
         },
     }
@@ -635,7 +633,6 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
         reasoning: ReasoningSelection::Effort {
             effort: ReasoningEffort::medium(),
         },
-        retries: Some(0),
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
         metadata: RequestMetadata::from_pairs([("user_id", "u-1"), ("trace_id", "trace-1")]),
@@ -678,39 +675,21 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
 }
 
 #[tokio::test]
-async fn openai_responses_client_retries_retryable_http_responses() {
-    let server = MockServer::start(vec![
-        status_response(500),
-        sse_response(&[
-            json!({ "type": "response.created", "response": { "id": "resp-retry" } }),
-            json!({ "type": "response.output_text.delta", "delta": "ok" }),
-            json!({
-                "type": "response.completed",
-                "response": { "status": "completed" }
-            }),
-        ]),
-    ]);
+async fn openai_responses_client_opens_provider_response_once() {
+    let server = MockServer::start(vec![status_response(500)]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::OpenAiResponse);
-    request.options.retries = Some(1);
+    let request = request(ApiKind::OpenAiResponse);
 
-    let events = client
+    let error = client
         .stream_chat(request)
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(server.requests().len(), 2);
-    assert!(matches!(
-        events.as_slice(),
-        [
-            AiStreamEvent::MessageStart { .. },
-            AiStreamEvent::TextDelta { text },
-            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
-        ] if text == "ok"
-    ));
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(error.code(), "provider.server_error");
 }
 
 #[tokio::test]
@@ -750,7 +729,6 @@ async fn openai_responses_client_rejects_budget_reasoning_selection_without_post
     request.options.reasoning = ReasoningSelection::BudgetTokens {
         budget_tokens: 8_192,
     };
-    request.options.retries = Some(0);
 
     let err = client
         .stream_chat(request)
@@ -1517,7 +1495,7 @@ async fn openai_responses_client_rejects_assistant_image_parts_without_posting()
 }
 
 #[tokio::test]
-async fn openai_responses_client_marks_failed_streams_as_error_end() {
+async fn openai_responses_client_returns_protocol_error_for_failed_streams() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-failed" } }),
         json!({
@@ -1527,30 +1505,20 @@ async fn openai_responses_client_marks_failed_streams_as_error_end() {
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
-    let events = client
+    let error = client
         .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(
-        events,
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "resp-failed".to_owned()
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: StopReason::Error,
-                usage: None,
-            },
-        ]
-    );
+    assert_eq!(error.code(), "provider.protocol_error");
+    assert!(error.to_string().contains("status failed"));
 }
 
 #[tokio::test]
-async fn openai_responses_client_marks_incomplete_streams_as_error_end() {
+async fn openai_responses_client_returns_protocol_error_for_incomplete_streams() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-incomplete" } }),
         json!({
@@ -1560,26 +1528,16 @@ async fn openai_responses_client_marks_incomplete_streams_as_error_end() {
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
-    let events = client
+    let error = client
         .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(
-        events,
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "resp-incomplete".to_owned()
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: StopReason::Error,
-                usage: None,
-            },
-        ]
-    );
+    assert_eq!(error.code(), "provider.protocol_error");
+    assert!(error.to_string().contains("status incomplete"));
 }
 
 #[tokio::test]
@@ -1730,40 +1688,21 @@ async fn anthropic_messages_client_marks_system_tools_and_last_message_for_promp
 }
 
 #[tokio::test]
-async fn anthropic_messages_client_retries_retryable_http_responses() {
-    let server = MockServer::start(vec![
-        status_response(529),
-        sse_response(&[
-            json!({ "type": "message_start", "message": { "id": "msg-retry" } }),
-            json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": { "type": "text_delta", "text": "ok" }
-            }),
-            json!({ "type": "message_stop" }),
-        ]),
-    ]);
+async fn anthropic_messages_client_opens_provider_response_once() {
+    let server = MockServer::start(vec![status_response(529)]);
     let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::AnthropicMessages);
-    request.options.retries = Some(1);
+    let request = request(ApiKind::AnthropicMessages);
 
-    let events = client
+    let error = client
         .stream_chat(request)
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(server.requests().len(), 2);
-    assert!(matches!(
-        events.as_slice(),
-        [
-            AiStreamEvent::MessageStart { .. },
-            AiStreamEvent::TextDelta { text },
-            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
-        ] if text == "ok"
-    ));
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(error.code(), "provider.server_error");
 }
 
 #[tokio::test]
@@ -1890,7 +1829,6 @@ async fn anthropic_messages_client_rejects_custom_effort_without_posting() {
     request.options.reasoning = ReasoningSelection::Effort {
         effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
     };
-    request.options.retries = Some(0);
 
     let error = client
         .stream_chat(request)
@@ -2308,44 +2246,25 @@ async fn provider_error_body_stops_reading_at_limit() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap_err();
 
-    assert_eq!(err.code(), "provider.stream_error");
+    assert_eq!(err.code(), "provider.protocol_error");
 }
 
 #[tokio::test]
-async fn google_generative_ai_client_retries_retryable_http_responses() {
-    let server = MockServer::start(vec![
-        status_response(503),
-        sse_response(&[json!({
-            "candidates": [{
-                "content": {
-                    "role": "model",
-                    "parts": [{ "text": "ok" }]
-                },
-                "finishReason": "STOP"
-            }]
-        })]),
-    ]);
+async fn google_generative_ai_client_opens_provider_response_once() {
+    let server = MockServer::start(vec![status_response(503)]);
     let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
-    let mut request = request(ApiKind::GoogleGenerativeAi);
-    request.options.retries = Some(1);
+    let request = request(ApiKind::GoogleGenerativeAi);
 
-    let events = client
+    let error = client
         .stream_chat(request)
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(server.requests().len(), 2);
-    assert!(matches!(
-        events.as_slice(),
-        [
-            AiStreamEvent::MessageStart { .. },
-            AiStreamEvent::TextDelta { text },
-            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
-        ] if text == "ok"
-    ));
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(error.code(), "provider.server_error");
 }
 
 #[tokio::test]
@@ -2420,7 +2339,6 @@ async fn google_generative_ai_client_rejects_custom_effort_without_posting() {
     request.options.reasoning = ReasoningSelection::Effort {
         effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
     };
-    request.options.retries = Some(0);
 
     let error = client
         .stream_chat(request)

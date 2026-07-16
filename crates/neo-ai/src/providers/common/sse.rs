@@ -37,7 +37,7 @@ pub(crate) fn find_frame_end(buffer: &[u8]) -> Option<(usize, usize)> {
 /// Joins all `data:` lines (trimmed) with `\n`. Returns `Ok(None)` when the
 /// frame carries no data payload.
 pub(crate) fn parse_sse_frame(frame: &[u8]) -> Result<Option<String>, AiError> {
-    let text = std::str::from_utf8(frame).map_err(|err| AiError::Stream {
+    let text = std::str::from_utf8(frame).map_err(|err| AiError::Protocol {
         message: format!("invalid SSE UTF-8: {err}"),
     })?;
     let data = text

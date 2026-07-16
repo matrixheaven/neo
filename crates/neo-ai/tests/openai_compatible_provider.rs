@@ -221,11 +221,9 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
             effort: ReasoningEffort::medium(),
         },
         replay_reasoning: true,
-        retries: Some(0),
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
         metadata: RequestMetadata::from_pairs([("user_id", "u-1")]),
-        cancel_token: None,
     });
 
     let events = client
@@ -437,35 +435,25 @@ async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
     ])]);
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
 
-    let events = client
+    let results = client
         .stream_chat(request(RequestOptions::default()))
         .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .await;
 
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::TextDelta { text }
+    assert!(results.iter().any(|result| matches!(
+        result,
+        Ok(AiStreamEvent::TextDelta { text })
             if text.contains("<tool_call><function=Bash>")
     )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::ToolCallStart { .. } | AiStreamEvent::ToolCallEnd { .. }
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::Error { message }
-            if message == "Provider reported tool calls but emitted no structured tool calls"
-    )));
-    assert!(matches!(
-        events.last(),
-        Some(AiStreamEvent::MessageEnd {
-            stop_reason: StopReason::Error,
-            ..
-        })
-    ));
+    let error = results
+        .into_iter()
+        .find_map(Result::err)
+        .expect("structured tool call failure");
+    assert_eq!(error.code(), "provider.protocol_error");
+    assert_eq!(
+        error.to_string(),
+        "protocol error: Provider reported tool calls but emitted no structured tool calls"
+    );
 }
 
 #[tokio::test]
@@ -538,7 +526,6 @@ async fn openai_preserves_custom_reasoning_effort() {
             reasoning: ReasoningSelection::Effort {
                 effort: ReasoningEffort::try_from("UltraMax").expect("custom effort"),
             },
-            retries: Some(0),
             ..RequestOptions::default()
         }))
         .collect::<Vec<_>>()
@@ -561,7 +548,6 @@ async fn openai_rejects_budget_reasoning_selection_without_posting() {
             reasoning: ReasoningSelection::BudgetTokens {
                 budget_tokens: 8_192,
             },
-            retries: Some(0),
             ..RequestOptions::default()
         }))
         .collect::<Vec<_>>()
@@ -705,37 +691,21 @@ async fn openai_compatible_client_normalizes_tool_schema_before_sending() {
 }
 
 #[tokio::test]
-async fn openai_compatible_client_retries_retryable_http_responses() {
-    let server = MockServer::start(vec![
-        status_response(500),
-        sse_response(&[json!({
-            "id": "chatcmpl-retry",
-            "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
-        })]),
-    ]);
+async fn openai_compatible_client_opens_provider_response_once() {
+    let server = MockServer::start(vec![status_response(500)]);
     let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
-    let request = request(RequestOptions {
-        retries: Some(1),
-        ..RequestOptions::default()
-    });
+    let request = request(RequestOptions::default());
 
-    let events = client
+    let err = client
         .stream_chat(request)
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(server.requests().len(), 2);
-    assert!(matches!(
-        events.as_slice(),
-        [
-            AiStreamEvent::MessageStart { .. },
-            AiStreamEvent::TextDelta { text },
-            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
-        ] if text == "ok"
-    ));
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(err.code(), "provider.server_error");
 }
 
 #[tokio::test]
@@ -777,7 +747,6 @@ async fn openai_compatible_half_json_arguments_emit_raw_tool_call_end() {
 
     let events = client
         .stream_chat(request(RequestOptions {
-            retries: Some(0),
             ..RequestOptions::default()
         }))
         .collect::<Vec<_>>()

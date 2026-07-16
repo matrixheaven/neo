@@ -46,19 +46,19 @@ impl ImageGenerationClient for OpenAiImagesClient {
             .json(&body)
             .send()
             .await
-            .map_err(|err| AiError::Stream {
+            .map_err(|err| AiError::Transport {
                 message: format!("transport error: {err}"),
             })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(AiError::Stream {
+            return Err(AiError::Protocol {
                 message: format!("http status {}", status.as_u16()),
             });
         }
         let response = response
             .json::<OpenAiImagesResponse>()
             .await
-            .map_err(|err| AiError::Stream {
+            .map_err(|err| AiError::Protocol {
                 message: format!("invalid image response: {err}"),
             })?;
         let images = response
@@ -69,7 +69,7 @@ impl ImageGenerationClient for OpenAiImagesClient {
                     (Some(value), _) if !value.is_empty() => ImageData::Base64(value),
                     (_, Some(value)) if !value.is_empty() => ImageData::Url(value),
                     _ => {
-                        return Err(AiError::Stream {
+                        return Err(AiError::Protocol {
                             message: "image response did not include b64_json or url".to_owned(),
                         });
                     }
@@ -103,7 +103,7 @@ struct OpenAiImage {
 fn headers(api_key: &str) -> Result<HeaderMap, AiError> {
     let mut headers = HeaderMap::new();
     let authorization =
-        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| AiError::Stream {
+        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| AiError::Protocol {
             message: format!("invalid authorization header: {err}"),
         })?;
     headers.insert(AUTHORIZATION, authorization);

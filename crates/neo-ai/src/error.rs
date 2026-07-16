@@ -20,13 +20,17 @@ pub enum AiError {
     ContextOverflow { message: String },
 
     #[error("server error ({status}): {message}")]
-    Server { status: u16, message: String },
+    Server {
+        status: u16,
+        message: String,
+        retry_after: Option<Duration>,
+    },
 
-    #[error("stream error: {message}")]
-    Stream { message: String },
+    #[error("transport error: {message}")]
+    Transport { message: String },
 
-    #[error("network error: {message}")]
-    Network { message: String },
+    #[error("protocol error: {message}")]
+    Protocol { message: String },
 
     #[error("request was cancelled")]
     Cancelled,
@@ -42,8 +46,8 @@ impl AiError {
             Self::Auth { .. } => "provider.auth_error",
             Self::ContextOverflow { .. } => "provider.context_overflow",
             Self::Server { .. } => "provider.server_error",
-            Self::Stream { .. } => "provider.stream_error",
-            Self::Network { .. } => "provider.network_error",
+            Self::Transport { .. } => "provider.transport_error",
+            Self::Protocol { .. } => "provider.protocol_error",
             Self::Cancelled => "request.cancelled",
         }
     }
@@ -52,11 +56,11 @@ impl AiError {
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimit { .. } | Self::Network { .. } | Self::Server { .. } => true,
+            Self::RateLimit { .. } | Self::Server { .. } | Self::Transport { .. } => true,
             Self::Configuration { .. }
             | Self::Auth { .. }
             | Self::ContextOverflow { .. }
-            | Self::Stream { .. }
+            | Self::Protocol { .. }
             | Self::Cancelled => false,
         }
     }
@@ -101,24 +105,25 @@ mod tests {
         assert_eq!(
             AiError::Server {
                 status: 500,
-                message: "x".into()
+                message: "x".into(),
+                retry_after: None
             }
             .code(),
             "provider.server_error"
         );
         assert_eq!(
-            AiError::Stream {
+            AiError::Transport {
                 message: "x".into()
             }
             .code(),
-            "provider.stream_error"
+            "provider.transport_error"
         );
         assert_eq!(
-            AiError::Network {
+            AiError::Protocol {
                 message: "x".into()
             }
             .code(),
-            "provider.network_error"
+            "provider.protocol_error"
         );
         assert_eq!(AiError::Cancelled.code(), "request.cancelled");
     }
@@ -133,7 +138,7 @@ mod tests {
             .is_retryable()
         );
         assert!(
-            AiError::Network {
+            AiError::Transport {
                 message: String::new()
             }
             .is_retryable()
@@ -141,7 +146,14 @@ mod tests {
         assert!(
             AiError::Server {
                 status: 503,
-                message: String::new()
+                message: String::new(),
+                retry_after: None
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::Protocol {
+                message: "invalid json".into()
             }
             .is_retryable()
         );
@@ -159,12 +171,6 @@ mod tests {
         );
         assert!(
             !AiError::ContextOverflow {
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            !AiError::Stream {
                 message: String::new()
             }
             .is_retryable()

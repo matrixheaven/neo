@@ -34,10 +34,9 @@ impl OpenAiCompatibleClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        crate::providers::common::http::open_response(&request, |req| {
-            Box::pin(self.open_response_once(req))
-        })
-        .await
+        self.open_response_once(&request)
+            .await
+            .map_err(ProviderError::into_ai_error)
     }
 
     async fn open_response_once(
@@ -287,7 +286,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream {
+                    vec![Err(AiError::Transport {
                         message: format!("transport error: {err}"),
                     })]
                 }
@@ -351,10 +350,12 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Protocol {
             message: format!("invalid SSE JSON: {err}"),
         })?;
-        self.parser.ingest(&value);
+        self.parser
+            .ingest(&value)
+            .map_err(ProviderError::into_ai_error)?;
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
     }
@@ -366,7 +367,7 @@ impl IncrementalSse {
 
         self.done = true;
         if !self.saw_done && !self.parser.saw_finish_reason() {
-            return vec![Err(AiError::Stream {
+            return vec![Err(AiError::Transport {
                 message: "missing SSE done marker".to_owned(),
             })];
         }
@@ -418,11 +419,13 @@ fn parse_sse_events(body: &str) -> Result<Vec<AiStreamEvent>, ProviderError> {
             break;
         }
         let value = serde_json::from_str::<Value>(&payload)
-            .map_err(|err| ProviderError::Stream(format!("invalid SSE JSON: {err}")))?;
-        state.ingest(&value);
+            .map_err(|err| ProviderError::Protocol(format!("invalid SSE JSON: {err}")))?;
+        state.ingest(&value)?;
     }
     if !saw_done && !state.saw_finish_reason() {
-        return Err(ProviderError::Stream("missing SSE done marker".to_owned()));
+        return Err(ProviderError::Protocol(
+            "missing SSE done marker".to_owned(),
+        ));
     }
     state.finish_events()
 }
@@ -489,7 +492,7 @@ impl Default for ParseState {
 }
 
 impl ParseState {
-    fn ingest(&mut self, value: &Value) {
+    fn ingest(&mut self, value: &Value) -> Result<(), ProviderError> {
         self.ensure_started(value);
         if let Some(usage) = value.get("usage") {
             self.usage = token_usage_from(usage, "prompt_tokens", "completion_tokens");
@@ -500,15 +503,16 @@ impl ParseState {
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
         else {
-            return;
+            return Ok(());
         };
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.apply_finish_reason(reason);
         }
         if let Some(delta) = choice.get("delta") {
-            self.ingest_delta(delta);
+            self.ingest_delta(delta)?;
         }
+        Ok(())
     }
 
     fn apply_finish_reason(&mut self, reason: &str) {
@@ -556,7 +560,7 @@ impl ParseState {
         self.lifecycle.started = true;
     }
 
-    fn ingest_delta(&mut self, delta: &Value) {
+    fn ingest_delta(&mut self, delta: &Value) -> Result<(), ProviderError> {
         if let Some(reasoning) = reasoning_delta(delta)
             && !reasoning.is_empty()
         {
@@ -580,15 +584,16 @@ impl ParseState {
         }
 
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
-            return;
+            return Ok(());
         };
 
         for tool_call in tool_calls {
-            self.ingest_tool_call(tool_call);
+            self.ingest_tool_call(tool_call)?;
         }
+        Ok(())
     }
 
-    fn ingest_tool_call(&mut self, tool_call: &Value) {
+    fn ingest_tool_call(&mut self, tool_call: &Value) -> Result<(), ProviderError> {
         let function = tool_call.get("function").unwrap_or(&Value::Null);
         let chunk = ToolCallChunk {
             index: tool_call.get("index").and_then(Value::as_u64),
@@ -607,14 +612,9 @@ impl ParseState {
         };
         match self.tool_calls.ingest(chunk) {
             Ok(events) => self.push_tool_events(events),
-            Err(err) => {
-                self.last_stop_reason = StopReason::Error;
-                self.finish_signal = FinishSignal::Final;
-                self.events.push(AiStreamEvent::Error {
-                    message: err.to_string(),
-                });
-            }
+            Err(err) => return Err(ProviderError::Protocol(err.to_string())),
         }
+        Ok(())
     }
 
     fn push_tool_events(&mut self, events: Vec<ToolCallAssemblyEvent>) {
@@ -642,15 +642,14 @@ impl ParseState {
         let tool_events = self
             .tool_calls
             .finish_all()
-            .map_err(|err| ProviderError::Stream(err.to_string()))?;
+            .map_err(|err| ProviderError::Protocol(err.to_string()))?;
         self.push_tool_events(tool_events);
 
         if self.finish_signal.reported_tool_calls() {
             if self.completed_tool_calls == 0 {
-                self.last_stop_reason = StopReason::Error;
-                self.events.push(AiStreamEvent::Error {
-                    message: EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE.to_owned(),
-                });
+                return Err(ProviderError::Protocol(
+                    EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE.to_owned(),
+                ));
             } else {
                 self.last_stop_reason = StopReason::ToolUse;
             }

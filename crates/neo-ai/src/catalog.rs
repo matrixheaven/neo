@@ -119,19 +119,19 @@ pub async fn fetch_catalog_from(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| crate::error::AiError::Network {
+        .map_err(|e| crate::error::AiError::Transport {
             message: e.to_string(),
         })?;
 
     if !resp.status().is_success() {
-        return Err(crate::error::AiError::Network {
+        return Err(crate::error::AiError::Protocol {
             message: format!("catalog fetch returned {}", resp.status()),
         });
     }
 
     resp.json::<BTreeMap<String, CatalogEntry>>()
         .await
-        .map_err(|e| crate::error::AiError::Network {
+        .map_err(|e| crate::error::AiError::Protocol {
             message: e.to_string(),
         })
 }

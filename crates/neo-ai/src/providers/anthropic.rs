@@ -31,8 +31,9 @@ impl AnthropicMessagesClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req)))
+        self.open_response_once(&request)
             .await
+            .map_err(ProviderError::into_ai_error)
     }
 
     async fn open_response_once(
@@ -321,7 +322,7 @@ fn assistant_content(
                 redacted: true,
             } if replay_reasoning => {
                 let Some(signature) = signature.as_deref().filter(|value| !value.is_empty()) else {
-                    return Err(ProviderError::Stream(
+                    return Err(ProviderError::Protocol(
                         "Anthropic redacted thinking replay requires a signature".to_owned(),
                     ));
                 };
@@ -348,7 +349,7 @@ fn assistant_content(
                 parts.push(json!({ "type": "text", "text": text }));
             }
             ContentPart::Image { .. } => {
-                return Err(ProviderError::Stream(
+                return Err(ProviderError::Protocol(
                     "Anthropic image content is only supported in user messages, not assistant messages"
                         .to_owned(),
                 ));
@@ -359,7 +360,7 @@ fn assistant_content(
     for tool_call in tool_calls {
         let input =
             serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments).map_err(|err| {
-                ProviderError::Stream(format!(
+                ProviderError::Protocol(format!(
                     "invalid raw tool arguments for Anthropic replay tool call '{}': {err}",
                     tool_call.id
                 ))
@@ -390,7 +391,7 @@ fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
                 },
             }),
             ImageData::Url(_) => {
-                return Err(ProviderError::Stream(
+                return Err(ProviderError::Protocol(
                     "Anthropic image URL content is unsupported; provide base64 image data"
                         .to_owned(),
                 ));
@@ -427,7 +428,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream {
+                    vec![Err(AiError::Transport {
                         message: format!("transport error: {err}"),
                     })]
                 }
@@ -491,10 +492,12 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Protocol {
             message: format!("invalid SSE JSON: {err}"),
         })?;
-        self.parser.ingest(&value);
+        self.parser
+            .ingest(&value)
+            .map_err(ProviderError::into_ai_error)?;
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
     }
@@ -506,7 +509,7 @@ impl IncrementalSse {
 
         self.stopped = true;
         if !self.saw_done && !self.parser.saw_terminal() {
-            return vec![Err(AiError::Stream {
+            return vec![Err(AiError::Transport {
                 message: "missing SSE done marker".to_owned(),
             })];
         }
@@ -549,7 +552,7 @@ impl Default for ParseState {
 }
 
 impl ParseState {
-    fn ingest(&mut self, value: &Value) {
+    fn ingest(&mut self, value: &Value) -> Result<(), ProviderError> {
         match value.get("type").and_then(Value::as_str) {
             Some("message_start") => {
                 let id = value
@@ -568,11 +571,17 @@ impl ParseState {
                 self.terminal = true;
             }
             Some("error") => {
-                self.last_stop_reason = StopReason::Error;
-                self.terminal = true;
+                let message = value
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider returned an error")
+                    .to_owned();
+                return Err(ProviderError::Protocol(message));
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn drain_events(&mut self) -> Vec<AiStreamEvent> {
@@ -779,7 +788,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(err, ProviderError::Stream(message) if message.contains("invalid raw tool arguments"))
+            matches!(err, ProviderError::Protocol(message) if message.contains("invalid raw tool arguments"))
         );
     }
 }

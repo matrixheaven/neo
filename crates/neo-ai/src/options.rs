@@ -306,15 +306,9 @@ pub struct RequestOptions {
     pub timeout: Option<Duration>,
     pub reasoning: ReasoningSelection,
     pub replay_reasoning: bool,
-    pub retries: Option<u32>,
     pub cache: CacheRetention,
     pub session_id: Option<String>,
     pub metadata: RequestMetadata,
-    /// Cancellation token for the HTTP retry loop's backoff sleep.
-    /// Set by the runtime so retries abort promptly on user cancellation.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub cancel_token: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
 }
 
 impl Default for RequestOptions {
@@ -326,11 +320,9 @@ impl Default for RequestOptions {
             timeout: None,
             reasoning: ReasoningSelection::Off,
             replay_reasoning: true,
-            retries: Some(2),
             cache: CacheRetention::Short,
             session_id: None,
             metadata: RequestMetadata::default(),
-            cancel_token: None,
         }
     }
 }
