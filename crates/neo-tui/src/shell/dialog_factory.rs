@@ -1,4 +1,5 @@
 use crate::tasks_browser::TaskBrowserState;
+use crate::transcript::TranscriptBrowserState;
 
 use super::command_palette::{CommandPaletteState, CommandSpec};
 use super::overlay::{Overlay, OverlayId, OverlayKind};
@@ -305,6 +306,29 @@ impl NeoChromeState {
             return id;
         }
         self.push_overlay(Overlay::new("tasks", OverlayKind::TaskBrowser(state)))
+    }
+
+    pub fn open_transcript_browser(&mut self, expanded: bool) -> OverlayId {
+        if let Some(overlay) = self
+            .overlays
+            .iter_mut()
+            .find(|overlay| matches!(overlay.kind, OverlayKind::TranscriptBrowser(_)))
+        {
+            overlay.kind = OverlayKind::TranscriptBrowser(TranscriptBrowserState::new(expanded));
+            let id = overlay.id;
+            self.focus_overlay(id);
+            return id;
+        }
+        self.push_overlay(Overlay::new(
+            "transcript",
+            OverlayKind::TranscriptBrowser(TranscriptBrowserState::new(expanded)),
+        ))
+    }
+
+    pub fn close_transcript_browser(&mut self) -> Option<Overlay> {
+        let id =
+            self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::TranscriptBrowser(_)))?;
+        self.close_overlay(id)
     }
 
     #[must_use]

@@ -91,6 +91,23 @@ fn terminal_frame_is_bounded_when_chrome_exhausts_terminal_height() {
 }
 
 #[test]
+fn transcript_browser_frame_is_bounded_and_marked_review_surface() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(80, 12);
+    for index in 0..32 {
+        transcript.push_status(format!("browser-status-{index}"));
+    }
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    tui.chrome_mut().open_transcript_browser(false);
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+
+    assert!(frame.review_surface);
+    assert!(frame.history.is_empty());
+    assert!(frame.live.len() <= 12);
+}
+
+#[test]
 fn running_file_write_advances_transcript_animation_state() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
     let mut transcript = TranscriptPane::new(80, 12);

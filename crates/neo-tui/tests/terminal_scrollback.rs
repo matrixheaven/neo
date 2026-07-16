@@ -380,6 +380,68 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     assert_lifecycle_retained(&mut screen, &shell_rows, &committed_rows);
 }
 
+#[test]
+fn review_surface_transition_preserves_primary_scrollback() {
+    let mut terminal = InlineTerminal::for_test(80, 12);
+    let normal = TerminalFrame::with_surface(Vec::new(), vec!["normal".into()], None, false, None);
+    terminal
+        .render_to(&mut Vec::new(), &normal)
+        .expect("normal frame");
+
+    let review = TerminalFrame::with_surface(Vec::new(), vec!["review".into()], None, true, None);
+    let mut bytes = Vec::new();
+    terminal
+        .render_to(&mut bytes, &review)
+        .expect("review frame");
+    terminal
+        .render_to(&mut bytes, &normal)
+        .expect("normal frame after review");
+
+    let output = String::from_utf8(bytes).expect("ANSI output is UTF-8");
+    assert!(output.contains("?1049h"));
+    assert!(output.contains("?1049l"));
+    assert!(!output.contains("\x1b[2J"));
+    assert!(!output.contains("\x1b[3J"));
+}
+
+#[test]
+fn leaving_review_appends_history_finalized_while_browser_was_open() {
+    let mut screen = vt100::Parser::new(12, 80, 128);
+    let mut terminal = InlineTerminal::for_test(80, 12);
+    let mut pane = TranscriptPane::new(80, 12);
+
+    pane.push_status("history-before-review");
+    let initial = pane.render_terminal_update(80, 12);
+    let initial_frame = TerminalFrame::new(initial.history, vec!["normal-live".into()], None);
+    render_and_process(&mut terminal, &mut screen, &initial_frame, &mut Vec::new());
+    pane.acknowledge_history(&initial_frame.history);
+
+    let review =
+        TerminalFrame::with_surface(Vec::new(), vec!["review-live".into()], None, true, None);
+    render_and_process(&mut terminal, &mut screen, &review, &mut Vec::new());
+
+    pane.push_status("history-finished-during-review");
+    let update = pane.render_terminal_update(80, 12);
+    let normal = TerminalFrame::with_surface(
+        update.history,
+        vec!["normal-after-review".into()],
+        None,
+        false,
+        None,
+    );
+    render_and_process(&mut terminal, &mut screen, &normal, &mut Vec::new());
+
+    let retained = all_terminal_rows(&mut screen);
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("history-finished-during-review"))
+            .count(),
+        1,
+        "new history was lost or replayed after review: {retained:#?}"
+    );
+}
+
 fn render_and_process(
     inline: &mut InlineTerminal,
     screen: &mut vt100::Parser,

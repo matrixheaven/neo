@@ -14,6 +14,7 @@ use crate::dialogs::{
 };
 use crate::input::KeybindingAction;
 use crate::tasks_browser::{TaskBrowserRenderer, TaskBrowserState};
+use crate::transcript::TranscriptBrowserState;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(u64);
@@ -147,6 +148,7 @@ pub enum OverlayKind {
     TrustDialog(TrustDialogState),
     HelpPanel(HelpPanelState),
     TaskBrowser(TaskBrowserState),
+    TranscriptBrowser(TranscriptBrowserState),
 }
 
 impl OverlayKind {
@@ -263,6 +265,7 @@ impl OverlayKind {
             | Self::TrustDialog(_)
             | Self::HelpPanel(_) => Some(16),
             Self::TaskBrowser(_) => Some(0),
+            Self::TranscriptBrowser(_) => Some(0),
             _ => None,
         }
     }

@@ -69,6 +69,9 @@ impl NeoTui {
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
+        if let Some(lines) = self.render_transcript_browser_frame(width, height) {
+            return (lines, None);
+        }
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
@@ -89,6 +92,8 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
+        self.transcript
+            .set_activity_frame(self.chrome.activity_frame());
         let mut lines = self
             .transcript
             .render_frame(width, height)
@@ -109,6 +114,18 @@ impl NeoTui {
         height: usize,
         now: Instant,
     ) -> TerminalFrame {
+        if let Some(lines) = self.render_transcript_browser_frame(width, height) {
+            let next_animation_deadline = (self.chrome.working_label().is_some()
+                || self.transcript.has_live_entries())
+            .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+            return TerminalFrame::with_surface(
+                Vec::new(),
+                lines,
+                None,
+                true,
+                next_animation_deadline,
+            );
+        }
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
@@ -129,6 +146,8 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
+        self.transcript
+            .set_activity_frame(self.chrome.activity_frame());
 
         let mut update = self.transcript.render_terminal_update(width, height);
         for block in &mut update.history {
@@ -158,6 +177,30 @@ impl NeoTui {
 
     pub fn render(&mut self, width: usize, height: usize) -> Vec<String> {
         self.render_frame(width, height).0
+    }
+
+    fn render_transcript_browser_frame(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<String>> {
+        self.chrome.transcript_browser_state()?;
+        self.transcript.set_theme(self.chrome.theme());
+        self.transcript
+            .set_image_render_policy(self.chrome.image_render_policy());
+        self.transcript
+            .set_image_capabilities(self.chrome.image_capabilities());
+        self.transcript
+            .set_workspace_root(self.chrome.workspace_root());
+        self.transcript.resize(width, height);
+        self.transcript
+            .set_activity_frame(self.chrome.activity_frame());
+        let state = self.chrome.transcript_browser_state_mut()?;
+        let mut lines =
+            self.transcript
+                .render_browser_rows(state, frame_content_width(width), height);
+        apply_gutter(&mut lines);
+        Some(lines)
     }
 }
 

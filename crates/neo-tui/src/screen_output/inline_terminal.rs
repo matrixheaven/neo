@@ -5,7 +5,9 @@ use crate::terminal_capabilities::TerminalCapabilities;
 use crate::transcript::FinalizedBlock;
 
 use super::LiveRenderer;
-use super::terminal_modes::TerminalModeGuard;
+use super::terminal_modes::{
+    TerminalModeGuard, write_enter_review_output, write_leave_review_output,
+};
 use super::types::CursorPos;
 
 const SYNCHRONIZED_OUTPUT_START: &str = "\x1b[?2026h";
@@ -16,6 +18,7 @@ pub struct TerminalFrame {
     pub history: Vec<FinalizedBlock>,
     pub live: Vec<String>,
     pub cursor: Option<CursorPos>,
+    pub review_surface: bool,
     pub next_animation_deadline: Option<Instant>,
 }
 
@@ -30,7 +33,25 @@ impl TerminalFrame {
             history,
             live,
             cursor,
+            review_surface: false,
             next_animation_deadline: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_surface(
+        history: Vec<FinalizedBlock>,
+        live: Vec<String>,
+        cursor: Option<CursorPos>,
+        review_surface: bool,
+        next_animation_deadline: Option<Instant>,
+    ) -> Self {
+        Self {
+            history: if review_surface { Vec::new() } else { history },
+            live,
+            cursor,
+            review_surface,
+            next_animation_deadline,
         }
     }
 
@@ -45,6 +66,7 @@ impl TerminalFrame {
             history,
             live,
             cursor,
+            review_surface: false,
             next_animation_deadline,
         }
     }
@@ -54,7 +76,9 @@ impl TerminalFrame {
 pub struct InlineTerminal {
     synchronized_output: bool,
     live: LiveRenderer,
+    saved_normal_live: Option<LiveRenderer>,
     modes: Option<TerminalModeGuard>,
+    review_surface: bool,
 }
 
 impl InlineTerminal {
@@ -63,7 +87,9 @@ impl InlineTerminal {
         Self {
             synchronized_output: capabilities.ansi.synchronized_output,
             live: LiveRenderer::new(width, height),
+            saved_normal_live: None,
             modes: None,
+            review_surface: false,
         }
     }
 
@@ -88,50 +114,131 @@ impl InlineTerminal {
         output: &mut dyn Write,
         frame: &TerminalFrame,
     ) -> std::io::Result<()> {
-        let history_lines = flatten_history(&frame.history);
-        let mut next_live = self.live.clone();
-        let mut transaction = String::new();
+        let entering_review = frame.review_surface && !self.review_surface;
+        let leaving_review = !frame.review_surface && self.review_surface;
+        let mut transaction = Vec::new();
+        let saved_normal_live = entering_review.then(|| self.live.clone());
+
+        if entering_review {
+            append_review_transition(&mut transaction, &mut self.modes, true)?;
+        } else if leaving_review {
+            append_review_transition(&mut transaction, &mut self.modes, false)?;
+        }
+
+        let history_lines = if frame.review_surface {
+            Vec::new()
+        } else {
+            flatten_history(&frame.history)
+        };
+        let mut next_live = if leaving_review {
+            self.saved_normal_live
+                .clone()
+                .unwrap_or_else(|| self.live.clone())
+        } else {
+            self.live.clone()
+        };
+        if entering_review {
+            next_live.reset();
+        } else if leaving_review {
+            transaction.extend_from_slice(next_live.clear_for_history_redraw().as_bytes());
+        }
         if !history_lines.is_empty() {
-            transaction.push_str(&next_live.clear_for_history_redraw());
-            append_history_lines(&mut transaction, &history_lines);
+            if !leaving_review {
+                transaction.extend_from_slice(next_live.clear_for_history_redraw().as_bytes());
+            }
+            let mut history = String::new();
+            append_history_lines(&mut history, &history_lines);
+            transaction.extend_from_slice(history.as_bytes());
         }
 
         let mut live_bytes = Vec::new();
-        next_live.render_to(&mut live_bytes, frame.live.clone(), frame.cursor)?;
-        transaction.push_str(&String::from_utf8_lossy(&live_bytes));
+        if let Err(error) = next_live.render_to(&mut live_bytes, frame.live.clone(), frame.cursor) {
+            if entering_review {
+                if let Some(modes) = &mut self.modes {
+                    modes.set_review_active(false);
+                }
+            } else if leaving_review {
+                if let Some(modes) = &mut self.modes {
+                    modes.set_review_active(true);
+                }
+            }
+            return Err(error);
+        }
+        transaction.extend_from_slice(&live_bytes);
         if transaction.is_empty() {
             return Ok(());
         }
 
         let transaction = if self.synchronized_output {
             format!(
-                "{SYNCHRONIZED_OUTPUT_START}{transaction}{}",
+                "{SYNCHRONIZED_OUTPUT_START}{}{}",
+                String::from_utf8_lossy(&transaction),
                 String::from_utf8_lossy(SYNCHRONIZED_OUTPUT_END)
             )
+            .into_bytes()
         } else {
             transaction
         };
-        if let Err(error) = output
-            .write_all(transaction.as_bytes())
-            .and_then(|()| output.flush())
-        {
+        if let Err(error) = output.write_all(&transaction).and_then(|()| output.flush()) {
             if self.synchronized_output {
                 let _ = output.write_all(SYNCHRONIZED_OUTPUT_END);
                 let _ = output.flush();
+            }
+            if entering_review || leaving_review {
+                recover_review_transition(&mut self.modes, output, entering_review);
             }
             return Err(error);
         }
 
         self.live = next_live;
+        if entering_review {
+            self.review_surface = true;
+            self.saved_normal_live = saved_normal_live;
+            if let Some(modes) = &mut self.modes {
+                modes.set_review_active(true);
+            }
+        } else if leaving_review {
+            self.review_surface = false;
+            self.saved_normal_live = None;
+            if let Some(modes) = &mut self.modes {
+                modes.set_review_active(false);
+            }
+        }
         Ok(())
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
         self.live.resize(width, height);
+        if let Some(saved) = &mut self.saved_normal_live {
+            saved.resize(width, height);
+        }
     }
 
     pub fn suspend_prepare(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
-        let result = self.clear_live_to(output, false);
+        let was_review = self.review_surface;
+        if self.review_surface {
+            let mut transition = Vec::new();
+            append_review_transition(&mut transition, &mut self.modes, false)?;
+            if let Some(saved) = self.saved_normal_live.as_ref() {
+                let mut saved = saved.clone();
+                transition.extend_from_slice(saved.clear_for_history_redraw().as_bytes());
+            }
+            if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
+                recover_review_transition(&mut self.modes, output, false);
+                return Err(error);
+            }
+            self.saved_normal_live = None;
+            if let Some(modes) = &mut self.modes {
+                modes.set_review_active(false);
+            }
+            self.review_surface = false;
+            self.live.reset();
+        }
+        let result = if was_review {
+            Ok(())
+        } else {
+            self.clear_live_to(output, false)
+        };
         if let Some(modes) = &mut self.modes {
             modes.leave();
         }
@@ -147,6 +254,31 @@ impl InlineTerminal {
     }
 
     pub fn leave(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
+        if self.review_surface {
+            let mut transition = Vec::new();
+            append_review_transition(&mut transition, &mut self.modes, false)?;
+            if let Some(saved) = self.saved_normal_live.as_ref() {
+                let mut saved = saved.clone();
+                transition.extend_from_slice(saved.clear_for_history_redraw().as_bytes());
+            }
+            if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
+                recover_review_transition(&mut self.modes, output, false);
+                return Err(error);
+            }
+            self.saved_normal_live = None;
+            if let Some(modes) = &mut self.modes {
+                modes.set_review_active(false);
+            }
+            self.review_surface = false;
+            self.live.reset();
+            if let Some(modes) = &mut self.modes {
+                modes.leave();
+            } else {
+                output.write_all(b"\x1b[?25h")?;
+                output.flush()?;
+            }
+            return Ok(());
+        }
         let show_cursor = self.modes.is_none();
         let result = self.clear_live_to(output, show_cursor);
         if let Some(modes) = &mut self.modes {
@@ -165,6 +297,43 @@ impl InlineTerminal {
         output.flush()?;
         self.live = next_live;
         Ok(())
+    }
+}
+
+fn append_review_transition(
+    transaction: &mut Vec<u8>,
+    modes: &mut Option<TerminalModeGuard>,
+    entering: bool,
+) -> std::io::Result<()> {
+    if let Some(modes) = modes {
+        if entering {
+            modes.enter_review(transaction)
+        } else {
+            modes.leave_review(transaction)
+        }
+    } else if entering {
+        write_enter_review_output(transaction)
+    } else {
+        write_leave_review_output(transaction)
+    }
+}
+
+fn recover_review_transition(
+    modes: &mut Option<TerminalModeGuard>,
+    output: &mut dyn Write,
+    entering: bool,
+) {
+    if let Some(modes) = modes {
+        if entering {
+            modes.set_review_active(true);
+            modes.leave();
+        } else {
+            modes.set_review_active(true);
+        }
+    } else if entering {
+        let _ = write_leave_review_output(output);
+    } else {
+        let _ = write_enter_review_output(output);
     }
 }
 
