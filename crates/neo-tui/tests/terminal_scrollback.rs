@@ -473,18 +473,27 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
     );
     render_and_process(&mut inline, &mut screen, &primary_frame, &mut Vec::new());
     pane.acknowledge_history(&committed.history);
-    let primary_before_review = all_terminal_rows(&mut screen);
+    let primary_before_review = native_terminal_snapshot(&mut screen);
 
     let mut browser = TranscriptBrowserState::new(true);
     let expanded_rows = pane.render_browser_rows(&mut browser, 80, 12);
     assert!(
         expanded_rows
             .iter()
-            .any(|row| row.contains("review-committed-tool"))
+            .any(|row| row.contains("review-committed-tool-result")),
+        "expanded review must include the committed tool result: {expanded_rows:#?}"
     );
     let expanded = TerminalFrame::with_surface(Vec::new(), expanded_rows, None, true, None);
     assert!(expanded.history.is_empty());
-    render_and_process(&mut inline, &mut screen, &expanded, &mut Vec::new());
+    let mut review_transition_output = Vec::new();
+    let entering_start = review_transition_output.len();
+    render_and_process(
+        &mut inline,
+        &mut screen,
+        &expanded,
+        &mut review_transition_output,
+    );
+    let entering_end = review_transition_output.len();
 
     browser.toggle();
     let collapsed_rows = pane.render_browser_rows(&mut browser, 80, 12);
@@ -495,26 +504,60 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
     );
     let collapsed = TerminalFrame::with_surface(Vec::new(), collapsed_rows, None, true, None);
     assert!(collapsed.history.is_empty());
-    render_and_process(&mut inline, &mut screen, &collapsed, &mut Vec::new());
+    render_and_process(
+        &mut inline,
+        &mut screen,
+        &collapsed,
+        &mut review_transition_output,
+    );
 
     let after_review =
         TerminalFrame::new(Vec::new(), vec!["primary-review-anchor".to_owned()], None);
-    render_and_process(&mut inline, &mut screen, &after_review, &mut Vec::new());
-    let primary_after_review = all_terminal_rows(&mut screen);
+    let leaving_start = review_transition_output.len();
+    render_and_process(
+        &mut inline,
+        &mut screen,
+        &after_review,
+        &mut review_transition_output,
+    );
+    let leaving_end = review_transition_output.len();
+    let primary_after_review = native_terminal_snapshot(&mut screen);
+
+    let entering_transition = &review_transition_output[entering_start..entering_end];
+    let leaving_transition = &review_transition_output[leaving_start..leaving_end];
+    assert!(
+        String::from_utf8_lossy(entering_transition).contains("?1049h"),
+        "entering review transition: {entering_transition:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(leaving_transition).contains("?1049l"),
+        "leaving review transition: {leaving_transition:?}"
+    );
+    assert!(
+        !review_transition_output
+            .windows(b"\x1b[2J".len())
+            .any(|window| window == b"\x1b[2J")
+    );
+    assert!(
+        !review_transition_output
+            .windows(b"\x1b[3J".len())
+            .any(|window| window == b"\x1b[3J")
+    );
 
     assert_eq!(primary_after_review, primary_before_review);
+    let primary_after_review_rows = all_terminal_rows(&mut screen);
     assert_eq!(
-        primary_after_review
+        primary_after_review_rows
             .iter()
             .filter(|row| row.contains("review-committed-tool"))
             .count(),
         1,
-        "committed tool must remain exactly once in native scrollback: {primary_after_review:#?}"
+        "committed tool must remain exactly once in native scrollback: {primary_after_review_rows:#?}"
     );
 }
 
 #[test]
-fn review_frames_never_acknowledge_history() {
+fn review_acknowledgement_does_not_advance_normal_history_ledger() {
     let chrome = NeoChromeState::new("neo", "session", "model", ".".into());
     let mut transcript = TranscriptPane::new(80, 12);
     transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
@@ -532,17 +575,25 @@ fn review_frames_never_acknowledge_history() {
     let mut tui = NeoTui::new(chrome, transcript);
     let normal = tui.render_terminal_frame(80, 12);
     assert!(!normal.history.is_empty());
-    assert!(!tui.transcript().has_committed_expandable_entries());
+    let ledger_before_review = tui.transcript().has_committed_expandable_entries();
+    assert!(!ledger_before_review);
 
     tui.chrome_mut().open_transcript_browser(true);
     let review = tui.render_terminal_frame(80, 12);
     assert!(review.review_surface);
     assert!(review.history.is_empty());
     tui.acknowledge_history(&review);
-    assert!(!tui.transcript().has_committed_expandable_entries());
+    assert_eq!(
+        tui.transcript().has_committed_expandable_entries(),
+        ledger_before_review,
+        "review acknowledgement must not advance the normal history ledger"
+    );
 
     tui.acknowledge_history(&normal);
-    assert!(tui.transcript().has_committed_expandable_entries());
+    assert!(
+        tui.transcript().has_committed_expandable_entries(),
+        "normal acknowledgement must advance the normal history ledger"
+    );
 }
 
 fn render_and_process(
@@ -687,6 +738,45 @@ fn assert_terminal_contains(terminal: &mut vt100::Parser, sentinel: &str, stage:
 
 fn visible_rows(terminal: &vt100::Parser) -> Vec<String> {
     terminal.screen().rows(0, 80).collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeTerminalSnapshot {
+    size: (u16, u16),
+    cursor_position: (u16, u16),
+    alternate_screen: bool,
+    hide_cursor: bool,
+    scrollback_position: usize,
+    scrollback_extent: usize,
+    formatted_positions: Vec<(usize, Vec<u8>)>,
+}
+
+fn native_terminal_snapshot(terminal: &mut vt100::Parser) -> NativeTerminalSnapshot {
+    let screen = terminal.screen();
+    let size = screen.size();
+    let cursor_position = screen.cursor_position();
+    let alternate_screen = screen.alternate_screen();
+    let hide_cursor = screen.hide_cursor();
+    let scrollback_position = screen.scrollback();
+
+    terminal.screen_mut().set_scrollback(usize::MAX);
+    let scrollback_extent = terminal.screen().scrollback();
+    let mut formatted_positions = Vec::with_capacity(scrollback_extent.saturating_add(1));
+    for offset in 0..=scrollback_extent {
+        terminal.screen_mut().set_scrollback(offset);
+        formatted_positions.push((offset, terminal.screen().state_formatted()));
+    }
+    terminal.screen_mut().set_scrollback(scrollback_position);
+
+    NativeTerminalSnapshot {
+        size,
+        cursor_position,
+        alternate_screen,
+        hide_cursor,
+        scrollback_position,
+        scrollback_extent,
+        formatted_positions,
+    }
 }
 
 fn all_terminal_rows(terminal: &mut vt100::Parser) -> Vec<String> {

@@ -112,13 +112,15 @@ owners:
   canonical TranscriptStore and owns its viewport, width/height reflow, and
   browser scroll offset. Browser rows are review-only and never enter the
   normal presentation ledger.
-- Normal input remains routed to the terminal emulator for wheel scrolling and
-  selection. Browser input is routed to the browser state until Ctrl+O or
-  cancel leaves it; suspend/resume restores the normal live anchor without
-  replaying committed history.
-- Review frames contain only bounded live rows, carry no history append blocks,
-  and are never passed to `acknowledge_history`. Leaving review appends only
-  history finalized while the browser was open.
+- The normal screen does not enable mouse capture. Terminal-native wheel
+  scrolling and selection remain available for unhandled events, while
+  app-delivered Scroll/Page actions may move a logical viewport. Browser input
+  is routed to the browser state until Ctrl+O or cancel leaves it; suspend/resume
+  restores the normal live anchor without replaying committed history.
+- Review frames contain only bounded live rows and carry no history append
+  blocks. Acknowledging a review frame leaves the normal presentation ledger
+  unchanged; leaving review appends only history finalized while the browser
+  was open.
 
 Both surfaces preserve the no-clear invariant: normal lifecycle output and
 review transitions emit neither `CSI 2 J` nor `CSI 3 J`. In particular, `CSI
