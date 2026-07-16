@@ -69,7 +69,21 @@ pub fn format_shell_failure(exit_code: Option<i32>, signal: Option<i32>) -> Stri
     "Command terminated before returning an exit code.".to_owned()
 }
 
-/// Returns `(signal_name, human_readable_hint)` for common Unix signals.
+/// Format an exit code for concise user-facing tool output.
+///
+/// Unlike `format_shell_failure`, this returns a short value rather than a full
+/// sentence, so it fits in a summary line. It avoids leaking Rust's `Option`
+/// representation (e.g. `Some(0)` or `None`) to users.
+#[must_use]
+pub fn format_exit_code(exit_code: Option<i32>, signal: Option<i32>) -> String {
+    match (exit_code, signal) {
+        (Some(code), None) => code.to_string(),
+        (Some(code), Some(sig)) => format!("{code} (signal {sig})"),
+        (None, Some(sig)) => format!("signal {sig}"),
+        (None, None) => "no exit code".to_owned(),
+    }
+}
+
 ///
 /// Signal numbers 1–15 are identical on Linux and macOS; this function is only
 /// called on Unix (callers guard with `#[cfg(unix)]` or pass `None` on Windows).
@@ -812,6 +826,32 @@ mod tests {
             format_shell_failure(None, None),
             "Command terminated before returning an exit code."
         );
+    }
+
+    #[test]
+    fn format_exit_code_success() {
+        assert_eq!(format_exit_code(Some(0), None), "0");
+    }
+
+    #[test]
+    fn format_exit_code_nonzero() {
+        assert_eq!(format_exit_code(Some(1), None), "1");
+        assert_eq!(format_exit_code(Some(127), None), "127");
+    }
+
+    #[test]
+    fn format_exit_code_signal_only() {
+        assert_eq!(format_exit_code(None, Some(9)), "signal 9");
+    }
+
+    #[test]
+    fn format_exit_code_code_and_signal() {
+        assert_eq!(format_exit_code(Some(1), Some(9)), "1 (signal 9)");
+    }
+
+    #[test]
+    fn format_exit_code_no_code_no_signal() {
+        assert_eq!(format_exit_code(None, None), "no exit code");
     }
 
     struct CountingTool {

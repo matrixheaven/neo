@@ -8,7 +8,9 @@ use uuid::Uuid;
 
 use super::shell_guard::{GuardStatusKind, GuardedCommandResult};
 use super::shell_guard::{GuardianClient, TerminalClientSession, TerminalClientState};
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code, parse_input, schema,
+};
 
 const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
@@ -249,6 +251,8 @@ async fn read_terminal(
     let exit_code = final_result
         .as_ref()
         .and_then(|result| result.exit.exit_code);
+    let signal = final_result.as_ref().and_then(|result| result.exit.signal);
+    let exit_code_text = format_exit_code(exit_code, signal);
     let resource_limit = final_result
         .as_ref()
         .and_then(|result| result.exit.resource_limit.as_ref());
@@ -271,7 +275,7 @@ async fn read_terminal(
         details["resource_limit"] = json!(limit);
     }
     Ok(ToolResult::ok(format!(
-        "handle: {handle}\nstatus: {status}\nexit_code: {exit_code:?}\noutput:\n{content}"
+        "handle: {handle}\nstatus: {status}\nexit_code: {exit_code_text}\noutput:\n{content}"
     ))
     .with_details(details))
 }
@@ -353,9 +357,9 @@ async fn stop_terminal(
     if let Some(callback) = &ctx.tool_update {
         callback(&content);
     }
+    let exit_code_text = format_exit_code(result.exit.exit_code, result.exit.signal);
     Ok(ToolResult::ok(format!(
-        "handle: {handle}\nstatus: {status}\nexit_code: {:?}\noutput:\n{content}",
-        result.exit.exit_code
+        "handle: {handle}\nstatus: {status}\nexit_code: {exit_code_text}\noutput:\n{content}"
     ))
     .with_details(json!({
         "handle": handle,
