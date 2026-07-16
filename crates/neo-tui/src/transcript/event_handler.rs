@@ -493,6 +493,7 @@ impl TranscriptPane {
 
     fn append_thinking_block(&mut self, text: &str) {
         self.transcript.append_thinking_delta(text);
+        self.apply_expand_state_to_active_thinking();
         self.mark_dirty();
     }
 

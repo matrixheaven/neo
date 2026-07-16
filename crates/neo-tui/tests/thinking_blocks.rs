@@ -166,3 +166,29 @@ fn consecutive_thinking_events_render_as_one_completed_block() {
         "merged thinking keeps second: {joined}"
     );
 }
+
+#[test]
+fn delta_first_thinking_inherits_expansion_state() {
+    let mut runtime = TranscriptPane::new(40, 12);
+    runtime.set_tool_output_expanded(true);
+
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "alpha\nbeta\ngamma\ndelta\nepsilon".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+
+    let joined = plain_frame(&mut runtime, 40, 12).join("\n");
+    assert!(
+        joined.contains("epsilon"),
+        "expanded thinking body: {joined}"
+    );
+    assert!(
+        !joined.contains("ctrl+o to expand"),
+        "delta-first thinking should inherit expansion: {joined}"
+    );
+}

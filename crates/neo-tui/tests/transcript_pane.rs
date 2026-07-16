@@ -1656,19 +1656,43 @@ fn skill_activation_toggle_expands_collapsed_body() {
 #[test]
 fn browser_snapshot_expands_and_collapses_committed_tool_without_mutating_source() {
     let mut pane = TranscriptPane::new(80, 20);
-    pane.transcript_mut()
-        .push_tool_run("tool-1", "Read", Some("{\"path\":\"a\"}".to_owned()));
-    let _ = pane.render_terminal_update(80, 20);
+    let transcript = pane.transcript_mut();
+    transcript.push_tool_run("tool-1", "Read", Some("{\"path\":\"a\"}".to_owned()));
+    assert!(transcript.mutate_tool("tool-1", |tool| {
+        tool.set_result(Some("ok".to_owned()), None, false, None)
+    }));
+
+    let committed = pane.render_terminal_update(80, 20);
+    assert!(!committed.history.is_empty());
+    assert!(!pane.has_committed_expandable_entries());
+    pane.acknowledge_history(&committed.history);
+    assert!(pane.has_committed_expandable_entries());
+    assert!(!pane.tool_output_expanded());
+
+    pane.push_status("after-browser");
     let mut browser = TranscriptBrowserState::new(true);
 
     let expanded = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
     assert!(expanded.contains("{\"path\":\"a\"}"));
+    assert!(pane.has_committed_expandable_entries());
     assert!(!pane.tool_output_expanded());
 
     browser.toggle();
     let collapsed = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
     assert!(!collapsed.contains("{\"path\":\"a\"}"));
+    assert!(pane.has_committed_expandable_entries());
     assert!(!pane.tool_output_expanded());
+
+    let native = pane.render_terminal_update(80, 20);
+    let native_history = native
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(native_history.contains("after-browser"));
+    assert!(!native_history.contains("{\"path\":\"a\"}"));
 }
 
 #[test]
