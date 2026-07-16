@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use neo_ai::{
-    AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage, ModelCapabilities,
-    ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection, RequestMetadata,
-    RequestOptions, StopReason, ToolCall, ToolSpec,
+    AiError, AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart,
+    ImageData, ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage,
+    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
+    RequestMetadata, RequestOptions, StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::images::OpenAiImagesClient,
@@ -611,6 +611,30 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
             },
         ]
     );
+}
+
+#[tokio::test]
+async fn openai_compatible_stream_rate_limit_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "error": { "code": "rate_limit_exceeded", "message": "slow down" }
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::RateLimit {
+            retry_after: None,
+            message
+        } if message == "slow down"
+    ));
 }
 
 #[tokio::test]
@@ -1518,6 +1542,63 @@ async fn openai_responses_client_returns_protocol_error_for_failed_streams() {
 }
 
 #[tokio::test]
+async fn openai_responses_stream_server_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": { "code": "server_error", "message": "upstream busy" }
+        }
+    })])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::Server {
+            status: 500,
+            retry_after: None,
+            message
+        } if message == "upstream busy"
+    ));
+}
+
+#[tokio::test]
+async fn openai_responses_stream_rate_limit_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": { "code": "rate_limit_exceeded", "message": "slow down" }
+        }
+    })])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::RateLimit {
+            retry_after: None,
+            message
+        } if message == "slow down"
+    ));
+}
+
+#[tokio::test]
 async fn openai_responses_client_returns_protocol_error_for_incomplete_streams() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-incomplete" } }),
@@ -1703,6 +1784,32 @@ async fn anthropic_messages_client_opens_provider_response_once() {
 
     assert_eq!(server.requests().len(), 1);
     assert_eq!(error.code(), "provider.server_error");
+}
+
+#[tokio::test]
+async fn anthropic_stream_overloaded_error_is_retryable_server() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "type": "error",
+        "error": { "type": "overloaded_error", "message": "provider busy" }
+    })])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::Server {
+            status: 529,
+            retry_after: None,
+            message
+        } if message == "provider busy"
+    ));
 }
 
 #[tokio::test]
@@ -2226,6 +2333,35 @@ async fn google_uses_header_auth_and_maps_bounded_error_body() {
     );
     assert!(!requests[0].path.contains("secret-key"));
     assert_eq!(err.code(), "provider.context_overflow");
+}
+
+#[tokio::test]
+async fn google_stream_numeric_server_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "error": {
+            "code": 503,
+            "status": "UNAVAILABLE",
+            "message": "provider busy"
+        }
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::Server {
+            status: 503,
+            retry_after: None,
+            message
+        } if message == "provider busy"
+    ));
 }
 
 #[tokio::test]

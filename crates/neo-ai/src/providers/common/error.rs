@@ -99,6 +99,42 @@ pub(crate) enum ProviderError {
     Unsupported(String),
 }
 
+/// Classify an error reported inside an otherwise successful provider stream.
+pub(crate) fn stream_failure(code: Option<&str>, message: impl Into<String>) -> ProviderError {
+    let message = message.into();
+    let normalized = code
+        .unwrap_or_default()
+        .trim()
+        .replace('-', "_")
+        .replace(' ', "_")
+        .to_lowercase();
+    let status = match normalized.as_str() {
+        "408" => Some(408),
+        "429"
+        | "rate_limit"
+        | "rate_limit_error"
+        | "rate_limit_exceeded"
+        | "too_many_requests"
+        | "resource_exhausted"
+        | "quota_exceeded" => Some(429),
+        "overload" | "overloaded" | "overloaded_error" => Some(529),
+        "unavailable" | "service_unavailable" => Some(503),
+        "server_error" | "internal" | "internal_server_error" | "api_error" | "5xx" => Some(500),
+        "deadline_exceeded" => Some(504),
+        value if value.len() == 3 => value.parse::<u16>().ok(),
+        _ => None,
+    };
+
+    match status {
+        Some(status) => ProviderError::HttpStatus {
+            status,
+            body: Some(message),
+            retry_after: None,
+        },
+        None => ProviderError::Protocol(message),
+    }
+}
+
 impl ProviderError {
     /// Convert into the public [`AiError`] type, branching by HTTP status.
     pub(crate) fn into_ai_error(self) -> AiError {
@@ -204,6 +240,19 @@ mod tests {
                 retry_after: Some(delay),
                 ..
             } if delay == Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn streamed_status_408_maps_to_retryable_server() {
+        let ai = stream_failure(Some("408"), "request timeout").into_ai_error();
+        assert!(matches!(
+            ai,
+            AiError::Server {
+                status: 408,
+                retry_after: None,
+                ..
+            }
         ));
     }
 

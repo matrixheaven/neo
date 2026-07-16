@@ -4,7 +4,7 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use super::common::error::ProviderError;
+use super::common::error::{ProviderError, stream_failure};
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -456,6 +456,25 @@ impl Default for ParseState {
 
 impl ParseState {
     fn ingest(&mut self, value: &Value) -> Result<(), AiError> {
+        if let Some(error) = value.get("error").and_then(Value::as_object) {
+            let numeric_code = error
+                .get("code")
+                .and_then(Value::as_u64)
+                .map(|code| code.to_string());
+            let code = error
+                .get("code")
+                .and_then(Value::as_str)
+                .or_else(|| error.get("status").and_then(Value::as_str))
+                .or_else(|| error.get("type").and_then(Value::as_str))
+                .or(numeric_code.as_deref());
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an error")
+                .to_owned();
+            return Err(stream_failure(code, message).into_ai_error());
+        }
+
         self.usage = value
             .get("usageMetadata")
             .and_then(|v| token_usage_from(v, "promptTokenCount", "candidatesTokenCount"))

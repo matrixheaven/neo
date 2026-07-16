@@ -4,7 +4,7 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use super::common::error::ProviderError;
+use super::common::error::{ProviderError, stream_failure};
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -571,13 +571,27 @@ impl ParseState {
                 self.terminal = true;
             }
             Some("error") => {
+                let error = value.get("error");
+                let numeric_code = error
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_u64)
+                    .map(|code| code.to_string());
+                let code = error
+                    .and_then(|error| error.get("type"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        error
+                            .and_then(|error| error.get("status"))
+                            .and_then(Value::as_str)
+                    })
+                    .or(numeric_code.as_deref());
                 let message = value
                     .get("error")
                     .and_then(|error| error.get("message"))
                     .and_then(Value::as_str)
                     .unwrap_or("provider returned an error")
                     .to_owned();
-                return Err(ProviderError::Protocol(message));
+                return Err(stream_failure(code, message));
             }
             _ => {}
         }

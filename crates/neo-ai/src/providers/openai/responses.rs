@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
-use crate::providers::common::error::ProviderError;
+use crate::providers::common::error::{ProviderError, stream_failure};
 use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
@@ -495,14 +495,39 @@ impl ParseState {
                 self.terminal = true;
             }
             Some("response.failed" | "response.incomplete") => {
-                let status = value
-                    .get("response")
-                    .and_then(|response| response.get("status"))
+                let response = value.get("response").unwrap_or(&Value::Null);
+                let status = response
+                    .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("failed");
-                return Err(ProviderError::Protocol(format!(
-                    "provider response ended with status {status}"
-                )));
+                let error = response.get("error");
+                let numeric_code = error
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_u64)
+                    .map(|code| code.to_string());
+                let code = error
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_str);
+                let code = code
+                    .or_else(|| {
+                        error
+                            .and_then(|error| error.get("type"))
+                            .and_then(Value::as_str)
+                    })
+                    .or_else(|| {
+                        error
+                            .and_then(|error| error.get("status"))
+                            .and_then(Value::as_str)
+                    })
+                    .or(numeric_code.as_deref());
+                let message = error
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .map_or_else(
+                        || format!("provider response ended with status {status}"),
+                        str::to_owned,
+                    );
+                return Err(stream_failure(code, message));
             }
             _ => {}
         }

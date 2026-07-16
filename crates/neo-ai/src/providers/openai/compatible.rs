@@ -1,7 +1,7 @@
 use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
-use crate::providers::common::error::ProviderError;
+use crate::providers::common::error::{ProviderError, stream_failure};
 use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
@@ -493,6 +493,25 @@ impl Default for ParseState {
 
 impl ParseState {
     fn ingest(&mut self, value: &Value) -> Result<(), ProviderError> {
+        if let Some(error) = value.get("error").and_then(Value::as_object) {
+            let numeric_code = error
+                .get("code")
+                .and_then(Value::as_u64)
+                .map(|code| code.to_string());
+            let code = error
+                .get("code")
+                .and_then(Value::as_str)
+                .or_else(|| error.get("type").and_then(Value::as_str))
+                .or_else(|| error.get("status").and_then(Value::as_str))
+                .or(numeric_code.as_deref());
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an error")
+                .to_owned();
+            return Err(stream_failure(code, message));
+        }
+
         self.ensure_started(value);
         if let Some(usage) = value.get("usage") {
             self.usage = token_usage_from(usage, "prompt_tokens", "completion_tokens");
