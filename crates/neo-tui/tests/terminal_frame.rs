@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use neo_agent_core::{AgentEvent, ToolResult};
 use neo_tui::NeoTui;
 use neo_tui::primitive::strip_ansi;
+use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::{TranscriptBrowserState, TranscriptEntry, TranscriptPane, apply_gutter};
 
@@ -42,6 +44,41 @@ fn terminal_frame_acknowledges_history_without_replaying_live_chrome() {
             .map(|line| strip_ansi(line))
             .any(|line| line.contains("streaming tail"))
     );
+}
+
+#[test]
+fn review_frame_acknowledgement_does_not_advance_presentation_ledger() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({"path": "README.md"}),
+    });
+    transcript.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Read".to_owned(),
+        result: ToolResult::ok("contents"),
+    });
+    let mut tui = NeoTui::new(chrome, transcript);
+    let normal = tui.render_terminal_frame(80, 12);
+    assert!(!normal.history.is_empty());
+    assert!(!tui.transcript().has_committed_expandable_entries());
+
+    let review = TerminalFrame {
+        history: normal.history.clone(),
+        live: Vec::new(),
+        cursor: None,
+        review_surface: true,
+        next_animation_deadline: None,
+    };
+    tui.acknowledge_history(&review);
+    assert!(!tui.transcript().has_committed_expandable_entries());
+
+    tui.acknowledge_history(&normal);
+    assert!(tui.transcript().has_committed_expandable_entries());
 }
 
 #[test]

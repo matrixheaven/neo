@@ -168,6 +168,9 @@ impl NeoTui {
     }
 
     pub fn acknowledge_history(&mut self, frame: &TerminalFrame) {
+        if frame.review_surface {
+            return;
+        }
         self.transcript.acknowledge_history(&frame.history);
     }
 

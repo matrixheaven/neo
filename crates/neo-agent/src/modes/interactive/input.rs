@@ -72,6 +72,9 @@ impl InteractiveController {
     }
 
     fn handle_transcript_browser_event(&mut self, event: &InputEvent) -> bool {
+        if matches!(event, InputEvent::Interrupt) {
+            return false;
+        }
         let toggles_output = match event {
             InputEvent::Action(KeybindingAction::ToolOutputToggle) => true,
             InputEvent::Key(key) => self

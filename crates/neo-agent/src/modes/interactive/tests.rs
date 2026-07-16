@@ -1370,10 +1370,8 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                     .map(|line| neo_tui::primitive::strip_ansi(line))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if !frame.review_surface {
-                    tui.acknowledge_history(&frame);
-                }
-                rendered.push(text);
+                tui.acknowledge_history(&frame);
+                rendered.push((frame.review_surface, text));
                 Ok(frame.next_animation_deadline)
             },
             || Ok(()),
@@ -1387,10 +1385,12 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
         .await
         .expect("event loop exits");
 
-    let first_after_ctrl_o = rendered.get(1).expect("frame after ctrl-o");
+    let (review_surface, first_after_ctrl_o) = rendered.get(1).expect("frame after ctrl-o");
+    assert!(!*review_surface);
     assert!(first_after_ctrl_o.contains("Using Write"));
     assert!(first_after_ctrl_o.contains("live-line-12"));
     assert!(!first_after_ctrl_o.contains("Used Write"));
+    assert!(controller.transcript().tool_output_expanded());
 }
 
 #[tokio::test]
@@ -4657,6 +4657,76 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
         .expect("escape closes transcript browser");
     assert!(controller.chrome().transcript_browser_state().is_none());
     assert!(!controller.transcript().tool_output_expanded());
+}
+
+#[tokio::test]
+async fn transcript_browser_interrupt_cancels_active_turn() {
+    let captured_token = Arc::new(std::sync::Mutex::new(None));
+    let observed_token = Arc::clone(&captured_token);
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
+        Box::pin(async move {
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+        PickerCatalogs::default(),
+        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+    );
+    controller
+        .transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({ "path": "README.md" }),
+        });
+    controller
+        .transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "Read".to_owned(),
+            result: ToolResult::ok("expanded file content"),
+        });
+    let frame = controller.tui.render_terminal_frame(80, 24);
+    controller.tui.acknowledge_history(&frame);
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
+        .await
+        .expect("ctrl-o opens transcript browser");
+    assert!(controller.chrome().transcript_browser_state().is_some());
+
+    controller.start_turn_with_prompt(Vec::new());
+    let token = captured_token
+        .lock()
+        .expect("token lock")
+        .clone()
+        .expect("turn token captured");
+    controller
+        .handle_input_event(InputEvent::Interrupt)
+        .await
+        .expect("interrupt reaches global handler");
+
+    let cancelled = token.is_cancelled();
+    let active_turn_cleared = controller.active_turn.is_none();
+    let interrupted_status = transcript_has_status(&controller, "Interrupted");
+    if !cancelled {
+        controller
+            .cancel_active_turn()
+            .await
+            .expect("clean up swallowed interrupt");
+    }
+    assert!(cancelled, "browser must not swallow active-turn interrupt");
+    assert!(active_turn_cleared);
+    assert!(interrupted_status);
 }
 
 #[tokio::test]
