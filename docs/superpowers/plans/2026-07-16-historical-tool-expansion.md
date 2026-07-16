@@ -30,7 +30,7 @@
 - Modify crates/neo-tui/src/screen_output/inline_terminal.rs and terminal_modes.rs: alternate-screen and mouse-capture transactions.
 - Modify crates/neo-tui/src/input/mod.rs and input/raw_input.rs: SGR wheel decoding while review capture is active.
 - Modify crates/neo-agent/src/modes/interactive/input.rs, mod.rs, and terminal_io.rs: browser input, immediate frame ordering, and mode transitions.
-- Delete crates/neo-tui/src/transcript/presentation.rs and streaming_prefix.rs only after all normal-screen history-only APIs/tests are migrated.
+- Keep crates/neo-tui/src/transcript/presentation.rs as the sole normal-screen append-only commit ledger; remove only obsolete replay APIs and diagnostics after review rendering is wired.
 - Update focused tests in neo-tui and neo-agent; update the immutable-scrollback design document.
 
 ---
@@ -245,34 +245,34 @@ In run_terminal_loop_with_suspend, after handle_input_event returns and before d
 
 ---
 
-### Task 4: Remove Obsolete History Replay Paths And Review The Branch
+### Task 4: Finalize Immutable Boundaries And Review The Branch
 
 Files:
-- Delete crates/neo-tui/src/transcript/presentation.rs
-- Delete crates/neo-tui/src/transcript/streaming_prefix.rs
+- Modify crates/neo-tui/src/transcript/presentation.rs and streaming_prefix.rs only where the review surface needs a clean boundary
 - Modify crates/neo-tui/src/transcript/mod.rs, pane.rs, app.rs, and screen_output/inline_terminal.rs
 - Modify focused terminal/transcript/multi-agent tests
 - Modify docs/superpowers/specs/2026-07-13-immutable-terminal-scrollback-design.md
 
 Interfaces:
 - Normal frames retain append-only history until the review surface is entered; review frames carry no history blocks and never call acknowledge_history.
-- No production or test code depends on TranscriptPresentation, FinalizedBlock, TranscriptTerminalUpdate, stable_prefix_len, or committed-revision replay diagnostics.
+- TranscriptPresentation remains the normal-screen ledger. Its committed-revision mismatch guard remains a safety invariant for the primary screen, while browser snapshots bypass it without mutating or acknowledging it.
+- No production or test code treats a committed revision mismatch as a user-visible history update; review rendering is the only path that reflows committed content.
 - The design document states the final two-surface contract: primary native scrollback is immutable; historical reflow happens only in the app-owned review surface.
 
 - [ ] Step 1: Write migration tests proving the old path is unreachable.
 
 Add exact assertions to terminal_scrollback.rs that a committed tool remains byte-for-byte unchanged while a review frame expands and collapses it, and that review frames contain no history append blocks. Replace the old test that treats committed revision mismatch without replay as user-visible behavior.
 
-- [ ] Step 2: Run migration tests and confirm RED against old exports.
+- [ ] Step 2: Run migration tests and confirm RED against the old history-only behavior.
 
     cargo test --package neo-tui --test terminal_scrollback committed_tool_review_does_not_duplicate_native_scrollback --exact --nocapture
     cargo test --package neo-tui --test terminal_scrollback review_frames_never_acknowledge_history --exact --nocapture
 
-Expected: compile or assertion failures until obsolete exports and acknowledgement calls are removed.
+Expected: assertion failures until the browser path is the only way to reflow committed content.
 
-- [ ] Step 3: Delete presentation/replay-only implementation and migrate callers.
+- [ ] Step 3: Remove only obsolete history-replay assumptions and migrate callers.
 
-Remove the presentation ledger, finalized-block proof types, streaming-prefix module, history acknowledgement API, and cache/diagnostic code whose only consumer was that ledger. Keep canonical TranscriptStore rendering and the browser clone as the sole historical reflow path. Update NeoTui, InlineTerminal, and interactive terminal I/O so normal frames append only newly produced rows and review frames render only bounded live rows.
+Keep the presentation ledger, finalized-block proof types, streaming-prefix module, and write-then-acknowledge transaction for normal-screen output. Remove any API that attempts to mutate an acknowledged block or replay it after Ctrl+O. Keep canonical TranscriptStore rendering and the browser clone as the only historical reflow paths. Update NeoTui, InlineTerminal, and interactive terminal I/O so normal frames append only newly produced rows and review frames render only bounded live rows.
 
 - [ ] Step 4: Update design/spec and focused tests.
 
