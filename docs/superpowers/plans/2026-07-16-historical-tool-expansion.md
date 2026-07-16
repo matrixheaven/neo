@@ -85,7 +85,7 @@ Add tests equivalent to the following:
         }
         let mut browser = TranscriptBrowserState::new(false);
         assert_eq!(pane.render_browser_rows(&mut browser, 80, 5).len(), 5);
-        browser.scroll_up(3);
+        browser.scroll_up(usize::MAX);
         assert!(pane.render_browser_rows(&mut browser, 80, 5).join("\n").contains("row-0"));
     }
 
