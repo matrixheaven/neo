@@ -941,8 +941,9 @@ mod tests {
 
     use neo_agent_core::{
         AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
-        MessageOrigin, PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
-        StopReason as AgentStopReason, ToolExecutionMode,
+        McpConnectionManager, MessageOrigin, PermissionApprovalDecision, PermissionMode,
+        PermissionOperation, ProcessSupervisor, QueueMode, StopReason as AgentStopReason,
+        ToolExecutionMode,
         session::{JsonlSessionReader, JsonlSessionWriter},
         skills::SkillStore,
     };
@@ -950,6 +951,7 @@ mod tests {
         AiStreamEvent, ApiKind, ApiType, ChatMessage, ContentPart, ModelCapabilities, ModelSpec,
         ProviderId, StopReason, providers::fake::FakeModelClient,
     };
+    use tracing_subscriber::prelude::*;
 
     use super::mcp_cli::auth_mcp_server;
     use super::models_cli::list_configured_models;
@@ -2168,21 +2170,10 @@ mod tests {
     async fn tool_registry_ignores_failed_mcp_server_startup() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = test_config(temp.path());
-        config.mcp.servers.push(crate::config::McpServerConfig {
-            id: "bad".to_owned(),
-            enabled: true,
-            transport: McpTransport::Stdio,
-            command: Some("neo-missing-mcp-binary-for-test".to_owned()),
-            url: None,
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            headers: BTreeMap::new(),
-            cwd: None,
-            enabled_tools: Vec::new(),
-            disabled_tools: Vec::new(),
-            startup_timeout_ms: Some(50),
-            tool_timeout_ms: None,
-        });
+        let mut server = test_mcp_server("bad", McpTransport::Stdio, None);
+        server.command = Some("neo-missing-mcp-binary-for-test".to_owned());
+        server.startup_timeout_ms = Some(50);
+        config.mcp.servers.push(server);
 
         let registry =
             tool_registry_for_config(&config, Arc::new(std::sync::Mutex::new(Vec::new())), None)
@@ -2195,6 +2186,34 @@ mod tests {
                 .iter()
                 .all(|spec| !spec.name.starts_with("mcp__bad__")),
             "failed MCP tools must not be exposed"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_mcp_manager_does_not_relog_startup_failure_during_tool_registration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        let mut server = test_mcp_server("bad", McpTransport::Stdio, None);
+        server.command = Some("neo-missing-mcp-binary-for-test".to_owned());
+        server.startup_timeout_ms = Some(50);
+        config.mcp.servers.push(server);
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let layer = crate::log_capture::CapturingLayer::new(event_tx);
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+        tool_registry_for_config(
+            &config,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            Some(&manager),
+        )
+        .await
+        .expect("bad MCP server should not abort registry construction");
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.is_empty(),
+            "startup failure was already surfaced by the shared MCP manager: {events:?}"
         );
     }
 

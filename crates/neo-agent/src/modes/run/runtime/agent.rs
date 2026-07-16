@@ -188,15 +188,17 @@ pub(crate) async fn tool_registry_for_config(
         for snapshot in snapshots {
             tracing::info!("{}", crate::mcp_ops::format_mcp_startup_message(&snapshot));
         }
-        for diagnostic in manager_ref
+        let diagnostics = manager_ref
             .register_connected_tools_into(&mut registry)
-            .await
-        {
-            tracing::warn!(
-                server_id = %diagnostic.server_id,
-                message = %diagnostic.message,
-                "MCP server unavailable"
-            );
+            .await;
+        if mcp_manager.is_none() {
+            for diagnostic in diagnostics {
+                tracing::warn!(
+                    server_id = %diagnostic.server_id,
+                    message = %diagnostic.message,
+                    "MCP server unavailable"
+                );
+            }
         }
     }
     Ok(registry)
