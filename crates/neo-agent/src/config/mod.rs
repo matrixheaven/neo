@@ -167,6 +167,7 @@ pub struct RuntimeConfig {
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
+    pub retry: RuntimeRetryConfig,
     pub compaction: Option<RuntimeCompactionConfig>,
     pub shell: ShellLimits,
     #[serde(skip)]
@@ -183,10 +184,22 @@ impl Default for RuntimeConfig {
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
+            retry: RuntimeRetryConfig::default(),
             compaction: Some(RuntimeCompactionConfig::default()),
             shell: ShellLimits::default(),
             shell_runtime: ShellRuntime::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRetryConfig {
+    pub max_retries: u32,
+}
+
+impl Default for RuntimeRetryConfig {
+    fn default() -> Self {
+        Self { max_retries: 5 }
     }
 }
 
@@ -256,7 +269,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::config::{
-        AppConfig, ConfigOverrides, PermissionMode, RuntimeCompactionConfig, TuiConfig,
+        AppConfig, ConfigOverrides, PermissionMode, RuntimeCompactionConfig, RuntimeConfig,
+        TuiConfig,
     };
     use crate::trust::{ProjectTrustState, ProjectTrustStore};
 
@@ -414,6 +428,21 @@ max_active_commands = 51
                 effort: neo_ai::ReasoningEffort::high(),
             }
         );
+    }
+
+    #[test]
+    fn runtime_retry_defaults_and_loads_explicit_max_retries() {
+        let config = super::loader::runtime_from_file_for_tests(Some(
+            crate::config::types::FileRuntimeConfig {
+                retry: Some(crate::config::types::FileRuntimeRetryConfig {
+                    max_retries: Some(100),
+                }),
+                ..crate::config::types::FileRuntimeConfig::default()
+            },
+        ));
+
+        assert_eq!(config.retry.max_retries, 100);
+        assert_eq!(RuntimeConfig::default().retry.max_retries, 5);
     }
 
     #[test]

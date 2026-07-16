@@ -1086,6 +1086,8 @@ model = "old"
         .expect("add provider");
 
         let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("[runtime.retry]"));
+        assert!(written.contains("max_retries = 5"));
         assert!(written.contains("[runtime.compaction]"));
         assert!(written.contains("enabled = true"));
         assert!(written.contains("keep_recent_messages = 20"));

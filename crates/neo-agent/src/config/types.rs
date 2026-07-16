@@ -203,9 +203,17 @@ pub(crate) struct FileRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tool_execution_mode: Option<ToolExecutionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retry: Option<FileRuntimeRetryConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) compaction: Option<FileRuntimeCompactionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) shell: Option<FileRuntimeShellConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct FileRuntimeRetryConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

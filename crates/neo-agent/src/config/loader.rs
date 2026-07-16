@@ -16,13 +16,13 @@ use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::notify::NotificationMode;
 
 use super::types::{
-    FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileRuntimeShellConfig,
-    FileTuiConfig, default_runtime_compaction_keep_recent_messages,
+    FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileRuntimeRetryConfig,
+    FileRuntimeShellConfig, FileTuiConfig, default_runtime_compaction_keep_recent_messages,
     default_runtime_compaction_max_estimated_tokens,
 };
 use super::{
     AppConfig, ConfigOverrides, Defaults, ProviderConfig, RuntimeCompactionConfig, RuntimeConfig,
-    TuiConfig, default_config_path, expand_user_path, neo_home,
+    RuntimeRetryConfig, TuiConfig, default_config_path, expand_user_path, neo_home,
 };
 use crate::{themes, trust};
 
@@ -236,6 +236,12 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         tool_execution_mode: runtime
             .tool_execution_mode
             .unwrap_or(ToolExecutionMode::Parallel),
+        retry: RuntimeRetryConfig {
+            max_retries: runtime
+                .retry
+                .and_then(|retry| retry.max_retries)
+                .unwrap_or(5),
+        },
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
         shell: runtime_shell_from_file(runtime.shell),
         shell_runtime: ShellRuntime::default(),
@@ -627,10 +633,17 @@ fn config_with_default_compaction(config: &FileConfig) -> FileConfig {
     let runtime = config
         .runtime
         .get_or_insert_with(FileRuntimeConfig::default);
+    runtime.retry.get_or_insert_with(default_file_runtime_retry);
     runtime
         .compaction
         .get_or_insert_with(default_file_runtime_compaction);
     config
+}
+
+fn default_file_runtime_retry() -> FileRuntimeRetryConfig {
+    FileRuntimeRetryConfig {
+        max_retries: Some(5),
+    }
 }
 
 fn default_file_runtime_compaction() -> FileRuntimeCompactionConfig {

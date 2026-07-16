@@ -968,7 +968,7 @@ mod tests {
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
-        RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+        RuntimeCompactionConfig, RuntimeConfig, RuntimeRetryConfig, TuiConfig,
     };
 
     #[test]
@@ -1000,6 +1000,7 @@ mod tests {
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
                 tool_execution_mode: ToolExecutionMode::Sequential,
+                retry: RuntimeRetryConfig { max_retries: 100 },
                 compaction: Some(RuntimeCompactionConfig {
                     enabled: true,
                     max_estimated_tokens: 16_000,
@@ -1042,6 +1043,7 @@ mod tests {
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
+        assert_eq!(agent_config.max_retries, 100);
         assert_eq!(
             agent_config.reasoning,
             neo_ai::ReasoningSelection::Effort {
