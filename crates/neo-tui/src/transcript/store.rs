@@ -410,6 +410,19 @@ impl TranscriptStore {
             self.active_thinking = Some(index);
             return;
         }
+        // Merge a new thinking stream into an immediately preceding completed
+        // thinking block so consecutive reasoning events render as one card.
+        if let Some(index) = self.entries.len().checked_sub(1) {
+            if let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
+            {
+                if *phase == ThinkingPhase::Complete {
+                    *phase = ThinkingPhase::Streaming;
+                    self.active_thinking = Some(index);
+                    self.touch_entry(index);
+                    return;
+                }
+            }
+        }
         let index = self.append_entry(TranscriptEntry::thinking_streaming(String::new()));
         self.active_thinking = Some(index);
     }

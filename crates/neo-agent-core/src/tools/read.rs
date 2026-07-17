@@ -2,7 +2,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, normalize_path, parse_input, schema,
+};
 
 const MAX_LINES: usize = 1000;
 const MAX_LINE_LENGTH: usize = 2000;
@@ -13,7 +15,7 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 struct ReadInput {
     #[schemars(
-        description = "Path to the text file. Relative paths resolve against the working directory; absolute paths must be inside an allowed workspace root."
+        description = "Path to the text file. Relative paths resolve against the working directory; absolute paths are used as-is, including paths outside the working directory."
     )]
     path: std::path::PathBuf,
     #[schemars(
@@ -42,7 +44,7 @@ impl Tool for ReadTool {
         \
         Parameters:\
         - path: Path to the text file. Relative paths resolve against the working directory; \
-          absolute paths must be inside an allowed workspace root.\
+          absolute paths are used as-is, including paths outside the working directory.\
         - line_offset: 1-based line number to start reading from. Omit to start at line 1. Negative \
           values read from the end (e.g. -100 reads the last 100 lines); the absolute value must \
           not exceed 1000.\
@@ -68,7 +70,7 @@ impl Tool for ReadTool {
         Box::pin(async move {
             ctx.ensure_file_read_allowed()?;
             let input: ReadInput = parse_input(self.name(), input)?;
-            let path = ctx.resolve_workspace_path(&input.path)?;
+            let path = resolve_read_path(ctx, &input.path);
 
             match run_read(&path, input.line_offset, input.n_lines).await {
                 Ok(result) => Ok(ToolResult::ok(result.finish_output())),
@@ -85,6 +87,19 @@ impl Tool for ReadTool {
             }
         })
     }
+}
+
+fn resolve_read_path(ctx: &ToolContext, path: &std::path::Path) -> std::path::PathBuf {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        ctx.workspace_root().join(path)
+    };
+    normalize_path(
+        &candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone()),
+    )
 }
 
 #[derive(Debug)]

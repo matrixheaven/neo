@@ -270,10 +270,65 @@ impl Default for ShellRuntime {
     fn default() -> Self {
         Self::new(
             ShellLimits::default(),
-            PathBuf::from("neo"),
-            std::env::temp_dir().join("neo-runtime"),
+            resolve_default_guardian_executable(),
+            std::env::temp_dir().join(format!("neo-runtime-{}", uuid::Uuid::new_v4())),
         )
     }
+}
+
+fn resolve_default_guardian_executable() -> PathBuf {
+    if let Ok(current_exe) = std::env::current_exe()
+        && is_named_neo(&current_exe)
+    {
+        return current_exe;
+    }
+
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let manifest_dir = PathBuf::from(manifest_dir);
+        if let Some(workspace_root) = find_workspace_root(&manifest_dir) {
+            if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+                let target = PathBuf::from(target_dir);
+                let debug = target.join("neo");
+                if debug.is_file() {
+                    return debug;
+                }
+                let release = target.join("neo");
+                if release.is_file() {
+                    return release;
+                }
+            } else {
+                let debug = workspace_root.join("target").join("debug").join("neo");
+                if debug.is_file() {
+                    return debug;
+                }
+                let release = workspace_root.join("target").join("release").join("neo");
+                if release.is_file() {
+                    return release;
+                }
+            }
+        }
+    }
+
+    PathBuf::from("neo")
+}
+
+fn is_named_neo(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("neo"))
+}
+
+fn find_workspace_root(manifest_dir: &Path) -> Option<PathBuf> {
+    manifest_dir.ancestors().find_map(|ancestor| {
+        let cargo_toml = ancestor.join("Cargo.toml");
+        if !cargo_toml.is_file() {
+            return None;
+        }
+        std::fs::read_to_string(cargo_toml)
+            .ok()
+            .filter(|content| content.contains("[workspace]"))
+            .map(|_| ancestor.to_path_buf())
+    })
 }
 
 impl ShellRuntime {

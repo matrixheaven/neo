@@ -813,11 +813,17 @@ fn fit_live_blocks(
             block_lines.push(header);
         }
         if block.show_omission {
-            block_lines.push(FittedLine {
-                text: omission_line(block.body.len().saturating_sub(block.tail_len), theme),
-                animated: false,
-                pinned: false,
-            });
+            if block.tail_len == 0 && !block.body.is_empty() {
+                // The budget is too tight for an omission hint; show the single
+                // most recent content line instead.
+                block_lines.push(block.body.last().expect("non-empty body").clone());
+            } else {
+                block_lines.push(FittedLine {
+                    text: omission_line(block.body.len().saturating_sub(block.tail_len), theme),
+                    animated: false,
+                    pinned: false,
+                });
+            }
         }
         block_lines.extend(
             block

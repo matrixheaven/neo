@@ -192,6 +192,17 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    /// Sync the externally driven animation frame (e.g., from the chrome) into
+    /// the transcript. Marking dirty when the frame changes ensures the next
+    /// render picks up the new spinner/activity state.
+    pub(crate) fn set_activity_frame(&mut self, frame: usize) {
+        if self.activity_frame == frame {
+            return;
+        }
+        self.activity_frame = frame;
+        self.mark_dirty();
+    }
+
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<PathBuf>) {
         let path = workspace_root.into();
         if self.workspace_root.as_deref() == Some(&path) {
