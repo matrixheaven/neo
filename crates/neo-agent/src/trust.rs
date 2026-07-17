@@ -1,42 +1,14 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::Context;
+use neo_agent_core::instructions::find_agents_file;
 
 use crate::{json_store, path_key::project_key};
 
 const TRUST_FILE: &str = "trust.json";
-
-/// Canonical (lowercase) base names of context files recognized by neo.
-/// Matching is case-insensitive so any casing (e.g. `agents.md`, `Agents.MD`)
-/// is detected on case-sensitive filesystems.
-pub(crate) const CONTEXT_FILE_CANDIDATES: &[&str] = &["agents.md", "claude.md"];
-
-/// Scan `directory` for context files (AGENTS.md, CLAUDE.md) using
-/// case-insensitive name matching.
-///
-/// Returns paths ordered by the priority in [`CONTEXT_FILE_CANDIDATES`].
-/// If `directory` cannot be read, returns an empty vector.
-pub(crate) fn find_context_files_in_dir(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let mut by_lower: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let Some(name_str) = file_name.to_str() else {
-            continue;
-        };
-        by_lower.insert(name_str.to_lowercase(), entry.path());
-    }
-    CONTEXT_FILE_CANDIDATES
-        .iter()
-        .filter_map(|candidate| by_lower.get(*candidate).cloned())
-        .collect()
-}
 
 /// Where a trust decision originates: the current working directory or an
 /// ancestor that was explicitly trusted/untrusted.
@@ -189,7 +161,7 @@ pub(crate) fn resolve_project_trust_decision(
 
     // Otherwise inherit from the nearest ancestor with a stored decision.
     for ancestor in project_dir.ancestors().skip(1) {
-        if !inputs_in_dir(ancestor).is_empty()
+        if !inputs_in_dir(ancestor)?.is_empty()
             && let Some(value) = store.get(ancestor)?
         {
             let canonical_ancestor = ancestor.canonicalize().with_context(|| {
@@ -259,7 +231,7 @@ pub(crate) fn collect_project_trust_inputs(
     let mut seen_candidates = HashSet::new();
 
     for (index, directory) in project_dir.ancestors().enumerate() {
-        let dir_inputs = inputs_in_dir(directory);
+        let dir_inputs = inputs_in_dir(directory)?;
         if dir_inputs.is_empty() {
             continue;
         }
@@ -299,10 +271,10 @@ pub(crate) fn collect_project_trust_inputs(
     })
 }
 
-fn inputs_in_dir(directory: &Path) -> Vec<(PathBuf, TrustInputKind)> {
+fn inputs_in_dir(directory: &Path) -> anyhow::Result<Vec<(PathBuf, TrustInputKind)>> {
     let mut result = Vec::new();
-    for path in find_context_files_in_dir(directory) {
-        result.push((path, TrustInputKind::ContextFile));
+    if let Some(agents_file) = find_agents_file(directory)? {
+        result.push((agents_file, TrustInputKind::ContextFile));
     }
     let neo_dir = directory.join(".neo");
     if neo_dir.is_dir() {
@@ -312,12 +284,13 @@ fn inputs_in_dir(directory: &Path) -> Vec<(PathBuf, TrustInputKind)> {
     if agents_skills_dir.is_dir() {
         result.push((agents_skills_dir, TrustInputKind::AgentsSkillsDir));
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -508,19 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn context_file_detection_is_case_insensitive() {
-        for casing in &[
-            "agents.md",
-            "Agents.md",
-            "AGENTS.MD",
-            "aGeNtS.Md",
-            "claude.md",
-            "Claude.MD",
-        ] {
+    fn trust_inputs_accept_only_agents_md_case_insensitively() {
+        for casing in &["agents.md", "Agents.md", "AGENTS.MD", "aGeNtS.Md"] {
             let root = TempDir::new().expect("tempdir");
             let project = root.path().join("project");
             fs::create_dir_all(&project).expect("create project");
-            fs::write(project.join(casing), "rules").expect("write context file");
+            fs::write(project.join(casing), "rules").expect("write agents file");
 
             let inputs = collect_project_trust_inputs(&project).expect("collect");
             assert!(
@@ -531,43 +497,58 @@ mod tests {
                 "failed to detect {casing} as a context file",
             );
         }
-    }
 
-    #[test]
-    fn find_context_files_returns_only_first_match() {
+        // A lone claude.md (any casing) is no longer a trust input.
         let root = TempDir::new().expect("tempdir");
-        fs::write(root.path().join("AGENTS.md"), "a").expect("write agents");
-        // No CLAUDE.md present — should still return the single agents file.
-        let found = find_context_files_in_dir(root.path());
-        assert_eq!(found.len(), 1);
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(project.join("claude.md"), "rules").expect("write legacy file");
+
+        let inputs = collect_project_trust_inputs(&project).expect("collect");
         assert!(
-            found[0]
-                .file_name()
-                .unwrap()
-                .eq_ignore_ascii_case("agents.md")
+            inputs.detected.is_empty(),
+            "a lone claude.md must be ignored by trust discovery: {:?}",
+            inputs.detected,
         );
     }
 
     #[test]
-    fn find_context_files_prioritizes_agents_over_claude() {
+    fn trust_inputs_report_ambiguous_casefolded_agents_files() {
         let root = TempDir::new().expect("tempdir");
-        fs::write(root.path().join("CLAUDE.md"), "c").expect("write claude");
-        fs::write(root.path().join("agents.md"), "a").expect("write agents");
+        let project = root.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(project.join("AGENTS.md"), "rules one").expect("write first variant");
+        fs::write(project.join("agents.md"), "rules two").expect("write second variant");
 
-        let found = find_context_files_in_dir(root.path());
-        assert_eq!(found.len(), 2);
-        // agents.md is first in CONTEXT_FILE_CANDIDATES.
+        // Case-insensitive filesystems (default macOS/Windows) cannot hold two
+        // case-folded variants in one directory, so the collision is then
+        // unreachable through the filesystem.
+        let variant_count = fs::read_dir(&project)
+            .expect("read project dir")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("agents.md")
+            })
+            .count();
+        if variant_count < 2 {
+            return;
+        }
+
+        let error = collect_project_trust_inputs(&project)
+            .expect_err("two case-folded AGENTS.md variants are ambiguous");
+        let instruction_error = error
+            .downcast_ref::<neo_agent_core::instructions::InstructionError>()
+            .expect("trust discovery propagates the registry's typed ambiguity");
         assert!(
-            found[0]
-                .file_name()
-                .unwrap()
-                .eq_ignore_ascii_case("agents.md")
-        );
-        assert!(
-            found[1]
-                .file_name()
-                .unwrap()
-                .eq_ignore_ascii_case("claude.md")
+            matches!(
+                instruction_error,
+                neo_agent_core::instructions::InstructionError::AmbiguousAgentsFile { candidates, .. }
+                if candidates.len() == 2
+            ),
+            "expected AmbiguousAgentsFile with both candidates, got {instruction_error}",
         );
     }
 }

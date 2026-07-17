@@ -1,12 +1,11 @@
-//! Resource loading for system prompts, skills, and project context files.
+//! Resource loading for system prompts and skills.
 //!
-//! Trust gating: project-local resources (`AGENTS.md`, `CLAUDE.md`,
-//! `.neo/SYSTEM.md`, `.neo/APPEND_SYSTEM.md`, project skills, and any future
-//! project-local MCP configuration) must only be loaded when the workspace is
-//! trusted. User-global resources under `~/.neo` are always loaded.
+//! Trust gating: project-local resources (`.neo/SYSTEM.md`,
+//! `.neo/APPEND_SYSTEM.md`, project skills, and any future project-local MCP
+//! configuration) must only be loaded when the workspace is trusted.
+//! User-global resources under `~/.neo` are always loaded.
 
 use std::{
-    collections::HashSet,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -15,7 +14,6 @@ use std::{
 use crate::config::expand_user_path;
 #[cfg(test)]
 use crate::config::expand_user_path_with_home;
-use crate::trust::find_context_files_in_dir;
 
 use anyhow::Context;
 use neo_agent_core::skills::{
@@ -163,13 +161,8 @@ Communication
 /// Load the system prompt for a turn.
 ///
 /// Trust gate: project-local `.neo/SYSTEM.md` and `.neo/APPEND_SYSTEM.md` are
-/// not loaded. Only user-global files under `~/.neo` are considered. If a
-/// project-local system prompt path is introduced later, it must be gated by
-/// `project_trusted` the same way `load_context_files` gates project context
-/// files.
+/// not loaded. Only user-global files under `~/.neo` are considered.
 pub(crate) fn load_system_prompt(
-    project_dir: &Path,
-    project_trusted: bool,
     system_prompt_file: Option<&Path>,
     skill_store: &SkillStore,
 ) -> anyhow::Result<Option<String>> {
@@ -183,11 +176,6 @@ pub(crate) fn load_system_prompt(
             .collect();
     if let Some(available_skills) = format_available_skills(skill_store) {
         append_prompts.push(available_skills);
-    }
-    if let Some(project_context) =
-        format_project_context(&load_context_files(project_dir, project_trusted)?)
-    {
-        append_prompts.push(project_context);
     }
 
     Ok(join_system_prompt_parts(system_prompt, append_prompts))
@@ -216,84 +204,6 @@ pub(crate) fn load_skill_store(
         user.extend(discovery::user_skill_dirs(user_dir));
     }
     SkillStore::load(&user, &extra, builtin_skills()?).map_err(anyhow::Error::from)
-}
-
-#[derive(Debug, Clone)]
-struct ContextFile {
-    path: PathBuf,
-    content: String,
-}
-
-/// Load project context files (`AGENTS.md`, `CLAUDE.md`, and variants).
-///
-/// Trust gate: project-local context files are loaded only when
-/// `project_trusted` is `true`. User-global context files under `~/.neo` are
-/// always loaded. This gate must remain in place for all project-local context
-/// file loading.
-fn load_context_files(
-    project_dir: &Path,
-    project_trusted: bool,
-) -> anyhow::Result<Vec<ContextFile>> {
-    let mut context_files = Vec::new();
-    let mut seen = HashSet::new();
-
-    if let Some(home) = crate::config::neo_home()
-        && let Some(global_context) = load_context_file_from_dir(&home)?
-    {
-        seen.insert(global_context.path.clone());
-        context_files.push(global_context);
-    }
-
-    if project_trusted {
-        for directory in project_context_directories(project_dir) {
-            if let Some(context_file) = load_context_file_from_dir(&directory)?
-                && seen.insert(context_file.path.clone())
-            {
-                context_files.push(context_file);
-            }
-        }
-    }
-
-    Ok(context_files)
-}
-
-fn project_context_directories(project_dir: &Path) -> Vec<PathBuf> {
-    project_dir
-        .ancestors()
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
-}
-
-fn load_context_file_from_dir(dir: &Path) -> anyhow::Result<Option<ContextFile>> {
-    let Some(path) = find_context_files_in_dir(dir).into_iter().next() else {
-        return Ok(None);
-    };
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read context file {}", path.display()))?;
-    Ok(Some(ContextFile { path, content }))
-}
-
-fn format_project_context(context_files: &[ContextFile]) -> Option<String> {
-    if context_files.is_empty() {
-        return None;
-    }
-
-    let mut prompt =
-        String::from("<project_context>\n\nProject-specific instructions and guidelines:\n\n");
-    for context_file in context_files {
-        writeln!(
-            prompt,
-            "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n",
-            context_file.path.display(),
-            context_file.content.trim_end()
-        )
-        .expect("writing to String should not fail");
-    }
-    prompt.push_str("</project_context>");
-    Some(prompt)
 }
 
 fn format_available_skills(skill_store: &SkillStore) -> Option<String> {
@@ -490,33 +400,52 @@ mod tests {
     }
 
     #[test]
-    fn project_context_directories_returns_ancestors_before_project() {
-        let directories = project_context_directories(Path::new("/workspace/repo/crate"));
+    fn system_prompt_does_not_append_project_instruction_files() {
+        use neo_agent_core::skills::{SkillManifest, SkillType};
 
-        assert_eq!(
-            directories,
-            vec![
-                PathBuf::from("/"),
-                PathBuf::from("/workspace"),
-                PathBuf::from("/workspace/repo"),
-                PathBuf::from("/workspace/repo/crate"),
-            ]
-        );
-    }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let neo_home = temp.path().join("neo_home");
+        fs::create_dir_all(&neo_home).expect("create neo home");
+        fs::write(neo_home.join("SYSTEM.md"), "BASE SYSTEM SENTINEL").expect("write system prompt");
+        fs::write(neo_home.join("APPEND_SYSTEM.md"), "APPEND SENTINEL")
+            .expect("write append prompt");
 
-    #[test]
-    fn format_project_context_uses_pi_project_instruction_shape() {
-        let prompt = format_project_context(&[ContextFile {
-            path: PathBuf::from("/repo/AGENTS.md"),
-            content: "Follow repo rules.\n".to_owned(),
-        }]);
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::write(workspace.join("AGENTS.md"), "AGENTS BODY SENTINEL").expect("write agents file");
 
-        assert_eq!(
-            prompt.as_deref(),
-            Some(
-                "<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/repo/AGENTS.md\">\nFollow repo rules.\n</project_instructions>\n\n</project_context>"
-            )
-        );
+        let skill = LoadedSkill {
+            name: "brainstorming".to_owned(),
+            root: temp.path().join("skills").join("brainstorming"),
+            manifest: SkillManifest {
+                name: "brainstorming".to_owned(),
+                description: "Use before creative work".to_owned(),
+                skill_type: SkillType::Prompt,
+                when_to_use: None,
+                disable_model_invocation: false,
+                arguments: Vec::new(),
+                slash_commands: Vec::new(),
+            },
+            body: String::new(),
+            source: SkillSource::Builtin,
+        };
+        let store = SkillStore::load(&[], &[], vec![skill]).expect("skill store");
+
+        temp_env::with_var("NEO_HOME", Some(neo_home.as_os_str()), || {
+            let prompt = load_system_prompt(None, &store)
+                .expect("load system prompt")
+                .expect("system prompt");
+
+            assert!(prompt.contains("BASE SYSTEM SENTINEL"));
+            assert!(prompt.contains("APPEND SENTINEL"));
+            assert!(prompt.contains("<available_skills>"));
+            assert!(prompt.contains("brainstorming"));
+            assert!(
+                !prompt.contains("AGENTS BODY SENTINEL"),
+                "project instruction files must not be appended to the system prompt",
+            );
+            assert!(!prompt.contains("<project_context>"));
+        });
     }
 
     #[test]
