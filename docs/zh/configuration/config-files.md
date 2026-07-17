@@ -119,6 +119,17 @@ effort = "high"
 
 `mode = "off"` 关闭 reasoning（默认），`mode = "on"` 启用 provider/model 默认 reasoning，`mode = "effort"` 在支持时发送 provider 定义的显式 `effort`，`mode = "budget_tokens"` 在支持时发送显式 `budget_tokens` 数量。常见 effort 包括 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`；provider 也可以声明其他非空且区分大小写的值。
 
+### `[runtime.retry]` 子表
+
+Neo 仅在 runtime 层重试瞬时 model 请求和 stream 故障：
+
+```toml
+[runtime.retry]
+max_retries = 5
+```
+
+`max_retries` 表示首次请求之后允许的重试请求次数（默认 `5`）；设为 `0` 可禁用重试。有效的 `Retry-After` 延迟会覆盖本地 backoff，并以 24 小时为上限。按 `Esc` 可中断正在进行的 stream 或等待中的重试。
+
 ### `[runtime.compaction]` 子表
 
 上下文压缩默认开启。首次写入配置时会包含此表；如果旧配置缺少该表，Neo 仍使用开启状态的默认值。需要关闭时必须显式设置 `enabled = false`。其余子字段都可选：

@@ -4,7 +4,7 @@ use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::tools::{Tool, ToolContext, ToolRegistry};
 use neo_agent_core::workflow::{LuaWorkflowRunner, WorkflowState};
 use neo_agent_core::{AgentConfig, PermissionMode, ToolAccess, ToolExecutionMode};
-use neo_ai::{AiStreamEvent, StopReason};
+use neo_ai::{AiError, AiStreamEvent, StopReason};
 use serde_json::json;
 
 #[test]
@@ -285,11 +285,11 @@ async fn run_workflow_verify_command_uses_bash_tool_success_and_failure() {
 #[tokio::test]
 async fn run_workflow_swarm_has_failures_reflects_child_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let harness = FakeHarness::from_turns([
-        child_text_turn("alpha ok"),
-        vec![AiStreamEvent::Error {
+    let harness = FakeHarness::from_result_turns([
+        child_text_turn("alpha ok").into_iter().map(Ok).collect(),
+        vec![Err(AiError::Protocol {
             message: "beta failed".to_owned(),
-        }],
+        })],
     ]);
     let ctx = workflow_ctx(dir.path(), &harness).with_access(ToolAccess::all());
     let tool = neo_agent_core::tools::RunWorkflowTool;

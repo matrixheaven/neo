@@ -119,6 +119,17 @@ effort = "high"
 
 `mode = "off"` disables reasoning (default), `mode = "on"` enables the provider/model default, `mode = "effort"` sends an explicit provider-defined `effort` when supported, and `mode = "budget_tokens"` sends an explicit `budget_tokens` count when supported. Common effort values include `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; providers may declare other non-empty, case-sensitive values.
 
+### `[runtime.retry]` Sub-Table
+
+Neo retries transient model request and stream failures only at runtime:
+
+```toml
+[runtime.retry]
+max_retries = 5
+```
+
+`max_retries` is the number of retry requests allowed after the initial request (default `5`); `0` disables retries. A valid `Retry-After` delay overrides local backoff and is capped at 24 hours. Press `Esc` to interrupt an active stream or a pending retry wait.
+
 ### `[runtime.compaction]` Sub-Table
 
 Context compaction is enabled by default. Fresh config writes include this table; if the table is missing from an older config, Neo still uses the enabled defaults. Set `enabled = false` explicitly to disable it. All other sub-fields are optional:
