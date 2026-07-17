@@ -145,6 +145,14 @@ fn sse_response(events: &[Value]) -> String {
     )
 }
 
+fn truncated_sse_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len() + 1,
+        body
+    )
+}
+
 fn status_response(status: u16) -> String {
     format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
@@ -2800,4 +2808,269 @@ async fn google_generative_ai_client_rejects_image_urls_without_dropping_them() 
 
     assert!(err.to_string().contains("image URL"));
     assert_eq!(server.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn anthropic_body_error_respects_terminal_state() {
+    let terminal = format!(
+        "data: {}\n\ndata: {}\n\n",
+        json!({ "type": "message_start", "message": { "id": "msg-terminal" } }),
+        json!({ "type": "message_stop" })
+    );
+    let incomplete = format!(
+        "data: {}\n\n",
+        json!({ "type": "message_start", "message": { "id": "msg-incomplete" } })
+    );
+    let server = MockServer::start(vec![
+        truncated_sse_response(&terminal),
+        truncated_sse_response(&incomplete),
+    ]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    let completed = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal marker must survive the body error");
+    assert!(matches!(
+        completed.last(),
+        Some(AiStreamEvent::MessageEnd { .. })
+    ));
+
+    let error = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("incomplete body must remain an error");
+    assert!(matches!(
+        error,
+        AiError::Transport { message } if !message.starts_with("transport error:")
+    ));
+}
+
+#[tokio::test]
+async fn google_body_error_respects_terminal_state() {
+    let terminal = format!(
+        "data: {}\n\n",
+        json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": "done" }] },
+                "finishReason": "STOP"
+            }]
+        })
+    );
+    let incomplete = format!(
+        "data: {}\n\n",
+        json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": "partial" }] }
+            }]
+        })
+    );
+    let server = MockServer::start(vec![
+        truncated_sse_response(&terminal),
+        truncated_sse_response(&incomplete),
+    ]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let completed = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal marker must survive the body error");
+    assert!(matches!(
+        completed.last(),
+        Some(AiStreamEvent::MessageEnd { .. })
+    ));
+
+    let error = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("incomplete body must remain an error");
+    assert!(matches!(
+        error,
+        AiError::Transport { message } if !message.starts_with("transport error:")
+    ));
+}
+
+#[tokio::test]
+async fn openai_compatible_body_error_respects_terminal_state() {
+    let terminal = concat!(
+        "data: {\"id\":\"chatcmpl-terminal\",\"choices\":[{\"delta\":{\"content\":\"done\"},",
+        "\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let incomplete = concat!(
+        "data: {\"id\":\"chatcmpl-incomplete\",\"choices\":[{\"delta\":{",
+        "\"content\":\"partial\"}}]}\n\n"
+    );
+    let server = MockServer::start(vec![
+        truncated_sse_response(terminal),
+        truncated_sse_response(incomplete),
+    ]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let completed = client
+        .stream_chat(request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal marker must survive the body error");
+    assert!(matches!(
+        completed.last(),
+        Some(AiStreamEvent::MessageEnd { .. })
+    ));
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("incomplete body must remain an error");
+    assert!(matches!(
+        error,
+        AiError::Transport { message } if !message.starts_with("transport error:")
+    ));
+}
+
+#[tokio::test]
+async fn openai_responses_body_error_respects_terminal_state() {
+    let terminal = format!(
+        "data: {}\n\ndata: {}\n\n",
+        json!({ "type": "response.created", "response": { "id": "resp-terminal" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        })
+    );
+    let incomplete = format!(
+        "data: {}\n\n",
+        json!({ "type": "response.created", "response": { "id": "resp-incomplete" } })
+    );
+    let server = MockServer::start(vec![
+        truncated_sse_response(&terminal),
+        truncated_sse_response(&incomplete),
+    ]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let completed = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal marker must survive the body error");
+    assert!(matches!(
+        completed.last(),
+        Some(AiStreamEvent::MessageEnd { .. })
+    ));
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("incomplete body must remain an error");
+    assert!(matches!(
+        error,
+        AiError::Transport { message } if !message.starts_with("transport error:")
+    ));
+}
+
+#[tokio::test]
+async fn openai_responses_numeric_429_and_503_errors_are_retryable() {
+    let server = MockServer::start(vec![
+        sse_response(&[json!({
+            "type": "error",
+            "code": 429,
+            "message": "slow down"
+        })]),
+        sse_response(&[json!({
+            "type": "error",
+            "status": 503,
+            "message": "unavailable"
+        })]),
+    ]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let rate_limit = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+    let unavailable = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(rate_limit, AiError::RateLimit { .. }));
+    assert!(matches!(unavailable, AiError::Server { status: 503, .. }));
+}
+
+#[tokio::test]
+async fn openai_responses_nested_rate_limit_and_overload_errors_are_retryable() {
+    let server = MockServer::start(vec![
+        sse_response(&[json!({
+            "type": "error",
+            "error": { "type": "rate_limit_error", "message": "slow down" }
+        })]),
+        sse_response(&[json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": "busy" }
+        })]),
+    ]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let rate_limit = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+    let overloaded = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(rate_limit, AiError::RateLimit { .. }));
+    assert!(matches!(overloaded, AiError::Server { status: 529, .. }));
+}
+
+#[tokio::test]
+async fn openai_responses_unknown_error_is_protocol() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "type": "error",
+        "error": { "type": "mystery_error", "message": "unknown failure" }
+    })])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(error, AiError::Protocol { .. }));
 }

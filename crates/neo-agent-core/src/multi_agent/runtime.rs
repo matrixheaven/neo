@@ -1440,7 +1440,17 @@ impl MultiAgentRuntime {
         match event {
             AgentEvent::RetryScheduled { .. }
             | AgentEvent::RetryStarted { .. }
-            | AgentEvent::RetryResumed { .. } => {
+            | AgentEvent::RetryResumed { .. }
+            | AgentEvent::RetryExhausted { .. }
+            | AgentEvent::Error { .. }
+            | AgentEvent::TurnFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            }
+            | AgentEvent::RunFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            } => {
                 if let Some((retry_changed, latest_text)) =
                     apply_retry_activity(&mut snapshot.activity, attempt_start, event)
                 {
@@ -1539,16 +1549,6 @@ impl MultiAgentRuntime {
                 snapshot.cache_write_token_count = snapshot
                     .cache_write_token_count
                     .saturating_add(usage.input_cache_write_tokens as usize);
-            }
-            AgentEvent::Error { message, .. } => {
-                changed = true;
-                snapshot.latest_text = Some(bounded_latest_text(message));
-                snapshot.activity.push(AgentActivityEntry {
-                    kind: AgentActivityKind::Text {
-                        text: bounded_latest_text(message),
-                        thinking: false,
-                    },
-                });
             }
             _ => {}
         }
@@ -2007,21 +2007,21 @@ fn child_events_were_cancelled(events: &[AgentEvent]) -> bool {
 }
 
 fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {
-    events.iter().rev().find_map(|event| {
-        let AgentEvent::MessageAppended {
+    events.iter().rev().find_map(|event| match event {
+        AgentEvent::Error { message, .. } => (!message.trim().is_empty()).then(|| message.clone()),
+        AgentEvent::MessageAppended {
             message: AgentMessage::Assistant { content, .. },
-        } = event
-        else {
-            return None;
-        };
-        let text = content
-            .iter()
-            .filter_map(|part| match part {
-                Content::Text { text } => Some(text.as_ref()),
-                _ => None,
-            })
-            .collect::<String>();
-        (!text.trim().is_empty()).then_some(text)
+        } => {
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    Content::Text { text } => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<String>();
+            (!text.trim().is_empty()).then_some(text)
+        }
+        _ => None,
     })
 }
 
@@ -2177,6 +2177,38 @@ fn apply_retry_activity(
                 .then(|| latest_text_activity(activity, false))
                 .flatten();
             Some((cleared, latest_text))
+        }
+        AgentEvent::RetryExhausted { message, .. } | AgentEvent::Error { message, .. } => {
+            let mut current_attempt = activity.split_off(start);
+            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            activity.append(&mut current_attempt);
+            let error = bounded_latest_text(message);
+            if latest_text_activity(activity, false).as_deref() != Some(error.as_str()) {
+                activity.push(AgentActivityEntry {
+                    kind: AgentActivityKind::Text {
+                        text: error.clone(),
+                        thinking: false,
+                    },
+                });
+            }
+            *attempt_start = activity.len();
+            Some((true, Some(error)))
+        }
+        AgentEvent::TurnFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        }
+        | AgentEvent::RunFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        } => {
+            let mut current_attempt = activity.split_off(start);
+            let previous_len = current_attempt.len();
+            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            let cleared = current_attempt.len() != previous_len;
+            activity.append(&mut current_attempt);
+            *attempt_start = activity.len();
+            Some((cleared, latest_text_activity(activity, false)))
         }
         _ => None,
     }
@@ -2627,6 +2659,138 @@ mod tests {
             latest_text_activity(&summarized, false).as_deref(),
             Some("Reconnecting 1/5")
         );
+    }
+
+    #[test]
+    fn retry_exhaustion_fold_matches_live_and_preserves_error() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("retry exhaustion");
+        let started_at = Instant::now();
+        let mut events = Vec::new();
+        let mut record = |event| {
+            let _ = runtime.apply_child_event(&child.id, started_at, &event);
+            events.push(event);
+        };
+
+        record(AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial one".to_owned(),
+        });
+        record(AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 1,
+            delay_ms: 500,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: body closed".to_owned(),
+        });
+        record(AgentEvent::RetryStarted {
+            turn: 1,
+            retry: 1,
+            max_retries: 1,
+        });
+        record(AgentEvent::RetryResumed { turn: 1, retry: 1 });
+        record(AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: "failed reasoning two".to_owned(),
+        });
+        record(AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial two".to_owned(),
+        });
+        record(AgentEvent::RetryExhausted {
+            turn: 1,
+            retries_used: 1,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: connection reset".to_owned(),
+        });
+        record(AgentEvent::Error {
+            turn: 1,
+            message: "transport error: connection reset".to_owned(),
+            code: Some("provider.transport_error".to_owned()),
+            retry_after: None,
+        });
+
+        let live = runtime.snapshot(&child.id).expect("live child snapshot");
+        let terminal = summarize_child_events(&events, Duration::ZERO);
+
+        assert_eq!(live.activity, terminal.activity);
+        assert_eq!(live.latest_text, terminal.latest_text);
+        assert_eq!(
+            terminal.latest_text.as_deref(),
+            Some("transport error: connection reset")
+        );
+        assert_eq!(terminal.summary, "transport error: connection reset");
+        assert!(terminal.activity.iter().all(|entry| !matches!(
+            &entry.kind,
+            AgentActivityKind::Text { text, .. }
+                if text.contains("failed") || text.starts_with("Reconnecting ")
+        )));
+    }
+
+    #[test]
+    fn cancelled_retry_backoff_fold_matches_live() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("cancelled retry backoff");
+        let started_at = Instant::now();
+        let mut events = Vec::new();
+        let mut record = |event| {
+            let _ = runtime.apply_child_event(&child.id, started_at, &event);
+            events.push(event);
+        };
+
+        record(AgentEvent::TextDelta {
+            turn: 1,
+            text: "prior answer".to_owned(),
+        });
+        record(AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                vec![Content::text("prior answer")],
+                Vec::new(),
+                StopReason::ToolUse,
+            ),
+        });
+        record(AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial".to_owned(),
+        });
+        record(AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+            delay_ms: 500,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: body closed".to_owned(),
+        });
+        record(AgentEvent::RetryStarted {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+        });
+        record(AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        });
+        record(AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        });
+
+        let live = runtime.snapshot(&child.id).expect("live child snapshot");
+        let terminal = summarize_child_events(&events, Duration::ZERO);
+
+        assert_eq!(live.activity, terminal.activity);
+        assert_eq!(live.latest_text, terminal.latest_text);
+        assert_eq!(terminal.latest_text.as_deref(), Some("prior answer"));
+        assert_eq!(
+            latest_text_activity(&terminal.activity, false).as_deref(),
+            Some("prior answer")
+        );
+        assert!(terminal.activity.iter().all(|entry| !matches!(
+            &entry.kind,
+            AgentActivityKind::Text { text, .. }
+                if text == "failed partial" || text.starts_with("Reconnecting ")
+        )));
     }
 
     #[tokio::test]

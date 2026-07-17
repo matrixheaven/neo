@@ -116,13 +116,16 @@ impl StableJsonState {
                 retries_used,
                 error_code,
                 message,
-            } => Some(json!({
-                "type": "retry_exhausted",
-                "turn": turn,
-                "retriesUsed": retries_used,
-                "errorCode": error_code,
-                "message": message,
-            })),
+            } => {
+                self.reset_assistant_attempt();
+                Some(json!({
+                    "type": "retry_exhausted",
+                    "turn": turn,
+                    "retriesUsed": retries_used,
+                    "errorCode": error_code,
+                    "message": message,
+                }))
+            }
             AgentEvent::MessageStarted { turn, id } => Some(self.map_message_started(*turn, id)),
             AgentEvent::ThinkingStarted { turn, id: _ } => Some(self.map_thinking_started(*turn)),
             AgentEvent::ThinkingDelta { turn, text } => Some(self.map_thinking_delta(*turn, text)),
@@ -220,11 +223,14 @@ impl StableJsonState {
                 push_unique(&mut self.messages, stable_message(message));
                 Vec::new()
             }
-            AgentEvent::Error { turn, message, .. } => vec![json!({
-                "type": "error",
-                "turn": turn,
-                "message": message,
-            })],
+            AgentEvent::Error { turn, message, .. } => {
+                self.reset_assistant_attempt();
+                vec![json!({
+                    "type": "error",
+                    "turn": turn,
+                    "message": message,
+                })]
+            }
             AgentEvent::QueueDrained { kind, count } => vec![json!({
                 "type": "queue_update",
                 "kind": format!("{kind:?}").to_lowercase(),
@@ -270,6 +276,7 @@ impl StableJsonState {
         self.assistant_content.clear();
         self.active_text_index = None;
         self.active_thinking_index = None;
+        self.assistant_message_id = None;
         self.assistant_stop_reason = None;
     }
 
@@ -678,6 +685,70 @@ mod tests {
                 "errorCode": "provider.transport_error",
                 "message": "transport error: body closed",
             })]
+        );
+    }
+
+    #[test]
+    fn retry_exhausted_clears_failed_assistant_attempt() {
+        let mut state = StableJsonState::default();
+        let _ = state.map_event(&AgentEvent::MessageStarted {
+            turn: 1,
+            id: "failed-message".to_owned(),
+        });
+        let _ = state.map_event(&AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial".to_owned(),
+        });
+
+        let exhausted = state.map_event(&AgentEvent::RetryExhausted {
+            turn: 1,
+            retries_used: 1,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: body closed".to_owned(),
+        });
+        let turn_end = state.map_event(&AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: neo_agent_core::StopReason::Error,
+        });
+
+        assert_eq!(exhausted[0]["type"], "retry_exhausted");
+        assert_eq!(turn_end[0]["message"]["id"], serde_json::Value::Null);
+        assert_eq!(turn_end[0]["message"]["content"], serde_json::json!([]));
+        assert_eq!(
+            turn_end[0]["message"]["stopReason"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn terminal_error_clears_failed_assistant_attempt() {
+        let mut state = StableJsonState::default();
+        let _ = state.map_event(&AgentEvent::MessageStarted {
+            turn: 1,
+            id: "failed-message".to_owned(),
+        });
+        let _ = state.map_event(&AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial".to_owned(),
+        });
+
+        let error = state.map_event(&AgentEvent::Error {
+            turn: 1,
+            message: "transport error: body closed".to_owned(),
+            code: Some("provider.transport_error".to_owned()),
+            retry_after: None,
+        });
+        let turn_end = state.map_event(&AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: neo_agent_core::StopReason::Error,
+        });
+
+        assert_eq!(error[0]["type"], "error");
+        assert_eq!(turn_end[0]["message"]["id"], serde_json::Value::Null);
+        assert_eq!(turn_end[0]["message"]["content"], serde_json::json!([]));
+        assert_eq!(
+            turn_end[0]["message"]["stopReason"],
+            serde_json::Value::Null
         );
     }
 

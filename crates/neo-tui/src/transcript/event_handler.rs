@@ -426,7 +426,9 @@ impl TranscriptPane {
 
                 let severity = match code.as_deref() {
                     Some(
-                        "provider.rate_limit" | "provider.server_error" | "provider.network_error",
+                        "provider.rate_limit"
+                        | "provider.server_error"
+                        | "provider.transport_error",
                     ) => StatusSeverity::Warning,
                     _ => StatusSeverity::Error,
                 };

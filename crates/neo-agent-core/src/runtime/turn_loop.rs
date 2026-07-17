@@ -53,15 +53,31 @@ async fn run_model_turn_with_recovery(
     cancel_token: &CancellationToken,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
     emitter.emit(AgentEvent::TurnStarted { turn });
-    let result =
-        match run_model_request_with_retries(model, config, &request, turn, emitter, cancel_token)
+    let mut retries_used = 0;
+    let result = match run_model_request_with_retries(
+        model,
+        config,
+        &request,
+        turn,
+        emitter,
+        cancel_token,
+        &mut retries_used,
+    )
+    .await
+    {
+        Err(error) if should_recover_from_overflow(&error) => {
+            recover_from_overflow(
+                model,
+                config,
+                emitter,
+                cancel_token,
+                turn,
+                &mut retries_used,
+            )
             .await
-        {
-            Err(error) if should_recover_from_overflow(&error) => {
-                recover_from_overflow(model, config, emitter, cancel_token, turn).await
-            }
-            result => result,
-        }?;
+        }
+        result => result,
+    }?;
 
     let stop_reason = match &result {
         Some(AgentMessage::Assistant { stop_reason, .. }) => *stop_reason,
@@ -79,37 +95,33 @@ async fn run_model_request_with_retries(
     turn: u32,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
+    retries_used: &mut u32,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
-    let mut retries_used = 0_u32;
     loop {
-        if retries_used > 0 {
-            emitter.emit(AgentEvent::RetryStarted {
-                turn,
-                retry: retries_used,
-                max_retries: config.max_retries,
-            });
-        }
         match run_model_attempt(
             Arc::clone(model),
             request.clone(),
             turn,
             emitter,
             cancel_token,
-            (retries_used > 0).then_some(retries_used),
+            (*retries_used > 0).then_some(*retries_used),
         )
         .await
         {
             Ok(message) => {
-                if retries_used > 0 {
-                    emitter.emit(AgentEvent::RetrySucceeded { turn, retries_used });
+                if *retries_used > 0 {
+                    emitter.emit(AgentEvent::RetrySucceeded {
+                        turn,
+                        retries_used: *retries_used,
+                    });
                 }
                 return Ok(message);
             }
             Err(AgentRuntimeError::Model(error)) if error.is_retryable() => {
-                if retries_used >= config.max_retries {
+                if *retries_used >= config.max_retries {
                     emitter.emit(AgentEvent::RetryExhausted {
                         turn,
-                        retries_used,
+                        retries_used: *retries_used,
                         error_code: error.code().to_owned(),
                         message: error.to_string(),
                     });
@@ -127,7 +139,12 @@ async fn run_model_request_with_retries(
                     message: error.to_string(),
                 });
                 wait_for_retry(delay, cancel_token).await?;
-                retries_used = next_retry;
+                *retries_used = next_retry;
+                emitter.emit(AgentEvent::RetryStarted {
+                    turn,
+                    retry: next_retry,
+                    max_retries: config.max_retries,
+                });
             }
             Err(error) => return Err(error),
         }
@@ -141,6 +158,7 @@ async fn recover_from_overflow(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
     turn: u32,
+    retries_used: &mut u32,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
     let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
         config,
@@ -171,7 +189,16 @@ async fn recover_from_overflow(
 
     // Rebuild request with compacted context and retry once.
     let retry_request = chat_request(config, &emitter.context, &ProjectionPlan::disabled()).await;
-    run_model_request_with_retries(model, config, &retry_request, turn, emitter, cancel_token).await
+    run_model_request_with_retries(
+        model,
+        config,
+        &retry_request,
+        turn,
+        emitter,
+        cancel_token,
+        retries_used,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

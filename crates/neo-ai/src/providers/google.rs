@@ -346,9 +346,13 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Transport {
-                        message: format!("transport error: {err}"),
-                    })]
+                    if state.parser.saw_terminal() {
+                        state.finish()
+                    } else {
+                        vec![Err(AiError::Transport {
+                            message: err.to_string(),
+                        })]
+                    }
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -526,11 +530,18 @@ impl ParseState {
 
         if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
             self.terminal = true;
-            self.last_stop_reason = if self.tool_args.is_empty() {
+            let stop_reason = if self.tool_args.is_empty() {
                 stop_reason(reason)
             } else {
                 StopReason::ToolUse
             };
+            if !self.started && matches!(stop_reason, StopReason::Error) {
+                return Err(AiError::Protocol {
+                    message: format!("google response finished without content: {reason}"),
+                });
+            }
+            self.last_stop_reason = stop_reason;
+            self.ensure_started();
         }
 
         Ok(())
@@ -680,5 +691,46 @@ mod tests {
         assert!(
             matches!(err, ProviderError::Protocol(message) if message.contains("invalid raw tool arguments"))
         );
+    }
+
+    #[test]
+    fn content_free_stop_emits_balanced_message() {
+        let mut parser = IncrementalSse::default();
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({ "candidates": [{ "finishReason": "STOP" }] })
+        );
+        let mut events = parser.push_chunk(body.as_bytes());
+        events.extend(parser.finish());
+        let events = events.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "google-generative-ai".to_owned(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn content_free_error_finish_is_protocol() {
+        let mut parser = IncrementalSse::default();
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({ "candidates": [{ "finishReason": "SAFETY" }] })
+        );
+        let error = parser
+            .push_chunk(body.as_bytes())
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_err();
+
+        assert!(matches!(error, AiError::Protocol { .. }));
     }
 }

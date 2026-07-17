@@ -75,7 +75,10 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
     }
     // Try HTTP-date format
     if let Ok(date) = httpdate::parse_http_date(value.trim()) {
-        return date.duration_since(std::time::SystemTime::now()).ok();
+        return Some(
+            date.duration_since(std::time::SystemTime::now())
+                .unwrap_or(Duration::ZERO),
+        );
     }
     None
 }
@@ -154,11 +157,7 @@ impl ProviderError {
                     400 | 413 | 422 if is_context_overflow(&excerpt) => {
                         AiError::ContextOverflow { message: excerpt }
                     }
-                    408 => AiError::Server {
-                        status,
-                        message: excerpt,
-                        retry_after,
-                    },
+                    408 => AiError::Transport { message: excerpt },
                     s if s >= 500 => AiError::Server {
                         status,
                         message: excerpt,
@@ -170,7 +169,7 @@ impl ProviderError {
                 }
             }
             Self::Transport(err) => AiError::Transport {
-                message: format!("transport error: {err}"),
+                message: err.to_string(),
             },
             Self::Header(message)
             | Self::Protocol(message)
@@ -225,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn http_status_408_maps_to_retryable_server() {
+    fn http_status_408_maps_to_retryable_transport() {
         let err = ProviderError::HttpStatus {
             status: 408,
             body: Some("Request Timeout".into()),
@@ -235,25 +234,29 @@ mod tests {
         assert!(ai.is_retryable());
         assert!(matches!(
             ai,
-            AiError::Server {
-                status: 408,
-                retry_after: Some(delay),
-                ..
-            } if delay == Duration::from_secs(2)
+            AiError::Transport { message } if message == "Request Timeout"
         ));
     }
 
     #[test]
-    fn streamed_status_408_maps_to_retryable_server() {
+    fn streamed_status_408_maps_to_retryable_transport() {
         let ai = stream_failure(Some("408"), "request timeout").into_ai_error();
         assert!(matches!(
             ai,
-            AiError::Server {
-                status: 408,
-                retry_after: None,
-                ..
-            }
+            AiError::Transport { message } if message == "request timeout"
         ));
+    }
+
+    #[test]
+    fn transport_display_prefixes_underlying_message_once() {
+        let transport = reqwest::Client::new()
+            .get("://")
+            .build()
+            .expect_err("invalid URL must fail");
+        let underlying = transport.to_string();
+        let ai = ProviderError::Transport(transport).into_ai_error();
+
+        assert_eq!(ai.to_string(), format!("transport error: {underlying}"));
     }
 
     #[test]
@@ -307,6 +310,14 @@ mod tests {
     fn parse_retry_after_seconds() {
         assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
         assert_eq!(parse_retry_after("  5  "), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_returns_zero() {
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(Duration::ZERO)
+        );
     }
 
     #[test]

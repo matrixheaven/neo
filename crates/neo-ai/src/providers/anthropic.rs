@@ -428,9 +428,13 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Transport {
-                        message: format!("transport error: {err}"),
-                    })]
+                    if state.saw_done || state.parser.saw_terminal() {
+                        state.finish()
+                    } else {
+                        vec![Err(AiError::Transport {
+                            message: err.to_string(),
+                        })]
+                    }
                 }
                 StreamChunk::End => state.finish(),
             }))

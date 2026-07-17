@@ -1533,6 +1533,92 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
 }
 
 #[tokio::test]
+async fn retry_lifecycle_survives_context_overflow_recovery() {
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::Transport {
+            message: "connection reset".to_owned(),
+        })],
+        vec![Err(AiError::ContextOverflow {
+            message: "too many tokens".to_owned(),
+        })],
+        vec![
+            Ok(AiStreamEvent::MessageStart {
+                id: "summary".to_owned(),
+            }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+        vec![
+            Ok(AiStreamEvent::MessageStart {
+                id: "recovered".to_owned(),
+            }),
+            Ok(AiStreamEvent::TextDelta {
+                text: "recovered".to_owned(),
+            }),
+            Ok(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+    ]);
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("history"));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("old answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_system_prompt("system ".repeat(4_000))
+        .with_compaction(CompactionSettings::new(usize::MAX, 1));
+    config.max_retries = 1;
+    config.model.capabilities.max_context_tokens = Some(200_000);
+
+    let events = collect_turn_events(
+        &harness,
+        config,
+        &mut context,
+        AgentMessage::user_text("continue"),
+    )
+    .await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        serde_json::to_value(&requests[0]).expect("serialize initial request"),
+        serde_json::to_value(&requests[1]).expect("serialize ordinary retry")
+    );
+    let lifecycle = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled { retry: 1, .. } => Some("retry_scheduled"),
+            AgentEvent::RetryStarted { retry: 1, .. } => Some("retry_started"),
+            AgentEvent::CompactionApplied { .. } => Some("compaction_applied"),
+            AgentEvent::RetryResumed { retry: 1, .. } => Some("retry_resumed"),
+            AgentEvent::RetrySucceeded {
+                retries_used: 1, ..
+            } => Some("retry_succeeded"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle,
+        vec![
+            "retry_scheduled",
+            "retry_started",
+            "compaction_applied",
+            "retry_resumed",
+            "retry_succeeded",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn runtime_does_not_compact_mid_parallel_tool_group() {
     let harness = FakeHarness::from_turns([
         vec![

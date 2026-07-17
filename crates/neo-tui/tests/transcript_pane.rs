@@ -2,7 +2,8 @@ use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::{
-    McpStartupPhase, McpStartupStatusData, TranscriptBrowserState, TranscriptEntry, TranscriptPane,
+    McpStartupPhase, McpStartupStatusData, StatusSeverity, TranscriptBrowserState, TranscriptEntry,
+    TranscriptPane,
 };
 
 /// Strip ANSI + trim from a frame line, for content assertions.
@@ -1309,6 +1310,40 @@ fn transcript_marks_pending_tool_failed_when_turn_errors() {
             .result
             .as_deref()
             .is_some_and(|result| result.contains("Provider reported tool calls"))
+    );
+}
+
+#[test]
+fn canonical_provider_error_codes_use_expected_severity() {
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "connection reset".to_owned(),
+        code: Some("provider.transport_error".to_owned()),
+        retry_after: None,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 2,
+        message: "malformed stream".to_owned(),
+        code: Some("provider.protocol_error".to_owned()),
+        retry_after: None,
+    });
+
+    let severities = pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Status {
+                severity: Some(severity),
+                ..
+            } => Some(*severity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        severities,
+        vec![StatusSeverity::Warning, StatusSeverity::Error]
     );
 }
 

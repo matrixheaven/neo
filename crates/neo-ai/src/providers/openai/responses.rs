@@ -317,9 +317,13 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Transport {
-                        message: format!("transport error: {err}"),
-                    })]
+                    if state.saw_done || state.parser.saw_terminal() {
+                        state.finish()
+                    } else {
+                        vec![Err(AiError::Transport {
+                            message: err.to_string(),
+                        })]
+                    }
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -499,9 +503,15 @@ impl ParseState {
                 let numeric_code = value
                     .get("code")
                     .and_then(Value::as_u64)
+                    .or_else(|| value.get("status").and_then(Value::as_u64))
                     .or_else(|| {
                         nested
                             .and_then(|error| error.get("code"))
+                            .and_then(Value::as_u64)
+                    })
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("status"))
                             .and_then(Value::as_u64)
                     })
                     .map(|code| code.to_string());
@@ -519,7 +529,11 @@ impl ParseState {
                             .and_then(|error| error.get("status"))
                             .and_then(Value::as_str)
                     })
-                    .or_else(|| value.get("type").and_then(Value::as_str))
+                    .or_else(|| {
+                        nested
+                            .and_then(|error| error.get("type"))
+                            .and_then(Value::as_str)
+                    })
                     .or(numeric_code.as_deref());
                 let message = value
                     .get("message")
@@ -543,6 +557,11 @@ impl ParseState {
                 let numeric_code = error
                     .and_then(|error| error.get("code"))
                     .and_then(Value::as_u64)
+                    .or_else(|| {
+                        error
+                            .and_then(|error| error.get("status"))
+                            .and_then(Value::as_u64)
+                    })
                     .map(|code| code.to_string());
                 let code = error
                     .and_then(|error| error.get("code"))

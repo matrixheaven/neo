@@ -39,8 +39,8 @@ pub fn error_info(code: &str) -> NeoErrorInfo {
         "provider.auth_error" => info("Authentication Failed", false, Some("Check API key")),
         "provider.context_overflow" => info("Context Overflow", false, Some("Run /compact")),
         "provider.server_error" => info("Server Error", true, Some("Will auto-retry")),
-        "provider.network_error" => info("Network Error", true, Some("Check connection")),
-        "provider.stream_error" => info("Stream Error", false, None),
+        "provider.transport_error" => info("Transport Error", true, Some("Check connection")),
+        "provider.protocol_error" => info("Protocol Error", false, None),
         "request.cancelled" => info("Cancelled", false, None),
         _ => NeoErrorInfo::fallback(),
     }
@@ -64,6 +64,19 @@ mod tests {
         assert_eq!(info.title, "Rate Limited");
         assert!(info.retryable);
         assert_eq!(info.action, Some("Will auto-retry with backoff"));
+    }
+
+    #[test]
+    fn canonical_transport_and_protocol_codes_return_specific_info() {
+        let transport = error_info("provider.transport_error");
+        assert_eq!(transport.title, "Transport Error");
+        assert!(transport.retryable);
+        assert_eq!(transport.action, Some("Check connection"));
+
+        let protocol = error_info("provider.protocol_error");
+        assert_eq!(protocol.title, "Protocol Error");
+        assert!(!protocol.retryable);
+        assert_eq!(protocol.action, None);
     }
 
     #[test]
