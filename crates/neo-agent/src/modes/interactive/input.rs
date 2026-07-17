@@ -106,10 +106,10 @@ impl InteractiveController {
         let toggles_output = matches_action(KeybindingAction::ToolOutputToggle);
 
         if self.tui.chrome().transcript_browser_state().is_none() {
-            if !toggles_output || !self.transcript().has_committed_expandable_entries() {
+            if !toggles_output || !self.tui.transcript().has_committed_expandable_entries() {
                 return false;
             }
-            let expanded = !self.transcript().tool_output_expanded();
+            let expanded = !self.tui.transcript().tool_output_expanded();
             self.tui.chrome_mut().open_transcript_browser(expanded);
             if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {
                 state.follow_bottom();

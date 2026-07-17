@@ -800,7 +800,7 @@ fn fit_live_blocks(
 
     let mut lines = Vec::with_capacity(budget);
     let mut has_visible_animation = false;
-    for block in fitted {
+    for mut block in fitted {
         let mut block_lines = Vec::new();
         for header in block.headers {
             if !block_lines.is_empty() {
@@ -816,7 +816,7 @@ fn fit_live_blocks(
             if block.tail_len == 0 && !block.body.is_empty() {
                 // The budget is too tight for an omission hint; show the single
                 // most recent content line instead.
-                block_lines.push(block.body.last().expect("non-empty body").clone());
+                block_lines.push(block.body.pop().expect("non-empty body"));
             } else {
                 block_lines.push(FittedLine {
                     text: omission_line(block.body.len().saturating_sub(block.tail_len), theme),
