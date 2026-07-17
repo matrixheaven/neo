@@ -7,6 +7,7 @@ use crate::terminal_image::{
 };
 use crate::transcript::DelegateCardComponent;
 use crate::transcript::DelegateGroupComponent;
+use crate::transcript::InstructionCardComponent;
 use crate::transcript::PlanBoxComponent;
 use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
@@ -191,6 +192,11 @@ pub enum TranscriptEntry {
     Workflow {
         component: WorkflowCardComponent,
     },
+    /// Finalized metadata-only card for one instruction epoch. Task 7 owns
+    /// insertion/routing; the entry never renders instruction bodies.
+    InstructionEpoch {
+        component: InstructionCardComponent,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +369,11 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub const fn instruction_epoch(component: InstructionCardComponent) -> Self {
+        Self::InstructionEpoch { component }
+    }
+
+    #[must_use]
     pub fn image(
         id: impl Into<String>,
         mime_type: impl Into<String>,
@@ -463,6 +474,7 @@ impl TranscriptEntry {
                 | Self::ThinkingBlock { .. }
                 | Self::SkillActivation { .. }
                 | Self::DelegateSwarm { .. }
+                | Self::InstructionEpoch { .. }
         )
     }
 
@@ -488,6 +500,13 @@ impl TranscriptEntry {
                 true
             }
             Self::DelegateSwarm { component } => {
+                if component.is_expanded() == expanded {
+                    return false;
+                }
+                component.set_expanded(expanded);
+                true
+            }
+            Self::InstructionEpoch { component } => {
                 if component.is_expanded() == expanded {
                     return false;
                 }
@@ -540,6 +559,7 @@ impl TranscriptEntry {
             Self::DelegateGroup { component } => component.finalization(),
             Self::DelegateSwarm { component } => component.finalization(),
             Self::Workflow { component } => component.finalization(),
+            Self::InstructionEpoch { component } => component.finalization(),
             Self::Banner(_)
             | Self::UserMessage { .. }
             | Self::AssistantMessage { .. }
@@ -801,6 +821,7 @@ impl TranscriptEntry {
             Self::DelegateGroup { component } => component.render_with_theme(inner_width, theme),
             Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
             Self::Workflow { component } => render_workflow_card(component, inner_width, theme),
+            Self::InstructionEpoch { component } => component.render_with_theme(inner_width, theme),
             Self::Banner(_)
             | Self::UserMessage { .. }
             | Self::Status { .. }

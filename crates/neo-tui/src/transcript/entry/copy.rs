@@ -65,6 +65,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         TranscriptEntry::DelegateGroup { component } => ("Agents", copy_delegate_group(component)),
         TranscriptEntry::DelegateSwarm { component } => ("Swarm", copy_swarm(component)),
         TranscriptEntry::Workflow { component } => ("Workflow", copy_workflow(component)),
+        TranscriptEntry::InstructionEpoch { component } => ("Instructions", component.copy_text()),
     }
 }
 

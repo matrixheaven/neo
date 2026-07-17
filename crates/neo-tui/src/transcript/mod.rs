@@ -7,6 +7,7 @@ mod delegate_group;
 pub mod diff_preview;
 pub mod entry;
 mod event_handler;
+mod instruction_card;
 pub mod pane;
 pub mod partial_json;
 pub mod plan_box;
@@ -38,6 +39,7 @@ pub use entry::{
     ApprovalPromptData, BannerData, InlineImageRender, McpStartupPhase, McpStartupStatusData,
     StatusSeverity, ThinkingPhase, TranscriptEntry, TranscriptImageAttachment,
 };
+pub use instruction_card::InstructionCardComponent;
 pub use pane::TranscriptPane;
 pub use plan_box::PlanBoxComponent;
 pub use presentation::{
