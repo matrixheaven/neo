@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::permission::ApprovalRequest;
+use crate::instructions::{InstructionInheritance, InstructionRegistry};
 use crate::multi_agent::MultiAgentRuntime;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
 use crate::tools::{BackgroundTaskManager, ShellRuntime};
@@ -174,6 +175,19 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub multi_agent: MultiAgentRuntime,
+    /// Session-shared instruction registry handle. Only the `Arc` handle is
+    /// cloned into child agent configs: source/revision caches are shared
+    /// session-wide while model visibility stays agent-local. Never
+    /// serialized, and never a process-global.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub instruction_registry: Option<Arc<InstructionRegistry>>,
+    /// How a child agent spawned from this config inherits instruction
+    /// visibility. Set from the delegate context mode at child creation and
+    /// immutable once cloned into the child config.
+    #[serde(skip, default = "default_instruction_inheritance")]
+    #[schemars(skip)]
+    pub instruction_inheritance: InstructionInheritance,
     /// Cached token estimate for `tools`. Computed once on first access;
     /// reset to default on clone (the value is unchanged because `tools`
     /// is cloned by value, but re-computation is cheap relative to the
@@ -181,6 +195,12 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub cached_tool_spec_tokens: std::sync::OnceLock<usize>,
+}
+
+/// Default instruction inheritance for configs that never spawn children:
+/// the conservative global/workspace baseline (no parent scope seeding).
+const fn default_instruction_inheritance() -> InstructionInheritance {
+    InstructionInheritance::Summary
 }
 
 impl AgentConfig {
@@ -225,6 +245,8 @@ impl AgentConfig {
             shell_runtime: ShellRuntime::default(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
+            instruction_registry: None,
+            instruction_inheritance: default_instruction_inheritance(),
             cached_tool_spec_tokens: std::sync::OnceLock::new(),
         }
     }

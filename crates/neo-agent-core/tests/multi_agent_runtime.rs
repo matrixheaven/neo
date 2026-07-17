@@ -3117,3 +3117,307 @@ fn cancel_swarm_preserves_completed_canonical_child_when_swarm_snapshot_is_stale
     assert_eq!(cancelled.aggregate.completed, 1);
     assert_eq!(cancelled.aggregate.cancelled, 1);
 }
+
+/// Combined text of every pinned `AgentMessage::Instruction` in a context.
+fn instruction_message_text(context: &AgentContext) -> String {
+    context
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Instruction { content, .. } => Some(content.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(neo_agent_core::Content::as_text)
+        .collect()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn child_runtime_shares_registry_but_not_parent_visibility() {
+    use neo_agent_core::instructions::{
+        AgentInstructionState, InstructionBudget, InstructionEpochOutcome, InstructionInheritance,
+        InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
+        InstructionRegistry, InstructionRegistryConfig,
+    };
+    use neo_agent_core::multi_agent::{
+        ChildRuntimeDeps, DelegateContext, DelegateRequest, seed_child_instruction_baseline,
+    };
+    use neo_agent_core::session::{
+        JsonlSessionReader, SessionState, SessionStateStore, agent_wire_path,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("workspace");
+    let nested = workspace.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::fs::write(workspace.join("AGENTS.md"), "root rules\n").expect("root agents");
+    std::fs::write(nested.join("AGENTS.md"), "nested rules\n").expect("nested agents");
+
+    let registry = Arc::new(
+        InstructionRegistry::new(InstructionRegistryConfig {
+            primary_workspace: workspace.clone(),
+            neo_home: None,
+            project_trusted: true,
+        })
+        .expect("registry"),
+    );
+    let budget = InstructionBudget {
+        nominal: 65_536,
+        actual: 65_536,
+    };
+
+    // Seed parent with a visible nested revision.
+    let mut parent = AgentInstructionState::default();
+    let parent_request = InstructionReconcileRequest {
+        agent_id: "main".to_owned(),
+        kind: InstructionReconcileKind::Baseline,
+        target_directories: vec![nested.clone()],
+        budget,
+        deferred_tool_ids: Vec::new(),
+    };
+    let InstructionPreflightDecision::Defer { epoch, fingerprint } =
+        registry.reconcile(parent_request, &parent).await
+    else {
+        panic!("parent baseline should defer with an epoch");
+    };
+    parent.apply_epoch(&epoch, &fingerprint);
+    let nested_revision = parent
+        .visible_revisions
+        .get(&nested)
+        .cloned()
+        .expect("parent sees the nested revision");
+
+    // Build an inherit child and a summary child.
+    let mut inherit_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
+    inherit_config.instruction_registry = Some(Arc::clone(&registry));
+    inherit_config.instruction_inheritance = InstructionInheritance::FullContext;
+    let mut inherit_child = AgentContext::new();
+    let inherit_epoch = seed_child_instruction_baseline(
+        &mut inherit_child,
+        &inherit_config,
+        Some(&parent),
+        "agent_inherit",
+    )
+    .await
+    .expect("inherit baseline emits an epoch");
+
+    let mut summary_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
+    summary_config.instruction_registry = Some(Arc::clone(&registry));
+    summary_config.instruction_inheritance = InstructionInheritance::Summary;
+    let mut summary_child = AgentContext::new();
+    let summary_epoch = seed_child_instruction_baseline(
+        &mut summary_child,
+        &summary_config,
+        Some(&parent),
+        "agent_summary",
+    )
+    .await
+    .expect("summary baseline emits an epoch");
+
+    // Assert Arc::ptr_eq registry for both.
+    let inherit_registry = inherit_child
+        .instruction_registry()
+        .expect("inherit child registry");
+    let summary_registry = summary_child
+        .instruction_registry()
+        .expect("summary child registry");
+    assert!(Arc::ptr_eq(&inherit_registry, &registry));
+    assert!(Arc::ptr_eq(&summary_registry, &registry));
+    assert!(Arc::ptr_eq(&inherit_registry, &summary_registry));
+
+    // Assert inherit may seed explicit visible revisions, summary starts
+    // agent-local baseline.
+    assert_eq!(inherit_epoch.agent_id, "agent_inherit");
+    assert_eq!(summary_epoch.agent_id, "agent_summary");
+    assert_eq!(inherit_epoch.outcome, InstructionEpochOutcome::Ready);
+    assert_eq!(summary_epoch.outcome, InstructionEpochOutcome::Ready);
+    assert_eq!(
+        inherit_child
+            .instruction_state()
+            .visible_revisions
+            .get(&nested)
+            .map(String::as_str),
+        Some(nested_revision.as_str()),
+        "full-context inheritance explicitly copies the parent's visible nested revision"
+    );
+    assert!(
+        !summary_child
+            .instruction_state()
+            .visible_revisions
+            .contains_key(&nested),
+        "summary inheritance must not infer nested visibility from the parent"
+    );
+    assert!(
+        summary_child
+            .instruction_state()
+            .visible_revisions
+            .contains_key(&workspace),
+        "summary baseline still loads the workspace root scope"
+    );
+    let inherit_text = instruction_message_text(&inherit_child);
+    assert!(inherit_text.contains("nested rules"), "{inherit_text}");
+    let summary_text = instruction_message_text(&summary_child);
+    assert!(!summary_text.contains("nested rules"), "{summary_text}");
+    assert!(summary_text.contains("root rules"), "{summary_text}");
+
+    // End to end: a foreground delegate child inherits through the runtime
+    // wiring, the pinned baseline reaches the child's first model request,
+    // and the epoch lands in the child's own wire JSONL.
+    let session_temp = tempfile::tempdir().expect("session tempdir");
+    let session_dir = session_temp.path();
+    let mut session_state = SessionState::new();
+    session_state.ensure_main_agent();
+    SessionStateStore::new(session_dir)
+        .write(&session_state)
+        .expect("state");
+
+    let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let harness = FakeHarness::from_turns([child_text_turn("inherit child done")]);
+    let mut child_config = AgentConfig::for_model(harness.model());
+    child_config.instruction_registry = Some(Arc::clone(&registry));
+    let deps = ChildRuntimeDeps::new(
+        child_config,
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    )
+    .with_parent_instruction_state(parent);
+    let request = DelegateRequest {
+        task: "inherit task".to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+    };
+    let output = runtime
+        .run_child_turn(deps, &request, AgentRunMode::Foreground)
+        .await
+        .expect("inherit child run");
+    let child_id = output.snapshot.id.as_str().to_owned();
+
+    let baseline = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::InstructionEpoch { epoch } => Some(epoch),
+            _ => None,
+        })
+        .expect("child baseline epoch event");
+    assert_eq!(baseline.agent_id, child_id);
+    assert!(
+        baseline
+            .selected_bundles
+            .iter()
+            .any(|bundle| bundle.display_path == nested),
+        "inherit child baseline includes the nested scope: {baseline:#?}"
+    );
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    let sent = request_text(&requests[0].messages);
+    assert!(sent.contains("nested rules"), "{sent}");
+    assert!(sent.contains("root rules"), "{sent}");
+
+    let wire = agent_wire_path(session_dir, &child_id);
+    let replayed = JsonlSessionReader::read_all(&wire)
+        .await
+        .expect("read child wire");
+    assert!(
+        replayed.iter().any(|event| matches!(
+            event,
+            AgentEvent::InstructionEpoch { epoch } if epoch.agent_id == child_id
+        )),
+        "child epochs go to the child's wire JSONL: {replayed:#?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_children_singleflight_the_same_source_read() {
+    use neo_agent_core::instructions::{
+        FilesystemSourceIo, InstructionRegistry, InstructionRegistryConfig, SourceIo,
+        SourceMetadata,
+    };
+    use neo_agent_core::multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest};
+    use std::io;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingSourceIo {
+        byte_reads: Arc<AtomicUsize>,
+    }
+
+    impl SourceIo for CountingSourceIo {
+        fn read_metadata(&self, path: &Path) -> io::Result<SourceMetadata> {
+            FilesystemSourceIo.read_metadata(path)
+        }
+
+        fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.byte_reads.fetch_add(1, Ordering::SeqCst);
+            FilesystemSourceIo.read_bytes(path)
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp
+        .path()
+        .canonicalize()
+        .expect("canonical tempdir")
+        .join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(workspace.join("AGENTS.md"), "root rules\n").expect("root agents");
+
+    // Instrument the registry file reader; two child baselines read one
+    // source once.
+    let byte_reads = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(
+        InstructionRegistry::with_source_io(
+            InstructionRegistryConfig {
+                primary_workspace: workspace,
+                neo_home: None,
+                project_trusted: true,
+            },
+            None,
+            Arc::new(CountingSourceIo {
+                byte_reads: Arc::clone(&byte_reads),
+            }),
+        )
+        .expect("registry"),
+    );
+
+    let harness = FakeHarness::from_turns([
+        child_text_turn("first child done"),
+        child_text_turn("second child done"),
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.instruction_registry = Some(Arc::clone(&registry));
+    let deps = ChildRuntimeDeps::new(config, harness.client(), Arc::new(ToolRegistry::new()));
+    let runtime = MultiAgentRuntime::new();
+    let request = |task: &str| DelegateRequest {
+        task: task.to_owned(),
+        resume: None,
+        title: None,
+        role: None,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::None,
+    };
+    let first_request = request("first child");
+    let second_request = request("second child");
+    let (first, second) = tokio::join!(
+        runtime.run_child_turn(deps.clone(), &first_request, AgentRunMode::Foreground),
+        runtime.run_child_turn(deps, &second_request, AgentRunMode::Foreground),
+    );
+    first.expect("first child run");
+    second.expect("second child run");
+
+    assert_eq!(
+        byte_reads.load(Ordering::SeqCst),
+        1,
+        "two concurrent child baselines share the session source cache"
+    );
+}

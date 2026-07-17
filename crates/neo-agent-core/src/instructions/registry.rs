@@ -14,11 +14,12 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use super::resolver::{
-    InstructionBundle, InstructionResolver, escape_attribute, find_agents_file, sha256_hex,
+    InstructionBundle, InstructionResolver, SourceIo, escape_attribute, find_agents_file,
+    sha256_hex,
 };
 use super::types::{
     AgentInstructionState, IgnoredInstructionBundle, InstructionBudget, InstructionBundleMetadata,
@@ -159,18 +160,41 @@ impl InstructionRegistry {
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(config: InstructionRegistryConfig) -> Result<Self, InstructionError> {
         let resolver = InstructionResolver::new(&config)?;
+        Ok(Self::from_resolver(resolver, config.project_trusted))
+    }
+
+    /// Builds a registry with an explicit home directory and source I/O
+    /// implementation (tests, sandboxes). Production uses [`Self::new`]; the
+    /// injected reader observes the same reconciliation, single-flight, and
+    /// cache behavior — the seam changes only how source bytes are read.
+    ///
+    /// # Errors
+    /// Returns [`InstructionError::Io`] when the primary workspace cannot be
+    /// canonicalized.
+    // By-value config mirrors `new`'s frozen interface contract.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn with_source_io(
+        config: InstructionRegistryConfig,
+        home_dir: Option<PathBuf>,
+        source_io: Arc<dyn SourceIo>,
+    ) -> Result<Self, InstructionError> {
+        let resolver = InstructionResolver::with_source_io(&config, home_dir, source_io)?;
+        Ok(Self::from_resolver(resolver, config.project_trusted))
+    }
+
+    fn from_resolver(resolver: InstructionResolver, project_trusted: bool) -> Self {
         let config = InstructionRegistryConfig {
             primary_workspace: resolver.canonical_workspace().to_path_buf(),
             neo_home: resolver.canonical_neo_home().map(Path::to_path_buf),
-            project_trusted: config.project_trusted,
+            project_trusted,
         };
-        Ok(Self {
+        Self {
             config,
             resolver,
             generation: AtomicU64::new(0),
             bundles: Mutex::new(HashMap::new()),
             sync: tokio::sync::Mutex::new(()),
-        })
+        }
     }
 
     /// Reconciles one frozen generation against the agent's visible state.

@@ -12,7 +12,13 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::runtime::{ActiveTurnInput, AgentConfig, AgentContext, SteerInputHandle};
+use crate::instructions::{
+    AgentInstructionState, InstructionBudget, InstructionEpochData, InstructionInheritance,
+    InstructionPreflightDecision,
+};
+use crate::runtime::{
+    ActiveTurnInput, AgentConfig, AgentContext, SteerInputHandle, effective_max_context_tokens,
+};
 use crate::{
     AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, StopReason, ToolRegistry,
 };
@@ -1221,6 +1227,10 @@ pub struct ChildRuntimeDeps {
     pub tools: Arc<ToolRegistry>,
     pub role: AgentRole,
     pub cancel_token: CancellationToken,
+    /// Snapshot of the parent agent's visible instruction state, used to
+    /// seed full-context child instruction baselines. `None` behaves like an
+    /// empty parent (plain global/workspace baseline).
+    pub parent_instruction_state: Option<AgentInstructionState>,
 }
 
 impl ChildRuntimeDeps {
@@ -1232,6 +1242,7 @@ impl ChildRuntimeDeps {
             tools,
             role: AgentRole::Coder,
             cancel_token: CancellationToken::new(),
+            parent_instruction_state: None,
         }
     }
 
@@ -1246,6 +1257,14 @@ impl ChildRuntimeDeps {
     #[must_use]
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = cancel_token;
+        self
+    }
+
+    /// Set the parent agent's visible instruction state snapshot used to
+    /// seed full-context child instruction baselines.
+    #[must_use]
+    pub fn with_parent_instruction_state(mut self, state: AgentInstructionState) -> Self {
+        self.parent_instruction_state = Some(state);
         self
     }
 }
@@ -1300,7 +1319,8 @@ impl MultiAgentRuntime {
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
-        let deps = deps.with_cancel_token(live_cancel.token());
+        let mut deps = deps.with_cancel_token(live_cancel.token());
+        deps.config.instruction_inheritance = instruction_inheritance_for(context);
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
         let run = run_agent_snapshot(
@@ -1389,7 +1409,8 @@ impl MultiAgentRuntime {
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
-        let deps = deps.with_cancel_token(live_cancel.token());
+        let mut deps = deps.with_cancel_token(live_cancel.token());
+        deps.config.instruction_inheritance = instruction_inheritance_for(context);
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
         let run = run_agent_snapshot(
@@ -1784,6 +1805,62 @@ struct LiveAgentCancel {
     generation: u64,
 }
 
+/// Maps the delegate context mode to instruction inheritance. `inherit`
+/// may explicitly copy revisions already represented in inherited full
+/// messages; `summary` and `none` never infer visibility from prose.
+fn instruction_inheritance_for(context: DelegateContext) -> InstructionInheritance {
+    match context {
+        DelegateContext::Inherit => InstructionInheritance::FullContext,
+        DelegateContext::Summary | DelegateContext::None => InstructionInheritance::Summary,
+    }
+}
+
+/// Seeds a freshly created child context from the session-shared
+/// instruction registry: attaches the registry handle (an `Arc` clone,
+/// never a process-global), reconciles a child-owned baseline keyed by the
+/// child's actual agent id, and applies it so the rules are pinned before
+/// the child's first prompt. Returns the emitted baseline epoch so the
+/// caller can persist it to the child's wire JSONL, or `None` when no
+/// registry is attached or the baseline is a no-op.
+pub async fn seed_child_instruction_baseline(
+    context: &mut AgentContext,
+    config: &AgentConfig,
+    parent: Option<&AgentInstructionState>,
+    child_agent_id: &str,
+) -> Option<InstructionEpochData> {
+    let registry = config.instruction_registry.clone()?;
+    context.attach_instruction_registry(registry.clone());
+    let effective_max = effective_max_context_tokens(config);
+    let budget = if effective_max == 0 {
+        InstructionBudget::from_context(None, u64::MAX)
+    } else {
+        let effective_max = u64::try_from(effective_max).unwrap_or(u64::MAX);
+        let reserved = u64::try_from(context.estimated_tokens())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::from(config.max_tokens.unwrap_or(0)));
+        InstructionBudget::from_context(Some(effective_max), effective_max.saturating_sub(reserved))
+    };
+    let parent_state = parent.cloned().unwrap_or_default();
+    let request = registry.child_baseline_request(
+        &parent_state,
+        child_agent_id.to_owned(),
+        config.instruction_inheritance,
+        budget,
+    );
+    let child_state = context.instruction_state().clone();
+    let (epoch, fingerprint) = match registry.reconcile(request, &child_state).await {
+        InstructionPreflightDecision::Proceed { fingerprint } => {
+            context.instruction_state_mut().last_epoch_fingerprint = Some(fingerprint.hash);
+            return None;
+        }
+        InstructionPreflightDecision::Defer { epoch, fingerprint }
+        | InstructionPreflightDecision::Block { epoch, fingerprint } => (epoch, fingerprint),
+    };
+    context.apply_instruction_epoch(&epoch);
+    context.instruction_state_mut().last_epoch_fingerprint = Some(fingerprint.hash);
+    Some(epoch)
+}
+
 async fn run_agent_snapshot(
     deps: ChildRuntimeDeps,
     prompt: String,
@@ -1793,7 +1870,8 @@ async fn run_agent_snapshot(
     child_wire_path: Option<PathBuf>,
     mut on_event: impl FnMut(&AgentEvent) + Send,
 ) -> Result<(Vec<AgentEvent>, Vec<AgentMessage>), String> {
-    let child_config = child_config(deps.config, deps.role).with_agent_id(agent_id);
+    let parent_instruction_state = deps.parent_instruction_state;
+    let child_config = child_config(deps.config, deps.role).with_agent_id(agent_id.clone());
     let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
     let parent_cancel_token = deps.cancel_token.clone();
     let cancel_token = CancellationToken::new();
@@ -1823,19 +1901,36 @@ async fn run_agent_snapshot(
         None
     };
     let mut persistence = crate::session::SessionEventPersistence::default();
-    let child_runtime =
-        AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
-            .with_steer_input(steer_input);
     let mut context = AgentContext::new();
     for message in prior_messages {
         context.append_message(message);
+    }
+    // Materialize the child-owned instruction baseline before the child's
+    // first prompt: attach the session-shared registry handle, reconcile a
+    // baseline keyed by this child's actual agent id, and pin the result.
+    let baseline_epoch = seed_child_instruction_baseline(
+        &mut context,
+        &child_config,
+        parent_instruction_state.as_ref(),
+        &agent_id,
+    )
+    .await;
+    let child_runtime =
+        AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
+            .with_steer_input(steer_input);
+    let mut events = Vec::new();
+    if let Some(epoch) = baseline_epoch {
+        // Child epochs go to the child's own wire JSONL.
+        let event = AgentEvent::InstructionEpoch { epoch };
+        persist_child_wire_event(&mut writer, &mut persistence, &event).await?;
+        on_event(&event);
+        events.push(event);
     }
     let mut stream = child_runtime.run_turn_with_cancel(
         &mut context,
         AgentMessage::user_text(prompt),
         cancel_token.clone(),
     );
-    let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(event) => event,
@@ -1880,6 +1975,22 @@ async fn flush_child_writer(
 ) -> Result<(), String> {
     if let Some(writer) = writer.as_mut() {
         writer.flush().await.map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+async fn persist_child_wire_event(
+    writer: &mut Option<crate::session::JsonlSessionWriter>,
+    persistence: &mut crate::session::SessionEventPersistence,
+    event: &AgentEvent,
+) -> Result<(), String> {
+    if let Some(child_writer) = writer.as_mut() {
+        for persisted in persistence.persisted_events(event) {
+            child_writer
+                .append_event(&persisted)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
     }
     Ok(())
 }

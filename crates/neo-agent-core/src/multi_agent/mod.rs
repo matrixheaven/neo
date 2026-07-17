@@ -17,7 +17,7 @@ pub use progress::{
 };
 pub use runtime::{
     AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateRequest, DelegateSwarmItem,
-    DelegateSwarmRequest, MultiAgentRuntime, apply_swarm_template,
+    DelegateSwarmRequest, MultiAgentRuntime, apply_swarm_template, seed_child_instruction_baseline,
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};
 pub use state::{
