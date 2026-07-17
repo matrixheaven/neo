@@ -1528,13 +1528,15 @@ async fn openai_responses_client_rejects_assistant_image_parts_without_posting()
 
 #[tokio::test]
 async fn openai_responses_client_returns_protocol_error_for_failed_streams() {
-    let server = MockServer::start(vec![sse_response(&[
+    let body = format!(
+        "data: {}\n\ndata: {}\n\n",
         json!({ "type": "response.created", "response": { "id": "resp-failed" } }),
         json!({
             "type": "response.failed",
             "response": { "status": "failed" }
-        }),
-    ])]);
+        })
+    );
+    let server = MockServer::start(vec![truncated_sse_response(&body)]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
     let events = client
