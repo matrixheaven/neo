@@ -15,3 +15,7 @@
 
 [term]
 quiet = false
+
+[env]
+# Match Rust's Intel floor; Clang raises Apple Silicon builds to 11.0.
+MACOSX_DEPLOYMENT_TARGET = "10.12"
