@@ -65,7 +65,15 @@ impl NeoChromeState {
             | AgentEvent::DelegateSwarmFinished { .. }
             | AgentEvent::WorkflowStarted { .. }
             | AgentEvent::WorkflowUpdated { .. }
-            | AgentEvent::WorkflowFinished { .. } => {
+            | AgentEvent::WorkflowFinished { .. }
+            | AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryResumed { .. }
+            | AgentEvent::RetrySucceeded { .. } => {
+                self.mode = ChromeMode::Streaming;
+            }
+            AgentEvent::RetryExhausted { turn, .. } => {
+                self.retry_exhausted_error_turn = Some(turn);
                 self.mode = ChromeMode::Streaming;
             }
             AgentEvent::ApprovalRequested {
@@ -193,12 +201,16 @@ impl NeoChromeState {
                 );
             }
             AgentEvent::TurnFinished { .. } => {
+                self.retry_exhausted_error_turn = None;
                 self.apply_stream_update(StreamUpdate::TurnFinished);
             }
-            AgentEvent::Error { message, .. } => {
-                self.apply_stream_update(StreamUpdate::Error { text: message });
+            AgentEvent::Error { turn, message, .. } => {
+                if self.retry_exhausted_error_turn.take() != Some(turn) {
+                    self.apply_stream_update(StreamUpdate::Error { text: message });
+                }
             }
             AgentEvent::RunFinished { turn, stop_reason } => {
+                self.retry_exhausted_error_turn = None;
                 self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
             }
             AgentEvent::SteeringQueued { message } => {

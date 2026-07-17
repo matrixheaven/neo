@@ -31,6 +31,8 @@ pub struct NeoChromeState {
     pub(super) prompt: PromptState,
     pub(super) copy_buffer: Option<String>,
     pub(super) mode: ChromeMode,
+    /// Turn whose RetryExhausted companion Error must not end streaming early.
+    pub(super) retry_exhausted_error_turn: Option<u32>,
     pub(super) overlays: Vec<Overlay>,
     pub(super) next_overlay_id: OverlayId,
     pub(super) focused_overlay: Option<OverlayId>,
@@ -85,6 +87,7 @@ impl NeoChromeState {
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: ChromeMode::Editing,
+            retry_exhausted_error_turn: None,
             overlays: Vec::new(),
             next_overlay_id: OverlayId::default(),
             focused_overlay: None,

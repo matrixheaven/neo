@@ -522,3 +522,22 @@ fn tool_runs_block_thinking_coalescing() {
     assert_eq!(thinking_contents(&store), vec!["first", "second"]);
     assert_eq!(store.entries().len(), 3);
 }
+
+#[test]
+fn retry_status_countdown_formats_long_delay() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 3_878_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "error decoding response body".to_owned(),
+    });
+
+    let rows = plain_rows(pane.transcript()).join("\n");
+    assert!(
+        rows.contains("Reconnecting 1/5 · retry in 1h 04m 38s · esc interrupt"),
+        "long retry delay: {rows}"
+    );
+}

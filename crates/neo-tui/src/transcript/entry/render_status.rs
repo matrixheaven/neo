@@ -1,4 +1,4 @@
-use super::{Color, Span, StatusSeverity, Style, TuiTheme};
+use super::{Color, RetryPhase, RetryStatusData, Span, StatusSeverity, Style, TuiTheme};
 use crate::primitive::Line;
 
 #[allow(clippy::needless_pass_by_value)]
@@ -25,6 +25,76 @@ pub(super) fn render_status(
 
 pub(super) fn status_style(theme: &TuiTheme) -> Style {
     Style::default().fg(theme.text_muted)
+}
+
+pub(super) fn render_retry_status(
+    data: &RetryStatusData,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let (header, color) = match data.phase {
+        RetryPhase::Waiting => {
+            let elapsed_ms = super::monotonic_time_ms().saturating_sub(data.started_at_ms);
+            let remaining_ms = data.delay_ms.saturating_sub(elapsed_ms);
+            (
+                format!(
+                    "Reconnecting {}/{} · retry in {} · esc interrupt",
+                    data.retry,
+                    data.max_retries,
+                    format_retry_delay(remaining_ms)
+                ),
+                theme.status_warn,
+            )
+        }
+        RetryPhase::Connecting => (
+            format!(
+                "Reconnecting {}/{} · connecting · esc interrupt",
+                data.retry, data.max_retries
+            ),
+            theme.brand,
+        ),
+        RetryPhase::Exhausted => (
+            format!(
+                "Reconnect failed after {} {}",
+                data.retry,
+                if data.retry == 1 {
+                    "attempt"
+                } else {
+                    "attempts"
+                }
+            ),
+            theme.status_error,
+        ),
+    };
+    let mut lines = super::styled_wrap(&header, width, Style::default().fg(color).bold());
+    if !data.message.is_empty() {
+        let title = if data.error_code == "provider.transport_error" {
+            "Network"
+        } else {
+            let title = neo_agent_core::error_info(&data.error_code).title;
+            title.strip_suffix(" Error").unwrap_or(title)
+        };
+        lines.extend(super::styled_wrap(
+            &format!("{title} · {}", data.message),
+            width,
+            status_style(theme),
+        ));
+    }
+    lines
+}
+
+fn format_retry_delay(delay_ms: u64) -> String {
+    let seconds = delay_ms.saturating_add(999) / 1_000;
+    let hours = seconds / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn compaction_pulse_char(activity_frame: usize) -> char {

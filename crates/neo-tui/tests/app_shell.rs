@@ -1836,3 +1836,79 @@ fn api_key_dialog_paste_then_submit_closes_overlay_with_result() {
         Some(ApiKeyInputResult::Cancelled)
     ));
 }
+
+#[test]
+fn retry_keeps_working_mode_until_turn_finishes() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let events = [
+        neo_agent_core::AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+            delay_ms: 12_000,
+            error_code: "provider.transport_error".to_owned(),
+            message: "error decoding response body".to_owned(),
+        },
+        neo_agent_core::AgentEvent::RetryStarted {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+        },
+        neo_agent_core::AgentEvent::RetryResumed { turn: 1, retry: 1 },
+        neo_agent_core::AgentEvent::RetrySucceeded {
+            turn: 1,
+            retries_used: 1,
+        },
+        neo_agent_core::AgentEvent::RetryExhausted {
+            turn: 1,
+            retries_used: 5,
+            error_code: "provider.transport_error".to_owned(),
+            message: "error decoding response body".to_owned(),
+        },
+    ];
+
+    for event in events {
+        app.apply_agent_event(event);
+        assert_eq!(app.mode(), ChromeMode::Streaming);
+        assert_eq!(
+            app.working_label().as_deref(),
+            Some("working · esc interrupt")
+        );
+        let footer = render_app(100, &app).join("\n");
+        assert!(!footer.contains("retry in"));
+        assert!(!footer.contains("error decoding response body"));
+    }
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "transport error: error decoding response body".to_owned(),
+        code: Some("provider.transport_error".to_owned()),
+        retry_after: None,
+    });
+    assert_eq!(app.mode(), ChromeMode::Streaming);
+    assert_eq!(
+        app.working_label().as_deref(),
+        Some("working · esc interrupt")
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+    assert_ne!(app.mode(), ChromeMode::Streaming);
+    assert!(app.working_label().is_none());
+
+    let mut ordinary = NeoChromeState::new("neo", "ordinary", "openai/gpt-4.1", "/tmp/neo-ws");
+    ordinary.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 2,
+        id: "ordinary-error".to_owned(),
+    });
+    ordinary.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 2,
+        message: "terminal error".to_owned(),
+        code: Some("provider.transport_error".to_owned()),
+        retry_after: None,
+    });
+    assert_ne!(ordinary.mode(), ChromeMode::Streaming);
+    assert!(ordinary.working_label().is_none());
+}

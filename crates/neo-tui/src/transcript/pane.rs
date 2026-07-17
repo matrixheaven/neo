@@ -14,6 +14,7 @@ use crate::transcript::{
     ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptStore,
 };
 
+use super::entry::RetryStatusData;
 use super::presentation::{FinalizedBlock, TranscriptPresentation, TranscriptTerminalUpdate};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
@@ -620,6 +621,38 @@ impl TranscriptPane {
     pub fn finish_assistant_message(&mut self) {
         self.transcript.finish_assistant();
         self.mark_dirty();
+    }
+
+    pub fn upsert_retry_status(&mut self, data: RetryStatusData) -> bool {
+        let changed = self.transcript.upsert_retry_status(data);
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    pub fn clear_retry_status(&mut self, turn: u32) -> bool {
+        let changed = self.transcript.clear_retry_status(turn);
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    pub fn reset_live_model_attempt(&mut self, turn: u32) -> bool {
+        let changed = self.transcript.reset_live_model_attempt(turn);
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    pub(super) fn interrupt_retry_status(&mut self, turn: u32) -> bool {
+        let changed = self.transcript.interrupt_retry_status(turn);
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
 
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {

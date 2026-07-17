@@ -2180,7 +2180,12 @@ fn replay_session_into_transcript(
                         }
                     }
                 },
-                AgentEvent::ApprovalRequested { .. } => {}
+                AgentEvent::ApprovalRequested { .. }
+                | AgentEvent::RetryScheduled { .. }
+                | AgentEvent::RetryStarted { .. }
+                | AgentEvent::RetryResumed { .. }
+                | AgentEvent::RetrySucceeded { .. }
+                | AgentEvent::RetryExhausted { .. } => {}
                 _ => {
                     coverage.observe(event);
                     transcript.apply_agent_event(event);

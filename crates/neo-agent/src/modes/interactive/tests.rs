@@ -6712,6 +6712,65 @@ fn replay_session_into_transcript_does_not_duplicate_text_delta_aggregate_withou
 }
 
 #[test]
+fn replay_session_into_transcript_ignores_retry_lifecycle() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 1,
+            delay_ms: 500,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: connection reset".to_owned(),
+        },
+        AgentEvent::RetryStarted {
+            turn: 1,
+            retry: 1,
+            max_retries: 1,
+        },
+        AgentEvent::RetryResumed { turn: 1, retry: 1 },
+        AgentEvent::MessageStarted {
+            turn: 1,
+            id: "failed-retry".to_owned(),
+        },
+        AgentEvent::RetryExhausted {
+            turn: 1,
+            retries_used: 1,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: connection reset".to_owned(),
+        },
+        AgentEvent::Error {
+            turn: 1,
+            message: "transport error: connection reset".to_owned(),
+            code: Some("provider.transport_error".to_owned()),
+            retry_after: None,
+        },
+        AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: StopReason::Error,
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+
+    assert!(
+        transcript
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::RetryStatus { .. }))
+    );
+    let rendered = transcript
+        .render_frame(100, 20)
+        .expect("render retry replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("Reconnect"), "{rendered}");
+}
+
+#[test]
 fn replay_session_into_transcript_consumes_assistant_coverage_per_occurrence() {
     let mut transcript = TranscriptPane::new(100, 20);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([

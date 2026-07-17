@@ -1710,3 +1710,278 @@ fn browser_rows_are_bounded_and_scrollable() {
             .contains("row-0")
     );
 }
+
+#[test]
+fn retry_status_renders_fixed_waiting_connecting_and_exhausted_states() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "error decoding response body".to_owned(),
+    });
+
+    let waiting = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(
+        waiting.contains("Reconnecting 1/5 · retry in 12s · esc interrupt"),
+        "waiting retry status: {waiting}"
+    );
+    assert!(
+        waiting.contains("Network · error decoding response body"),
+        "waiting retry detail: {waiting}"
+    );
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+    });
+    let connecting = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(
+        connecting.contains("Reconnecting 1/5 · connecting · esc interrupt"),
+        "connecting retry status: {connecting}"
+    );
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryExhausted {
+        turn: 1,
+        retries_used: 5,
+        error_code: "provider.transport_error".to_owned(),
+        message: "error decoding response body".to_owned(),
+    });
+    let exhausted = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(
+        exhausted.contains("Reconnect failed after 5 attempts"),
+        "exhausted retry status: {exhausted}"
+    );
+    assert!(
+        exhausted.contains("Network · error decoding response body"),
+        "exhausted retry detail: {exhausted}"
+    );
+
+    let mut high_attempt = TranscriptPane::new(80, 20);
+    high_attempt.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 2,
+        retry: 99,
+        max_retries: 100,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "connection reset".to_owned(),
+    });
+    let waiting = plain_frame(&mut high_attempt, 80, 20).join("\n");
+    high_attempt.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn: 2,
+        retry: 99,
+        max_retries: 100,
+    });
+    let connecting = plain_frame(&mut high_attempt, 80, 20).join("\n");
+    assert!(waiting.contains("Reconnecting 99/100 · retry in 12s"));
+    assert!(connecting.contains("Reconnecting 99/100 · connecting"));
+    high_attempt.apply_agent_event(neo_agent_core::AgentEvent::RetrySucceeded {
+        turn: 2,
+        retries_used: 99,
+    });
+    assert!(
+        high_attempt
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::RetryStatus { .. }))
+    );
+}
+
+#[test]
+fn retry_status_mutates_original_position() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.push_user_message("question");
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "attempt-1".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "discard me".to_owned(),
+    });
+    let original_id = pane.transcript().entry_ids()[1];
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "error decoding response body".to_owned(),
+    });
+    assert_eq!(pane.transcript().entries().len(), 2);
+    assert_eq!(pane.transcript().entry_ids()[1], original_id);
+    assert!(matches!(
+        pane.transcript().entries()[1],
+        TranscriptEntry::RetryStatus { .. }
+    ));
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+    });
+    assert_eq!(pane.transcript().entry_ids()[1], original_id);
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryResumed { turn: 1, retry: 1 });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "attempt-2".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "replacement".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetrySucceeded {
+        turn: 1,
+        retries_used: 1,
+    });
+
+    assert_eq!(pane.transcript().entries().len(), 2);
+    assert_eq!(pane.transcript().entry_ids()[1], original_id);
+    assert!(matches!(
+        &pane.transcript().entries()[1],
+        TranscriptEntry::AssistantMessage { content } if content == "replacement"
+    ));
+
+    let mut exhausted = TranscriptPane::new(80, 20);
+    exhausted.push_user_message("question");
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 2,
+        text: "first partial".to_owned(),
+    });
+    let original_id = exhausted.transcript().entry_ids()[1];
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 2,
+        retry: 1,
+        max_retries: 1,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "connection reset".to_owned(),
+    });
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn: 2,
+        retry: 1,
+        max_retries: 1,
+    });
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::RetryResumed { turn: 2, retry: 1 });
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 2,
+        text: "last partial".to_owned(),
+    });
+    exhausted.apply_agent_event(neo_agent_core::AgentEvent::RetryExhausted {
+        turn: 2,
+        retries_used: 1,
+        error_code: "provider.transport_error".to_owned(),
+        message: "connection reset".to_owned(),
+    });
+
+    assert_eq!(exhausted.transcript().entries().len(), 2);
+    assert_eq!(exhausted.transcript().entry_ids()[1], original_id);
+    assert!(matches!(
+        &exhausted.transcript().entries()[1],
+        TranscriptEntry::RetryStatus { data }
+            if data.phase == neo_tui::transcript::entry::RetryPhase::Exhausted
+                && data.message == "connection reset"
+    ));
+}
+
+#[test]
+fn retry_exhaustion_suppresses_followup_error_card() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "partial".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryExhausted {
+        turn: 1,
+        retries_used: 5,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: connection reset".to_owned(),
+    });
+    let entry_count = pane.transcript().entries().len();
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "transport error: connection reset".to_owned(),
+        code: Some("provider.transport_error".to_owned()),
+        retry_after: None,
+    });
+
+    assert_eq!(pane.transcript().entries().len(), entry_count);
+    assert_eq!(
+        pane.transcript()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::RetryStatus { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn retry_wait_cancel_becomes_interrupted_terminal_status() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: connection reset".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Cancelled,
+    });
+
+    assert!(pane.transcript().entries().iter().all(|entry| !matches!(
+        entry,
+        TranscriptEntry::RetryStatus { data }
+            if data.phase != neo_tui::transcript::entry::RetryPhase::Exhausted
+    )));
+    let rendered = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(rendered.contains("Reconnect interrupted"), "{rendered}");
+    assert!(!rendered.contains("Reconnect failed"), "{rendered}");
+}
+
+#[test]
+fn retry_reset_preserves_earlier_turn_live_entry() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "older-tool".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({ "path": "README.md" }),
+    });
+    let older_id = pane.transcript().entry_ids()[0];
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 2,
+        id: "attempt-2".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 2,
+        text: "discard current turn only".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 2,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: connection reset".to_owned(),
+    });
+
+    assert_eq!(pane.transcript().entry_ids()[0], older_id);
+    assert!(matches!(
+        pane.transcript().entries()[0],
+        TranscriptEntry::ToolRun { .. }
+    ));
+    assert!(matches!(
+        pane.transcript().entries()[1],
+        TranscriptEntry::RetryStatus { .. }
+    ));
+}

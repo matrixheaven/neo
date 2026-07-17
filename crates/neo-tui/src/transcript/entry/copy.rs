@@ -54,6 +54,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::ApprovalPrompt(_)
         | TranscriptEntry::Image { .. }
         | TranscriptEntry::Status { .. }
+        | TranscriptEntry::RetryStatus { .. }
         | TranscriptEntry::McpStartupStatus { .. }
         | TranscriptEntry::QueuedMessage { .. } => unreachable!("simple copy parts handled above"),
         TranscriptEntry::Banner(_)
@@ -89,6 +90,7 @@ fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
 fn status_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
     match entry {
         TranscriptEntry::Status { text, .. } => Some(("Status", text.clone())),
+        TranscriptEntry::RetryStatus { data } => Some(("Retry", data.message.clone())),
         TranscriptEntry::McpStartupStatus { data } => Some(("MCP", data.message())),
         TranscriptEntry::ApprovalPrompt(data) => Some(("Approval", data.title.clone())),
         _ => None,

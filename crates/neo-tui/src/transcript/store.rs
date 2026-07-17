@@ -7,7 +7,9 @@ use crate::transcript::{
     ToolCallComponent, ToolCallState, WorkflowCardComponent,
 };
 
-use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
+use super::entry::{
+    ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
+};
 use neo_agent_core::multi_agent::{
     AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
     SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress, apply_swarm_child_progress,
@@ -164,6 +166,7 @@ pub struct TranscriptStore {
     suppressed_tool_run_ids: Vec<String>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
+    live_model_attempt: Option<(u32, usize)>,
     viewport: TranscriptViewport,
     /// Per-entry render cache, parallel to `entries`. `None` means the entry
     /// needs re-rendering (new, mutated, or width changed).
@@ -184,6 +187,24 @@ impl TranscriptStore {
             self.mark_visible_boundary();
         }
         self.append_entry(entry);
+    }
+
+    pub(crate) fn begin_live_model_attempt(&mut self, turn: u32) {
+        if self
+            .live_model_attempt
+            .is_none_or(|(active_turn, _)| active_turn != turn)
+        {
+            self.live_model_attempt = Some((turn, self.entries.len()));
+        }
+    }
+
+    pub(crate) fn finish_live_model_attempt(&mut self, turn: u32) {
+        if self
+            .live_model_attempt
+            .is_some_and(|(active_turn, _)| active_turn == turn)
+        {
+            self.live_model_attempt = None;
+        }
     }
 
     pub fn start_assistant(&mut self) {
@@ -210,6 +231,149 @@ impl TranscriptStore {
         if let Some(index) = self.active_assistant.take() {
             self.touch_entry(index);
         }
+    }
+
+    pub fn upsert_retry_status(&mut self, mut data: RetryStatusData) -> bool {
+        let turn = data.turn;
+        if let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::RetryStatus { data: current } if current.turn == data.turn),
+        ) {
+            let changed = self.mutate_entry(index, |entry| {
+                let TranscriptEntry::RetryStatus { data: current } = entry else {
+                    return false;
+                };
+                if current.phase == RetryPhase::Exhausted {
+                    return false;
+                }
+                if data.phase == RetryPhase::Connecting {
+                    data.delay_ms = current.delay_ms;
+                    data.started_at_ms = current.started_at_ms;
+                    if data.error_code.is_empty() {
+                        data.error_code.clone_from(&current.error_code);
+                    }
+                    if data.message.is_empty() {
+                        data.message.clone_from(&current.message);
+                    }
+                }
+                if *current == data {
+                    return false;
+                }
+                *current = data;
+                true
+            });
+            self.live_model_attempt = Some((turn, index));
+            return changed;
+        }
+
+        let slot = self.active_assistant.or(self.active_thinking);
+        let Some(index) = slot else {
+            let index = self.append_entry(TranscriptEntry::retry_status(data));
+            self.live_model_attempt = Some((turn, index));
+            return true;
+        };
+        let changed = self.mutate_entry(index, |entry| {
+            *entry = TranscriptEntry::retry_status(data);
+            true
+        });
+        if self.active_assistant == Some(index) {
+            self.active_assistant = None;
+        }
+        if self.active_thinking == Some(index) {
+            self.active_thinking = None;
+        }
+        self.live_model_attempt = Some((turn, index));
+        changed
+    }
+
+    pub fn clear_retry_status(&mut self, turn: u32) -> bool {
+        let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::RetryStatus { data } if data.turn == turn),
+        ) else {
+            return false;
+        };
+        let changed = self.mutate_entry(index, |entry| {
+            *entry = TranscriptEntry::assistant_message("");
+            true
+        });
+        self.active_thinking = None;
+        self.active_assistant = Some(index);
+        self.live_model_attempt = Some((turn, index));
+        changed
+    }
+
+    #[must_use]
+    pub fn has_exhausted_retry_status(&self, turn: u32) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::RetryStatus { data }
+                    if data.turn == turn && data.phase == RetryPhase::Exhausted
+            )
+        })
+    }
+
+    pub fn interrupt_retry_status(&mut self, turn: u32) -> bool {
+        let Some(index) = self.entries.iter().position(
+            |entry| matches!(entry, TranscriptEntry::RetryStatus { data } if data.turn == turn),
+        ) else {
+            return false;
+        };
+        self.mutate_entry(index, TranscriptEntry::interrupt)
+    }
+
+    pub fn reset_live_model_attempt(&mut self, turn: u32) -> bool {
+        if self.entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::RetryStatus { data } if data.turn == turn),
+        ) {
+            return false;
+        }
+
+        let mut provisional = if let Some((_, start)) = self
+            .live_model_attempt
+            .filter(|(active_turn, _)| *active_turn == turn)
+        {
+            self.entries
+                .iter()
+                .enumerate()
+                .skip(start)
+                .filter_map(|(index, entry)| {
+                    matches!(
+                        entry,
+                        TranscriptEntry::AssistantMessage { .. }
+                            | TranscriptEntry::ThinkingBlock { .. }
+                            | TranscriptEntry::ToolRun { .. }
+                    )
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            [self.active_assistant, self.active_thinking]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        provisional.sort_unstable();
+        provisional.dedup();
+        let Some(anchor) = provisional.first().copied() else {
+            return false;
+        };
+
+        let mut changed = false;
+        for index in provisional.into_iter().skip(1).rev() {
+            changed |= self.remove(index).is_some();
+        }
+        changed |= self.mutate_entry(anchor, |entry| {
+            if matches!(entry, TranscriptEntry::AssistantMessage { content } if content.is_empty())
+            {
+                return false;
+            }
+            *entry = TranscriptEntry::assistant_message("");
+            true
+        });
+        self.active_thinking = None;
+        self.active_assistant = Some(anchor);
+        self.live_model_attempt = Some((turn, anchor));
+        changed
     }
 
     pub fn start_thinking(&mut self) {
@@ -724,6 +888,9 @@ impl TranscriptStore {
                     | TranscriptEntry::DelegateGroup { .. }
                     | TranscriptEntry::DelegateSwarm { .. }
                     | TranscriptEntry::McpStartupStatus { .. }
+            ) || matches!(
+                entry,
+                TranscriptEntry::RetryStatus { data } if data.phase != RetryPhase::Exhausted
             )
         })
     }
@@ -743,6 +910,11 @@ impl TranscriptStore {
         }
         self.active_assistant = adjusted_index_after_remove(self.active_assistant, index);
         self.active_thinking = adjusted_index_after_remove(self.active_thinking, index);
+        if let Some((_, start)) = &mut self.live_model_attempt
+            && *start > index
+        {
+            *start -= 1;
+        }
         self.mark_dirty_from(index);
         Some(entry)
     }
@@ -863,6 +1035,11 @@ impl TranscriptStore {
             && *active >= index
         {
             *active += 1;
+        }
+        if let Some((_, start)) = &mut self.live_model_attempt
+            && *start >= index
+        {
+            *start += 1;
         }
         self.mark_dirty_from(index);
     }

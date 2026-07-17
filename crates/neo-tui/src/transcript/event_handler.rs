@@ -8,7 +8,7 @@ use neo_agent_core::{
 use crate::shell::ToolStatusKind;
 use crate::transcript::ShellRunComponent;
 use crate::transcript::TranscriptEntry;
-use crate::transcript::entry::GoalCardKind;
+use crate::transcript::entry::{GoalCardKind, RetryPhase, RetryStatusData, monotonic_time_ms};
 
 use super::pane::{AbsorbedToolKind, TranscriptPane};
 
@@ -18,6 +18,9 @@ impl TranscriptPane {
         E: Borrow<AgentEvent>,
     {
         let event = event.borrow();
+        if self.apply_retry_event(event) {
+            return;
+        }
         if self.apply_message_event(event) {
             return;
         }
@@ -39,13 +42,87 @@ impl TranscriptPane {
         self.apply_skill_goal_event(event);
     }
 
+    fn apply_retry_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::RetryScheduled {
+                turn,
+                retry,
+                max_retries,
+                delay_ms,
+                error_code,
+                message,
+            } => {
+                self.reset_live_model_attempt(*turn);
+                self.upsert_retry_status(RetryStatusData {
+                    turn: *turn,
+                    retry: *retry,
+                    max_retries: *max_retries,
+                    phase: RetryPhase::Waiting,
+                    delay_ms: *delay_ms,
+                    started_at_ms: monotonic_time_ms(),
+                    error_code: error_code.clone(),
+                    message: message.clone(),
+                });
+                true
+            }
+            AgentEvent::RetryStarted {
+                turn,
+                retry,
+                max_retries,
+            } => {
+                self.upsert_retry_status(RetryStatusData {
+                    turn: *turn,
+                    retry: *retry,
+                    max_retries: *max_retries,
+                    phase: RetryPhase::Connecting,
+                    delay_ms: 0,
+                    started_at_ms: monotonic_time_ms(),
+                    error_code: String::new(),
+                    message: String::new(),
+                });
+                true
+            }
+            AgentEvent::RetryResumed { turn, .. } => {
+                self.clear_retry_status(*turn);
+                self.reset_live_model_attempt(*turn);
+                true
+            }
+            AgentEvent::RetrySucceeded { turn, .. } => {
+                self.clear_retry_status(*turn);
+                true
+            }
+            AgentEvent::RetryExhausted {
+                turn,
+                retries_used,
+                error_code,
+                message,
+            } => {
+                self.reset_live_model_attempt(*turn);
+                self.upsert_retry_status(RetryStatusData {
+                    turn: *turn,
+                    retry: *retries_used,
+                    max_retries: *retries_used,
+                    phase: RetryPhase::Exhausted,
+                    delay_ms: 0,
+                    started_at_ms: monotonic_time_ms(),
+                    error_code: error_code.clone(),
+                    message: message.clone(),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn apply_message_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::MessageStarted { .. } => {
+            AgentEvent::MessageStarted { turn, .. } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.mark_dirty();
                 true
             }
-            AgentEvent::TextDelta { text, .. } => {
+            AgentEvent::TextDelta { turn, text } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.append_assistant_delta(text);
                 true
             }
@@ -64,6 +141,7 @@ impl TranscriptPane {
                     "Turn ended before this tool executed",
                 );
                 self.finish_active_text_blocks();
+                self.transcript.finish_live_model_attempt(*turn);
                 true
             }
             AgentEvent::TurnFinished {
@@ -75,11 +153,14 @@ impl TranscriptPane {
                     ToolStatusKind::Cancelled,
                     "Turn cancelled before this tool executed",
                 );
+                self.interrupt_retry_status(*turn);
                 self.finish_active_text_blocks();
+                self.transcript.finish_live_model_attempt(*turn);
                 true
             }
-            AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. } => {
+            AgentEvent::MessageFinished { turn, .. } | AgentEvent::TurnFinished { turn, .. } => {
                 self.finish_active_text_blocks();
+                self.transcript.finish_live_model_attempt(*turn);
                 true
             }
             _ => false,
@@ -88,11 +169,13 @@ impl TranscriptPane {
 
     fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::ThinkingStarted { .. } => {
+            AgentEvent::ThinkingStarted { turn, .. } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.start_thinking_block();
                 true
             }
-            AgentEvent::ThinkingDelta { text, .. } => {
+            AgentEvent::ThinkingDelta { turn, text } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.append_thinking_block(text);
                 true
             }
@@ -178,16 +261,21 @@ impl TranscriptPane {
     fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::ToolCallStarted { turn, id, name } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.start_tool_call(*turn, id, name.clone());
                 true
             }
             AgentEvent::ToolCallArgumentsDelta {
-                id, json_fragment, ..
+                turn,
+                id,
+                json_fragment,
             } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.append_tool_call_arguments(id, json_fragment);
                 true
             }
             AgentEvent::ToolCallFinished { turn, tool_call } => {
+                self.transcript.begin_live_model_attempt(*turn);
                 self.finish_tool_call(*turn, tool_call);
                 true
             }
@@ -332,6 +420,9 @@ impl TranscriptPane {
                 use crate::transcript::entry::StatusSeverity;
                 let result = format!("Turn ended before this tool executed: {message}");
                 self.mark_unfinished_tools_for_turn(*turn, ToolStatusKind::Failed, &result);
+                if self.transcript.has_exhausted_retry_status(*turn) {
+                    return true;
+                }
 
                 let severity = match code.as_deref() {
                     Some(

@@ -152,6 +152,9 @@ pub enum TranscriptEntry {
         /// line with no prefix.
         severity: Option<StatusSeverity>,
     },
+    RetryStatus {
+        data: RetryStatusData,
+    },
     McpStartupStatus {
         data: McpStartupStatusData,
     },
@@ -212,6 +215,35 @@ pub enum StatusSeverity {
     Info,
     Warning,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPhase {
+    Waiting,
+    Connecting,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryStatusData {
+    pub turn: u32,
+    pub retry: u32,
+    pub max_retries: u32,
+    pub phase: RetryPhase,
+    pub delay_ms: u64,
+    pub started_at_ms: u64,
+    pub error_code: String,
+    pub message: String,
+}
+
+pub(crate) fn monotonic_time_ms() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +407,11 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub const fn retry_status(data: RetryStatusData) -> Self {
+        Self::RetryStatus { data }
+    }
+
+    #[must_use]
     pub const fn mcp_startup_status(data: McpStartupStatusData) -> Self {
         Self::McpStartupStatus { data }
     }
@@ -484,6 +521,13 @@ impl TranscriptEntry {
                     Finalization::Live
                 }
             }
+            Self::RetryStatus { data } => {
+                if data.phase == RetryPhase::Exhausted {
+                    Finalization::Finalized
+                } else {
+                    Finalization::Live
+                }
+            }
             Self::McpStartupStatus { data } => {
                 if matches!(data.phase, McpStartupPhase::Connecting) {
                     Finalization::Live
@@ -529,6 +573,11 @@ impl TranscriptEntry {
                 *self = Self::status(format!(
                     "Compaction interrupted at {percent}% when terminal exited"
                 ));
+                true
+            }
+            Self::RetryStatus { data } => {
+                let retry = data.retry;
+                *self = Self::status(format!("Reconnect interrupted during attempt {retry}"));
                 true
             }
             Self::McpStartupStatus { data } => {
@@ -639,6 +688,9 @@ impl TranscriptEntry {
             ),
             Self::Status { text, severity } => {
                 render_status::render_status(text, *severity, inner_width, theme)
+            }
+            Self::RetryStatus { data } => {
+                render_status::render_retry_status(data, inner_width, theme)
             }
             Self::McpStartupStatus { data } => render_mcp_startup::render_mcp_startup_status(
                 data,
@@ -752,6 +804,7 @@ impl TranscriptEntry {
             Self::Banner(_)
             | Self::UserMessage { .. }
             | Self::Status { .. }
+            | Self::RetryStatus { .. }
             | Self::McpStartupStatus { .. }
             | Self::AssistantMessage { .. }
             | Self::ThinkingBlock { .. }
@@ -767,6 +820,7 @@ impl TranscriptEntry {
             Self::McpStartupStatus { data } => {
                 matches!(data.phase, McpStartupPhase::Connecting)
             }
+            Self::RetryStatus { data } => data.phase == RetryPhase::Waiting,
             _ => false,
         }
     }
@@ -782,6 +836,13 @@ impl TranscriptEntry {
                 data:
                     McpStartupStatusData {
                         phase: McpStartupPhase::Connecting,
+                        ..
+                    },
+            }
+            | Self::RetryStatus {
+                data:
+                    RetryStatusData {
+                        phase: RetryPhase::Waiting,
                         ..
                     },
             }
@@ -812,6 +873,7 @@ impl TranscriptEntry {
         match self {
             // MCP startup status uses activity_frame spinner when connecting.
             Self::McpStartupStatus { data } => !matches!(data.phase, McpStartupPhase::Connecting),
+            Self::RetryStatus { data } => data.phase == RetryPhase::Exhausted,
             // ThinkingBlock uses activity_frame spinner when streaming.
             Self::ThinkingBlock { phase, .. } => *phase == ThinkingPhase::Complete,
             // Image rendering depends on terminal image capabilities and render policy.
