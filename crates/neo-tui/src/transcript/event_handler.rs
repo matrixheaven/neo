@@ -423,6 +423,7 @@ impl TranscriptPane {
                 if self.transcript.has_exhausted_retry_status(*turn) {
                     return true;
                 }
+                self.interrupt_retry_status(*turn);
 
                 let severity = match code.as_deref() {
                     Some(

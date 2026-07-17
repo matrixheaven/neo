@@ -349,11 +349,13 @@ fn stream_response(
                     if state.parser.saw_terminal() {
                         state.finish()
                     } else {
+                        state.stopped = true;
                         vec![Err(AiError::Transport {
                             message: err.to_string(),
                         })]
                     }
                 }
+                StreamChunk::End if state.stopped => Vec::new(),
                 StreamChunk::End => state.finish(),
             }))
         })

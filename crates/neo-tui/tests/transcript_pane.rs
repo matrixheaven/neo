@@ -2126,6 +2126,56 @@ fn retry_exhaustion_suppresses_followup_error_card() {
 }
 
 #[test]
+fn retry_error_interrupts_connecting_status_and_keeps_terminal_error_visible() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: connection reset".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+    });
+    let retry_entry_id = pane.transcript().entry_ids()[0];
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "terminal connection failure".to_owned(),
+        code: None,
+        retry_after: None,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+
+    assert_eq!(pane.transcript().entry_ids()[0], retry_entry_id);
+    assert!(matches!(
+        &pane.transcript().entries()[0],
+        TranscriptEntry::Status { text, .. }
+            if text == "Reconnect interrupted during attempt 1"
+    ));
+    assert!(
+        pane.transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::RetryStatus { .. }))
+    );
+    let rendered = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(rendered.contains("Reconnect interrupted"), "{rendered}");
+    assert!(
+        rendered.contains("Error: terminal connection failure"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("connecting"), "{rendered}");
+}
+
+#[test]
 fn retry_wait_cancel_becomes_interrupted_terminal_status() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {

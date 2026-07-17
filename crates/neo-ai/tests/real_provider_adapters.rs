@@ -1537,13 +1537,19 @@ async fn openai_responses_client_returns_protocol_error_for_failed_streams() {
     ])]);
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
 
-    let error = client
+    let events = client
         .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
-        .await
+        .await;
+    assert_eq!(
+        events.iter().filter(|event| event.is_err()).count(),
+        1,
+        "classified provider failure must emit exactly one error: {events:?}"
+    );
+    let error = events
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_err();
+        .find_map(Result::err)
+        .expect("classified provider failure must emit an error");
 
     assert_eq!(error.code(), "provider.protocol_error");
     assert!(error.to_string().contains("status failed"));
@@ -2839,13 +2845,22 @@ async fn anthropic_body_error_respects_terminal_state() {
         Some(AiStreamEvent::MessageEnd { .. })
     ));
 
-    let error = client
+    let incomplete_events = client
         .stream_chat(request(ApiKind::AnthropicMessages))
         .collect::<Vec<_>>()
-        .await
+        .await;
+    assert_eq!(
+        incomplete_events
+            .iter()
+            .filter(|event| event.is_err())
+            .count(),
+        1,
+        "incomplete stream must emit exactly one error: {incomplete_events:?}"
+    );
+    let error = incomplete_events
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("incomplete body must remain an error");
+        .find_map(Result::err)
+        .expect("incomplete body must remain an error");
     assert!(matches!(
         error,
         AiError::Transport { message } if !message.starts_with("transport error:")
@@ -2889,13 +2904,22 @@ async fn google_body_error_respects_terminal_state() {
         Some(AiStreamEvent::MessageEnd { .. })
     ));
 
-    let error = client
+    let incomplete_events = client
         .stream_chat(request(ApiKind::GoogleGenerativeAi))
         .collect::<Vec<_>>()
-        .await
+        .await;
+    assert_eq!(
+        incomplete_events
+            .iter()
+            .filter(|event| event.is_err())
+            .count(),
+        1,
+        "incomplete stream must emit exactly one error: {incomplete_events:?}"
+    );
+    let error = incomplete_events
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("incomplete body must remain an error");
+        .find_map(Result::err)
+        .expect("incomplete body must remain an error");
     assert!(matches!(
         error,
         AiError::Transport { message } if !message.starts_with("transport error:")
@@ -2930,13 +2954,22 @@ async fn openai_compatible_body_error_respects_terminal_state() {
         Some(AiStreamEvent::MessageEnd { .. })
     ));
 
-    let error = client
+    let incomplete_events = client
         .stream_chat(request(ApiKind::OpenAi))
         .collect::<Vec<_>>()
-        .await
+        .await;
+    assert_eq!(
+        incomplete_events
+            .iter()
+            .filter(|event| event.is_err())
+            .count(),
+        1,
+        "incomplete stream must emit exactly one error: {incomplete_events:?}"
+    );
+    let error = incomplete_events
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("incomplete body must remain an error");
+        .find_map(Result::err)
+        .expect("incomplete body must remain an error");
     assert!(matches!(
         error,
         AiError::Transport { message } if !message.starts_with("transport error:")
@@ -2975,13 +3008,22 @@ async fn openai_responses_body_error_respects_terminal_state() {
         Some(AiStreamEvent::MessageEnd { .. })
     ));
 
-    let error = client
+    let incomplete_events = client
         .stream_chat(request(ApiKind::OpenAiResponse))
         .collect::<Vec<_>>()
-        .await
+        .await;
+    assert_eq!(
+        incomplete_events
+            .iter()
+            .filter(|event| event.is_err())
+            .count(),
+        1,
+        "incomplete stream must emit exactly one error: {incomplete_events:?}"
+    );
+    let error = incomplete_events
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("incomplete body must remain an error");
+        .find_map(Result::err)
+        .expect("incomplete body must remain an error");
     assert!(matches!(
         error,
         AiError::Transport { message } if !message.starts_with("transport error:")
