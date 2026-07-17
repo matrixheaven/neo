@@ -77,7 +77,7 @@ pub(crate) fn estimate_tool_specs_tokens(tools: &[ToolSpec]) -> usize {
         .sum()
 }
 
-fn estimate_text_tokens(text: &str) -> usize {
+pub(crate) fn estimate_text_tokens(text: &str) -> usize {
     // Fast byte-based approximation that avoids per-character iteration.
     //
     // The previous implementation iterated every `char`, counting ASCII vs

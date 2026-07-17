@@ -2,6 +2,7 @@ pub mod compaction;
 pub mod events;
 pub mod goal;
 pub mod harness;
+pub mod instructions;
 pub mod messages;
 pub mod mode;
 pub mod multi_agent;
