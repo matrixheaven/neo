@@ -20,6 +20,23 @@ fn plain_frame(transcript: &mut TranscriptPane, width: usize, height: usize) -> 
         .collect()
 }
 
+fn schedule_and_resume_retry(pane: &mut TranscriptPane, turn: u32) {
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: connection reset".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+        turn,
+        retry: 1,
+        max_retries: 5,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryResumed { turn, retry: 1 });
+}
+
 fn ansi_for_color(color: Color) -> String {
     match color {
         Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
@@ -1887,6 +1904,157 @@ fn retry_status_mutates_original_position() {
         TranscriptEntry::RetryStatus { data }
             if data.phase == neo_tui::transcript::entry::RetryPhase::Exhausted
                 && data.message == "connection reset"
+    ));
+}
+
+#[test]
+fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
+    let mut pane = TranscriptPane::new(40, 8);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "attempt-1".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-1".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "failed reasoning".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "failed answer prefix\n\nfailed mutable tail".to_owned(),
+    });
+
+    let provisional = pane.render_terminal_update(40, 8);
+    let provisional_live = provisional
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut terminal_history = provisional
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(provisional_live.contains("failed mutable tail"));
+    pane.acknowledge_history(&provisional.history);
+
+    schedule_and_resume_retry(&mut pane, 1);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "attempt-2".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "winning answer".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "attempt-2".to_owned(),
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+    });
+
+    let finished = pane.render_terminal_update(40, 8);
+    terminal_history.push('\n');
+    terminal_history.push_str(
+        &finished
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    pane.acknowledge_history(&finished.history);
+    assert!(pane.render_terminal_update(40, 8).history.is_empty());
+
+    assert!(
+        !terminal_history.contains("failed reasoning"),
+        "{terminal_history}"
+    );
+    assert!(
+        !terminal_history.contains("failed answer prefix"),
+        "{terminal_history}"
+    );
+    assert_eq!(
+        terminal_history.matches("winning answer").count(),
+        1,
+        "{terminal_history}"
+    );
+}
+
+#[test]
+fn retry_thinking_first_reuses_anchor_before_intervening_finalized_entry() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "failed answer".to_owned(),
+    });
+    let anchor_id = pane.transcript().entry_ids()[0];
+    schedule_and_resume_retry(&mut pane, 1);
+    pane.transcript_mut()
+        .push(TranscriptEntry::status("intervening"));
+    let intervening_id = pane.transcript().entry_ids()[1];
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-2".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "winning reasoning".to_owned(),
+    });
+
+    assert_eq!(pane.transcript().entries().len(), 2);
+    assert_eq!(pane.transcript().entry_ids(), &[anchor_id, intervening_id]);
+    assert!(matches!(
+        &pane.transcript().entries()[0],
+        TranscriptEntry::ThinkingBlock { content, .. } if content == "winning reasoning"
+    ));
+    assert!(matches!(
+        &pane.transcript().entries()[1],
+        TranscriptEntry::Status { text, .. } if text == "intervening"
+    ));
+}
+
+#[test]
+fn retry_tool_first_reuses_anchor_before_intervening_finalized_entry() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "failed answer".to_owned(),
+    });
+    let anchor_id = pane.transcript().entry_ids()[0];
+    schedule_and_resume_retry(&mut pane, 1);
+    pane.transcript_mut()
+        .push(TranscriptEntry::status("intervening"));
+    let intervening_id = pane.transcript().entry_ids()[1];
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-2".to_owned(),
+        name: "Read".to_owned(),
+    });
+
+    assert_eq!(pane.transcript().entries().len(), 2);
+    assert_eq!(pane.transcript().entry_ids(), &[anchor_id, intervening_id]);
+    assert!(matches!(
+        &pane.transcript().entries()[0],
+        TranscriptEntry::ToolRun { component } if component.id() == "tool-2"
+    ));
+    assert!(matches!(
+        &pane.transcript().entries()[1],
+        TranscriptEntry::Status { text, .. } if text == "intervening"
     ));
 }
 

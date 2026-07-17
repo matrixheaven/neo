@@ -175,8 +175,10 @@ impl TranscriptPresentation {
         let mut pending_history = Vec::new();
         let mut commit_blocked = false;
         let mut rendered_tail_owner = self.acknowledged_tail_owner;
+        let live_model_attempt_start = transcript.live_model_attempt_start();
         let mut index = 0;
         while index < transcript.entries().len() {
+            commit_blocked |= live_model_attempt_start == Some(index);
             let Some(id) = transcript.entry_ids().get(index).copied() else {
                 index += 1;
                 continue;

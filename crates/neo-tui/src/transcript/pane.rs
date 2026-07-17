@@ -919,7 +919,14 @@ impl TranscriptPane {
             component.set_workspace_dir(workspace_root.clone());
         }
         let entry = self.apply_expand_state_to_entry(TranscriptEntry::tool_run(component));
-        self.transcript.push(entry);
+        if let Some(index) = self.transcript.take_empty_live_attempt_anchor() {
+            self.transcript.mutate_entry(index, |current| {
+                *current = entry;
+                true
+            });
+        } else {
+            self.transcript.push(entry);
+        }
     }
 
     pub(super) fn remember_tool_call(&mut self, turn: u32, id: &str, name: &str) {

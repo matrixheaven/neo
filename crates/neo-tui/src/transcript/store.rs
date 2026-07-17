@@ -207,6 +207,28 @@ impl TranscriptStore {
         }
     }
 
+    #[must_use]
+    pub(crate) fn live_model_attempt_start(&self) -> Option<usize> {
+        self.live_model_attempt.map(|(_, start)| start)
+    }
+
+    pub(crate) fn take_empty_live_attempt_anchor(&mut self) -> Option<usize> {
+        let Some((_, index)) = self.live_model_attempt else {
+            return None;
+        };
+        if !matches!(
+            self.entries.get(index),
+            Some(TranscriptEntry::AssistantMessage { content }) if content.is_empty()
+        ) {
+            return None;
+        }
+
+        if self.active_assistant == Some(index) {
+            self.active_assistant = None;
+        }
+        Some(index)
+    }
+
     pub fn start_assistant(&mut self) {
         if self.active_assistant.is_some() {
             return;
@@ -378,6 +400,14 @@ impl TranscriptStore {
 
     pub fn start_thinking(&mut self) {
         if self.active_thinking.is_some() {
+            return;
+        }
+        if let Some(index) = self.take_empty_live_attempt_anchor() {
+            self.mutate_entry(index, |entry| {
+                *entry = TranscriptEntry::thinking_streaming(String::new());
+                true
+            });
+            self.active_thinking = Some(index);
             return;
         }
         let index = self.append_entry(TranscriptEntry::thinking_streaming(String::new()));
@@ -832,7 +862,9 @@ impl TranscriptStore {
     }
 
     pub fn finalize_interrupted_live_entries(&mut self) -> bool {
-        let mut changed = self.active_assistant.is_some() || self.active_thinking.is_some();
+        let mut changed = self.live_model_attempt.take().is_some()
+            || self.active_assistant.is_some()
+            || self.active_thinking.is_some();
         self.finish_assistant();
         self.finish_thinking();
 
