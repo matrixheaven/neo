@@ -143,7 +143,7 @@ fn app_shell_explicit_animation_tick_animates_transcript_thinking_spinner() {
     let mut tui = neo_tui::NeoTui::new(chrome, transcript);
 
     let first = strip_lines(tui.render_frame(80, 20).0).join("\n");
-    tui.chrome_mut().advance_activity_frame();
+    tui.advance_animation_at(Instant::now());
     let second = strip_lines(tui.render_frame(80, 20).0).join("\n");
 
     assert!(first.contains("⠋ thinking..."), "first frame: {first}");
