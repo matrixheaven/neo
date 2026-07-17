@@ -69,8 +69,14 @@ impl NeoTui {
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        if let Some(lines) = self.render_transcript_browser_frame(width, height) {
-            return (lines, None);
+        if self.chrome.transcript_browser_state().is_some() {
+            let chrome =
+                fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+            let mut lines = self
+                .render_transcript_browser_frame(width, height.saturating_sub(chrome.lines.len()))
+                .expect("transcript browser state exists");
+            let cursor = append_chrome(&mut lines, chrome);
+            return (lines, cursor);
         }
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
@@ -112,7 +118,13 @@ impl NeoTui {
         height: usize,
         now: Instant,
     ) -> TerminalFrame {
-        if let Some(lines) = self.render_transcript_browser_frame(width, height) {
+        if self.chrome.transcript_browser_state().is_some() {
+            let chrome =
+                fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+            let mut lines = self
+                .render_transcript_browser_frame(width, height.saturating_sub(chrome.lines.len()))
+                .expect("transcript browser state exists");
+            let cursor = append_chrome(&mut lines, chrome);
             let next_animation_deadline = (self.chrome.working_label().is_some()
                 || self.transcript.has_visible_animation()
                 || self.transcript.has_live_entries())
@@ -120,7 +132,7 @@ impl NeoTui {
             return TerminalFrame::with_surface(
                 Vec::new(),
                 lines,
-                None,
+                cursor,
                 true,
                 next_animation_deadline,
             );
@@ -193,9 +205,7 @@ impl NeoTui {
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
         let state = self.chrome.transcript_browser_state_mut()?;
-        let mut lines = self.transcript.render_browser_rows(state, width, height);
-        apply_gutter(&mut lines);
-        Some(lines)
+        Some(self.transcript.render_browser_rows(state, width, height))
     }
 }
 

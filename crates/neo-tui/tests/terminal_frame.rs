@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use neo_agent_core::{AgentEvent, ToolResult};
 use neo_tui::NeoTui;
-use neo_tui::primitive::strip_ansi;
+use neo_tui::primitive::{strip_ansi, visible_width};
 use neo_tui::screen_output::TerminalFrame;
-use neo_tui::shell::NeoChromeState;
-use neo_tui::transcript::{TranscriptBrowserState, TranscriptEntry, TranscriptPane, apply_gutter};
+use neo_tui::shell::{NeoChromeState, PromptEdit};
+use neo_tui::transcript::{CHROME_GUTTER, TranscriptBrowserState, TranscriptEntry, TranscriptPane};
 
 #[test]
 fn terminal_frame_acknowledges_history_without_replaying_live_chrome() {
@@ -110,6 +110,49 @@ fn transcript_browser_frame_is_bounded_and_marked_review_surface() {
 }
 
 #[test]
+fn transcript_browser_expansion_reserves_chrome_rows() {
+    let mut chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    chrome.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
+    chrome.open_transcript_browser(true);
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.push_transcript(TranscriptEntry::thinking_complete(
+        (1..=20)
+            .map(|index| format!("expanded-line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+    let text = frame
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cursor = frame.cursor.expect("review keeps the prompt cursor");
+
+    assert!(frame.review_surface);
+    assert_eq!(frame.live.len(), 12);
+    assert!(text.contains("expanded-line-20"), "frame: {text}");
+    assert!(text.contains("draft"), "frame: {text}");
+    assert!(text.contains("[ask]"), "frame: {text}");
+    assert!(cursor.row < frame.live.len());
+    assert!(cursor.row < 12);
+}
+
+#[test]
+fn browser_render_does_not_consume_normal_pane_dirty_state() {
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.push_status("pending normal render");
+    let mut browser = TranscriptBrowserState::new(false);
+
+    let _ = transcript.render_browser_rows(&mut browser, 80, 8);
+
+    assert!(transcript.is_dirty());
+}
+
+#[test]
 fn transcript_browser_uses_terminal_width_before_gutter() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
     let mut transcript = TranscriptPane::new(20, 8);
@@ -117,16 +160,24 @@ fn transcript_browser_uses_terminal_width_before_gutter() {
         "0123456789012345678901234567890123456789",
     ));
 
-    let mut expected_pane = transcript.clone();
-    let mut expected_state = TranscriptBrowserState::new(false);
-    let mut expected = expected_pane.render_browser_rows(&mut expected_state, 20, 8);
-    apply_gutter(&mut expected);
-
     let mut tui = NeoTui::new(chrome, transcript);
     tui.chrome_mut().open_transcript_browser(false);
     let frame = tui.render_terminal_frame_at(20, 8, Instant::now());
+    let body_line = frame
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .find(|line| line.contains("012345"))
+        .expect("review body line is visible");
 
-    assert_eq!(frame.live, expected);
+    assert!(frame.live.iter().all(|line| visible_width(line) <= 20));
+    assert!(
+        frame
+            .live
+            .iter()
+            .any(|line| visible_width(line) == 20 - CHROME_GUTTER)
+    );
+    assert!(body_line.starts_with(" ●"), "body line: {body_line:?}");
 }
 
 #[test]

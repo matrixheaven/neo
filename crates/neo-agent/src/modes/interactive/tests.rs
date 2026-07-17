@@ -4664,6 +4664,44 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
 }
 
 #[tokio::test]
+async fn transcript_browser_keeps_prompt_editable_and_closes_on_submit() {
+    let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&submitted);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |_request| {
+            let observed = Arc::clone(&observed);
+            async move {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.tui.chrome_mut().open_transcript_browser(false);
+
+    controller
+        .handle_input_event(InputEvent::Insert('a'))
+        .await
+        .expect("prompt input works during review");
+    assert_eq!(controller.chrome().prompt().text, "a");
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("prompt submits during review");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("submitted turn completes");
+
+    assert!(controller.chrome().transcript_browser_state().is_none());
+    assert!(submitted.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn transcript_browser_routes_default_and_custom_suspend_exit_keys() {
     let mut default_controller = InteractiveController::new_for_test(
         "neo",
@@ -4737,7 +4775,7 @@ async fn transcript_browser_routes_default_and_custom_suspend_exit_keys() {
 }
 
 #[tokio::test]
-async fn transcript_browser_routes_direct_global_actions_and_consumes_prompt_input() {
+async fn transcript_browser_routes_direct_global_actions() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -4747,10 +4785,6 @@ async fn transcript_browser_routes_direct_global_actions_and_consumes_prompt_inp
     );
     controller.tui.chrome_mut().open_transcript_browser(false);
 
-    let ordinary_input = controller
-        .handle_input_event(InputEvent::Insert('a'))
-        .await
-        .expect("ordinary input is consumed by the browser");
     let suspend = controller
         .handle_input_event(InputEvent::Action(KeybindingAction::AppSuspend))
         .await
@@ -4764,8 +4798,6 @@ async fn transcript_browser_routes_direct_global_actions_and_consumes_prompt_inp
         .await
         .expect("direct exit action confirms exit");
 
-    assert!(!ordinary_input);
-    assert_eq!(controller.chrome().prompt().text, "");
     assert!(controller.chrome().transcript_browser_state().is_some());
     assert!(!suspend);
     assert!(controller.take_suspend_requested());

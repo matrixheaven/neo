@@ -133,6 +133,11 @@ impl InteractiveController {
             self.transcript_mut().mark_dirty();
             return true;
         }
+        if matches!(event, InputEvent::Submit) || matches_action(KeybindingAction::InputSubmit) {
+            self.tui.chrome_mut().close_transcript_browser();
+            self.transcript_mut().mark_dirty();
+            return false;
+        }
 
         let scroll = if matches_action(KeybindingAction::EditorCursorUp)
             || matches_action(KeybindingAction::SelectUp)
@@ -173,8 +178,9 @@ impl InteractiveController {
                 }
             }
             self.transcript_mut().mark_dirty();
+            return true;
         }
-        true
+        false
     }
 
     fn follow_transcript_tail(&mut self) {

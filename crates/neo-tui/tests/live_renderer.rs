@@ -1,4 +1,4 @@
-use neo_tui::screen_output::{InlineTerminal, LiveRenderer, TerminalFrame};
+use neo_tui::screen_output::{CursorPos, InlineTerminal, LiveRenderer, TerminalFrame};
 use neo_tui::transcript::TranscriptPane;
 
 #[test]
@@ -122,6 +122,34 @@ fn unchanged_live_frame_emits_no_bytes() {
         .expect("unchanged live render");
 
     assert!(second.is_empty());
+}
+
+#[test]
+fn logical_cursor_state_controls_hardware_cursor_visibility() {
+    let mut renderer = LiveRenderer::new(80, 24);
+    let mut hidden = Vec::new();
+    renderer
+        .render_to(&mut hidden, vec!["live".to_owned()], None)
+        .expect("render without a logical cursor");
+    assert!(
+        String::from_utf8(hidden)
+            .expect("ANSI output is UTF-8")
+            .contains("\x1b[?25l")
+    );
+
+    let mut shown = Vec::new();
+    renderer
+        .render_to(
+            &mut shown,
+            vec!["live".to_owned()],
+            Some(CursorPos { row: 0, col: 0 }),
+        )
+        .expect("render with a logical cursor");
+    assert!(
+        String::from_utf8(shown)
+            .expect("ANSI output is UTF-8")
+            .contains("\x1b[?25h")
+    );
 }
 
 #[test]

@@ -820,7 +820,6 @@ impl TranscriptPane {
         let rows = snapshot.render_body_lines(width);
         state.viewport.sync(rows.len(), height);
         let range = state.viewport.visible_row_range(rows.len(), height);
-        self.dirty = false;
         rows[range].to_vec()
     }
 

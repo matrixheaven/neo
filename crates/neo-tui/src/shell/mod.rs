@@ -359,7 +359,6 @@ impl NeoChromeState {
                 | OverlayKind::TrustDialog(_)
                 | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
-                | OverlayKind::TranscriptBrowser(_)
         )
     }
 

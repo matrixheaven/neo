@@ -177,6 +177,11 @@ impl LiveRenderer {
                 let _ = write!(bytes, "\x1b[{}C", cursor.col);
             }
         }
+        bytes.push_str(if cursor.is_some() {
+            "\x1b[?25h"
+        } else {
+            "\x1b[?25l"
+        });
 
         output.write_all(bytes.as_bytes())?;
         output.flush()?;
