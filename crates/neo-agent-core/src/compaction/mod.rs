@@ -356,6 +356,13 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
         | AgentMessage::ToolResult { content, .. } => {
             render_content_parts(content, &mut lines);
         }
+        // Pinned instruction bodies are exact model context: they are
+        // excluded from summary input and labeled by generation only.
+        AgentMessage::Instruction { generation, .. } => {
+            lines.push(format!(
+                "pinned instructions (epoch generation {generation}); body excluded from summary input"
+            ));
+        }
         AgentMessage::Assistant {
             content,
             tool_calls,
@@ -442,6 +449,7 @@ fn message_role_label(message: &AgentMessage) -> &'static str {
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
         AgentMessage::ShellCommand { .. } => "shell",
+        AgentMessage::Instruction { .. } => "instructions",
     }
 }
 

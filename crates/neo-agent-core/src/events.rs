@@ -305,6 +305,13 @@ pub enum AgentEvent {
     MessageAppended {
         message: AgentMessage,
     },
+    /// One append-only instruction epoch: the single persisted source for
+    /// path-scoped AGENTS.md model content and transcript metadata. Never
+    /// duplicated as a `MessageAppended` event; replay rebuilds the pinned
+    /// `AgentMessage::Instruction` and agent-local visibility from this.
+    InstructionEpoch {
+        epoch: crate::instructions::InstructionEpochData,
+    },
     TurnFinished {
         turn: u32,
         stop_reason: StopReason,

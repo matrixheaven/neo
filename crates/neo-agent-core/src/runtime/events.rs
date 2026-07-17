@@ -76,6 +76,11 @@ impl EventEmitter {
             AgentEvent::CompactionApplied { summary } => {
                 context.apply_compaction(summary.clone());
             }
+            // Live conversion mirrors replay: the epoch pins one instruction
+            // message and updates agent-local visibility.
+            AgentEvent::InstructionEpoch { epoch } => {
+                context.apply_instruction_epoch(epoch);
+            }
             AgentEvent::PlanModeEntered { id, .. } => {
                 context.plan_mode_active = true;
                 context.plan_mode_id = Some(id.clone());

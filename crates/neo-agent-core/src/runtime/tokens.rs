@@ -11,9 +11,9 @@ pub(crate) fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
 pub(crate) fn estimate_message_tokens(message: &AgentMessage) -> usize {
     let role_tokens = estimate_text_tokens(agent_message_role(message));
     let payload_tokens = match message {
-        AgentMessage::System { content } | AgentMessage::User { content, .. } => {
-            estimate_content_tokens(content)
-        }
+        AgentMessage::System { content }
+        | AgentMessage::User { content, .. }
+        | AgentMessage::Instruction { content, .. } => estimate_content_tokens(content),
         AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
@@ -103,7 +103,8 @@ const fn estimate_image_tokens() -> usize {
 
 const fn agent_message_role(message: &AgentMessage) -> &'static str {
     match message {
-        AgentMessage::System { .. } => "system",
+        // Pinned instructions convert to provider system messages.
+        AgentMessage::System { .. } | AgentMessage::Instruction { .. } => "system",
         AgentMessage::User { .. } | AgentMessage::ShellCommand { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",

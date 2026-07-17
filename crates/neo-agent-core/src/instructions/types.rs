@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Maximum recursive `@path` import depth below the root `AGENTS.md`.
@@ -24,7 +25,7 @@ pub const MAX_GRAPH_BYTES: u64 = 8 * 1024 * 1024;
 pub const MIN_NOMINAL_BUDGET: u64 = 65_536;
 
 /// Semantic outcome of one instruction epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionEpochOutcome {
     Ready,
@@ -46,7 +47,7 @@ pub struct InstructionRegistryConfig {
 
 /// One append-only instruction epoch. This is the single persisted source
 /// for model content and transcript metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionEpochData {
     pub agent_id: String,
     pub generation: u64,
@@ -65,7 +66,7 @@ pub struct InstructionEpochData {
 ///
 /// Scope paths are canonical absolute paths; home redaction for display is
 /// applied later by the transcript projection, not by the engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AgentInstructionState {
     pub visible_generation: u64,
     pub visible_revisions: BTreeMap<PathBuf, String>,
@@ -83,8 +84,16 @@ impl AgentInstructionState {
         epoch: &InstructionEpochData,
         fingerprint: &InstructionFingerprint,
     ) {
-        self.visible_generation = epoch.generation;
+        self.apply_epoch_visibility(epoch);
         self.last_epoch_fingerprint = Some(fingerprint.hash.clone());
+    }
+
+    /// Visibility-only epoch application. Replay rebuilds durable state from
+    /// epoch events and cannot reconstruct the preflight fingerprint, so it
+    /// updates only the model-visible fields; live callers use
+    /// [`Self::apply_epoch`] (or record the fingerprint separately).
+    pub fn apply_epoch_visibility(&mut self, epoch: &InstructionEpochData) {
+        self.visible_generation = epoch.generation;
         self.active_scopes = epoch
             .scopes
             .iter()
@@ -147,7 +156,7 @@ pub enum InstructionInheritance {
 }
 
 /// Which filesystem layer a scope belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionScopeKind {
     /// `$NEO_HOME/AGENTS.md`.
@@ -161,7 +170,7 @@ pub enum InstructionScopeKind {
 }
 
 /// Display-safe metadata about one discovered scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionScopeData {
     pub display_path: PathBuf,
     pub kind: InstructionScopeKind,
@@ -170,7 +179,7 @@ pub struct InstructionScopeData {
 }
 
 /// Display-safe metadata about one admitted bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionBundleMetadata {
     pub display_path: PathBuf,
     pub revision: String,
@@ -181,7 +190,7 @@ pub struct InstructionBundleMetadata {
 }
 
 /// A complete bundle omitted from the model context as a whole unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct IgnoredInstructionBundle {
     pub display_path: PathBuf,
     pub revision: String,
@@ -190,14 +199,14 @@ pub struct IgnoredInstructionBundle {
 }
 
 /// Why a complete bundle was omitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionOmissionReason {
     OverBudget,
 }
 
 /// One bundle revision replacement (previous revision -> new revision).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionReplacement {
     pub display_path: PathBuf,
     pub previous_revision: String,
@@ -205,7 +214,7 @@ pub struct InstructionReplacement {
 }
 
 /// Typed failure kinds for blocked instruction bundles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionFailureKind {
     MissingImport,
@@ -237,7 +246,7 @@ impl InstructionFailureKind {
 
 /// One blocked instruction state: display-safe path, typed kind, and
 /// display-safe detail (paths and limit numbers only).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionFailure {
     pub display_path: PathBuf,
     pub kind: InstructionFailureKind,

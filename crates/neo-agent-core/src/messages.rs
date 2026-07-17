@@ -172,6 +172,16 @@ pub enum AgentMessage {
         #[serde(default)]
         truncated: bool,
     },
+    /// Pinned path-scoped AGENTS.md instruction context for one epoch.
+    ///
+    /// Converts to a provider [`ChatMessage::System`], is never emitted as
+    /// `MessageAppended` (the owning `AgentEvent::InstructionEpoch` is the
+    /// single persisted source), and is never exported as user/assistant
+    /// prose.
+    Instruction {
+        generation: u64,
+        content: Vec<Content>,
+    },
 }
 
 impl AgentMessage {
@@ -289,7 +299,8 @@ impl AgentMessage {
             Self::System { content }
             | Self::User { content, .. }
             | Self::Assistant { content, .. }
-            | Self::ToolResult { content, .. } => content,
+            | Self::ToolResult { content, .. }
+            | Self::Instruction { content, .. } => content,
             Self::ShellCommand {
                 command,
                 stdout,
@@ -313,7 +324,7 @@ impl AgentMessage {
     #[must_use]
     pub fn to_chat_message(&self) -> ChatMessage {
         match self {
-            Self::System { content } => ChatMessage::System {
+            Self::System { content } | Self::Instruction { content, .. } => ChatMessage::System {
                 content: content.iter().map(to_content_part).collect(),
             },
             Self::User { content, .. } => ChatMessage::User {
@@ -772,6 +783,53 @@ fn to_content_part(content: &Content) -> ContentPart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_message_converts_to_provider_system_message_and_counts_tokens() {
+        let body = "Follow the scoped rules.\nNever regress established behavior.";
+        let message = AgentMessage::Instruction {
+            generation: 7,
+            content: vec![Content::text(body)],
+        };
+
+        // Provider conversion maps the pinned instruction to a system message
+        // with the exact body preserved.
+        let ChatMessage::System { content } = message.to_chat_message() else {
+            panic!("expected instruction to convert to a system chat message");
+        };
+        assert_eq!(
+            content,
+            vec![ContentPart::Text {
+                text: body.to_owned()
+            }]
+        );
+
+        // Token estimation includes the body exactly like an equivalent
+        // system message, and an empty instruction counts no body tokens.
+        assert_eq!(
+            crate::runtime::estimate_message_tokens(&message),
+            crate::runtime::estimate_message_tokens(&AgentMessage::system_text(body))
+        );
+        assert!(
+            crate::runtime::estimate_message_tokens(&message)
+                > crate::runtime::estimate_message_tokens(&AgentMessage::Instruction {
+                    generation: 7,
+                    content: Vec::new(),
+                })
+        );
+
+        // Image-blob resolution passes the pinned instruction through
+        // unchanged.
+        let resolved = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(crate::runtime::image_blobs::resolve_image_blobs(
+                vec![message.clone()],
+                None,
+            ));
+        assert_eq!(resolved, vec![message]);
+    }
 
     #[test]
     fn to_chat_message_repairs_partial_tool_arguments_before_provider_request() {

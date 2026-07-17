@@ -6,7 +6,7 @@ use crate::{AgentMessage, Content, ImageRef};
 /// Recursively replace `ImageRef::Blob` with `ImageRef::Base64` by reading
 /// `<session_dir>/blobs/<sha256>.*`. If the blob file is missing or the
 /// session directory is unknown, the blob is replaced with an empty base64.
-pub(super) async fn resolve_image_blobs(
+pub(crate) async fn resolve_image_blobs(
     messages: Vec<AgentMessage>,
     session_dir: Option<&std::path::Path>,
 ) -> Vec<AgentMessage> {
@@ -40,6 +40,9 @@ pub(super) async fn resolve_image_blobs(
             AgentMessage::System { content } => AgentMessage::System {
                 content: resolve_content_blobs(content, session_dir).await,
             },
+            // Pinned instruction context is exact text: pass it through
+            // unchanged.
+            message @ AgentMessage::Instruction { .. } => message,
             AgentMessage::ShellCommand {
                 command,
                 stdout,

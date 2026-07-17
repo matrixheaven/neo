@@ -8,7 +8,7 @@ mod context;
 pub(crate) mod context_budget;
 mod error;
 mod events;
-mod image_blobs;
+pub(crate) mod image_blobs;
 mod permission;
 mod plan_orchestration;
 mod queue;

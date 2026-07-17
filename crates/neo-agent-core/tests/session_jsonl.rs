@@ -1,9 +1,14 @@
+use neo_agent_core::instructions::{
+    InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome, InstructionScopeData,
+    InstructionScopeKind,
+};
 use neo_agent_core::multi_agent::{
     AgentId, AgentLifecycleState, AgentProgressSnapshot, AgentToolActivityPhase,
     DelegateToolProgress, SwarmAggregate, SwarmChildProgress,
 };
 use neo_agent_core::session::{
-    JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
+    JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, SessionEventPersistence,
+    compact_jsonl_session,
 };
 use neo_agent_core::session::{
     SessionAgentKind, SessionAgentRecord, SessionState, SessionStateStore, agent_tasks_dir,
@@ -1029,5 +1034,99 @@ async fn session_state_store_adds_missing_main_agent_when_reading_existing_state
     assert_eq!(
         loaded.agents.get("main").expect("main").record_dir,
         relative_agent_record_dir("main")
+    );
+}
+
+fn instruction_epoch(
+    generation: u64,
+    revision: &str,
+    model_content: Option<&str>,
+) -> InstructionEpochData {
+    let scope = std::path::PathBuf::from("/workspace");
+    InstructionEpochData {
+        agent_id: "main".to_owned(),
+        generation,
+        outcome: InstructionEpochOutcome::Activated,
+        scopes: vec![InstructionScopeData {
+            display_path: scope.clone(),
+            kind: InstructionScopeKind::WorkspaceRoot,
+            revision: Some(revision.to_owned()),
+            token_estimate: 12,
+        }],
+        selected_bundles: vec![InstructionBundleMetadata {
+            display_path: scope,
+            revision: revision.to_owned(),
+            token_estimate: 12,
+            byte_size: 64,
+            source_count: 1,
+            import_count: 0,
+        }],
+        ignored_bundles: Vec::new(),
+        replacements: Vec::new(),
+        failure: None,
+        deferred_tool_ids: Vec::new(),
+        model_content: model_content.map(str::to_owned),
+    }
+}
+
+#[tokio::test]
+async fn instruction_epoch_persists_once_and_replays_model_context() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let epoch = instruction_epoch(1, "rev-1", Some("scoped rules body"));
+    let event = AgentEvent::InstructionEpoch { epoch };
+
+    // The epoch event is the single persisted source: the persistence layer
+    // emits it exactly once and never synthesizes a MessageAppended copy.
+    let mut persistence = SessionEventPersistence::default();
+    let persisted = persistence.persisted_events(&event);
+    assert_eq!(persisted, vec![event]);
+
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    for persisted_event in &persisted {
+        writer.append(persisted_event).await.expect("append epoch");
+    }
+    writer.flush().await.expect("flush");
+
+    let wire = std::fs::read_to_string(&path).expect("read wire");
+    assert_eq!(
+        wire.matches("\"InstructionEpoch\"").count(),
+        1,
+        "epoch persisted exactly once: {wire}"
+    );
+    assert!(
+        !wire.contains("MessageAppended"),
+        "no duplicate MessageAppended copy: {wire}"
+    );
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay context");
+    assert_eq!(context.instruction_state().visible_generation, 1);
+    assert_eq!(
+        context
+            .instruction_state()
+            .visible_revisions
+            .get(std::path::Path::new("/workspace"))
+            .map(String::as_str),
+        Some("rev-1")
+    );
+    assert_eq!(context.messages().len(), 1);
+    let Some(AgentMessage::Instruction {
+        generation,
+        content,
+    }) = context.messages().first()
+    else {
+        panic!("expected one pinned instruction message");
+    };
+    assert_eq!(*generation, 1);
+    assert_eq!(
+        content
+            .iter()
+            .filter_map(Content::as_text)
+            .collect::<String>(),
+        "scoped rules body"
     );
 }

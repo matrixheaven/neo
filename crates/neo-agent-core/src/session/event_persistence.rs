@@ -92,6 +92,10 @@ impl SessionEventPersistence {
                 }
                 Vec::new()
             }
+            // The catch-all also covers `AgentEvent::InstructionEpoch`: the
+            // epoch is the single persisted source for instruction model
+            // content and transcript metadata, persisted exactly once and
+            // never duplicated as a `MessageAppended` copy.
             _ => vec![event.clone()],
         }
     }
