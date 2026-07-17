@@ -23,6 +23,7 @@ use session_mgmt::{
 };
 
 use std::{
+    io::IsTerminal as _,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
 };
@@ -54,13 +55,14 @@ pub async fn execute(
     continue_latest: bool,
     no_session: bool,
 ) -> anyhow::Result<String> {
+    let show_retry_notices = output == RunOutput::Text && !std::io::stdout().is_terminal();
     let turn = if no_session {
-        run_prompt_ephemeral(prompt, config).await?
+        run_prompt_ephemeral(prompt, config, show_retry_notices).await?
     } else if continue_latest {
         let session_id = latest_session_id(config)?;
-        run_prompt_in_session(&session_id, prompt, config).await?
+        run_prompt_in_session(&session_id, prompt, config, show_retry_notices).await?
     } else {
-        run_prompt(prompt, config).await?
+        run_prompt_with_retry_notices(prompt, config, show_retry_notices).await?
     };
     match output {
         RunOutput::Json => output::stable_json_output(&turn, config),
@@ -98,6 +100,14 @@ pub struct PromptApprovalRequest {
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
+    run_prompt_with_retry_notices(prompt, config, false).await
+}
+
+async fn run_prompt_with_retry_notices(
+    prompt: &[String],
+    config: &AppConfig,
+    show_retry_notices: bool,
+) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
     let session_path = create_session_path(config).await?;
@@ -129,15 +139,17 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         runtime,
         events,
         session_id,
+        show_retry_notices,
     )
     .await?;
     record_initial_session_title(config, &turn, &prompt_text).await;
     Ok(turn)
 }
 
-pub async fn run_prompt_ephemeral(
+async fn run_prompt_ephemeral(
     prompt: &[String],
     config: &AppConfig,
+    show_retry_notices: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
@@ -164,14 +176,16 @@ pub async fn run_prompt_ephemeral(
         runtime,
         events,
         "ephemeral".to_owned(),
+        show_retry_notices,
     )
     .await
 }
 
-pub async fn run_prompt_in_session(
+async fn run_prompt_in_session(
     session_id: &str,
     prompt: &[String],
     config: &AppConfig,
+    show_retry_notices: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
     let user_content = vec![Content::text(prompt_text.as_str())];
@@ -207,6 +221,7 @@ pub async fn run_prompt_in_session(
         runtime,
         events,
         session_id.to_owned(),
+        show_retry_notices,
     )
     .await
 }
@@ -548,6 +563,7 @@ async fn run_prompt_with_runtime(
         runtime,
         events,
         "test-session".to_owned(),
+        false,
     )
     .await
 }
@@ -582,17 +598,17 @@ async fn finish_prompt_turn(
     runtime: AgentRuntime,
     mut events: Vec<AgentEvent>,
     session_id: String,
+    show_retry_notices: bool,
 ) -> anyhow::Result<PromptTurn> {
     let mut assistant_text = String::new();
     let mut persistence = SessionEventPersistence::default();
-    let turn_events = runtime
-        .run_turn(&mut context, user_message.clone())
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for event in turn_events {
+    let mut turn_stream = runtime.run_turn(&mut context, user_message.clone());
+    while let Some(event) = turn_stream.next().await {
+        let event = event?;
+        if show_retry_notices {
+            let mut stderr = std::io::stderr();
+            let _ = write_retry_notice(&event, &mut stderr);
+        }
         let is_duplicate_user_message = matches!(
             &event,
             AgentEvent::MessageAppended { message } if message == &user_message
@@ -618,6 +634,43 @@ async fn finish_prompt_turn(
         events,
         assistant_text,
     })
+}
+
+fn write_retry_notice<W: std::io::Write>(
+    event: &AgentEvent,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let AgentEvent::RetryScheduled {
+        retry,
+        max_retries,
+        delay_ms,
+        error_code,
+        message,
+        ..
+    } = event
+    else {
+        return Ok(());
+    };
+    let message = neo_tui::primitive::strip_ansi(message)
+        .chars()
+        .map(|character| {
+            matches!(character, '\r' | '\n')
+                .then_some(' ')
+                .unwrap_or(character)
+        })
+        .collect::<String>();
+    let message = if error_code == "provider.transport_error" {
+        let detail = message
+            .strip_prefix("transport error: ")
+            .unwrap_or(message.as_str());
+        format!("Network error: {detail}")
+    } else {
+        message
+    };
+    writeln!(
+        output,
+        "Reconnecting {retry}/{max_retries} in {delay_ms}ms: {message}"
+    )
 }
 
 enum SessionEventWriter<'a> {
@@ -1694,6 +1747,41 @@ mod tests {
         assert!(!effect.persist);
         assert!(!effect.forward);
         assert_eq!(effect.assistant_text.as_deref(), None);
+    }
+
+    #[test]
+    fn retry_scheduled_notice_is_plain_non_tty_stderr() {
+        let mut stderr = Vec::new();
+
+        super::write_retry_notice(
+            &AgentEvent::RetryScheduled {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+                delay_ms: 500,
+                error_code: "provider.transport_error".to_owned(),
+                message: "transport error: \u{1b}[31mbody closed\u{1b}[0m\r\nretry detail"
+                    .to_owned(),
+            },
+            &mut stderr,
+        )
+        .expect("write retry notice");
+        super::write_retry_notice(
+            &AgentEvent::RetryStarted {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+            },
+            &mut stderr,
+        )
+        .expect("ignore non-scheduled retry event");
+
+        let stderr = String::from_utf8(stderr).expect("plain UTF-8 notice");
+        assert_eq!(
+            stderr,
+            "Reconnecting 1/5 in 500ms: Network error: body closed  retry detail\n"
+        );
+        assert!(!stderr.contains('\u{1b}'));
     }
 
     #[tokio::test]

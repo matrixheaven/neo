@@ -117,6 +117,7 @@ struct MultiAgentState {
     agent_order: BTreeMap<String, u64>,
     swarm_order: BTreeMap<String, u64>,
     agents: BTreeMap<String, AgentSnapshot>,
+    retry_activity_starts: BTreeMap<String, usize>,
     swarms: BTreeMap<String, super::SwarmSnapshot>,
     steer_handles: BTreeMap<String, SteerInputHandle>,
     /// Live cancellation tokens for actively running child agents. Registered
@@ -290,7 +291,12 @@ impl MultiAgentRuntime {
         snapshot.terminal_at_ms = None;
         snapshot.terminal_reason = None;
         snapshot.updated_at_ms = now;
-        Some(snapshot.clone())
+        let activity_start = snapshot.activity.len();
+        let snapshot = snapshot.clone();
+        state
+            .retry_activity_starts
+            .insert(id.as_str().to_owned(), activity_start);
+        Some(snapshot)
     }
 
     #[must_use]
@@ -743,7 +749,9 @@ impl MultiAgentRuntime {
         agent.terminal_at_ms = None;
         agent.terminal_reason = None;
         agent.updated_at_ms = now;
-        Ok(agent.clone())
+        let agent = agent.clone();
+        state.retry_activity_starts.insert(agent_id.to_owned(), 0);
+        Ok(agent)
     }
 
     pub fn deliver_live_agent_message(
@@ -1411,7 +1419,12 @@ impl MultiAgentRuntime {
         event: &AgentEvent,
     ) -> Option<AgentProgressSnapshot> {
         let mut locked = self.state.lock().expect("multi-agent state poisoned");
-        let snapshot = locked.agents.get_mut(id.as_str())?;
+        let MultiAgentState {
+            agents,
+            retry_activity_starts,
+            ..
+        } = &mut *locked;
+        let snapshot = agents.get_mut(id.as_str())?;
         // Ignore late buffered events after the agent has reached a terminal
         // state (e.g. cancelled by InterruptDelegate). This prevents a
         // cancelled child from looking active again.
@@ -1420,8 +1433,23 @@ impl MultiAgentRuntime {
         }
         snapshot.elapsed = started_at.elapsed();
         snapshot.updated_at_ms = now_ms();
+        let attempt_start = retry_activity_starts
+            .entry(id.as_str().to_owned())
+            .or_insert(snapshot.activity.len());
         let mut changed = false;
         match event {
+            AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryResumed { .. } => {
+                if let Some((retry_changed, latest_text)) =
+                    apply_retry_activity(&mut snapshot.activity, attempt_start, event)
+                {
+                    changed = retry_changed;
+                    if retry_changed {
+                        snapshot.latest_text = latest_text;
+                    }
+                }
+            }
             AgentEvent::ToolExecutionStarted {
                 id,
                 name,
@@ -1479,11 +1507,11 @@ impl MultiAgentRuntime {
             }
             AgentEvent::TextDelta { text, .. } => {
                 changed = true;
-                push_text_activity(snapshot, text, false);
+                push_text_activity(snapshot, *attempt_start, text, false);
             }
             AgentEvent::ThinkingDelta { text, .. } => {
                 changed = true;
-                push_text_activity(snapshot, text, true);
+                push_text_activity(snapshot, *attempt_start, text, true);
             }
             AgentEvent::MessageAppended {
                 message: AgentMessage::Assistant { content, .. },
@@ -1496,7 +1524,7 @@ impl MultiAgentRuntime {
                     if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
                         != Some(canonical_text.as_str())
                     {
-                        push_text_activity(snapshot, &text, false);
+                        push_text_activity(snapshot, *attempt_start, &text, false);
                     }
                 }
             }
@@ -1524,10 +1552,18 @@ impl MultiAgentRuntime {
             }
             _ => {}
         }
+        if matches!(
+            event,
+            AgentEvent::MessageAppended {
+                message: AgentMessage::Assistant { .. }
+            }
+        ) {
+            *attempt_start = snapshot.activity.len();
+        }
         if !changed {
             return None;
         }
-        trim_activity(&mut snapshot.activity);
+        *attempt_start = attempt_start.saturating_sub(trim_activity(&mut snapshot.activity));
         Some(snapshot.progress_snapshot())
     }
 
@@ -1991,88 +2027,106 @@ fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {
 
 fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
     let mut activity = Vec::new();
+    let mut attempt_start = 0;
     let mut tool_args: HashMap<String, serde_json::Value> = HashMap::new();
     for event in events {
-        match event {
-            AgentEvent::ToolExecutionStarted {
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                tool_args.insert(id.clone(), arguments.clone());
-                upsert_tool_activity(
-                    &mut activity,
+        if apply_retry_activity(&mut activity, &mut attempt_start, event).is_none() {
+            match event {
+                AgentEvent::ToolExecutionStarted {
                     id,
                     name,
-                    summarize_tool_arguments(arguments),
-                    AgentToolActivityPhase::Ongoing,
-                    None,
-                );
-            }
-            AgentEvent::ToolExecutionFinished {
-                id, name, result, ..
-            } => {
-                let phase = if result.is_error {
-                    AgentToolActivityPhase::Failed
-                } else {
-                    AgentToolActivityPhase::Done
-                };
-                let summary = summarize_tool_result(name, result)
-                    .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
-                upsert_tool_activity(
-                    &mut activity,
-                    id,
-                    name,
-                    summary,
-                    phase,
-                    tool_output_preview(name, result, false),
-                );
-            }
-            AgentEvent::ToolExecutionUpdate {
-                id,
-                name,
-                partial_result,
-                ..
-            } => {
-                let summary = summarize_tool_result(name, partial_result)
-                    .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
-                upsert_tool_activity(
-                    &mut activity,
-                    id,
-                    name,
-                    summary,
-                    AgentToolActivityPhase::Ongoing,
-                    tool_output_preview(name, partial_result, true),
-                );
-            }
-            AgentEvent::MessageAppended {
-                message: AgentMessage::Assistant { content, .. },
-            } => {
-                let text = content_text(content);
-                let canonical_text = bounded_latest_text(&text);
-                if !canonical_text.is_empty()
-                    && latest_text_activity(activity.as_slice(), false).as_deref()
-                        != Some(canonical_text.as_str())
-                {
-                    let _ = append_text_activity(&mut activity, &text, false);
+                    arguments,
+                    ..
+                } => {
+                    tool_args.insert(id.clone(), arguments.clone());
+                    upsert_tool_activity(
+                        &mut activity,
+                        id,
+                        name,
+                        summarize_tool_arguments(arguments),
+                        AgentToolActivityPhase::Ongoing,
+                        None,
+                    );
                 }
+                AgentEvent::ToolExecutionFinished {
+                    id, name, result, ..
+                } => {
+                    let phase = if result.is_error {
+                        AgentToolActivityPhase::Failed
+                    } else {
+                        AgentToolActivityPhase::Done
+                    };
+                    let summary = summarize_tool_result(name, result)
+                        .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
+                    upsert_tool_activity(
+                        &mut activity,
+                        id,
+                        name,
+                        summary,
+                        phase,
+                        tool_output_preview(name, result, false),
+                    );
+                }
+                AgentEvent::ToolExecutionUpdate {
+                    id,
+                    name,
+                    partial_result,
+                    ..
+                } => {
+                    let summary = summarize_tool_result(name, partial_result)
+                        .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
+                    upsert_tool_activity(
+                        &mut activity,
+                        id,
+                        name,
+                        summary,
+                        AgentToolActivityPhase::Ongoing,
+                        tool_output_preview(name, partial_result, true),
+                    );
+                }
+                AgentEvent::MessageAppended {
+                    message: AgentMessage::Assistant { content, .. },
+                } => {
+                    let text = content_text(content);
+                    let canonical_text = bounded_latest_text(&text);
+                    if !canonical_text.is_empty()
+                        && latest_text_activity(activity.as_slice(), false).as_deref()
+                            != Some(canonical_text.as_str())
+                    {
+                        let _ = append_text_activity(&mut activity, attempt_start, &text, false);
+                    }
+                }
+                AgentEvent::ThinkingDelta { text, .. } => {
+                    let _ = append_text_activity(&mut activity, attempt_start, text, true);
+                }
+                AgentEvent::TextDelta { text, .. } => {
+                    let _ = append_text_activity(&mut activity, attempt_start, text, false);
+                }
+                _ => {}
             }
-            AgentEvent::ThinkingDelta { text, .. } => {
-                let _ = append_text_activity(&mut activity, text, true);
-            }
-            AgentEvent::TextDelta { text, .. } => {
-                let _ = append_text_activity(&mut activity, text, false);
-            }
-            _ => {}
         }
+        if matches!(
+            event,
+            AgentEvent::MessageAppended {
+                message: AgentMessage::Assistant { .. }
+            }
+        ) {
+            attempt_start = activity.len();
+        }
+        attempt_start = attempt_start.saturating_sub(trim_activity(&mut activity));
     }
-    trim_activity(&mut activity);
     activity
 }
 
-fn push_text_activity(snapshot: &mut AgentSnapshot, text: &str, thinking: bool) {
-    let Some(accumulated) = append_text_activity(&mut snapshot.activity, text, thinking) else {
+fn push_text_activity(
+    snapshot: &mut AgentSnapshot,
+    attempt_start: usize,
+    text: &str,
+    thinking: bool,
+) {
+    let Some(accumulated) =
+        append_text_activity(&mut snapshot.activity, attempt_start, text, thinking)
+    else {
         return;
     };
 
@@ -2081,18 +2135,67 @@ fn push_text_activity(snapshot: &mut AgentSnapshot, text: &str, thinking: bool) 
     }
 }
 
+fn apply_retry_activity(
+    activity: &mut Vec<AgentActivityEntry>,
+    attempt_start: &mut usize,
+    event: &AgentEvent,
+) -> Option<(bool, Option<String>)> {
+    let start = (*attempt_start).min(activity.len());
+    match event {
+        AgentEvent::RetryScheduled {
+            retry, max_retries, ..
+        }
+        | AgentEvent::RetryStarted {
+            retry, max_retries, ..
+        } => {
+            let mut current_attempt = activity.split_off(start);
+            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            activity.append(&mut current_attempt);
+            let reconnecting = bounded_latest_text(&format!("Reconnecting {retry}/{max_retries}"));
+            activity.push(AgentActivityEntry {
+                kind: AgentActivityKind::Text {
+                    text: reconnecting.clone(),
+                    thinking: false,
+                },
+            });
+            Some((true, Some(reconnecting)))
+        }
+        AgentEvent::RetryResumed { .. } => {
+            let mut current_attempt = activity.split_off(start);
+            let previous_len = current_attempt.len();
+            current_attempt.retain(|entry| {
+                !matches!(
+                    &entry.kind,
+                    AgentActivityKind::Text { text, thinking: false }
+                        if text.starts_with("Reconnecting ")
+                )
+            });
+            let cleared = current_attempt.len() != previous_len;
+            activity.append(&mut current_attempt);
+            *attempt_start = activity.len();
+            let latest_text = cleared
+                .then(|| latest_text_activity(activity, false))
+                .flatten();
+            Some((cleared, latest_text))
+        }
+        _ => None,
+    }
+}
+
 fn append_text_activity(
     activity: &mut Vec<AgentActivityEntry>,
+    attempt_start: usize,
     text: &str,
     thinking: bool,
 ) -> Option<String> {
-    if let Some(AgentActivityEntry {
-        kind:
-            AgentActivityKind::Text {
-                text: previous,
-                thinking: previous_thinking,
-            },
-    }) = activity.last_mut()
+    if activity.len() > attempt_start
+        && let Some(AgentActivityEntry {
+            kind:
+                AgentActivityKind::Text {
+                    text: previous,
+                    thinking: previous_thinking,
+                },
+        }) = activity.last_mut()
         && *previous_thinking == thinking
     {
         previous.push_str(text);
@@ -2300,10 +2403,11 @@ fn compact_line(text: &str) -> String {
     line
 }
 
-fn trim_activity(activity: &mut Vec<AgentActivityEntry>) {
+fn trim_activity(activity: &mut Vec<AgentActivityEntry>) -> usize {
     const MAX_AGENT_ACTIVITY: usize = 24;
     let excess = activity.len().saturating_sub(MAX_AGENT_ACTIVITY);
     activity.drain(..excess);
+    excess
 }
 
 fn child_prompt(task: &str, context: DelegateContext, role: AgentRole) -> String {
@@ -2390,6 +2494,139 @@ mod tests {
 
         assert_eq!(body.as_deref(), Some("All edits applied."));
         assert_eq!(thinking.as_deref(), Some("Let me verify."));
+    }
+
+    #[test]
+    fn summarized_retry_activity_keeps_only_winning_attempt() {
+        let events = [
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "prior answer".to_owned(),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    vec![Content::text("prior answer")],
+                    Vec::new(),
+                    StopReason::ToolUse,
+                ),
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "failed reasoning one".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "failed partial one".to_owned(),
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "failed reasoning two".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "failed partial two".to_owned(),
+            },
+            AgentEvent::RetryScheduled {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+                delay_ms: 500,
+                error_code: "provider.transport_error".to_owned(),
+                message: "transport error: body closed".to_owned(),
+            },
+            AgentEvent::RetryStarted {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+            },
+            AgentEvent::RetryResumed { turn: 1, retry: 1 },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "winning answer".to_owned(),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    vec![Content::text("winning answer")],
+                    Vec::new(),
+                    StopReason::EndTurn,
+                ),
+            },
+        ];
+
+        let activity = summarize_child_activity(&events);
+
+        assert_eq!(
+            latest_text_activity(&activity, false).as_deref(),
+            Some("winning answer")
+        );
+        assert_eq!(latest_text_activity(&activity, true), None);
+        assert!(activity.iter().any(|entry| matches!(
+            &entry.kind,
+            AgentActivityKind::Text { text, thinking: false } if text == "prior answer"
+        )));
+        assert!(activity.iter().all(|entry| !matches!(
+            &entry.kind,
+            AgentActivityKind::Text { text, .. }
+                if text.contains("failed") || text.starts_with("Reconnecting ")
+        )));
+    }
+
+    #[test]
+    fn retry_activity_fold_matches_live_snapshot_at_capacity() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("retry at activity cap");
+        let started_at = Instant::now();
+        let mut events = Vec::new();
+        let mut record = |event| {
+            let _ = runtime.apply_child_event(&child.id, started_at, &event);
+            events.push(event);
+        };
+
+        record(AgentEvent::TextDelta {
+            turn: 1,
+            text: "prior answer".to_owned(),
+        });
+        record(AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                vec![Content::text("prior answer")],
+                Vec::new(),
+                StopReason::ToolUse,
+            ),
+        });
+        for index in 0..24 {
+            record(AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: format!("tool-{index}"),
+                name: "Read".to_owned(),
+                arguments: serde_json::json!({"path": format!("file-{index}")}),
+            });
+        }
+        record(AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: "failed reasoning".to_owned(),
+        });
+        record(AgentEvent::RetryScheduled {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+            delay_ms: 500,
+            error_code: "provider.transport_error".to_owned(),
+            message: "transport error: body closed".to_owned(),
+        });
+        record(AgentEvent::RetryStarted {
+            turn: 1,
+            retry: 1,
+            max_retries: 5,
+        });
+
+        let live = runtime.snapshot(&child.id).expect("live child snapshot");
+        let summarized = summarize_child_activity(&events);
+
+        assert_eq!(live.activity, summarized);
+        assert_eq!(
+            latest_text_activity(&summarized, false).as_deref(),
+            Some("Reconnecting 1/5")
+        );
     }
 
     #[tokio::test]

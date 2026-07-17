@@ -1053,6 +1053,108 @@ fn child_text_delta_accumulation_preserves_repeated_fragments() {
 }
 
 #[test]
+fn retry_activity_stays_inside_child_snapshot() {
+    let runtime = MultiAgentRuntime::new();
+    let child = runtime.start_foreground_delegate_for_test("retry model stream");
+    let started_at = std::time::Instant::now();
+
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "failed reasoning".to_owned(),
+            },
+        )
+        .expect("failed attempt thinking activity");
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::TextDelta {
+                turn: 1,
+                text: "failed partial".to_owned(),
+            },
+        )
+        .expect("failed attempt activity");
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::RetryScheduled {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+                delay_ms: 500,
+                error_code: "provider.transport_error".to_owned(),
+                message: "transport error: body closed".to_owned(),
+            },
+        )
+        .expect("scheduled retry activity");
+
+    let scheduled = runtime.snapshot(&child.id).expect("scheduled snapshot");
+    assert_eq!(scheduled.latest_text.as_deref(), Some("Reconnecting 1/5"));
+    assert_eq!(
+        scheduled
+            .activity
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+                _ => None,
+            }),
+        Some("Reconnecting 1/5")
+    );
+    assert!(scheduled.activity.iter().all(|entry| !matches!(
+        &entry.kind,
+        AgentActivityKind::Text { text, .. } if text.contains("failed partial")
+    )));
+    assert!(scheduled.activity.iter().all(|entry| !matches!(
+        &entry.kind,
+        AgentActivityKind::Text { text, thinking: true } if !text.is_empty()
+    )));
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::RetryResumed { turn: 1, retry: 1 },
+        )
+        .expect("resumed retry clears activity");
+
+    let resumed = runtime.snapshot(&child.id).expect("resumed snapshot");
+    assert_eq!(resumed.latest_text, None);
+    assert!(resumed.activity.iter().all(|entry| !matches!(
+        &entry.kind,
+        AgentActivityKind::Text { text, .. } if text.starts_with("Reconnecting ")
+    )));
+
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::TextDelta {
+                turn: 1,
+                text: "winning answer".to_owned(),
+            },
+        )
+        .expect("winning activity");
+    let winning = runtime.snapshot(&child.id).expect("winning snapshot");
+    assert_eq!(winning.latest_text.as_deref(), Some("winning answer"));
+    assert_eq!(
+        winning
+            .activity
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                AgentActivityKind::Text { text, thinking } if !thinking => Some(text.as_str()),
+                _ => None,
+            }),
+        Some("winning answer")
+    );
+}
+
+#[test]
 fn builtin_tools_register_delegate_tools() {
     let specs = ToolRegistry::with_builtin_tools()
         .specs()

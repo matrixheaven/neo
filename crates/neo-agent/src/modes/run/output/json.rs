@@ -73,6 +73,56 @@ impl StableJsonState {
                 "type": "turn_start",
                 "turn": turn,
             })),
+            AgentEvent::RetryScheduled {
+                turn,
+                retry,
+                max_retries,
+                delay_ms,
+                error_code,
+                ..
+            } => {
+                self.reset_assistant_attempt();
+                Some(json!({
+                    "type": "retry_scheduled",
+                    "turn": turn,
+                    "retry": retry,
+                    "maxRetries": max_retries,
+                    "delayMs": delay_ms,
+                    "errorCode": error_code,
+                }))
+            }
+            AgentEvent::RetryStarted {
+                turn,
+                retry,
+                max_retries,
+            } => Some(json!({
+                "type": "retry_started",
+                "turn": turn,
+                "retry": retry,
+                "maxRetries": max_retries,
+            })),
+            AgentEvent::RetryResumed { turn, retry } => Some(json!({
+                "type": "retry_resumed",
+                "turn": turn,
+                "retry": retry,
+            })),
+            AgentEvent::RetrySucceeded { turn, retries_used } => Some(json!({
+                "type": "retry_succeeded",
+                "turn": turn,
+                "retriesUsed": retries_used,
+            })),
+            AgentEvent::RetryExhausted {
+                turn,
+                retries_used,
+                error_code,
+                message,
+            } => Some(json!({
+                "type": "retry_exhausted",
+                "turn": turn,
+                "retriesUsed": retries_used,
+                "errorCode": error_code,
+                "message": message,
+            })),
             AgentEvent::MessageStarted { turn, id } => Some(self.map_message_started(*turn, id)),
             AgentEvent::ThinkingStarted { turn, id: _ } => Some(self.map_thinking_started(*turn)),
             AgentEvent::ThinkingDelta { turn, text } => Some(self.map_thinking_delta(*turn, text)),
@@ -207,16 +257,20 @@ impl StableJsonState {
     }
 
     fn map_message_started(&mut self, turn: u32, id: &str) -> Value {
-        self.assistant_content.clear();
-        self.active_text_index = None;
-        self.active_thinking_index = None;
+        self.reset_assistant_attempt();
         self.assistant_message_id = Some(id.to_owned());
-        self.assistant_stop_reason = None;
         json!({
             "type": "message_start",
             "turn": turn,
             "message": self.assistant_message(),
         })
+    }
+
+    fn reset_assistant_attempt(&mut self) {
+        self.assistant_content.clear();
+        self.active_text_index = None;
+        self.active_thinking_index = None;
+        self.assistant_stop_reason = None;
     }
 
     fn map_thinking_started(&mut self, turn: u32) -> Value {
@@ -533,6 +587,99 @@ mod tests {
     use neo_agent_core::AgentEvent;
 
     use super::StableJsonState;
+
+    #[test]
+    fn retry_events_are_stable_json_records() {
+        let mut state = StableJsonState::default();
+
+        let _ = state.map_event(&AgentEvent::MessageStarted {
+            turn: 1,
+            id: "message-1".to_owned(),
+        });
+        let _ = state.map_event(&AgentEvent::TextDelta {
+            turn: 1,
+            text: "failed partial".to_owned(),
+        });
+        assert_eq!(
+            state.map_event(&AgentEvent::RetryScheduled {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+                delay_ms: 500,
+                error_code: "provider.transport_error".to_owned(),
+                message: "transport error: body closed".to_owned(),
+            }),
+            vec![serde_json::json!({
+                "type": "retry_scheduled",
+                "turn": 1,
+                "retry": 1,
+                "maxRetries": 5,
+                "delayMs": 500,
+                "errorCode": "provider.transport_error",
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::RetryStarted {
+                turn: 1,
+                retry: 1,
+                max_retries: 5,
+            }),
+            vec![serde_json::json!({
+                "type": "retry_started",
+                "turn": 1,
+                "retry": 1,
+                "maxRetries": 5,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::RetryResumed { turn: 1, retry: 1 }),
+            vec![serde_json::json!({
+                "type": "retry_resumed",
+                "turn": 1,
+                "retry": 1,
+            })]
+        );
+
+        let _ = state.map_event(&AgentEvent::TextDelta {
+            turn: 1,
+            text: "winning answer".to_owned(),
+        });
+        let message_end = state.map_event(&AgentEvent::MessageFinished {
+            turn: 1,
+            id: "message-1".to_owned(),
+            stop_reason: neo_agent_core::StopReason::EndTurn,
+        });
+        assert_eq!(
+            message_end[0]["message"]["content"],
+            serde_json::json!([{"type": "text", "text": "winning answer"}])
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::RetrySucceeded {
+                turn: 1,
+                retries_used: 1,
+            }),
+            vec![serde_json::json!({
+                "type": "retry_succeeded",
+                "turn": 1,
+                "retriesUsed": 1,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::RetryExhausted {
+                turn: 1,
+                retries_used: 5,
+                error_code: "provider.transport_error".to_owned(),
+                message: "transport error: body closed".to_owned(),
+            }),
+            vec![serde_json::json!({
+                "type": "retry_exhausted",
+                "turn": 1,
+                "retriesUsed": 5,
+                "errorCode": "provider.transport_error",
+                "message": "transport error: body closed",
+            })]
+        );
+    }
 
     #[test]
     fn stable_json_maps_compaction_lifecycle_events() {
