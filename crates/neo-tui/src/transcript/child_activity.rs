@@ -166,7 +166,7 @@ pub fn render_child_tool_row(
     let suffix = row
         .summary
         .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" · {}", one_line(value)))
+        .map(|value| format!(" ({})", one_line(value)))
         .unwrap_or_default();
     let muted = Style::default().fg(theme.text_muted);
     let mut lines = vec![

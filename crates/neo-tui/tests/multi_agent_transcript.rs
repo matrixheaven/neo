@@ -815,8 +815,14 @@ fn option_b_expanded_swarm_preserves_full_child_transcripts() {
         text.contains("  └─ Iris  [Planner]  done · 12s · 2 tools · 8.2k tok"),
         "{text}"
     );
-    assert!(text.contains("• Used Read"), "{text}");
-    assert!(text.contains("• Using Bash"), "{text}");
+    assert!(
+        text.contains("• Used Read (crates/neo-agent-core/src/tools/delegate.rs)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("• Using Bash (cargo nextest run -p neo-agent-core ...)"),
+        "{text}"
+    );
     assert!(text.contains("◌ thinking"), "{text}");
     assert!(text.contains("│ All edits applied"), "{text}");
     assert!(
@@ -878,11 +884,11 @@ fn option_b_child_activity_orders_tools_thinking_body_and_final() {
 
     let used_index = rows
         .iter()
-        .position(|row| row.contains("• Used Read"))
+        .position(|row| row.contains("• Used Read (crates/neo-agent-core/src/tools/delegate.rs)"))
         .expect("used row");
     let using_index = rows
         .iter()
-        .position(|row| row.contains("• Using Bash"))
+        .position(|row| row.contains("• Using Bash (cargo nextest run -p neo-agent-core ...)"))
         .expect("using row");
     let thinking_index = rows
         .iter()
@@ -2979,7 +2985,10 @@ fn expanded_swarm_child_uses_delegate_activity_rules() {
     let text = rows.join("\n");
 
     assert_eq!(text.matches('◌').count(), 1, "{text}");
-    assert!(text.contains("Used Bash"), "{text}");
+    assert!(text.contains("Used Bash (printf 2)"), "{text}");
+    assert!(rows.iter().any(|row| row.trim() == "2"), "{text}");
+    assert!(rows.iter().any(|row| row.trim() == "3"), "{text}");
+    assert!(!rows.iter().any(|row| row.trim() == "1"), "{text}");
     let body_index = rows
         .iter()
         .position(|row| row.contains("│ expanded child body text"))

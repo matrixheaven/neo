@@ -1486,8 +1486,7 @@ impl MultiAgentRuntime {
                 } else {
                     AgentToolActivityPhase::Done
                 };
-                let summary = summarize_tool_result(name, result)
-                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+                let summary = last_tool_summary(snapshot.activity.as_slice(), id);
                 upsert_tool_activity(
                     &mut snapshot.activity,
                     id,
@@ -1504,8 +1503,7 @@ impl MultiAgentRuntime {
                 ..
             } => {
                 changed = true;
-                let summary = summarize_tool_result(name, partial_result)
-                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+                let summary = last_tool_summary(snapshot.activity.as_slice(), id);
                 upsert_tool_activity(
                     &mut snapshot.activity,
                     id,
@@ -2056,8 +2054,7 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                     } else {
                         AgentToolActivityPhase::Done
                     };
-                    let summary = summarize_tool_result(name, result)
-                        .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
+                    let summary = tool_args.get(id).and_then(summarize_tool_arguments);
                     upsert_tool_activity(
                         &mut activity,
                         id,
@@ -2073,8 +2070,7 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                     partial_result,
                     ..
                 } => {
-                    let summary = summarize_tool_result(name, partial_result)
-                        .or_else(|| tool_args.get(id).and_then(summarize_tool_arguments));
+                    let summary = tool_args.get(id).and_then(summarize_tool_arguments);
                     upsert_tool_activity(
                         &mut activity,
                         id,
@@ -2365,18 +2361,6 @@ fn summarize_tool_arguments(arguments: &serde_json::Value) -> Option<String> {
                 format!("{key}: {}", compact_line(&value.to_string()))
             }
         })
-}
-
-fn summarize_tool_result(name: &str, result: &crate::ToolResult) -> Option<String> {
-    if matches!(name, "Bash" | "Terminal") {
-        result
-            .content
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .map(compact_line)
-    } else {
-        None
-    }
 }
 
 const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 512;

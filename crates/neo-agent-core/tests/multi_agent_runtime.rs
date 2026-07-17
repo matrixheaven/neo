@@ -1782,6 +1782,11 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
         .expect("live output update");
     let updated = runtime.snapshot(&snapshot.id).expect("updated snapshot");
     let output = latest_tool_output(&updated, "call_bash").expect("output preview");
+    assert!(updated.activity.iter().any(|entry| matches!(
+        &entry.kind,
+        AgentActivityKind::Tool { id, summary, .. }
+            if id == "call_bash" && summary.as_deref() == Some("cargo nextest run -p neo-tui")
+    )));
     assert!(output.text.contains("Compiling neo-tui"));
     assert!(output.tail);
 
@@ -1801,6 +1806,17 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
     assert_eq!(
         latest_tool_phase(&finished, "call_bash"),
         Some(AgentToolActivityPhase::Done)
+    );
+    assert!(finished.activity.iter().any(|entry| matches!(
+        &entry.kind,
+        AgentActivityKind::Tool { id, summary, .. }
+            if id == "call_bash" && summary.as_deref() == Some("cargo nextest run -p neo-tui")
+    )));
+    assert!(
+        latest_tool_output(&finished, "call_bash")
+            .expect("final output preview")
+            .text
+            .contains("Finished test profile")
     );
     assert_eq!(finished.tool_count, 1);
 }
