@@ -36,6 +36,7 @@ pub fn error_info(code: &str) -> NeoErrorInfo {
             Some("Check ~/.neo/config.toml"),
         ),
         "provider.rate_limit" => info("Rate Limited", true, Some("Will auto-retry with backoff")),
+        "provider.quota_exhausted" => info("Quota Exhausted", false, None),
         "provider.auth_error" => info("Authentication Failed", false, Some("Check API key")),
         "provider.context_overflow" => info("Context Overflow", false, Some("Run /compact")),
         "provider.server_error" => info("Server Error", true, Some("Will auto-retry")),
@@ -64,6 +65,11 @@ mod tests {
         assert_eq!(info.title, "Rate Limited");
         assert!(info.retryable);
         assert_eq!(info.action, Some("Will auto-retry with backoff"));
+
+        let quota = error_info("provider.quota_exhausted");
+        assert_eq!(quota.title, "Quota Exhausted");
+        assert!(!quota.retryable);
+        assert_eq!(quota.action, None);
     }
 
     #[test]

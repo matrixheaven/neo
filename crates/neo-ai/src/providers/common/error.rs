@@ -16,6 +16,21 @@ const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
     "token count exceeds",
     "token limit",
 ];
+const PERMANENT_QUOTA_CODES: &[&str] = &[
+    "insufficient_quota",
+    "insufficient_balance",
+    "billing_limit_exceeded",
+    "usage_limit_exceeded",
+    "payment_required",
+];
+const PERMANENT_QUOTA_PHRASES: &[&str] = &[
+    "usage limit for this billing cycle",
+    "purchase extra usage",
+    "insufficient balance",
+    "insufficient credits",
+    "quota exhausted",
+    "billing limit exceeded",
+];
 
 /// Truncate `body` to [`MAX_HTTP_ERROR_BODY_CHARS`] characters, appending `...`
 /// if truncation occurred. Leading/trailing whitespace is trimmed first.
@@ -65,6 +80,16 @@ fn is_context_overflow(message: &str) -> bool {
         .any(|pattern| lower.contains(pattern))
 }
 
+fn is_permanent_quota(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    PERMANENT_QUOTA_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| PERMANENT_QUOTA_CODES.contains(&token))
+}
+
 /// Parse an HTTP `Retry-After` header value into a `Duration`.
 ///
 /// Supports both delta-seconds (integer) and HTTP-date formats per RFC 7231.
@@ -112,6 +137,7 @@ pub(crate) fn stream_failure(code: Option<&str>, message: impl Into<String>) -> 
         .replace(' ', "_")
         .to_lowercase();
     let status = match normalized.as_str() {
+        value if PERMANENT_QUOTA_CODES.contains(&value) => Some(402),
         "408" => Some(408),
         "429"
         | "rate_limit"
@@ -149,6 +175,10 @@ impl ProviderError {
             } => {
                 let excerpt = sanitize_error_body(body.as_deref());
                 match status {
+                    402 => AiError::QuotaExhausted { message: excerpt },
+                    403 | 429 if is_permanent_quota(&excerpt) => {
+                        AiError::QuotaExhausted { message: excerpt }
+                    }
                     429 => AiError::RateLimit {
                         message: excerpt,
                         retry_after,
@@ -193,6 +223,65 @@ mod tests {
         };
         let ai = err.into_ai_error();
         assert_eq!(ai.code(), "provider.rate_limit");
+    }
+
+    #[test]
+    fn permanent_quota_http_errors_are_terminal() {
+        for (status, body) in [
+            (402, "Payment Required"),
+            (403, r#"{"error":{"code":"insufficient_quota"}}"#),
+            (429, "Usage limit for this billing cycle"),
+        ] {
+            let error = ProviderError::HttpStatus {
+                status,
+                body: Some(body.into()),
+                retry_after: None,
+            }
+            .into_ai_error();
+            assert!(matches!(error, AiError::QuotaExhausted { .. }));
+            assert!(!error.is_retryable());
+        }
+
+        assert!(matches!(
+            ProviderError::HttpStatus {
+                status: 403,
+                body: Some("Forbidden".into()),
+                retry_after: None,
+            }
+            .into_ai_error(),
+            AiError::Auth { .. }
+        ));
+        assert!(matches!(
+            ProviderError::HttpStatus {
+                status: 429,
+                body: Some("Too Many Requests".into()),
+                retry_after: None,
+            }
+            .into_ai_error(),
+            AiError::RateLimit { .. }
+        ));
+    }
+
+    #[test]
+    fn permanent_quota_stream_codes_are_terminal() {
+        for code in [
+            "insufficient_quota",
+            "insufficient_balance",
+            "billing_limit_exceeded",
+            "usage_limit_exceeded",
+            "payment_required",
+        ] {
+            assert!(matches!(
+                stream_failure(Some(code), "provider detail").into_ai_error(),
+                AiError::QuotaExhausted { .. }
+            ));
+        }
+        for code in ["quota_exceeded", "resource_exhausted"] {
+            assert!(matches!(
+                stream_failure(Some(code), "try later").into_ai_error(),
+                AiError::RateLimit { .. }
+            ));
+        }
     }
 
     #[test]

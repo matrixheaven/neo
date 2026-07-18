@@ -13,6 +13,9 @@ pub enum AiError {
         retry_after: Option<Duration>,
     },
 
+    #[error("quota exhausted: {message}")]
+    QuotaExhausted { message: String },
+
     #[error("authentication error: {message}")]
     Auth { message: String },
 
@@ -43,6 +46,7 @@ impl AiError {
         match self {
             Self::Configuration { .. } => "config.invalid",
             Self::RateLimit { .. } => "provider.rate_limit",
+            Self::QuotaExhausted { .. } => "provider.quota_exhausted",
             Self::Auth { .. } => "provider.auth_error",
             Self::ContextOverflow { .. } => "provider.context_overflow",
             Self::Server { .. } => "provider.server_error",
@@ -58,6 +62,7 @@ impl AiError {
         match self {
             Self::RateLimit { .. } | Self::Server { .. } | Self::Transport { .. } => true,
             Self::Configuration { .. }
+            | Self::QuotaExhausted { .. }
             | Self::Auth { .. }
             | Self::ContextOverflow { .. }
             | Self::Protocol { .. }
@@ -87,6 +92,13 @@ mod tests {
             }
             .code(),
             "provider.rate_limit"
+        );
+        assert_eq!(
+            AiError::QuotaExhausted {
+                message: "buy more credits".into(),
+            }
+            .code(),
+            "provider.quota_exhausted"
         );
         assert_eq!(
             AiError::Auth {
@@ -134,6 +146,12 @@ mod tests {
             AiError::RateLimit {
                 message: String::new(),
                 retry_after: Some(Duration::from_secs(5))
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AiError::QuotaExhausted {
+                message: "buy more credits".into(),
             }
             .is_retryable()
         );
