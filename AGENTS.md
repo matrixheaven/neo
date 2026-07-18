@@ -141,3 +141,45 @@ In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the re
 
 If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 <!-- CODEGRAPH_END -->
+
+<!-- codebase-memory-mcp:start -->
+
+## Codebase Knowledge Graph (codebase-memory-mcp)
+
+This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase and its reference projects.
+ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.
+
+### Indexed projects
+
+| Project name | Path | Purpose |
+|---|---|---|
+| `Users-chenyuanhao-Workspace-neo` | (workspace root) | Neo itself — primary development target |
+| `neo-ref-claude-code` | `.references/claude-code` | Anthropic Claude Code — TypeScript agent reference |
+| `neo-ref-codex` | `.references/codex` | OpenAI Codex — Rust agent reference |
+| `neo-ref-opencode` | `.references/opencode` | OpenCode — Rust/TypeScript agent reference |
+| `neo-ref-kimi-code` | `.references/kimi-code` | Kimi Code — TypeScript agent reference |
+| `neo-ref-pi` | `.references/pi` | Pi — TypeScript terminal AI reference |
+| `neo-ref-reasonix` | `.references/reasonix` | Reasonix — Go reasoning engine reference |
+
+### Priority Order
+
+1. `search_graph` — find functions, classes, routes, variables by pattern
+2. `trace_path` — trace who calls a function or what it calls
+3. `get_code_snippet` — read specific function/class source code
+4. `query_graph` — run Cypher queries for complex patterns
+5. `get_architecture` — high-level project summary
+
+### When to fall back to grep/glob
+
+- Searching for string literals, error messages, config values
+- Searching non-code files (Dockerfiles, shell scripts, configs)
+- When MCP tools return insufficient results
+
+### Examples
+
+- Find a handler: `search_graph(name_pattern=".*OrderHandler.*", project="Users-chenyuanhao-Workspace-neo")`
+- Who calls it: `trace_path(function_name="OrderHandler", project="Users-chenyuanhao-Workspace-neo", direction="inbound")`
+- Read source: `get_code_snippet(qualified_name="pkg.orders.OrderHandler", project="Users-chenyuanhao-Workspace-neo")`
+- Explore a reference project: `get_architecture(project="neo-ref-codex", aspects=["overview"])`
+
+<!-- codebase-memory-mcp:end -->
