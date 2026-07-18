@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::multi_agent::{
-    AgentActivityKind, AgentProgressSnapshot, AgentSnapshot, AgentToolActivityPhase, SwarmSnapshot,
-};
+use crate::multi_agent::{AgentProgressSnapshot, SwarmChildProgress};
 use crate::{AgentEvent, AgentMessage};
 
 #[derive(Default)]
@@ -45,68 +43,71 @@ impl SessionEventPersistence {
                 if let AgentEvent::DelegateStarted { agent, .. }
                 | AgentEvent::DelegateFinished { agent, .. } = &mut event
                 {
-                    strip_live_queue_metadata_from_snapshot(agent);
+                    agent.clear_live_queue_metadata();
+                    let mut progress = agent.progress_snapshot();
+                    normalize_persisted_progress(&mut progress);
                     self.agents.insert(
                         agent.id.as_str().to_owned(),
-                        PersistedAgentProgress::from_progress(agent.progress_snapshot()),
+                        PersistedAgentProgress::from_progress(progress),
                     );
                 }
                 vec![event]
             }
             AgentEvent::DelegateUpdated { turn, agent } => {
-                let mut progress = agent.progress_snapshot();
-                strip_live_queue_metadata_from_progress(&mut progress);
-                let agent_id = progress.agent_id.as_str().to_owned();
-                let gate = self.agents.entry(agent_id).or_default();
-                if gate.should_persist(progress) {
-                    let progress = gate.last_progress.clone().expect("progress recorded");
-                    vec![AgentEvent::DelegateProgressUpdated {
-                        turn: *turn,
-                        progress,
-                    }]
-                } else {
-                    Vec::new()
-                }
+                self.persist_delegate_progress(*turn, agent.progress_snapshot())
+            }
+            AgentEvent::DelegateProgressUpdated { turn, progress } => {
+                self.persist_delegate_progress(*turn, progress.clone())
             }
             AgentEvent::DelegateSwarmStarted { .. } | AgentEvent::DelegateSwarmFinished { .. } => {
                 let mut event = event.clone();
                 if let AgentEvent::DelegateSwarmStarted { swarm, .. }
                 | AgentEvent::DelegateSwarmFinished { swarm, .. } = &mut event
                 {
-                    strip_live_queue_metadata_from_swarm(swarm);
+                    swarm.clear_live_queue_metadata();
                     let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
                     for child in &swarm.children {
+                        let mut progress = child.agent.progress_snapshot();
+                        normalize_persisted_progress(&mut progress);
                         swarm_gates.insert(
                             child.agent.id.as_str().to_owned(),
-                            PersistedAgentProgress::from_progress(child.agent.progress_snapshot()),
+                            PersistedAgentProgress::from_progress(progress),
                         );
                     }
                 }
                 vec![event]
             }
             AgentEvent::DelegateSwarmUpdated { turn, swarm } => {
-                let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
                 for child in &swarm.children {
-                    let mut progress = child.agent.progress_snapshot();
-                    strip_live_queue_metadata_from_progress(&mut progress);
-                    let agent_id = progress.agent_id.as_str().to_owned();
-                    let gate = swarm_gates.entry(agent_id).or_default();
-                    if gate.should_persist(progress) {
-                        let progress = gate.last_progress.clone().expect("progress recorded");
-                        return vec![AgentEvent::DelegateSwarmProgressUpdated {
-                            turn: *turn,
-                            swarm_id: swarm.swarm_id.clone(),
-                            state: swarm.state,
-                            aggregate: swarm.aggregate,
-                            child_progress: crate::multi_agent::SwarmChildProgress {
-                                item_index: child.item_index,
-                                progress,
-                            },
-                        }];
+                    let persisted = self.persist_swarm_progress(
+                        *turn,
+                        swarm.swarm_id.clone(),
+                        swarm.state,
+                        swarm.aggregate,
+                        SwarmChildProgress {
+                            item_index: child.item_index,
+                            progress: child.agent.progress_snapshot(),
+                        },
+                    );
+                    if !persisted.is_empty() {
+                        return persisted;
                     }
                 }
                 Vec::new()
             }
+            AgentEvent::DelegateSwarmProgressUpdated {
+                turn,
+                swarm_id,
+                state,
+                aggregate,
+                child_progress,
+            } => self.persist_swarm_progress(
+                *turn,
+                swarm_id.clone(),
+                *state,
+                *aggregate,
+                child_progress.clone(),
+            ),
             // Live queue rank/wait ticks must not land in session JSONL.
             AgentEvent::ToolExecutionQueueUpdated { .. }
             | AgentEvent::ShellCommandQueueUpdated { .. } => Vec::new(),
@@ -119,36 +120,60 @@ impl SessionEventPersistence {
             _ => vec![event.clone()],
         }
     }
-}
 
-fn strip_live_queue_metadata_from_phase(phase: &mut AgentToolActivityPhase) {
-    if let AgentToolActivityPhase::Queued {
-        position,
-        queued_at_ms,
-    } = phase
-    {
-        *position = None;
-        *queued_at_ms = 0;
-    }
-}
-
-fn strip_live_queue_metadata_from_snapshot(agent: &mut AgentSnapshot) {
-    for entry in &mut agent.activity {
-        if let AgentActivityKind::Tool { phase, .. } = &mut entry.kind {
-            strip_live_queue_metadata_from_phase(phase);
+    fn persist_delegate_progress(
+        &mut self,
+        turn: u32,
+        mut progress: AgentProgressSnapshot,
+    ) -> Vec<AgentEvent> {
+        normalize_persisted_progress(&mut progress);
+        let gate = self
+            .agents
+            .entry(progress.agent_id.as_str().to_owned())
+            .or_default();
+        if !gate.should_persist(progress) {
+            return Vec::new();
         }
+        vec![AgentEvent::DelegateProgressUpdated {
+            turn,
+            progress: gate.last_progress.clone().expect("progress recorded"),
+        }]
+    }
+
+    fn persist_swarm_progress(
+        &mut self,
+        turn: u32,
+        swarm_id: String,
+        state: crate::multi_agent::AgentLifecycleState,
+        aggregate: crate::multi_agent::SwarmAggregate,
+        mut child_progress: SwarmChildProgress,
+    ) -> Vec<AgentEvent> {
+        normalize_persisted_progress(&mut child_progress.progress);
+        let gate = self
+            .swarm_agents
+            .entry(swarm_id.clone())
+            .or_default()
+            .entry(child_progress.progress.agent_id.as_str().to_owned())
+            .or_default();
+        if !gate.should_persist(child_progress.progress) {
+            return Vec::new();
+        }
+        child_progress.progress = gate.last_progress.clone().expect("progress recorded");
+        vec![AgentEvent::DelegateSwarmProgressUpdated {
+            turn,
+            swarm_id,
+            state,
+            aggregate,
+            child_progress,
+        }]
     }
 }
 
-fn strip_live_queue_metadata_from_progress(progress: &mut AgentProgressSnapshot) {
+fn normalize_persisted_progress(progress: &mut AgentProgressSnapshot) {
+    progress.clear_live_queue_metadata();
     if let Some(tool) = &mut progress.last_tool {
-        strip_live_queue_metadata_from_phase(&mut tool.phase);
-    }
-}
-
-fn strip_live_queue_metadata_from_swarm(swarm: &mut SwarmSnapshot) {
-    for child in &mut swarm.children {
-        strip_live_queue_metadata_from_snapshot(&mut child.agent);
+        // Live output reaches the TUI; terminal snapshots persist the final preview.
+        tool.output = None;
     }
 }
 

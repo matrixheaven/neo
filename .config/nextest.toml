@@ -7,6 +7,13 @@ fail-fast = false
 retries = 0
 slow-timeout = { period = "20s", terminate-after = 2 }
 
+[test-groups]
+shell-guardian = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(shell_admission_runtime) | binary(tool_bash_guardian) | binary(tool_terminal_guardian)"
+test-group = "shell-guardian"
+
 [[profile.default.overrides]]
 filter = "test(authenticate_tool_reports_unwired_oauth_flow_without_success_claim)"
 slow-timeout = { period = "30s", terminate-after = 3 }

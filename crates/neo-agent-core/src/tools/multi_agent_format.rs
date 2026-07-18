@@ -88,7 +88,7 @@ pub(crate) fn agent_details(
         );
     }
     if include_activity {
-        value["activity_tail"] = json!(&agent.activity);
+        value["activity_tail"] = json!(model_safe_agent_snapshot(agent).activity);
     }
     if matches!(
         agent.terminal_reason,
@@ -100,6 +100,18 @@ pub(crate) fn agent_details(
         ));
     }
     value
+}
+
+pub(crate) fn model_safe_agent_snapshot(agent: &AgentSnapshot) -> AgentSnapshot {
+    let mut snapshot = agent.clone();
+    snapshot.clear_live_queue_metadata();
+    snapshot
+}
+
+pub(crate) fn model_safe_swarm_snapshot(swarm: &SwarmSnapshot) -> SwarmSnapshot {
+    let mut snapshot = swarm.clone();
+    snapshot.clear_live_queue_metadata();
+    snapshot
 }
 
 pub(crate) fn delegate_result_content(agent: &AgentSnapshot, context: DelegateContext) -> String {

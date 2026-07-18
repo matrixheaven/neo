@@ -252,6 +252,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
             name: "Read".to_owned(),
             summary: Some("crates/neo-agent-core/src/session/mod.rs".to_owned()),
             phase: AgentToolActivityPhase::Ongoing,
+            output: None,
         }),
         outcome: None,
     };
@@ -1218,6 +1219,45 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     assert!(
         progress_persistence
             .persisted_events(&AgentEvent::DelegateUpdated { turn: 3, agent })
+            .is_empty()
+    );
+
+    let mut direct_progress = swarm.children[0].agent.progress_snapshot();
+    let direct = AgentEvent::DelegateSwarmProgressUpdated {
+        turn: 4,
+        swarm_id: swarm.swarm_id.clone(),
+        state: swarm.state,
+        aggregate: swarm.aggregate,
+        child_progress: SwarmChildProgress {
+            item_index: 0,
+            progress: direct_progress.clone(),
+        },
+    };
+    let mut direct_persistence = SessionEventPersistence::default();
+    let direct_events = direct_persistence.persisted_events(&direct);
+    assert_eq!(direct_events.len(), 1);
+    assert_queued_phase_stripped(&direct_events[0]);
+
+    let Some(tool) = &mut direct_progress.last_tool else {
+        panic!("expected queued tool progress");
+    };
+    tool.phase = AgentToolActivityPhase::Queued {
+        position: Some(1),
+        queued_at_ms: 5_000,
+    };
+    direct_progress.updated_at_ms = 5_000;
+    assert!(
+        direct_persistence
+            .persisted_events(&AgentEvent::DelegateSwarmProgressUpdated {
+                turn: 5,
+                swarm_id: swarm.swarm_id,
+                state: swarm.state,
+                aggregate: swarm.aggregate,
+                child_progress: SwarmChildProgress {
+                    item_index: 0,
+                    progress: direct_progress,
+                },
+            })
             .is_empty()
     );
 }

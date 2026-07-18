@@ -314,6 +314,121 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
 }
 
 #[tokio::test]
+async fn background_bash_honors_explicit_timeout() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let ctx = guarded_context(&workspace, ShellLimits::default());
+    let zero = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": "printf should-not-start",
+            "run_in_background": true,
+            "description": "invalid timeout",
+            "timeout_secs": 0
+        }),
+    )
+    .await
+    .expect_err("zero background timeout must be rejected");
+    assert!(zero.to_string().contains("timeout_secs must be positive"));
+
+    let started = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": if cfg!(windows) { "ping -n 31 127.0.0.1 >nul" } else { "sleep 30" },
+            "run_in_background": true,
+            "description": "timed background command",
+            "timeout_secs": 1
+        }),
+    )
+    .await
+    .expect("start background bash");
+    let task_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details["task_id"].as_str())
+        .expect("task id")
+        .to_owned();
+
+    let result = ctx
+        .background_tasks
+        .output(&task_id, true, Duration::from_secs(5), 1_024)
+        .await
+        .expect("background output");
+    assert_eq!(
+        result.details.as_ref().expect("details")["status"],
+        "timed_out"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_model_bash_revalidates_cwd_after_admission() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    let queued_cwd = workspace.path().join("queued-cwd");
+    std::fs::create_dir(&queued_cwd).expect("queued cwd");
+    let limits = ShellLimits {
+        max_active_commands: 1,
+        ..ShellLimits::default()
+    };
+    let ctx = guarded_context(&workspace, limits);
+    let hold_cancel = CancellationToken::new();
+    let hold = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "cwd-hold".to_owned(),
+        command: "sleep 30".to_owned(),
+        cwd: workspace.path().to_path_buf(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: None,
+        max_output_bytes: 1_024,
+        cancel_token: hold_cancel.clone(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: ctx.shell_runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
+    }));
+    for _ in 0..500 {
+        if count_running_markers(ctx.shell_runtime.runtime_root()) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(count_running_markers(ctx.shell_runtime.runtime_root()), 1);
+
+    let queued_ctx = ctx.clone();
+    let queued = tokio::spawn(async move {
+        execute_model_bash_for_runtime(
+            &queued_ctx,
+            serde_json::json!({
+                "command": "printf escaped > escaped.marker",
+                "cwd": "queued-cwd"
+            }),
+        )
+        .await
+    });
+    for _ in 0..50 {
+        assert!(!queued.is_finished(), "model Bash should still be queued");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    std::fs::remove_dir(&queued_cwd).expect("remove queued cwd");
+    symlink(outside.path(), &queued_cwd).expect("retarget queued cwd");
+    hold_cancel.cancel();
+    let _ = hold.await.expect("join hold").expect("cancel hold");
+
+    let error = queued
+        .await
+        .expect("join queued Bash")
+        .expect_err("post-admission cwd drift must be rejected");
+    assert!(
+        error.to_string().contains("outside workspace"),
+        "unexpected error: {error}"
+    );
+    assert!(!outside.path().join("escaped.marker").exists());
+}
+
+#[tokio::test]
 async fn explicit_timeout_excludes_time_spent_in_admission_queue() {
     let workspace = tempfile::tempdir().expect("workspace");
     let limits = ShellLimits {

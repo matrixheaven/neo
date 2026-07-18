@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
-    SummaryScope, agent_details, context_mode_label, delegate_result_content, swarm_details,
+    SummaryScope, agent_details, context_mode_label, delegate_result_content,
+    model_safe_swarm_snapshot, swarm_details,
 };
 use super::{
     Tool, ToolContext, ToolError, ToolEventCallback, ToolFuture, ToolResult, parse_input, schema,
@@ -358,7 +359,7 @@ impl Tool for DelegateSwarmTool {
                 .with_details(json!({
                     "kind": "delegate_swarm",
                     "mode": "background",
-                    "swarm": initial_snapshot,
+                    "swarm": model_safe_swarm_snapshot(&initial_snapshot),
                     "task_id": task_id,
                 })));
             }

@@ -642,7 +642,9 @@ impl Tool for WaitDelegateTool {
                         false,
                     );
                     details["kind"] = json!("delegate_wait");
-                    details["agent"] = json!(snapshot.clone());
+                    details["agent"] = json!(super::multi_agent_format::model_safe_agent_snapshot(
+                        &snapshot
+                    ));
                     details["outcome"] = json!(state_label);
                     return Ok(ToolResult::ok(format!(
                         "id: {}\nstatus: {}\nsummary: {}",
@@ -742,7 +744,7 @@ impl Tool for InterruptDelegateTool {
                         ))
                         .with_details(json!({
                             "kind": "delegate_interrupt",
-                            "swarm": swarm,
+                            "swarm": super::multi_agent_format::model_safe_swarm_snapshot(&swarm),
                             "outcome": "cancelled",
                         })));
                     }
@@ -781,7 +783,7 @@ impl Tool for InterruptDelegateTool {
                 ))
                 .with_details(json!({
                     "kind": "delegate_interrupt",
-                    "agent": snapshot,
+                    "agent": super::multi_agent_format::model_safe_agent_snapshot(&snapshot),
                     "outcome": "cancelled",
                 })));
             }
@@ -1217,5 +1219,70 @@ mod tests {
         assert!(!result.is_error);
         let history = &result.details.as_ref().unwrap()["delegates"][0]["terminal_status_history"];
         assert_eq!(history, &json!(["completed", "completed"]));
+    }
+
+    #[tokio::test]
+    async fn delegate_control_results_strip_live_queue_metadata() {
+        let ctx = test_context();
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("queued command");
+        let started_at = std::time::Instant::now();
+        let _ = ctx.multi_agent.apply_child_event(
+            &agent.id,
+            started_at,
+            &crate::AgentEvent::ToolExecutionQueued {
+                turn: 1,
+                id: "bash-queued".to_owned(),
+                name: "Bash".to_owned(),
+                arguments: json!({"command": "cargo test"}),
+            },
+        );
+        let _ = ctx.multi_agent.apply_child_event(
+            &agent.id,
+            started_at,
+            &crate::AgentEvent::ToolExecutionQueueUpdated {
+                turn: 1,
+                id: "bash-queued".to_owned(),
+                position: 2,
+                waiting_ms: 18_000,
+            },
+        );
+        let interrupted = InterruptDelegateTool
+            .execute(&ctx, json!({"id": agent.id.as_str()}))
+            .await
+            .expect("interrupt queued agent");
+        assert_queue_metadata_cleared(
+            &interrupted.details.as_ref().expect("interrupt details")["agent"]["activity"][0]["kind"]
+                ["phase"],
+        );
+
+        let listed = ListDelegatesTool
+            .execute(
+                &ctx,
+                json!({
+                    "include_completed": true,
+                    "include": ["activity"]
+                }),
+            )
+            .await
+            .expect("list delegates");
+        assert_queue_metadata_cleared(
+            &listed.details.as_ref().expect("list details")["delegates"][0]["activity_tail"][0]["kind"]
+                ["phase"],
+        );
+
+        let waited = WaitDelegateTool
+            .execute(&ctx, json!({"id": agent.id.as_str(), "timeout_ms": 1}))
+            .await
+            .expect("wait delegate");
+        assert_queue_metadata_cleared(
+            &waited.details.as_ref().expect("wait details")["agent"]["activity"][0]["kind"]["phase"],
+        );
+    }
+
+    fn assert_queue_metadata_cleared(phase: &serde_json::Value) {
+        assert_eq!(phase["queued"]["position"], serde_json::Value::Null);
+        assert_eq!(phase["queued"]["queued_at_ms"], 0);
     }
 }

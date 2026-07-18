@@ -81,7 +81,7 @@ The dedicated tools render in the per-tool permission UI and keep raw stdout out
 **Output:**
 The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the output will end with a line describing the failure: either `Command failed with exit code: N` for a non-zero exit, or `Command terminated by signal N (NAME) — hint` on Unix when the process was killed by a signal (e.g. SIGPIPE from a closed pipe).
 
-If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. Background commands are not subject to the foreground `timeout_secs`. You will be automatically notified when the task completes. Use `TaskOutput` with this task_id for a non-blocking status/output snapshot, and only set `block=true` when you explicitly want to wait for completion. Use `TaskStop` only if the task must be cancelled.
+If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. An explicit `timeout_secs` starts after the background command starts; omission leaves it without an execution deadline. You will be automatically notified when the task completes. Use `TaskOutput` with this task_id for a non-blocking status/output snapshot, and only set `block=true` when you explicitly want to wait for completion. Use `TaskStop` only if the task must be cancelled.
 
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.
@@ -205,6 +205,7 @@ impl Tool for BashTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
+            let timeout = parse_timeout_secs(self.name(), input.timeout_secs)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
             if input.run_in_background == Some(true) {
                 if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -219,12 +220,12 @@ impl Tool for BashTool {
                     &input.command,
                     input.cwd.as_deref(),
                     input.description.unwrap_or_default(),
+                    timeout,
                     max_output_bytes,
                 )
                 .await;
             }
 
-            let timeout = parse_timeout_secs(self.name(), input.timeout_secs)?;
             let result = run_command(
                 ctx,
                 &input.command,
@@ -316,6 +317,7 @@ pub async fn execute_model_bash_for_runtime(
 ) -> Result<ToolResult, ToolError> {
     ctx.ensure_shell_allowed()?;
     let input: BashInput = parse_input("Bash", input)?;
+    let timeout = parse_timeout_secs("Bash", input.timeout_secs)?;
     let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
     if input.run_in_background == Some(true) {
         if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -329,12 +331,12 @@ pub async fn execute_model_bash_for_runtime(
             &input.command,
             input.cwd.as_deref(),
             input.description.unwrap_or_default(),
+            timeout,
             max_output_bytes,
         )
         .await;
     }
 
-    let timeout = parse_timeout_secs("Bash", input.timeout_secs)?;
     let result = run_command_without_error_mapping(
         ctx,
         &input.command,
@@ -346,7 +348,10 @@ pub async fn execute_model_bash_for_runtime(
     Ok(shell_command_result(&result))
 }
 
-fn parse_timeout_secs(tool: &str, timeout_secs: Option<u64>) -> Result<Option<Duration>, ToolError> {
+fn parse_timeout_secs(
+    tool: &str,
+    timeout_secs: Option<u64>,
+) -> Result<Option<Duration>, ToolError> {
     match timeout_secs {
         None => Ok(None),
         Some(0) => Err(ToolError::InvalidInput {
@@ -396,7 +401,7 @@ async fn run_command_without_error_mapping(
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
-    execute_shell_command(ShellExecutionRequest {
+    let mut request = ShellExecutionRequest {
         id: "bash".to_owned(),
         command: command.to_owned(),
         cwd,
@@ -409,23 +414,35 @@ async fn run_command_without_error_mapping(
         shell_runtime: ctx.shell_runtime.clone(),
         admission: model_admission(ctx, ShellAdmissionClass::AgentForeground),
         admission_callback: ctx.shell_admission_callback.clone(),
-    })
-    .await
+    };
+    let permit = acquire_shell_permit(&request).await?;
+    ctx.ensure_shell_allowed()?;
+    request.cwd = ctx.resolve_workspace_path(&request.cwd)?;
+    execute_shell_command_with_permit(request, permit).await
 }
 
 pub async fn execute_shell_command(
-    request: ShellExecutionRequest,
+    mut request: ShellExecutionRequest,
 ) -> Result<ShellExecutionResult, ToolError> {
+    request.cwd = std::fs::canonicalize(&request.cwd)?;
     if request.background_tasks.is_some()
         && matches!(request.origin, ShellCommandOrigin::UserShellMode)
     {
         return execute_manager_owned_shell_command(request).await;
     }
     let permit = acquire_shell_permit(&request).await?;
+    execute_shell_command_with_permit(request, permit).await
+}
+
+async fn execute_shell_command_with_permit(
+    mut request: ShellExecutionRequest,
+    permit: ShellCommandPermit,
+) -> Result<ShellExecutionResult, ToolError> {
     if request.cancel_token.is_cancelled() {
         drop(permit);
         return Err(ToolError::Cancelled);
     }
+    revalidate_canonical_cwd(&mut request.cwd)?;
     let max_output_bytes = request
         .shell_runtime
         .limits()
@@ -447,15 +464,11 @@ pub async fn execute_shell_command(
         result = client.wait() => result,
         () = request.cancel_token.cancelled() => client.stop().await,
     };
-    Ok(shell_result_from_guarded(
-        result,
-        None,
-        max_output_bytes,
-    ))
+    Ok(shell_result_from_guarded(result, None, max_output_bytes))
 }
 
 async fn execute_manager_owned_shell_command(
-    request: ShellExecutionRequest,
+    mut request: ShellExecutionRequest,
 ) -> Result<ShellExecutionResult, ToolError> {
     let manager = request
         .background_tasks
@@ -467,6 +480,7 @@ async fn execute_manager_owned_shell_command(
         drop(permit);
         return Err(ToolError::Cancelled);
     }
+    revalidate_canonical_cwd(&mut request.cwd)?;
     let max_output_bytes = request
         .shell_runtime
         .limits()
@@ -539,6 +553,18 @@ async fn execute_manager_owned_shell_command(
             () = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }
+}
+
+fn revalidate_canonical_cwd(cwd: &mut PathBuf) -> Result<(), ToolError> {
+    let current = std::fs::canonicalize(&*cwd)?;
+    if current != *cwd {
+        return Err(ToolError::InvalidInput {
+            tool: "Bash".to_owned(),
+            message: "cwd changed while waiting for shell admission".to_owned(),
+        });
+    }
+    *cwd = current;
+    Ok(())
 }
 
 fn shell_result_from_guarded(
@@ -629,6 +655,7 @@ async fn start_background_command(
     command: &str,
     workdir: Option<&str>,
     description: String,
+    timeout: Option<Duration>,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
     // Validate path before waiting for admission.
@@ -664,7 +691,7 @@ async fn start_background_command(
         ctx.background_tasks
             .persistence_dir()
             .map_or(ctx.shell_runtime.runtime_root(), PathBuf::as_path),
-        None,
+        timeout,
         max_output_bytes,
         ctx.tool_update.clone(),
         permit,

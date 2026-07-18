@@ -4,7 +4,7 @@ use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, AgentPathKind, AgentRole, AgentRunMode,
     AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DEFAULT_AGENT_NAMES,
     DisplayNamePool, MultiAgentRuntime, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
-    SwarmSnapshot,
+    SwarmSnapshot, apply_agent_progress,
 };
 use neo_agent_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use neo_agent_core::{
@@ -445,6 +445,50 @@ fn compact_swarm_child_progress_refreshes_aggregate_and_ordering() {
         swarm.children[0].agent.state,
         AgentLifecycleState::Completed
     );
+}
+
+#[test]
+fn compact_progress_preserves_live_shell_output() {
+    let runtime = MultiAgentRuntime::new();
+    let started = runtime.start_foreground_delegate_for_test("run tests");
+    let started_at = std::time::Instant::now();
+    let _ = runtime.apply_child_event(
+        &started.id,
+        started_at,
+        &AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "bash-live".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"command": "cargo test"}),
+        },
+    );
+    let progress = runtime
+        .apply_child_event(
+            &started.id,
+            started_at,
+            &AgentEvent::ToolExecutionUpdate {
+                turn: 1,
+                id: "bash-live".to_owned(),
+                name: "Bash".to_owned(),
+                partial_result: ToolResult::ok("Compiling neo"),
+            },
+        )
+        .expect("live progress");
+
+    let mut projected = started;
+    assert!(apply_agent_progress(&mut projected, &progress));
+    let output = projected
+        .activity
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool { output, .. } => output.as_ref(),
+            AgentActivityKind::Text { .. } => None,
+        });
+    assert_eq!(
+        output.map(|preview| preview.text.as_str()),
+        Some("Compiling neo")
+    );
+    assert!(output.is_some_and(|preview| preview.tail));
 }
 
 #[tokio::test]

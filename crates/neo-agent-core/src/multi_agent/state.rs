@@ -173,6 +173,10 @@ impl AgentSnapshot {
     pub fn progress_snapshot(&self) -> AgentProgressSnapshot {
         AgentProgressSnapshot::from_agent(self)
     }
+
+    pub(crate) fn clear_live_queue_metadata(&mut self) {
+        clear_live_queue_metadata_from_activity(&mut self.activity);
+    }
 }
 
 pub(crate) fn derive_title(task: &str, provided: Option<&str>) -> String {
@@ -206,6 +210,8 @@ pub struct DelegateToolProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub phase: AgentToolActivityPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<AgentToolOutputPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -269,7 +275,7 @@ impl AgentProgressSnapshot {
                         name,
                         summary,
                         phase,
-                        ..
+                        output,
                     } => Some(DelegateToolProgress {
                         id: id.clone(),
                         name: name.clone(),
@@ -277,6 +283,7 @@ impl AgentProgressSnapshot {
                             .as_deref()
                             .map(|text| truncate_progress_text(text, MAX_TOOL_SUMMARY_CHARS)),
                         phase: *phase,
+                        output: output.clone(),
                     }),
                     AgentActivityKind::Text { .. } => None,
                 }),
@@ -303,6 +310,12 @@ impl AgentProgressSnapshot {
             latest_text: self.latest_text.clone(),
             last_tool: self.last_tool.clone(),
             outcome: self.outcome.clone(),
+        }
+    }
+
+    pub(crate) fn clear_live_queue_metadata(&mut self) {
+        if let Some(tool) = &mut self.last_tool {
+            clear_live_queue_metadata_from_phase(&mut tool.phase);
         }
     }
 }
@@ -390,6 +403,14 @@ pub struct SwarmSnapshot {
     pub children: Vec<SwarmChildSnapshot>,
 }
 
+impl SwarmSnapshot {
+    pub(crate) fn clear_live_queue_metadata(&mut self) {
+        for child in &mut self.children {
+            child.agent.clear_live_queue_metadata();
+        }
+    }
+}
+
 fn default_swarm_max_concurrency() -> usize {
     1
 }
@@ -460,7 +481,7 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             name: tool.name.clone(),
             summary: tool.summary.clone(),
             phase: tool.phase,
-            output: None,
+            output: tool.output.clone(),
         };
         return;
     }
@@ -470,9 +491,28 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             name: tool.name.clone(),
             summary: tool.summary.clone(),
             phase: tool.phase,
-            output: None,
+            output: tool.output.clone(),
         },
     });
+}
+
+fn clear_live_queue_metadata_from_activity(activity: &mut [AgentActivityEntry]) {
+    for entry in activity {
+        if let AgentActivityKind::Tool { phase, .. } = &mut entry.kind {
+            clear_live_queue_metadata_from_phase(phase);
+        }
+    }
+}
+
+fn clear_live_queue_metadata_from_phase(phase: &mut AgentToolActivityPhase) {
+    if let AgentToolActivityPhase::Queued {
+        position,
+        queued_at_ms,
+    } = phase
+    {
+        *position = None;
+        *queued_at_ms = 0;
+    }
 }
 
 fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str) {
