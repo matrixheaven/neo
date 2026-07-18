@@ -273,10 +273,16 @@ impl ToolCallComponent {
     /// + tool name + key arg + chip) and the body as weak preview lines.
     #[must_use]
     pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let header_width = width.saturating_sub(2).max(1);
         let mut header_spans = if self.state.name == "ExitPlanMode" {
             crate::transcript::tool_renderers::exit_plan_mode_header_spans(&self.state, theme)
         } else {
-            tool_header_spans(&self.state, theme, self.workspace_dir.as_deref())
+            tool_header_spans(
+                &self.state,
+                theme,
+                self.workspace_dir.as_deref(),
+                header_width,
+            )
         };
         // While Write/Edit is streaming, show a token count chip in the header
         // instead of a separate progress line in the body.
@@ -295,7 +301,6 @@ impl ToolCallComponent {
             );
             header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));
         }
-        let header_width = width.saturating_sub(2).max(1);
         let mut rows = vec![Line::from_spans(header_spans).truncate_to_width(header_width)];
 
         // For ExitPlanMode, render a PlanBox from the tool result details.

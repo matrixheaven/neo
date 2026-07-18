@@ -264,6 +264,34 @@ fn terminal_delegate_ignores_late_running_snapshot() {
 }
 
 #[test]
+fn resumed_delegate_appends_new_run_card() {
+    let mut store = TranscriptStore::new();
+    let completed = agent_snapshot("delegate", AgentLifecycleState::Completed);
+    let agent_id = completed.id.clone();
+    store.upsert_delegate(1, completed);
+    let completed_entry_id = store.entry_ids()[0];
+
+    let mut resumed = agent_snapshot("delegate", AgentLifecycleState::Running);
+    resumed.run_count = 2;
+    resumed.resumed_from = Some(agent_id);
+    resumed.task_title = "resumed task".to_owned();
+    store.upsert_delegate(2, resumed.clone());
+
+    assert_eq!(store.entries().len(), 2);
+    assert_eq!(store.entry_ids()[0], completed_entry_id);
+    assert_eq!(store.entry_finalization(0), Some(Finalization::Finalized));
+    assert_eq!(store.entry_finalization(1), Some(Finalization::Live));
+
+    resumed.tool_count = 7;
+    store.upsert_delegate_progress(2, &resumed.progress_snapshot());
+    let TranscriptEntry::Delegate { component } = &store.entries()[1] else {
+        panic!("resumed run should render as a new delegate card");
+    };
+    assert_eq!(component.snapshot().run_count, 2);
+    assert_eq!(component.snapshot().tool_count, 7);
+}
+
+#[test]
 fn delegate_group_replacement_preserves_entry_identity() {
     let mut store = TranscriptStore::new();
     store.upsert_delegate(1, agent_snapshot("first", AgentLifecycleState::Running));

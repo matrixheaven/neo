@@ -690,9 +690,11 @@ impl TranscriptStore {
     /// exists, update it in place; otherwise append a new entry.
     pub fn upsert_delegate(&mut self, turn: u32, snapshot: AgentSnapshot) {
         let id = snapshot.id.as_str().to_owned();
-        if let Some(index) = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::DelegateGroup { component } if component.contains(&id)),
-        ) {
+        let run_count = snapshot.run_count;
+        if let Some(index) = self.entries.iter().rposition(|entry| {
+            matches!(entry, TranscriptEntry::DelegateGroup { component }
+                if component.snapshot(&id).is_some_and(|current| current.run_count == run_count))
+        }) {
             let preserve_terminal = matches!(
                 &self.entries[index],
                 TranscriptEntry::DelegateGroup { component }
@@ -711,9 +713,10 @@ impl TranscriptStore {
             });
             return;
         }
-        if let Some(index) = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::Delegate { component } if component.id() == id),
-        ) {
+        if let Some(index) = self.entries.iter().rposition(|entry| {
+            matches!(entry, TranscriptEntry::Delegate { component }
+                if component.id() == id && component.snapshot().run_count == run_count)
+        }) {
             let merged = match &self.entries[index] {
                 TranscriptEntry::Delegate { component } => {
                     merge_delegate_snapshot(component.snapshot(), snapshot)
@@ -738,6 +741,7 @@ impl TranscriptStore {
             && let Some(index) = self.entries.iter().position(|entry| {
                 matches!(entry, TranscriptEntry::DelegateGroup { component }
                     if component.turn() == turn
+                        && !component.contains(&id)
                         && component.finalization() == Finalization::Live)
             })
         {
@@ -791,9 +795,10 @@ impl TranscriptStore {
 
     pub fn upsert_delegate_progress(&mut self, turn: u32, progress: &AgentProgressSnapshot) {
         let id = progress.agent_id.as_str().to_owned();
-        if let Some(index) = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::DelegateGroup { component } if component.contains(&id)),
-        ) {
+        if let Some(index) = self.entries.iter().rposition(|entry| {
+            matches!(entry, TranscriptEntry::DelegateGroup { component }
+                if component.snapshot(&id).is_some_and(|current| current.run_count == progress.run_count))
+        }) {
             let Some(mut snapshot) = (match &self.entries[index] {
                 TranscriptEntry::DelegateGroup { component } => component.snapshot(&id).cloned(),
                 _ => None,
@@ -815,9 +820,10 @@ impl TranscriptStore {
             });
             return;
         }
-        if let Some(index) = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::Delegate { component } if component.id() == id),
-        ) {
+        if let Some(index) = self.entries.iter().rposition(|entry| {
+            matches!(entry, TranscriptEntry::Delegate { component }
+                if component.id() == id && component.snapshot().run_count == progress.run_count)
+        }) {
             let mut snapshot = match &self.entries[index] {
                 TranscriptEntry::Delegate { component } => component.snapshot().clone(),
                 _ => return,

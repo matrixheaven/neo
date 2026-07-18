@@ -562,6 +562,12 @@ struct FittedLiveBlock {
     separator_before: bool,
 }
 
+impl FittedLiveBlock {
+    fn is_pinned(&self) -> bool {
+        self.headers.iter().any(|line| line.pinned)
+    }
+}
+
 impl From<LiveBlock> for FittedLiveBlock {
     fn from(block: LiveBlock) -> Self {
         let mut is_header = vec![false; block.lines.len()];
@@ -781,21 +787,31 @@ fn fit_live_blocks(
     }
 
     let mut remaining = budget - header_count - separator_count;
-    for block in fitted
-        .iter_mut()
-        .rev()
-        .filter(|block| !block.body.is_empty())
-    {
-        if remaining == 0 {
-            break;
+    for pinned in [true, false] {
+        for block in fitted
+            .iter_mut()
+            .rev()
+            .filter(|block| block.is_pinned() == pinned && !block.body.is_empty())
+        {
+            if remaining == 0 {
+                break;
+            }
+            block.show_omission = true;
+            remaining -= 1;
         }
-        block.show_omission = true;
-        remaining -= 1;
-    }
-    for block in fitted.iter_mut().rev().filter(|block| block.show_omission) {
-        let retainable = block.body.len().saturating_sub(1);
-        block.tail_len = retainable.min(remaining);
-        remaining -= block.tail_len;
+        for block in fitted
+            .iter_mut()
+            .rev()
+            .filter(|block| block.is_pinned() == pinned && block.show_omission)
+        {
+            let retainable = block.body.len().saturating_sub(1);
+            block.tail_len = retainable.min(remaining);
+            remaining -= block.tail_len;
+            if pinned && block.tail_len + 1 == block.body.len() {
+                block.show_omission = false;
+                block.tail_len = block.body.len();
+            }
+        }
     }
 
     let mut lines = Vec::with_capacity(budget);
@@ -954,6 +970,46 @@ mod tests {
         assert!(update.live[1].is_empty());
         assert!(update.has_visible_animation);
         assert_eq!(update.live.len(), 3);
+    }
+
+    #[test]
+    fn living_card_body_outranks_later_deferred_result_body() {
+        let theme = TuiTheme::default();
+        let living = LiveBlock::with_header(
+            vec![
+                "delegate".to_owned(),
+                "delegate tool one".to_owned(),
+                "delegate tool two".to_owned(),
+            ],
+            true,
+            true,
+            false,
+        );
+        let deferred = LiveBlock::with_header(
+            vec![
+                "wait delegate".to_owned(),
+                "status".to_owned(),
+                "summary".to_owned(),
+                "latest result".to_owned(),
+            ],
+            false,
+            false,
+            true,
+        );
+
+        let (lines, _) = fit_live_blocks(vec![living, deferred], 6, &theme);
+
+        assert_eq!(
+            lines,
+            vec![
+                "delegate",
+                "delegate tool one",
+                "delegate tool two",
+                "",
+                "wait delegate",
+                "latest result",
+            ]
+        );
     }
 
     #[test]

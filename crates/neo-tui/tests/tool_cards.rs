@@ -31,8 +31,8 @@ fn running_tool_header_uses_finished_status_color() {
     };
 
     assert_eq!(
-        tool_header_spans(&running, &theme, None)[0].to_ansi(),
-        tool_header_spans(&used, &theme, None)[0].to_ansi()
+        tool_header_spans(&running, &theme, None, usize::MAX)[0].to_ansi(),
+        tool_header_spans(&used, &theme, None, usize::MAX)[0].to_ansi()
     );
 }
 
@@ -77,6 +77,76 @@ fn tool_call_updates_in_place_to_finished_state() {
     );
     assert!(rows.iter().any(|line| line.contains("2 lines")));
     assert_eq!(card.finalization(), Finalization::Finalized);
+}
+
+#[test]
+fn wait_delegate_header_uses_result_title() {
+    let theme = TuiTheme::default();
+    let agent_id = "agent_123456789";
+    let state = ToolCallState {
+        id: "wait-1".to_owned(),
+        name: "WaitDelegate".to_owned(),
+        arguments: Some(serde_json::json!({ "id": agent_id }).to_string()),
+        result: Some("status: completed".to_owned()),
+        details: Some(serde_json::json!({
+            "kind": "delegate_wait",
+            "title": "Task 3: registry lifetime + child visibility",
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+
+    let header = plain(vec![Line::from_spans(tool_header_spans(
+        &state,
+        &theme,
+        None,
+        usize::MAX,
+    ))])
+    .remove(0);
+
+    assert!(
+        header.contains("Used WaitDelegate · Task 3: registry lifetime + child visibility"),
+        "header: {header:?}"
+    );
+    assert!(!header.contains(agent_id), "header: {header:?}");
+}
+
+#[test]
+fn wait_delegate_header_fits_every_swarm_item_title() {
+    const WIDTH: usize = 80;
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "wait-swarm".to_owned(),
+        name: "WaitDelegate".to_owned(),
+        arguments: Some(serde_json::json!({ "id": "swarm_123" }).to_string()),
+        result: Some("status: completed".to_owned()),
+        details: Some(serde_json::json!({
+            "kind": "delegate_swarm",
+            "description": "review instruction runtime",
+            "items": [
+                { "title": "Task 1: registry lifetime and ownership review" },
+                { "title": "Task 2: child visibility and replay review" },
+                { "title": "Task 3: persistence and compaction review" },
+            ],
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+
+    let header = plain(vec![Line::from_spans(tool_header_spans(
+        &state, &theme, None, WIDTH,
+    ))])
+    .remove(0);
+
+    for label in ["Task 1", "Task 2", "Task 3"] {
+        assert!(header.contains(label), "missing {label} in {header:?}");
+    }
+    assert_eq!(header.matches(" | ").count(), 2, "header: {header:?}");
+    assert_eq!(header.matches("...").count(), 3, "header: {header:?}");
+    assert!(
+        neo_tui::primitive::visible_width(&header) <= WIDTH,
+        "header: {header:?}"
+    );
 }
 
 #[test]
@@ -159,7 +229,10 @@ fn empty_args_tool_header_omits_parens() {
         exit_code: None,
     };
     let rows = plain(vec![Line::from_spans(tool_header_spans(
-        &state, &theme, None,
+        &state,
+        &theme,
+        None,
+        usize::MAX,
     ))]);
     let header = &rows[0];
     assert!(
@@ -950,7 +1023,10 @@ fn long_command_header_keeps_closing_paren() {
         exit_code: None,
     };
     let rows = plain(vec![Line::from_spans(tool_header_spans(
-        &state, &theme, None,
+        &state,
+        &theme,
+        None,
+        usize::MAX,
     ))]);
     let header = &rows[0];
     assert!(
@@ -981,7 +1057,10 @@ fn long_path_header_preserves_tail() {
         exit_code: None,
     };
     let rows = plain(vec![Line::from_spans(tool_header_spans(
-        &state, &theme, None,
+        &state,
+        &theme,
+        None,
+        usize::MAX,
     ))]);
     let header = &rows[0];
     assert!(

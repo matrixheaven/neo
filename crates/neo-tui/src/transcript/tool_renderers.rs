@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 use crate::markdown::{highlight_code_lines, lang_from_path};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Style};
+use crate::primitive::{Color, Style, truncate_width, visible_width};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::{estimate_tokens, format_token_count};
@@ -19,18 +19,20 @@ const COMMAND_PREVIEW_LINES: usize = 10;
 /// always be rendered, regardless of terminal width.
 const MAX_ARG_LENGTH: usize = 60;
 
-/// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
+/// Build the tool header as styled spans:
+/// `{symbol} {verb} {name}[ · target] [({key})]{chip}`.
 ///
 /// Color mapping (mirrors Neo's tool header):
 /// - symbol + verb → status color
 /// - tool name → bold brand color
-/// - `(key arg)` → weak text
+/// - `WaitDelegate` target and `(key arg)` → weak text
 /// - chip (`· N lines`) → weak text
 #[must_use]
 pub fn tool_header_spans(
     state: &ToolCallState,
     theme: &TuiTheme,
     workspace_dir: Option<&Path>,
+    header_width: usize,
 ) -> Vec<Span> {
     let symbol = tool_symbol(state.status);
     let verb = tool_verb(state.status);
@@ -43,6 +45,17 @@ pub fn tool_header_spans(
         Span::styled(format!("{verb} "), Style::default().fg(status_color)),
         Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
     ];
+    let wait_title_separator = " · ";
+    let title_width = header_width.saturating_sub(
+        spans.iter().map(Span::visible_width).sum::<usize>() + visible_width(wait_title_separator),
+    );
+    if let Some(title) = wait_delegate_title(state, title_width) {
+        spans.push(Span::styled(
+            wait_title_separator,
+            Style::default().fg(meta_color),
+        ));
+        spans.push(Span::styled(title, Style::default().fg(meta_color)));
+    }
     if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
         let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
         spans.push(Span::styled(" (", Style::default().fg(meta_color)));
@@ -54,6 +67,59 @@ pub fn tool_header_spans(
         spans.push(Span::styled(chip, Style::default().fg(meta_color)));
     }
     spans
+}
+
+fn wait_delegate_title(state: &ToolCallState, max_width: usize) -> Option<String> {
+    if state.name != "WaitDelegate" || max_width == 0 {
+        return None;
+    }
+    let details = state.details.as_ref()?;
+    let item_titles = details
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("title").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(one_line)
+        .collect::<Vec<_>>();
+    if !item_titles.is_empty() {
+        return Some(fit_wait_delegate_titles(&item_titles, max_width));
+    }
+    let title = details
+        .get("title")
+        .or_else(|| details.get("description"))?
+        .as_str()?
+        .trim();
+    let title = truncate_arg_value(false, &one_line(title));
+    let title = truncate_width(&title, max_width, "...", false);
+    (!title.is_empty()).then_some(title)
+}
+
+fn fit_wait_delegate_titles(titles: &[String], max_width: usize) -> String {
+    const SEPARATOR: &str = " | ";
+    let separator_width = visible_width(SEPARATOR).saturating_mul(titles.len().saturating_sub(1));
+    if separator_width >= max_width {
+        return truncate_width(&titles.join(SEPARATOR), max_width, "...", false);
+    }
+
+    let title_width = max_width - separator_width;
+    let slot_width = title_width / titles.len();
+    let remainder = title_width % titles.len();
+    titles
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            truncate_width(
+                title,
+                slot_width + usize::from(index < remainder),
+                "...",
+                false,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(SEPARATOR)
 }
 
 /// Build a custom header for the `ExitPlanMode` tool card.
