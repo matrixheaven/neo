@@ -1068,7 +1068,7 @@ model = "old"
     }
 
     #[test]
-    fn first_config_write_includes_enabled_compaction_defaults() {
+    fn first_config_write_includes_runtime_defaults() {
         let temp = TempDir::new().expect("temp dir");
         let config_path = temp.path().join(".neo/config.toml");
 
@@ -1088,6 +1088,8 @@ model = "old"
         let written = fs::read_to_string(config_path).expect("read config");
         assert!(written.contains("[runtime.retry]"));
         assert!(written.contains("max_retries = 5"));
+        assert!(written.contains("first_event_timeout_secs = 60"));
+        assert!(written.contains("stream_idle_timeout_secs = 120"));
         assert!(written.contains("[runtime.compaction]"));
         assert!(written.contains("enabled = true"));
         assert!(written.contains("keep_recent_messages = 20"));
