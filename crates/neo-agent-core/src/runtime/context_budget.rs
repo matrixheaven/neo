@@ -31,6 +31,29 @@ pub struct ContextBudgetSnapshot {
 
 pub struct ContextBudgetEstimator;
 
+impl ContextBudgetSnapshot {
+    /// Tokens safely available for pinned instruction content in the current
+    /// request: the smaller of the effective (observed-overflow-corrected)
+    /// and absolute caps, minus the projected request tokens (fixed overhead,
+    /// tool schemas, and current ordinary context) and the reserved output
+    /// headroom. Returns `None` when no context window is known, meaning no
+    /// cap applies. Never grants capacity beyond either cap or the reserved
+    /// headroom.
+    #[must_use]
+    pub fn safely_available_instruction_tokens(&self) -> Option<u64> {
+        let cap = match (self.effective_max_context_tokens, self.absolute_max_tokens) {
+            (Some(effective), Some(absolute)) => effective.min(absolute),
+            (Some(effective), None) => effective,
+            (None, Some(absolute)) => absolute,
+            (None, None) => return None,
+        };
+        let used = self
+            .projected_tokens
+            .saturating_add(self.reserved_headroom_tokens);
+        Some(u64::try_from(cap.saturating_sub(used)).unwrap_or(u64::MAX))
+    }
+}
+
 impl ContextBudgetEstimator {
     #[must_use]
     pub fn snapshot(
@@ -265,5 +288,73 @@ mod tests {
             snapshot.remaining_to_max,
             Some(10_000usize.saturating_sub(snapshot.projected_tokens))
         );
+    }
+
+    #[test]
+    fn instruction_budget_is_max_64k_or_one_eighth_then_safely_clamped() {
+        use super::super::instruction_context::InstructionContextBridge;
+
+        fn config_with_window(window_tokens: u32, reserved: usize, absolute: usize) -> AgentConfig {
+            let mut config =
+                AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
+                    reserved_context_tokens: reserved,
+                    max_estimated_tokens: absolute,
+                    ..CompactionSettings::new(usize::MAX, 4)
+                });
+            config.model.capabilities.max_context_tokens = Some(window_tokens);
+            config
+        }
+
+        // 128K advertised window: one eighth (16_000) is below the floor.
+        let config = config_with_window(128_000, 2_048, usize::MAX);
+        let context = AgentContext::new();
+        let budget = InstructionContextBridge::budget(&config, &context);
+        assert_eq!(budget.nominal, 65_536);
+        assert_eq!(budget.actual, 65_536);
+
+        // 1M advertised window: one eighth (131_072) exceeds the floor.
+        let config = config_with_window(1_048_576, 2_048, usize::MAX);
+        let budget = InstructionContextBridge::budget(&config, &context);
+        assert_eq!(budget.nominal, 131_072);
+        assert_eq!(budget.actual, 131_072);
+
+        // The observed provider cap replaces the advertised window: 1M
+        // advertised, overflow observed at 800_000 -> effective 680_000.
+        let config = config_with_window(1_048_576, 2_048, usize::MAX);
+        observe_context_overflow(&config, 800_000);
+        let budget = InstructionContextBridge::budget(&config, &context);
+        assert_eq!(budget.nominal, 85_000);
+        assert_eq!(budget.actual, 85_000);
+
+        // 32K window: nominal stays at the 65_536 floor but the actual budget
+        // clamps to the tokens safely available in the request.
+        let config = config_with_window(32_768, 2_048, usize::MAX);
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("ordinary history ".repeat(40)));
+        let snapshot =
+            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let safe = snapshot
+            .safely_available_instruction_tokens()
+            .expect("configured window is known");
+        let budget = InstructionContextBridge::budget(&config, &context);
+        assert_eq!(budget.nominal, 65_536);
+        assert_eq!(budget.actual, safe);
+        assert!(budget.actual < budget.nominal);
+        // Safe capacity never grants beyond the effective window minus the
+        // reserved output headroom and the current ordinary context.
+        assert!(safe < 32_768_u64.saturating_sub(2_048));
+
+        // The absolute estimator cap binds below the effective window.
+        let config = config_with_window(1_048_576, 2_048, 40_000);
+        let context = AgentContext::new();
+        let snapshot =
+            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let safe = snapshot
+            .safely_available_instruction_tokens()
+            .expect("configured window is known");
+        assert_eq!(safe, 40_000 - 2_048);
+        let budget = InstructionContextBridge::budget(&config, &context);
+        assert_eq!(budget.nominal, 131_072);
+        assert_eq!(budget.actual, safe);
     }
 }

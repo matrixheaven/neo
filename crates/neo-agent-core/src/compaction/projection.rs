@@ -253,4 +253,49 @@ mod tests {
         assert!(summary.omitted_tokens > request.omitted_tokens);
         assert!(summary.projected_tokens < request.projected_tokens);
     }
+
+    #[test]
+    fn micro_projection_never_changes_instruction_messages() {
+        let instruction = AgentMessage::Instruction {
+            generation: 7,
+            content: vec![Content::text("pinned rules ".repeat(4_000))],
+        };
+        let messages = vec![
+            AgentMessage::tool_result(
+                "old_call",
+                "Read",
+                vec![Content::text("x".repeat(8_000))],
+                false,
+            ),
+            instruction.clone(),
+            AgentMessage::tool_result(
+                "new_call",
+                "Read",
+                vec![Content::text("y".repeat(8_000))],
+                false,
+            ),
+        ];
+
+        for mode in [ProjectionMode::Request, ProjectionMode::SummaryInput] {
+            let plan = ProjectionPlan {
+                enabled: true,
+                cutoff_index: messages.len(),
+                min_tool_result_tokens: 100,
+                keep_recent_messages: 0,
+                mode,
+            };
+            let result = match mode {
+                ProjectionMode::Request => project_for_request(&messages, &plan),
+                ProjectionMode::SummaryInput => project_for_summary(&messages, &plan),
+                ProjectionMode::None => unreachable!("test only exercises active modes"),
+            };
+
+            // The large tool results around the epoch are projected...
+            assert!(result.messages[0].text().contains("omitted"), "{mode:?}");
+            assert!(result.messages[2].text().contains("omitted"), "{mode:?}");
+            assert!(result.omitted_tokens > 0, "{mode:?}");
+            // ...but the pinned instruction message passes through byte-for-byte.
+            assert_eq!(result.messages[1], instruction, "{mode:?}");
+        }
+    }
 }

@@ -49,6 +49,22 @@ pub struct AdmissionSelection {
     pub ignored: Vec<IgnoredInstructionBundle>,
 }
 
+/// Exact post-compaction rehydration data: the refreshed current scope
+/// chain (global, trusted ancestors, workspace root, and the chain to the
+/// most recently used nested scope) plus metadata of every session-cached
+/// bundle.
+#[derive(Debug, Clone)]
+pub struct RehydrationSnapshot {
+    /// Current chain bundles in model rendering order, refreshed from disk.
+    pub chain: Vec<AdmissionCandidate>,
+    /// Metadata of every session-cached bundle, sorted by scope path.
+    /// Visited sibling scopes keep their metadata here even though their
+    /// bodies stay unpinned after compaction.
+    pub visited: Vec<InstructionBundleMetadata>,
+    /// Rendered model content for `chain`, byte-identical to epoch rendering.
+    pub model_content: Option<String>,
+}
+
 /// Deterministic atomic budget admission.
 pub struct InstructionAdmission;
 
@@ -419,21 +435,7 @@ impl InstructionRegistry {
                 failure.detail
             ))
         } else {
-            let mut rendered = String::new();
-            for candidate in InstructionAdmission::rendering_order(selection.admitted.clone()) {
-                let display = escape_attribute(
-                    &self
-                        .resolver
-                        .display_for_model(&candidate.scope_dir)
-                        .to_string_lossy(),
-                );
-                writeln!(rendered, "<instructions path=\"{display}\">").expect("write to string");
-                rendered.push_str(&candidate.content);
-                if !candidate.content.ends_with('\n') {
-                    rendered.push('\n');
-                }
-                rendered.push_str("</instructions>\n");
-            }
+            let mut rendered = self.render_admitted_bundles(&selection.admitted);
             if !selection.ignored.is_empty() {
                 let ignored: Vec<String> = selection
                     .ignored
@@ -479,6 +481,72 @@ impl InstructionRegistry {
             model_content,
         };
         (fingerprint, Some(epoch))
+    }
+
+    /// Renders admitted bundles in model rendering order with provenance
+    /// wrappers. Epoch evaluation and post-compaction rehydration share this
+    /// path so both produce byte-identical content for the same bundle set.
+    fn render_admitted_bundles(&self, admitted: &[AdmissionCandidate]) -> String {
+        let mut rendered = String::new();
+        for candidate in InstructionAdmission::rendering_order(admitted.to_vec()) {
+            let display = escape_attribute(
+                &self
+                    .resolver
+                    .display_for_model(&candidate.scope_dir)
+                    .to_string_lossy(),
+            );
+            writeln!(rendered, "<instructions path=\"{display}\">").expect("write to string");
+            rendered.push_str(&candidate.content);
+            if !candidate.content.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str("</instructions>\n");
+        }
+        rendered
+    }
+
+    /// Loads the exact post-compaction rehydration state: refreshes the scope
+    /// chain for `most_recent_scope` (or the plain global/workspace baseline
+    /// when no nested scope was ever active) from disk and snapshots the
+    /// metadata of every bundle cached this session. Visited sibling scopes
+    /// keep their metadata in `visited` even though their bodies stay
+    /// unpinned.
+    ///
+    /// # Errors
+    /// Returns the typed [`InstructionError`] when scope discovery or a
+    /// bundle read fails; callers must surface it rather than rehydrate
+    /// partial rules.
+    pub async fn rehydration_snapshot(
+        &self,
+        most_recent_scope: Option<&Path>,
+    ) -> Result<RehydrationSnapshot, InstructionError> {
+        let _guard = self.sync.lock().await;
+        let targets: Vec<PathBuf> =
+            most_recent_scope.map_or_else(Vec::new, |dir| vec![dir.to_path_buf()]);
+        let resolved = self.resolver.discover_scopes(&targets)?;
+        let mut chain = Vec::new();
+        for (kind, dir) in resolved.rendering_order() {
+            if let Some(candidate) = self.load_cached(&dir, kind)? {
+                chain.push(candidate);
+            }
+        }
+        let mut visited: Vec<InstructionBundleMetadata> = self
+            .cache()
+            .values()
+            .map(|cached| metadata_from_bundle(&cached.bundle))
+            .collect();
+        visited.sort_by(|a, b| a.display_path.cmp(&b.display_path));
+        let rendered = self.render_admitted_bundles(&chain);
+        let model_content = if rendered.is_empty() {
+            None
+        } else {
+            Some(rendered)
+        };
+        Ok(RehydrationSnapshot {
+            chain,
+            visited,
+            model_content,
+        })
     }
 
     /// Loads one scope's bundle through the positive-only cache. Metadata
@@ -543,15 +611,19 @@ fn candidate_from_bundle(
     AdmissionCandidate {
         kind,
         scope_dir: bundle.scope_dir.clone(),
-        metadata: InstructionBundleMetadata {
-            display_path: bundle.scope_dir.clone(),
-            revision: bundle.revision.clone(),
-            token_estimate: bundle.token_estimate,
-            byte_size: bundle.byte_size,
-            source_count: bundle.source_count(),
-            import_count: bundle.import_count(),
-        },
+        metadata: metadata_from_bundle(bundle),
         content: bundle.expanded.clone(),
+    }
+}
+
+fn metadata_from_bundle(bundle: &InstructionBundle) -> InstructionBundleMetadata {
+    InstructionBundleMetadata {
+        display_path: bundle.scope_dir.clone(),
+        revision: bundle.revision.clone(),
+        token_estimate: bundle.token_estimate,
+        byte_size: bundle.byte_size,
+        source_count: bundle.source_count(),
+        import_count: bundle.import_count(),
     }
 }
 

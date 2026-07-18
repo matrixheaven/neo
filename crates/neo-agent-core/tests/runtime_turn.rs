@@ -8328,3 +8328,420 @@ async fn runtime_invalid_tool_arguments_return_model_visible_error() {
         "second request should end with an error ToolResult"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Path-scoped instruction context bridge: prefix stability, dynamic budget,
+// compaction exclusion, and exact rehydration.
+// ---------------------------------------------------------------------------
+
+use neo_agent_core::InstructionContextBridge;
+use neo_agent_core::instructions::{
+    InstructionEpochData, InstructionEpochOutcome, InstructionFingerprint,
+    InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
+    InstructionRegistry, InstructionRegistryConfig,
+};
+use std::path::PathBuf;
+
+struct InstructionFixture {
+    _temp: tempfile::TempDir,
+    workspace: PathBuf,
+    registry: InstructionRegistry,
+}
+
+/// A trusted workspace with a root `AGENTS.md` plus optional nested scopes.
+fn instruction_fixture(nested: &[(&str, &str)], root_rules: &str) -> InstructionFixture {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(workspace.join("AGENTS.md"), root_rules).expect("root AGENTS.md");
+    for (dir, rules) in nested {
+        let nested_dir = workspace.join(dir);
+        std::fs::create_dir_all(&nested_dir).expect("nested dir");
+        std::fs::write(nested_dir.join("AGENTS.md"), rules).expect("nested AGENTS.md");
+    }
+    let workspace = workspace.canonicalize().expect("canonical workspace");
+    let registry = InstructionRegistry::new(InstructionRegistryConfig {
+        primary_workspace: workspace.clone(),
+        neo_home: None,
+        project_trusted: true,
+    })
+    .expect("registry");
+    InstructionFixture {
+        _temp: temp,
+        workspace,
+        registry,
+    }
+}
+
+async fn reconcile_defer_epoch(
+    fixture: &InstructionFixture,
+    config: &AgentConfig,
+    context: &AgentContext,
+    targets: Vec<PathBuf>,
+) -> (InstructionEpochData, InstructionFingerprint) {
+    let budget = InstructionContextBridge::budget(config, context);
+    let decision = fixture
+        .registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::ToolPreflight,
+                target_directories: targets,
+                budget,
+                deferred_tool_ids: vec!["call-1".to_owned()],
+            },
+            context.instruction_state(),
+        )
+        .await;
+    match decision {
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
+        InstructionPreflightDecision::Proceed { .. } => panic!("expected Defer, got Proceed"),
+        InstructionPreflightDecision::Block { epoch, .. } => {
+            panic!("expected Defer, got Block: {:?}", epoch.failure)
+        }
+    }
+}
+
+fn chat_request_text(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let content = match message {
+                neo_ai::ChatMessage::System { content }
+                | neo_ai::ChatMessage::User { content }
+                | neo_ai::ChatMessage::Assistant { content, .. }
+                | neo_ai::ChatMessage::ToolResult { content, .. } => content,
+            };
+            content
+                .iter()
+                .filter_map(|part| match part {
+                    neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn end_turn_events(text: &str) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::TextDelta {
+            text: text.to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
+}
+
+async fn run_turn_collect(
+    runtime: &AgentRuntime,
+    context: &mut AgentContext,
+    input: &str,
+) -> Vec<AgentEvent> {
+    runtime
+        .run_turn(context, AgentMessage::user_text(input))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed")
+}
+
+async fn run_manual_compaction_collect(runtime: &AgentRuntime, context: &mut AgentContext) {
+    let events = runtime
+        .run_manual_compaction_turn(context)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("compaction turn should succeed");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. })),
+        "expected a CompactionApplied event"
+    );
+}
+
+#[tokio::test]
+async fn adjacent_requests_keep_the_complete_previous_message_prefix() {
+    let fixture = instruction_fixture(&[("nested", "nested rules\n")], "root rules\n");
+    let harness =
+        FakeHarness::from_turns([end_turn_events("reply one"), end_turn_events("reply two")]);
+    let tool = ToolSpec {
+        name: "Read".to_owned(),
+        description: "read a file".to_owned(),
+        input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+    };
+    let config = AgentConfig::for_model(harness.model())
+        .with_system_prompt("BASE SYSTEM PROMPT")
+        .with_tools(vec![tool])
+        .with_workspace_root(&fixture.workspace)
+        .expect("workspace root")
+        .with_session_directory(
+            fixture
+                .workspace
+                .join("session_00000000-0000-4000-8000-0000000000aa"),
+        );
+    let runtime = AgentRuntime::new(config.clone(), harness.client());
+    let mut context = AgentContext::new();
+
+    run_turn_collect(&runtime, &mut context, "first request").await;
+
+    // Activate the nested scope between the two provider requests.
+    let (epoch, fingerprint) = reconcile_defer_epoch(
+        &fixture,
+        &config,
+        &context,
+        vec![fixture.workspace.join("nested")],
+    )
+    .await;
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::Activated);
+    InstructionContextBridge::apply_epoch(&mut context, &epoch, &fingerprint);
+
+    run_turn_collect(&runtime, &mut context, "second request").await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    let first = &requests[0];
+    let second = &requests[1];
+
+    // The complete earlier message sequence is the exact prefix of the next
+    // pre-compaction request; the epoch only appends.
+    assert!(
+        first.messages.len() < second.messages.len(),
+        "the epoch and the follow-up exchange must append messages"
+    );
+    assert_eq!(
+        first.messages.as_slice(),
+        &second.messages[..first.messages.len()],
+        "request N messages must be the exact prefix of request N+1"
+    );
+
+    // Stable system prompt bytes, tool ordering, reasoning settings, and the
+    // session cache key across scope activation.
+    let system_text = |request: &ChatRequest| match request.messages.first() {
+        Some(neo_ai::ChatMessage::System { content }) => content
+            .iter()
+            .filter_map(|part| match part {
+                neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        other => panic!("expected leading system message, got {other:?}"),
+    };
+    assert_eq!(system_text(first), system_text(second));
+    assert_eq!(system_text(first), "BASE SYSTEM PROMPT");
+    assert_eq!(first.tools, second.tools);
+    assert_eq!(first.options.reasoning, second.options.reasoning);
+    assert_eq!(first.options.session_id, second.options.session_id);
+    assert_eq!(
+        first.options.session_id.as_deref(),
+        Some("session_00000000-0000-4000-8000-0000000000aa")
+    );
+}
+
+#[tokio::test]
+async fn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes() {
+    const INSTRUCTION_SENTINEL: &str = "INSTRUCTION-SENTINEL-4f8c2e-rules";
+    const ORDINARY_SENTINEL: &str = "ORDINARY-SENTINEL-91bd7a-history";
+
+    let fixture = instruction_fixture(&[], &format!("# rules\n{INSTRUCTION_SENTINEL}\n"));
+    let harness = FakeHarness::from_turns([
+        end_turn_events("summary output"),
+        end_turn_events("continued"),
+    ]);
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_compaction(CompactionSettings::new(usize::MAX, 4));
+    config.manual_compact_request = Arc::new(Mutex::new(Some(String::new())));
+    let runtime = AgentRuntime::new(config.clone(), harness.client());
+    let mut context = AgentContext::new();
+
+    // Pin the workspace baseline epoch carrying the instruction sentinel.
+    let (epoch, fingerprint) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![fixture.workspace.clone()]).await;
+    let model_content = epoch
+        .model_content
+        .clone()
+        .expect("baseline epoch carries model content");
+    assert!(model_content.contains(INSTRUCTION_SENTINEL));
+    InstructionContextBridge::apply_epoch(&mut context, &epoch, &fingerprint);
+
+    // Ordinary history with its own sentinel, then a manual compaction.
+    context.append_message(AgentMessage::user_text(format!(
+        "please remember {ORDINARY_SENTINEL}"
+    )));
+    context.append_message(AgentMessage::assistant(
+        vec![Content::text("noted")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    context.append_message(AgentMessage::user_text("and now something else"));
+    context.append_message(AgentMessage::assistant(
+        vec![Content::text("done")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    run_manual_compaction_collect(&runtime, &mut context).await;
+
+    // The summary request excludes the instruction body but still summarizes
+    // ordinary history.
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 1);
+    let summary_text = chat_request_text(&requests[0]);
+    assert!(
+        !summary_text.contains(INSTRUCTION_SENTINEL),
+        "summary input must exclude pinned instruction bodies: {summary_text}"
+    );
+    assert!(
+        summary_text.contains(ORDINARY_SENTINEL),
+        "summary input must keep ordinary history: {summary_text}"
+    );
+
+    // Rehydrate the exact current rules from registry state.
+    let repinned =
+        InstructionContextBridge::rehydrate_after_compaction(&fixture.registry, &mut context)
+            .await
+            .expect("rehydration succeeds");
+    assert!(repinned, "current instruction chain must be re-pinned");
+
+    run_turn_collect(&runtime, &mut context, "continue working").await;
+
+    // The post-compaction request contains the byte-identical instruction
+    // content exactly once.
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    let post_compaction = chat_request_text(&requests[1]);
+    assert_eq!(
+        post_compaction.matches(INSTRUCTION_SENTINEL).count(),
+        1,
+        "instruction sentinel must appear exactly once: {post_compaction}"
+    );
+    let pinned = requests[1]
+        .messages
+        .iter()
+        .map(|message| {
+            let parts = match message {
+                neo_ai::ChatMessage::System { content }
+                | neo_ai::ChatMessage::User { content }
+                | neo_ai::ChatMessage::Assistant { content, .. }
+                | neo_ai::ChatMessage::ToolResult { content, .. } => content,
+            };
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .find(|text| text.contains(INSTRUCTION_SENTINEL))
+        .expect("one message carries the rehydrated sentinel");
+    assert_eq!(
+        pinned, model_content,
+        "rehydrated content must be byte-identical to the epoch content"
+    );
+}
+
+#[tokio::test]
+async fn compacted_sibling_scope_reactivates_when_reentered() {
+    let fixture = instruction_fixture(
+        &[("a", "ALPHA-RULES-a11\n"), ("b", "BETA-RULES-b22\n")],
+        "ROOT-RULES-c01\n",
+    );
+    let scope_a = fixture.workspace.join("a");
+    let scope_b = fixture.workspace.join("b");
+    let harness = FakeHarness::from_turns([end_turn_events("summary output")]);
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_compaction(CompactionSettings::new(usize::MAX, 4));
+    config.manual_compact_request = Arc::new(Mutex::new(Some(String::new())));
+    let runtime = AgentRuntime::new(config.clone(), harness.client());
+    let mut context = AgentContext::new();
+
+    // Activate sibling scope A, then sibling scope B.
+    let (epoch_a, fingerprint_a) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![scope_a.clone()]).await;
+    assert_eq!(epoch_a.outcome, InstructionEpochOutcome::Activated);
+    InstructionContextBridge::apply_epoch(&mut context, &epoch_a, &fingerprint_a);
+    let (epoch_b, fingerprint_b) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![scope_b.clone()]).await;
+    InstructionContextBridge::apply_epoch(&mut context, &epoch_b, &fingerprint_b);
+    context.append_message(AgentMessage::user_text("working in b"));
+
+    // Compact while B is current, then rehydrate from registry state.
+    run_manual_compaction_collect(&runtime, &mut context).await;
+    let repinned =
+        InstructionContextBridge::rehydrate_after_compaction(&fixture.registry, &mut context)
+            .await
+            .expect("rehydration succeeds");
+    assert!(repinned);
+
+    // A remains cached but unpinned; the current chain (root + B) is pinned.
+    let pinned = context
+        .messages()
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::Instruction { .. }))
+        .map(AgentMessage::text)
+        .collect::<Vec<_>>()
+        .concat();
+    assert!(
+        !pinned.contains("ALPHA-RULES"),
+        "sibling A must stay unpinned"
+    );
+    assert!(
+        pinned.contains("ROOT-RULES"),
+        "workspace baseline is rehydrated"
+    );
+    assert!(
+        pinned.contains("BETA-RULES"),
+        "current scope B is rehydrated"
+    );
+
+    let state = context.instruction_state();
+    assert_eq!(state.active_scopes, vec![fixture.workspace.clone()]);
+    assert_eq!(state.most_recent_scope.as_deref(), Some(scope_b.as_path()));
+    for scope in [&fixture.workspace, &scope_a, &scope_b] {
+        assert!(
+            state.visible_revisions.contains_key(scope),
+            "metadata retained for {}",
+            scope.display()
+        );
+    }
+
+    // Re-entering A emits exactly one Reactivated epoch.
+    let (epoch_reentry, fingerprint_reentry) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![scope_a.clone()]).await;
+    assert_eq!(epoch_reentry.outcome, InstructionEpochOutcome::Reactivated);
+    assert!(
+        epoch_reentry
+            .model_content
+            .as_deref()
+            .is_some_and(|content| content.contains("ALPHA-RULES")),
+        "re-entry re-pins A's exact content"
+    );
+    InstructionContextBridge::apply_epoch(&mut context, &epoch_reentry, &fingerprint_reentry);
+
+    // The identical probe afterwards proceeds silently — no second epoch.
+    let decision = fixture
+        .registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::ToolPreflight,
+                target_directories: vec![scope_a],
+                budget: InstructionContextBridge::budget(&config, &context),
+                deferred_tool_ids: vec!["call-1".to_owned()],
+            },
+            context.instruction_state(),
+        )
+        .await;
+    assert!(
+        matches!(decision, InstructionPreflightDecision::Proceed { .. }),
+        "an unchanged scope must not emit a second epoch"
+    );
+}

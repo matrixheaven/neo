@@ -13,6 +13,7 @@ mod types;
 
 pub use registry::{
     AdmissionCandidate, AdmissionSelection, InstructionAdmission, InstructionRegistry,
+    RehydrationSnapshot,
 };
 pub use resolver::{
     FilesystemSourceIo, InstructionBundle, InstructionResolver, ResolvedScopes, SourceIo,
