@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-19 | plan | docs/aegis/plans/2026-07-19-terminal-bounded-yield.md | Terminal Raw PTY and Bounded Yield Implementation Plan |
 | 2026-07-19 | spec | docs/aegis/specs/2026-07-19-terminal-bounded-yield-design.md | Terminal Raw PTY and Bounded Yield |
 | 2026-07-18 | spec | docs/aegis/specs/2026-07-18-aegis-dual-host-install-design.md | Aegis dual-host install and Neo skill discovery |
 | 2026-07-18 | plan | docs/aegis/plans/2026-07-18-aegis-dual-host-install.md | Aegis dual-host install |
