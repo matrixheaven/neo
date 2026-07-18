@@ -446,6 +446,10 @@ impl TranscriptPane {
                 };
 
                 let text = match (code.as_deref(), retry_after) {
+                    (Some("provider.quota_exhausted"), _) => {
+                        let detail = message.strip_prefix("quota exhausted: ").unwrap_or(message);
+                        format!("✗ Quota Exhausted — {detail}")
+                    }
                     (Some("provider.rate_limit"), Some(secs)) => {
                         format!("⚠ Rate Limited — retry in {secs}s")
                     }
@@ -935,9 +939,7 @@ fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Op
             "Run stopped after turn {turn}: response hit the output length cap (max_tokens). \
              Raise [models.<alias>].max_output_tokens or [runtime].max_tokens to continue."
         )),
-        neo_agent_core::StopReason::Error => {
-            Some(format!("Run stopped after turn {turn}: runtime error."))
-        }
+        neo_agent_core::StopReason::Error => None,
         neo_agent_core::StopReason::Cancelled => {
             Some(format!("Run stopped after turn {turn}: cancelled."))
         }

@@ -2184,8 +2184,8 @@ fn replay_session_into_transcript(
                 | AgentEvent::RetryScheduled { .. }
                 | AgentEvent::RetryStarted { .. }
                 | AgentEvent::RetryResumed { .. }
-                | AgentEvent::RetrySucceeded { .. }
-                | AgentEvent::RetryExhausted { .. } => {}
+                | AgentEvent::RetrySucceeded { .. } => {}
+                AgentEvent::RetryExhausted { .. } => transcript.apply_agent_event(event),
                 _ => {
                     coverage.observe(event);
                     transcript.apply_agent_event(event);

@@ -710,7 +710,7 @@ impl TranscriptEntry {
                 render_status::render_status(text, *severity, inner_width, theme)
             }
             Self::RetryStatus { data } => {
-                render_status::render_retry_status(data, inner_width, theme)
+                render_status::render_retry_status(data, inner_width, theme, activity_frame)
             }
             Self::McpStartupStatus { data } => render_mcp_startup::render_mcp_startup_status(
                 data,
@@ -841,7 +841,9 @@ impl TranscriptEntry {
             Self::McpStartupStatus { data } => {
                 matches!(data.phase, McpStartupPhase::Connecting)
             }
-            Self::RetryStatus { data } => data.phase == RetryPhase::Waiting,
+            Self::RetryStatus { data } => {
+                matches!(data.phase, RetryPhase::Waiting | RetryPhase::Connecting)
+            }
             _ => false,
         }
     }
@@ -863,7 +865,7 @@ impl TranscriptEntry {
             | Self::RetryStatus {
                 data:
                     RetryStatusData {
-                        phase: RetryPhase::Waiting,
+                        phase: RetryPhase::Waiting | RetryPhase::Connecting,
                         ..
                     },
             }

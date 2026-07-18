@@ -1776,28 +1776,53 @@ fn retry_status_renders_fixed_waiting_connecting_and_exhausted_states() {
         max_retries: 5,
         delay_ms: 12_000,
         error_code: "provider.transport_error".to_owned(),
-        message: "error decoding response body".to_owned(),
+        message: "transport error: error decoding response body".to_owned(),
     });
 
-    let waiting = plain_frame(&mut pane, 80, 20).join("\n");
+    let waiting_frame_0 = plain_frame(&mut pane, 80, 20).join("\n");
     assert!(
-        waiting.contains("Reconnecting 1/5 · retry in 12s · esc interrupt"),
-        "waiting retry status: {waiting}"
+        waiting_frame_0.contains("⠋ Reconnecting 1/5 · retry in 12s · esc interrupt"),
+        "waiting retry status: {waiting_frame_0}"
     );
+    assert_eq!(
+        waiting_frame_0
+            .matches("Network · error decoding response body")
+            .count(),
+        1,
+        "waiting retry detail: {waiting_frame_0}"
+    );
+    assert!(!waiting_frame_0.contains("Network · transport error:"));
+    pane.advance_animation_at_ms(80);
+    let waiting_frame_1 = plain_frame(&mut pane, 80, 20).join("\n");
     assert!(
-        waiting.contains("Network · error decoding response body"),
-        "waiting retry detail: {waiting}"
+        waiting_frame_1.contains("⠙ Reconnecting 1/5 · retry in 12s · esc interrupt"),
+        "waiting retry animation: {waiting_frame_1}"
     );
 
-    pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
+    let mut connecting_pane = TranscriptPane::new(80, 20);
+    connecting_pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
+        turn: 1,
+        retry: 1,
+        max_retries: 5,
+        delay_ms: 12_000,
+        error_code: "provider.transport_error".to_owned(),
+        message: "transport error: error decoding response body".to_owned(),
+    });
+    connecting_pane.apply_agent_event(neo_agent_core::AgentEvent::RetryStarted {
         turn: 1,
         retry: 1,
         max_retries: 5,
     });
-    let connecting = plain_frame(&mut pane, 80, 20).join("\n");
+    let connecting_frame_0 = plain_frame(&mut connecting_pane, 80, 20).join("\n");
     assert!(
-        connecting.contains("Reconnecting 1/5 · connecting · esc interrupt"),
-        "connecting retry status: {connecting}"
+        connecting_frame_0.contains("⠋ Reconnecting 1/5 · connecting · esc interrupt"),
+        "connecting retry status: {connecting_frame_0}"
+    );
+    connecting_pane.advance_animation_at_ms(80);
+    let connecting_frame_1 = plain_frame(&mut connecting_pane, 80, 20).join("\n");
+    assert!(
+        connecting_frame_1.contains("⠙ Reconnecting 1/5 · connecting · esc interrupt"),
+        "connecting retry animation: {connecting_frame_1}"
     );
 
     pane.apply_agent_event(neo_agent_core::AgentEvent::RetryExhausted {
@@ -1808,13 +1833,31 @@ fn retry_status_renders_fixed_waiting_connecting_and_exhausted_states() {
     });
     let exhausted = plain_frame(&mut pane, 80, 20).join("\n");
     assert!(
-        exhausted.contains("Reconnect failed after 5 attempts"),
+        exhausted.contains("Reconnect failed after 5 retries"),
         "exhausted retry status: {exhausted}"
     );
     assert!(
         exhausted.contains("Network · error decoding response body"),
         "exhausted retry detail: {exhausted}"
     );
+
+    for (turn, retries_used, expected) in [
+        (3, 0, "Reconnect failed · retry disabled"),
+        (4, 1, "Reconnect failed after 1 retry"),
+    ] {
+        let mut terminal = TranscriptPane::new(80, 20);
+        terminal.apply_agent_event(neo_agent_core::AgentEvent::RetryExhausted {
+            turn,
+            retries_used,
+            error_code: "provider.transport_error".to_owned(),
+            message: String::new(),
+        });
+        let rendered = plain_frame(&mut terminal, 80, 20).join("\n");
+        assert!(
+            rendered.contains(expected),
+            "terminal retry status: {rendered}"
+        );
+    }
 
     let mut high_attempt = TranscriptPane::new(80, 20);
     high_attempt.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
@@ -2117,6 +2160,10 @@ fn retry_exhaustion_suppresses_followup_error_card() {
         code: Some("provider.transport_error".to_owned()),
         retry_after: None,
     });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RunFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
 
     assert_eq!(pane.transcript().entries().len(), entry_count);
     assert_eq!(
@@ -2127,6 +2174,41 @@ fn retry_exhaustion_suppresses_followup_error_card() {
             .count(),
         1
     );
+    let rendered = plain_frame(&mut pane, 80, 20).join("\n");
+    assert!(!rendered.contains("runtime error"), "{rendered}");
+}
+
+#[test]
+fn quota_exhausted_error_preserves_provider_detail() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Error {
+        turn: 1,
+        message: "quota exhausted: balance is 0; purchase extra usage".to_owned(),
+        code: Some("provider.quota_exhausted".to_owned()),
+        retry_after: None,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RunFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+
+    let rendered = plain_frame(&mut pane, 80, 20).join("\n");
+    assert_eq!(rendered.matches("Quota Exhausted").count(), 1, "{rendered}");
+    assert_eq!(
+        rendered
+            .matches("balance is 0; purchase extra usage")
+            .count(),
+        1,
+        "{rendered}"
+    );
+    for unexpected in [
+        "Check API key",
+        "quota exhausted:",
+        "runtime error",
+        "Reconnecting",
+    ] {
+        assert!(!rendered.contains(unexpected), "{rendered}");
+    }
 }
 
 #[test]

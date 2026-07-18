@@ -6744,7 +6744,7 @@ fn replay_session_into_transcript_does_not_duplicate_text_delta_aggregate_withou
 }
 
 #[test]
-fn replay_session_into_transcript_ignores_retry_lifecycle() {
+fn replay_session_into_transcript_restores_only_retry_exhaustion() {
     let mut transcript = TranscriptPane::new(100, 20);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
         AgentEvent::RetryScheduled {
@@ -6761,10 +6761,6 @@ fn replay_session_into_transcript_ignores_retry_lifecycle() {
             max_retries: 1,
         },
         AgentEvent::RetryResumed { turn: 1, retry: 1 },
-        AgentEvent::MessageStarted {
-            turn: 1,
-            id: "failed-retry".to_owned(),
-        },
         AgentEvent::RetryExhausted {
             turn: 1,
             retries_used: 1,
@@ -6781,16 +6777,29 @@ fn replay_session_into_transcript_ignores_retry_lifecycle() {
             turn: 1,
             stop_reason: StopReason::Error,
         },
+        AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Error,
+        },
     ]);
 
     replay_session_into_transcript(&mut transcript, &loaded);
 
-    assert!(
-        transcript
-            .transcript()
-            .entries()
-            .iter()
-            .all(|entry| !matches!(entry, TranscriptEntry::RetryStatus { .. }))
+    let retry_entries = transcript
+        .transcript()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::RetryStatus { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(retry_entries.len(), 1);
+    assert!(matches!(
+        retry_entries[0],
+        TranscriptEntry::RetryStatus { data }
+            if data.phase == neo_tui::transcript::entry::RetryPhase::Exhausted
+    ));
+    assert_eq!(
+        retry_entries[0].finalization(),
+        neo_tui::primitive::Finalization::Finalized
     );
     let rendered = transcript
         .render_frame(100, 20)
@@ -6799,7 +6808,18 @@ fn replay_session_into_transcript_ignores_retry_lifecycle() {
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!rendered.contains("Reconnect"), "{rendered}");
+    assert_eq!(
+        rendered.matches("Reconnect failed after 1 retry").count(),
+        1,
+        "{rendered}"
+    );
+    for unexpected in [
+        "Reconnecting",
+        "Error: transport error: connection reset",
+        "runtime error",
+    ] {
+        assert!(!rendered.contains(unexpected), "{rendered}");
+    }
 }
 
 #[test]

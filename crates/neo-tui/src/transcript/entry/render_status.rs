@@ -31,14 +31,17 @@ pub(super) fn render_retry_status(
     data: &RetryStatusData,
     width: usize,
     theme: &TuiTheme,
+    activity_frame: usize,
 ) -> Vec<Line> {
+    const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinner = SPINNER[activity_frame % SPINNER.len()];
     let (header, color) = match data.phase {
         RetryPhase::Waiting => {
             let elapsed_ms = super::monotonic_time_ms().saturating_sub(data.started_at_ms);
             let remaining_ms = data.delay_ms.saturating_sub(elapsed_ms);
             (
                 format!(
-                    "Reconnecting {}/{} · retry in {} · esc interrupt",
+                    "{spinner} Reconnecting {}/{} · retry in {} · esc interrupt",
                     data.retry,
                     data.max_retries,
                     format_retry_delay(remaining_ms)
@@ -48,34 +51,38 @@ pub(super) fn render_retry_status(
         }
         RetryPhase::Connecting => (
             format!(
-                "Reconnecting {}/{} · connecting · esc interrupt",
+                "{spinner} Reconnecting {}/{} · connecting · esc interrupt",
                 data.retry, data.max_retries
             ),
             theme.brand,
         ),
-        RetryPhase::Exhausted => (
-            format!(
-                "Reconnect failed after {} {}",
-                data.retry,
-                if data.retry == 1 {
-                    "attempt"
-                } else {
-                    "attempts"
-                }
-            ),
-            theme.status_error,
-        ),
+        RetryPhase::Exhausted => {
+            let header = match data.retry {
+                0 => "Reconnect failed · retry disabled".to_owned(),
+                1 => "Reconnect failed after 1 retry".to_owned(),
+                retry => format!("Reconnect failed after {retry} retries"),
+            };
+            (header, theme.status_error)
+        }
     };
     let mut lines = super::styled_wrap(&header, width, Style::default().fg(color).bold());
     if !data.message.is_empty() {
-        let title = if data.error_code == "provider.transport_error" {
-            "Network"
+        let (title, message) = if data.error_code == "provider.transport_error" {
+            (
+                "Network",
+                data.message
+                    .strip_prefix("transport error: ")
+                    .unwrap_or(data.message.as_str()),
+            )
         } else {
             let title = neo_agent_core::error_info(&data.error_code).title;
-            title.strip_suffix(" Error").unwrap_or(title)
+            (
+                title.strip_suffix(" Error").unwrap_or(title),
+                data.message.as_str(),
+            )
         };
         lines.extend(super::styled_wrap(
-            &format!("{title} · {}", data.message),
+            &format!("{title} · {message}"),
             width,
             status_style(theme),
         ));
