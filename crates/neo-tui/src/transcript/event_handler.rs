@@ -8,7 +8,9 @@ use neo_agent_core::{
 use crate::shell::ToolStatusKind;
 use crate::transcript::ShellRunComponent;
 use crate::transcript::TranscriptEntry;
-use crate::transcript::entry::{GoalCardKind, RetryPhase, RetryStatusData, monotonic_time_ms};
+use crate::transcript::entry::{
+    GoalCardKind, RetryPhase, RetryStatusData, StatusSeverity, monotonic_time_ms,
+};
 
 use super::pane::{AbsorbedToolKind, TranscriptPane};
 
@@ -133,8 +135,21 @@ impl TranscriptPane {
                 turn,
                 stop_reason: neo_agent_core::StopReason::Error,
                 ..
+            } => {
+                self.mark_unfinished_tools_for_turn(
+                    *turn,
+                    ToolStatusKind::Failed,
+                    "Turn ended before this tool executed",
+                );
+                self.finish_active_text_blocks();
+                self.transcript.finish_live_model_attempt(*turn);
+                self.push_status_with_severity(
+                    "Provider response ended with an error.",
+                    StatusSeverity::Error,
+                );
+                true
             }
-            | AgentEvent::TurnFinished {
+            AgentEvent::TurnFinished {
                 turn,
                 stop_reason: neo_agent_core::StopReason::Error,
             } => {
@@ -428,7 +443,6 @@ impl TranscriptPane {
                 code,
                 retry_after,
             } => {
-                use crate::transcript::entry::StatusSeverity;
                 let result = format!("Turn ended before this tool executed: {message}");
                 self.mark_unfinished_tools_for_turn(*turn, ToolStatusKind::Failed, &result);
                 if self.transcript.has_exhausted_retry_status(*turn) {

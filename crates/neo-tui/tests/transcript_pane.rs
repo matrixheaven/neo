@@ -2141,6 +2141,52 @@ fn retry_tool_first_reuses_anchor_before_intervening_finalized_entry() {
 }
 
 #[test]
+fn provider_message_finished_error_renders_one_terminal_error_row() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "assistant-1".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "assistant-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::RunFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::Error,
+    });
+
+    let entries = pane.transcript().entries();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::Status { .. }))
+            .count(),
+        1
+    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Status {
+            text,
+            severity: Some(StatusSeverity::Error),
+        } if text == "Provider response ended with an error."
+    )));
+    let rendered = plain_frame(&mut pane, 80, 20).join("\n");
+    assert_eq!(
+        rendered
+            .matches("Provider response ended with an error.")
+            .count(),
+        1,
+        "{rendered}"
+    );
+}
+
+#[test]
 fn retry_exhaustion_suppresses_followup_error_card() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {

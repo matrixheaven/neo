@@ -6801,6 +6801,13 @@ fn replay_session_into_transcript_restores_only_retry_exhaustion() {
         retry_entries[0].finalization(),
         neo_tui::primitive::Finalization::Finalized
     );
+    assert!(
+        transcript
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::Status { .. }))
+    );
     let rendered = transcript
         .render_frame(100, 20)
         .expect("render retry replay")
@@ -6813,11 +6820,7 @@ fn replay_session_into_transcript_restores_only_retry_exhaustion() {
         1,
         "{rendered}"
     );
-    for unexpected in [
-        "Reconnecting",
-        "Error: transport error: connection reset",
-        "runtime error",
-    ] {
+    for unexpected in ["Reconnecting", "runtime error"] {
         assert!(!rendered.contains(unexpected), "{rendered}");
     }
 }
