@@ -1,5 +1,9 @@
+use neo_agent_core::instructions::{
+    InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome, InstructionScopeData,
+    InstructionScopeKind,
+};
 use neo_tui::primitive::theme::TuiTheme;
-use neo_tui::primitive::{Color, strip_ansi, visible_width};
+use neo_tui::primitive::{Color, Finalization, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::{
     McpStartupPhase, McpStartupStatusData, StatusSeverity, TranscriptBrowserState, TranscriptEntry,
@@ -2237,4 +2241,218 @@ fn retry_reset_preserves_earlier_turn_live_entry() {
         pane.transcript().entries()[1],
         TranscriptEntry::RetryStatus { .. }
     ));
+}
+
+// ── Instruction epoch cards (path-scoped AGENTS.md instructions) ────────────
+
+fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> InstructionEpochData {
+    let nested = std::path::PathBuf::from("/workspace/neo/crates/neo-tui");
+    InstructionEpochData {
+        agent_id: "main".to_owned(),
+        generation,
+        outcome: InstructionEpochOutcome::Activated,
+        scopes: vec![InstructionScopeData {
+            display_path: nested.clone(),
+            kind: InstructionScopeKind::Nested,
+            revision: Some("7af13c2e".to_owned()),
+            token_estimate: 31_800,
+        }],
+        selected_bundles: vec![InstructionBundleMetadata {
+            display_path: nested,
+            revision: "7af13c2e".to_owned(),
+            token_estimate: 31_800,
+            byte_size: 127_200,
+            source_count: 3,
+            import_count: 2,
+        }],
+        ignored_bundles: Vec::new(),
+        replacements: Vec::new(),
+        failure: None,
+        deferred_tool_ids: deferred_tool_ids
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        model_content: Some("scoped rules".to_owned()),
+    }
+}
+
+fn instruction_order(pane: &TranscriptPane) -> Vec<String> {
+    pane.transcript()
+        .entries()
+        .iter()
+        .map(|entry| match entry {
+            TranscriptEntry::InstructionEpoch { component } => {
+                format!("card:{}", component.id())
+            }
+            TranscriptEntry::ToolRun { component } => format!("tool:{}", component.id()),
+            TranscriptEntry::AssistantMessage { .. } => "assistant".to_owned(),
+            _ => "other".to_owned(),
+        })
+        .collect()
+}
+
+#[test]
+fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
+    const DEFERRED: [(&str, &str); 3] =
+        [("read-1", "Read"), ("grep-1", "Grep"), ("bash-1", "Bash")];
+    const RETRIED: [(&str, &str); 3] = [("read-2", "Read"), ("grep-2", "Grep"), ("bash-2", "Bash")];
+    let deferred_ids = DEFERRED.map(|(id, _)| id);
+    let epoch = instruction_test_epoch(3, &deferred_ids);
+
+    let replay = |pane: &mut TranscriptPane| {
+        for (id, name) in DEFERRED {
+            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+                turn: 1,
+                id: id.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
+            epoch: epoch.clone(),
+        });
+        // Deferred calls receive provider-valid non-error results without
+        // executing; on replay those results arrive through the normal
+        // finish path and must stay absorbed behind the card.
+        for (id, name) in DEFERRED {
+            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: id.to_owned(),
+                name: name.to_owned(),
+                result: neo_agent_core::ToolResult::ok("deferred by instruction epoch"),
+            });
+        }
+        // The model replans and re-issues the batch under fresh ids.
+        for (id, name) in RETRIED {
+            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments: serde_json::json!({}),
+            });
+            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: id.to_owned(),
+                name: name.to_owned(),
+                result: neo_agent_core::ToolResult::ok("done"),
+            });
+        }
+    };
+
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.set_workspace_root("/workspace/neo");
+    replay(&mut pane);
+    let first_order = instruction_order(&pane);
+
+    replay(&mut pane);
+    let second_order = instruction_order(&pane);
+
+    let expected = vec![
+        "card:instruction-epoch-main-3".to_owned(),
+        "tool:read-1".to_owned(),
+        "tool:grep-1".to_owned(),
+        "tool:bash-1".to_owned(),
+        "tool:read-2".to_owned(),
+        "tool:grep-2".to_owned(),
+        "tool:bash-2".to_owned(),
+    ];
+    assert_eq!(first_order, expected);
+    assert_eq!(
+        second_order, expected,
+        "replay must reconstruct the same visible order via deferred_tool_ids"
+    );
+    for (id, _) in DEFERRED {
+        assert!(
+            pane.transcript().is_tool_run_suppressed(id),
+            "deferred placeholder {id} stays absorbed after replay"
+        );
+    }
+    for (id, _) in RETRIED {
+        assert!(
+            !pane.transcript().is_tool_run_suppressed(id),
+            "retried tool {id} must stay visible"
+        );
+    }
+
+    let frame = plain_frame(&mut pane, 80, 24);
+    let card_rows = frame
+        .iter()
+        .filter(|line| line.contains("Instructions loaded"))
+        .count();
+    assert_eq!(
+        card_rows, 1,
+        "identical epochs never produce duplicate cards: {frame:?}"
+    );
+}
+
+#[test]
+fn finalized_instruction_card_does_not_drift_after_later_updates() {
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.set_workspace_root("/workspace/neo");
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "read-1".to_owned(),
+        name: "Read".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "grep-1".to_owned(),
+        name: "Grep".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
+        epoch: instruction_test_epoch(3, &["read-1", "grep-1"]),
+    });
+    assert!(matches!(
+        pane.transcript().entries().first(),
+        Some(TranscriptEntry::InstructionEpoch { .. })
+    ));
+
+    // Later turn activity: assistant text, the replanned tool batch, turn
+    // completion, and a follow-up epoch with no deferred placeholders.
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Working on it.".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "read-2".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({ "path": "README.md" }),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "read-2".to_owned(),
+        name: "Read".to_owned(),
+        result: neo_agent_core::ToolResult::ok("done"),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
+        epoch: instruction_test_epoch(4, &[]),
+    });
+
+    let entries = pane.transcript().entries();
+    assert!(
+        matches!(
+            entries.first(),
+            Some(TranscriptEntry::InstructionEpoch { component })
+                if component.id() == "instruction-epoch-main-3"
+        ),
+        "the finalized card must not drift to the transcript bottom: {:?}",
+        instruction_order(&pane)
+    );
+    assert!(
+        matches!(
+            entries.last(),
+            Some(TranscriptEntry::InstructionEpoch { component })
+                if component.id() == "instruction-epoch-main-4"
+        ),
+        "an epoch without placeholders appends after later activity: {:?}",
+        instruction_order(&pane)
+    );
+    assert_eq!(
+        pane.transcript().entry_finalization(0),
+        Some(Finalization::Finalized)
+    );
 }

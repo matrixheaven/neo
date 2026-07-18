@@ -24,6 +24,9 @@ impl TranscriptPane {
         if self.apply_message_event(event) {
             return;
         }
+        if self.apply_instruction_epoch_event(event) {
+            return;
+        }
         if self.apply_thinking_event(event) {
             return;
         }
@@ -165,6 +168,14 @@ impl TranscriptPane {
             }
             _ => false,
         }
+    }
+
+    fn apply_instruction_epoch_event(&mut self, event: &AgentEvent) -> bool {
+        let AgentEvent::InstructionEpoch { epoch } = event else {
+            return false;
+        };
+        self.insert_instruction_epoch(epoch);
+        true
     }
 
     fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {

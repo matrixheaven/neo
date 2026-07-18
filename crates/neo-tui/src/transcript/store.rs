@@ -1,14 +1,20 @@
+use std::path::PathBuf;
+
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Component, Finalization, Line};
+use crate::primitive::{Component, Expandable, Finalization, Line};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::transcript::{
-    DelegateCardComponent, DelegateGroupComponent, ShellRunComponent, SwarmCardComponent,
-    ToolCallComponent, ToolCallState, WorkflowCardComponent,
+    DelegateCardComponent, DelegateGroupComponent, InstructionCardComponent, ShellRunComponent,
+    SwarmCardComponent, ToolCallComponent, ToolCallState, WorkflowCardComponent,
 };
 
 use super::entry::{
     ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
+};
+use neo_agent_core::instructions::{
+    IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
+    InstructionEpochOutcome, InstructionFailure, InstructionReplacement, InstructionScopeData,
 };
 use neo_agent_core::multi_agent::{
     AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
@@ -164,6 +170,10 @@ pub struct TranscriptStore {
     entry_revisions: Vec<u64>,
     next_entry_id: u64,
     suppressed_tool_run_ids: Vec<String>,
+    /// Replay-dedup identity for inserted instruction epoch cards:
+    /// `(fingerprint, entry_id)` per card, so an identical epoch applied
+    /// twice (live event plus JSONL replay) never yields a duplicate card.
+    instruction_epoch_cards: Vec<(String, TranscriptEntryId)>,
     active_assistant: Option<usize>,
     active_thinking: Option<usize>,
     live_model_attempt: Option<(u32, usize)>,
@@ -575,6 +585,70 @@ impl TranscriptStore {
             .any(|existing| existing == id)
     }
 
+    /// Insert a finalized instruction-epoch card at the earliest deferred
+    /// tool placeholder's canonical position.
+    ///
+    /// When any of `epoch.deferred_tool_ids` matches a tool-run entry, the
+    /// card takes the earliest matching entry's index and every matched
+    /// unexecuted placeholder is suppressed — the model replans and
+    /// re-issues those tools under fresh ids after the epoch, so the stale
+    /// placeholders would otherwise render as an internal duplicate
+    /// sequence. Without a matching placeholder the card appends normally.
+    ///
+    /// Insertion is replay-idempotent: an epoch whose
+    /// `(agent_id, generation, scope/revision/selection/failure)`
+    /// fingerprint matches an existing card returns that card's id without
+    /// inserting or re-suppressing. Suppression is presentation-only —
+    /// provider history and JSONL events are never rewritten.
+    pub fn insert_instruction_epoch(
+        &mut self,
+        epoch: &InstructionEpochData,
+        primary_workspace: PathBuf,
+        home_dir: Option<PathBuf>,
+        expanded: bool,
+    ) -> TranscriptEntryId {
+        let fingerprint = instruction_epoch_fingerprint(epoch);
+        if let Some((_, id)) = self
+            .instruction_epoch_cards
+            .iter()
+            .find(|(existing, _)| *existing == fingerprint)
+            && self.entry_ids.contains(id)
+        {
+            return *id;
+        }
+
+        let insertion_index = epoch
+            .deferred_tool_ids
+            .iter()
+            .filter_map(|id| self.tool_run_index(id))
+            .min();
+        for id in &epoch.deferred_tool_ids {
+            let unexecuted = self.tool(id).is_some_and(|tool| {
+                matches!(
+                    tool.status(),
+                    ToolStatusKind::Pending | ToolStatusKind::Running
+                )
+            });
+            if unexecuted {
+                self.suppress_tool_run(id);
+            }
+        }
+
+        let mut component =
+            InstructionCardComponent::new(epoch.clone(), primary_workspace, home_dir);
+        component.set_expanded(expanded);
+        let index = match insertion_index {
+            Some(index) => {
+                self.insert_entry(index, TranscriptEntry::instruction_epoch(component));
+                index
+            }
+            None => self.append_entry(TranscriptEntry::instruction_epoch(component)),
+        };
+        let id = self.entry_ids[index];
+        self.instruction_epoch_cards.push((fingerprint, id));
+        id
+    }
+
     pub fn insert_approval_after_tool_or_push(&mut self, data: ApprovalPromptData) {
         self.mark_visible_boundary();
         let insert_at = self
@@ -594,6 +668,13 @@ impl TranscriptStore {
     #[must_use]
     pub fn has_tool(&self, id: &str) -> bool {
         self.entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
+        )
+    }
+
+    #[must_use]
+    fn tool_run_index(&self, id: &str) -> Option<usize> {
+        self.entries.iter().position(
             |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
         )
     }
@@ -1283,6 +1364,35 @@ fn adjusted_index_after_remove(active: Option<usize>, removed: usize) -> Option<
     active.and_then(|index| {
         (index != removed).then_some(if index > removed { index - 1 } else { index })
     })
+}
+
+/// Replay-stable dedup identity for one instruction epoch card:
+/// `(agent_id, generation, outcome, scope, revision, selection, failure)`.
+/// `deferred_tool_ids` and `model_content` are excluded — they do not
+/// distinguish the semantic epoch the card displays.
+fn instruction_epoch_fingerprint(epoch: &InstructionEpochData) -> String {
+    #[derive(serde::Serialize)]
+    struct EpochCardFingerprint<'a> {
+        agent_id: &'a str,
+        generation: u64,
+        outcome: InstructionEpochOutcome,
+        scopes: &'a [InstructionScopeData],
+        selected_bundles: &'a [InstructionBundleMetadata],
+        ignored_bundles: &'a [IgnoredInstructionBundle],
+        replacements: &'a [InstructionReplacement],
+        failure: Option<&'a InstructionFailure>,
+    }
+    let fingerprint = EpochCardFingerprint {
+        agent_id: &epoch.agent_id,
+        generation: epoch.generation,
+        outcome: epoch.outcome,
+        scopes: &epoch.scopes,
+        selected_bundles: &epoch.selected_bundles,
+        ignored_bundles: &epoch.ignored_bundles,
+        replacements: &epoch.replacements,
+        failure: epoch.failure.as_ref(),
+    };
+    serde_json::to_string(&fingerprint).unwrap_or_else(|_| format!("{epoch:?}"))
 }
 
 fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {

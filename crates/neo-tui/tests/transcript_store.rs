@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use neo_agent_core::instructions::{
+    InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome, InstructionScopeData,
+    InstructionScopeKind,
+};
 use neo_agent_core::multi_agent::{
     AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
     AgentSnapshot, DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
@@ -539,5 +543,117 @@ fn retry_status_countdown_formats_long_delay() {
     assert!(
         rows.contains("Reconnecting 1/5 · retry in 1h 04m 38s · esc interrupt"),
         "long retry delay: {rows}"
+    );
+}
+
+// ── Instruction epoch cards (path-scoped AGENTS.md instructions) ────────────
+
+fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> InstructionEpochData {
+    let nested = std::path::PathBuf::from("/workspace/neo/crates/neo-tui");
+    InstructionEpochData {
+        agent_id: "main".to_owned(),
+        generation,
+        outcome: InstructionEpochOutcome::Activated,
+        scopes: vec![InstructionScopeData {
+            display_path: nested.clone(),
+            kind: InstructionScopeKind::Nested,
+            revision: Some("7af13c2e".to_owned()),
+            token_estimate: 31_800,
+        }],
+        selected_bundles: vec![InstructionBundleMetadata {
+            display_path: nested,
+            revision: "7af13c2e".to_owned(),
+            token_estimate: 31_800,
+            byte_size: 127_200,
+            source_count: 3,
+            import_count: 2,
+        }],
+        ignored_bundles: Vec::new(),
+        replacements: Vec::new(),
+        failure: None,
+        deferred_tool_ids: deferred_tool_ids
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect(),
+        model_content: Some("scoped rules".to_owned()),
+    }
+}
+
+fn instruction_order(store: &TranscriptStore) -> Vec<String> {
+    store
+        .entries()
+        .iter()
+        .map(|entry| match entry {
+            TranscriptEntry::InstructionEpoch { component } => {
+                format!("card:{}", component.id())
+            }
+            TranscriptEntry::ToolRun { component } => format!("tool:{}", component.id()),
+            _ => "other".to_owned(),
+        })
+        .collect()
+}
+
+#[test]
+fn instruction_epoch_replaces_deferred_placeholders_at_earliest_position() {
+    let mut store = TranscriptStore::new();
+    store.push_tool_run("read-1", "Read", None);
+    store.push_tool_run("grep-1", "Grep", None);
+    store.push_tool_run("bash-1", "Bash", None);
+
+    // Deferred ids arrive in provider batch order, not transcript order; the
+    // card must still land at the earliest placeholder's canonical position.
+    let epoch = instruction_test_epoch(3, &["bash-1", "read-1", "grep-1"]);
+    let card_id = store.insert_instruction_epoch(
+        &epoch,
+        std::path::PathBuf::from("/workspace/neo"),
+        Some(std::path::PathBuf::from("/home/user")),
+        false,
+    );
+
+    assert!(matches!(
+        store.entries().first(),
+        Some(TranscriptEntry::InstructionEpoch { .. })
+    ));
+    assert_eq!(store.entry_ids().first(), Some(&card_id));
+    for id in ["read-1", "grep-1", "bash-1"] {
+        assert!(
+            store.is_tool_run_suppressed(id),
+            "deferred placeholder {id} must be absorbed"
+        );
+    }
+    assert_eq!(
+        store.entries().len(),
+        4,
+        "placeholders are suppressed, never deleted"
+    );
+
+    // The model replans and re-issues the batch under fresh ids; the retried
+    // tools append after the fixed card instead of displacing it.
+    store.push_tool_run("read-2", "Read", None);
+    store.push_tool_run("grep-2", "Grep", None);
+    store.push_tool_run("bash-2", "Bash", None);
+
+    assert_eq!(
+        instruction_order(&store),
+        [
+            "card:instruction-epoch-main-3",
+            "tool:read-1",
+            "tool:grep-1",
+            "tool:bash-1",
+            "tool:read-2",
+            "tool:grep-2",
+            "tool:bash-2",
+        ]
+    );
+    for id in ["read-2", "grep-2", "bash-2"] {
+        assert!(
+            !store.is_tool_run_suppressed(id),
+            "retried tool {id} must stay visible"
+        );
+    }
+    assert_eq!(
+        store.entry_finalization(0),
+        Some(Finalization::Finalized),
+        "the instruction card is a finalized semantic entry"
     );
 }

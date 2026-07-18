@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use neo_agent_core::instructions::InstructionEpochData;
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
 use crate::primitive::theme::TuiTheme;
@@ -11,7 +12,8 @@ use crate::terminal_image::{
 };
 use crate::transcript::{
     ApprovalPromptData, InlineImageRender, McpStartupStatusData, ShellRunComponent,
-    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptStore,
+    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptEntryId,
+    TranscriptStore,
 };
 
 use super::entry::RetryStatusData;
@@ -99,6 +101,10 @@ pub struct TranscriptPane {
     pub(super) streaming_tool_args: BTreeMap<String, String>,
     tool_call_metadata: BTreeMap<String, (u32, String)>,
     delegate_absorption_targets: BTreeMap<(u32, AbsorbedToolKind), BTreeSet<String>>,
+    /// Tool call ids absorbed by instruction epoch cards. Their
+    /// provider-valid deferred results replay through the normal finish
+    /// path but must never un-suppress the placeholders.
+    instruction_deferred_tool_ids: BTreeSet<String>,
     pub(super) queued_approvals: VecDeque<ApprovalPromptData>,
     pub(super) completed_tool_result_ids: Vec<String>,
     replay_plan_snapshot: Option<ReplayPlanSnapshot>,
@@ -136,6 +142,7 @@ impl TranscriptPane {
             streaming_tool_args: BTreeMap::new(),
             tool_call_metadata: BTreeMap::new(),
             delegate_absorption_targets: BTreeMap::new(),
+            instruction_deferred_tool_ids: BTreeSet::new(),
             queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
             replay_plan_snapshot: None,
@@ -415,6 +422,12 @@ impl TranscriptPane {
                 if !text.is_empty() {
                     self.push_status(text);
                 }
+            }
+            AgentMessage::Instruction { .. } => {
+                // Pinned instruction context is model-visible only. The
+                // transcript shows the metadata card projected from the
+                // owning `AgentEvent::InstructionEpoch`, never the
+                // instruction body as prose.
             }
             AgentMessage::ShellCommand {
                 command,
@@ -884,6 +897,24 @@ impl TranscriptPane {
         (self.width, self.height)
     }
 
+    /// Project one instruction epoch into the transcript: a finalized
+    /// metadata-only card at the earliest deferred placeholder's canonical
+    /// position, with the unexecuted placeholders absorbed behind it.
+    /// Identical epochs (live event plus JSONL replay) dedup to one card.
+    pub fn insert_instruction_epoch(&mut self, epoch: &InstructionEpochData) -> TranscriptEntryId {
+        self.finish_active_text_blocks();
+        self.instruction_deferred_tool_ids
+            .extend(epoch.deferred_tool_ids.iter().cloned());
+        let id = self.transcript.insert_instruction_epoch(
+            epoch,
+            self.workspace_root.clone().unwrap_or_default(),
+            std::env::home_dir(),
+            self.tool_output_expanded,
+        );
+        self.mark_dirty();
+        id
+    }
+
     pub(super) fn upsert_tool(
         &mut self,
         id: &str,
@@ -1011,6 +1042,12 @@ impl TranscriptPane {
         is_error: bool,
         details: Option<&serde_json::Value>,
     ) {
+        if self.instruction_deferred_tool_ids.contains(id) {
+            // Instruction-deferred placeholders stay absorbed: their
+            // provider-valid deferred results pass through this finish path
+            // without executing and must not re-expose the placeholder.
+            return;
+        }
         if is_error {
             self.transcript.unsuppress_tool_run(id);
             return;

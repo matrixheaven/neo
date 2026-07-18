@@ -66,6 +66,7 @@ impl NeoChromeState {
             | AgentEvent::WorkflowStarted { .. }
             | AgentEvent::WorkflowUpdated { .. }
             | AgentEvent::WorkflowFinished { .. }
+            | AgentEvent::InstructionEpoch { .. }
             | AgentEvent::RetryScheduled { .. }
             | AgentEvent::RetryStarted { .. }
             | AgentEvent::RetryResumed { .. }
