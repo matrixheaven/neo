@@ -342,7 +342,7 @@ mod tests {
     fn config_defaults_shell_limits() {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
-        assert_eq!(config.runtime.shell.max_active_commands, 4);
+        assert_eq!(config.runtime.shell.max_active_commands, 8);
         assert_eq!(config.runtime.shell.max_command_parallelism, 4);
         assert_eq!(config.runtime.shell.max_command_descendant_processes, 32);
         assert_eq!(config.runtime.shell.max_command_memory_percent, 25);

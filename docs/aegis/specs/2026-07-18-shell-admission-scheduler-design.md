@@ -56,7 +56,7 @@ a second task lifecycle.
 - Give a queued user shell command the next available slot without preempting a
   running command.
 - Prevent background Bash and Terminal sessions from consuming more than three
-  slots, leaving foreground capacity under the default four-slot configuration.
+  slots, leaving foreground capacity under the default eight-slot configuration.
 - Preserve per-agent fairness while retaining foreground preference.
 - Show a truthful queued state in the original transcript card, including live
   position and elapsed wait, without exposing an ETA.
@@ -123,10 +123,10 @@ trade-off, not a weighted-fairness guarantee.
 The total running count may not exceed `max_active_commands`. The running
 `AgentBackground` count may not exceed both three and
 `max_active_commands`. The limit of three is fixed rather than another config
-key. With the default total capacity of four, at least one slot cannot be held
-by an agent-started background Bash or Terminal. A user who deliberately
-configures a total capacity below four also reduces or removes that reserved
-foreground headroom.
+key. With the default total capacity of eight, at least five slots cannot be
+held by an agent-started background Bash or Terminal. A lower configured total
+capacity reduces that foreground headroom; values below four can remove it
+entirely when background work is active.
 
 A local `!` command admitted as `User` keeps that class if the user later moves
 the already-running command to the background. Detach neither starts a new
@@ -347,7 +347,7 @@ The canonical user-facing configuration is:
 
 ```toml
 [runtime.shell]
-max_active_commands = 4
+max_active_commands = 8
 max_command_parallelism = 4
 max_command_descendant_processes = 32
 max_command_memory_percent = 25
@@ -581,7 +581,7 @@ No new crate is required for scheduling or Sleep. Standard collections,
 - foreground-before-background ordering;
 - per-owner FIFO and round-robin ordering in each agent class;
 - foreground bypass of an ineligible background request from the same owner;
-- total capacity four and background cap three;
+- total capacity eight and background cap three;
 - cancellation before grant removes a waiter;
 - grant/cancel race does not leak or double-release capacity; and
 - queue position updates reflect class-local round-robin rank; and
@@ -624,9 +624,9 @@ No new crate is required for scheduling or Sleep. Standard collections,
 
 ## Acceptance Criteria
 
-1. A fifth shell request under the default configuration waits rather than
+1. A ninth shell request under the default configuration waits rather than
    returning `Resource limit exceeded`.
-2. At most four commands run, at most three of them were admitted as agent
+2. At most eight commands run, at most three of them were admitted as agent
    background Bash or Terminal sessions, and the next released slot goes to a
    queued user command.
 3. Agent foreground/background requests preserve per-owner FIFO and class-local

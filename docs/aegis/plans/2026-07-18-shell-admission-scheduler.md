@@ -12,7 +12,7 @@
 
 - Rust edition 2024; minimum Rust 1.96.1; no new crate dependency.
 - The scheduler is process-local and in-memory; queued work is never replayed.
-- Default total capacity is `4`; at most `3` permits may be admitted as `AgentBackground`.
+- Default total capacity is `8`; at most `3` permits may be admitted as `AgentBackground`.
 - Priority is `User`, then `AgentForeground`, then eligible `AgentBackground`; no preemption.
 - Agent queues are FIFO per owner and round-robin between owners within each class.
 - Queueing has no item limit, TTL, admission timeout, ETA, task handle, or automatic background conversion.
@@ -269,7 +269,7 @@ impl Default for ShellLimits {
         Self {
             foreground_timeout_secs: 600,
             background_timeout_secs: 1_800,
-            max_active_commands: 4,
+            max_active_commands: 8,
             max_command_parallelism: 4,
             max_command_descendant_processes: 32,
             max_command_memory_percent: 25,

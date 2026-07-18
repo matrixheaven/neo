@@ -132,7 +132,7 @@ pub struct ShellLimits {
 impl Default for ShellLimits {
     fn default() -> Self {
         Self {
-            max_active_commands: 4,
+            max_active_commands: 8,
             max_command_parallelism: 4,
             max_command_descendant_processes: 32,
             max_command_memory_percent: 25,
