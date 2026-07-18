@@ -30,8 +30,10 @@ impl Tool for SleepTool {
 
     fn description(&self) -> &str {
         "Pause this agent without starting a shell command. Use only for a \
-         genuine time-based wait. Prefer WaitDelegate for a known agent or \
-         swarm, and TaskOutput with block=true for a known background task. \
+         genuine time-based wait. Never use Sleep to wait for a delegate, swarm, \
+         or background task, and never combine it with ListDelegates or TaskList \
+         for polling. Use WaitDelegate for a known agent or swarm, and TaskOutput \
+         with block=true for a known background task. \
          The wait is cancellable and duration_seconds must be 1..=3600."
     }
 
@@ -102,6 +104,8 @@ mod tests {
                 .any(|field| field.as_str() == Some("reason"))
         );
         assert!(spec.description.contains("WaitDelegate"));
+        assert!(spec.description.contains("Never use Sleep"));
+        assert!(spec.description.contains("ListDelegates"));
         assert!(spec.description.contains("TaskOutput"));
         assert!(spec.description.contains("block=true"));
         let temp = tempfile::tempdir().expect("tempdir");

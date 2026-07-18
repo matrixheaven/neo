@@ -316,7 +316,8 @@ impl Tool for ListDelegatesTool {
     }
 
     fn description(&self) -> &'static str {
-        "List delegate agents and/or swarms with their current status. \
+        "Take a point-in-time snapshot of delegate agents and/or swarms. This tool does not wait. \
+         Never poll it with Sleep; use WaitDelegate when a known agent or swarm must reach a terminal state. \
          Defaults to newest-first, active-only, all kinds, and meta-only rows. \
          Pass include_completed=true to see completed, failed, cancelled, or timed_out history. \
          Use include=[\"task\"], include=[\"summary\"], or include=[\"activity\"] only when that extra context is needed. \
@@ -530,7 +531,7 @@ struct WaitDelegateInput {
     #[schemars(description = "The agent or swarm ID to wait for.")]
     id: String,
     #[schemars(
-        description = "Maximum time to wait in milliseconds. Defaults to 30000 (30s). Returns timed_out if the target hasn't finished."
+        description = "Maximum time to wait in milliseconds. Defaults to 30000 (30s). Returns outcome=wait_timed_out if the target has not finished."
     )]
     timeout_ms: Option<u64>,
 }
@@ -543,7 +544,7 @@ impl Tool for WaitDelegateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Wait for a delegate agent or swarm to reach a terminal state (completed, failed, \
+        "Canonical blocking wait for a known delegate agent or swarm to reach a terminal state (completed, failed, \
          cancelled, timed_out). A wait timeout returns outcome=\"wait_timed_out\" while preserving \
          the target's current status; this differs from a case where the delegate itself reached timed_out. \
          For swarms, terminal results use the same structured shape as DelegateSwarm and TaskOutput."
@@ -610,7 +611,7 @@ impl Tool for WaitDelegateTool {
                             details["aggregate"] = json!(swarm.aggregate);
                         }
                         return Ok(ToolResult::ok(format!(
-                            "id: {}\nstatus: {}\noutcome: wait_timed_out\nnext_step: The swarm is still running. Increase timeout_ms or use ListDelegates to check status.",
+                            "id: {}\nstatus: {}\noutcome: wait_timed_out\nnext_step: The swarm is still running. Call WaitDelegate again with a larger timeout_ms.",
                             input.id,
                             details["status"].as_str().unwrap_or("running"),
                         ))
@@ -673,7 +674,7 @@ impl Tool for WaitDelegateTool {
 
                 if std::time::Instant::now() >= deadline {
                     return Ok(ToolResult::ok(format!(
-                        "id: {}\nstatus: running\noutcome: wait_timed_out\nnext_step: The delegate is still running. Increase timeout_ms, call ListDelegates, or wait for automatic completion.",
+                        "id: {}\nstatus: running\noutcome: wait_timed_out\nnext_step: The delegate is still running. Call WaitDelegate again with a larger timeout_ms.",
                         input.id,
                     ))
                     .with_details(json!({
@@ -684,7 +685,7 @@ impl Tool for WaitDelegateTool {
                         "outcome": "wait_timed_out",
                         "next_steps": [
                             "The delegate is still running.",
-                            "Increase timeout_ms, call ListDelegates, or wait for automatic completion."
+                            "Call WaitDelegate again with a larger timeout_ms."
                         ],
                     })));
                 }

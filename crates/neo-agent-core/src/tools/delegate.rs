@@ -173,7 +173,7 @@ impl Tool for DelegateTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\nrun_index: {}\ncontext_mode: {}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status.",
+                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\nrun_index: {}\ncontext_mode: {}\nnext_step: Call WaitDelegate with this agent_id to wait for completion.",
                     snapshot.id.as_str(),
                     snapshot.display_name.as_str(),
                     snapshot.run_count,
@@ -354,7 +354,7 @@ impl Tool for DelegateSwarmTool {
                         .await;
                 });
                 return Ok(ToolResult::ok(format!(
-                    "swarm_id: {swarm_id}\nkind: delegate-swarm\nstatus: running\nitems: {total_children}\nnext_step: Use WaitDelegate to wait for completion.\nnext_step: Use ListDelegates to check status."
+                    "swarm_id: {swarm_id}\nkind: delegate-swarm\nstatus: running\nitems: {total_children}\nnext_step: Call WaitDelegate with this swarm_id to wait for completion."
                 ))
                 .with_details(json!({
                     "kind": "delegate_swarm",

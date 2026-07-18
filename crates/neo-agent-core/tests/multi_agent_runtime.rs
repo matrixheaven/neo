@@ -2794,6 +2794,9 @@ async fn wait_delegate_timeout_preserves_running_status_with_wait_timed_out_outc
     assert_eq!(details["outcome"], "wait_timed_out");
     assert_eq!(details["status"], "running");
     assert_eq!(details["id"], running.id.as_str());
+    assert!(result.content.contains("Call WaitDelegate again"));
+    assert!(!result.content.contains("Sleep"));
+    assert!(!result.content.contains("ListDelegates"));
 }
 
 #[test]
@@ -2873,8 +2876,28 @@ fn multi_agent_tool_descriptions_explain_contract_without_docs() {
         "{}",
         list.description
     );
+    assert!(
+        list.description.contains("does not wait"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.description.contains("Never poll it with Sleep"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.description.contains("WaitDelegate"),
+        "{}",
+        list.description
+    );
 
     let wait = spec("WaitDelegate");
+    assert!(
+        wait.description.contains("Canonical blocking wait"),
+        "{}",
+        wait.description
+    );
     assert!(
         wait.description.contains("wait_timed_out"),
         "{}",
