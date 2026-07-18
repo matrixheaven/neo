@@ -216,6 +216,11 @@ pub struct ToolContext {
     pub child_model: Option<Arc<dyn ModelClient>>,
     /// Parent tool registry shared by child `AgentRuntime` instances.
     pub child_tools: Option<Arc<ToolRegistry>>,
+    /// Snapshot of the parent agent's visible instruction state, threaded to
+    /// child runtimes so production child baselines inherit the parent's
+    /// currently applicable scopes. `None` for contexts with no instruction
+    /// registry attached (plain global/workspace baseline degradation).
+    pub parent_instruction_state: Option<crate::instructions::AgentInstructionState>,
     /// Current parent turn for lifecycle events emitted by tools.
     pub current_turn: Option<u32>,
     /// Optional callback for streaming intermediate tool output (e.g. bash
@@ -249,6 +254,10 @@ impl std::fmt::Debug for ToolContext {
             .field("child_config", &self.child_config.is_some())
             .field("child_model", &self.child_model.is_some())
             .field("child_tools", &self.child_tools.is_some())
+            .field(
+                "parent_instruction_state",
+                &self.parent_instruction_state.is_some(),
+            )
             .field("current_turn", &self.current_turn)
             .field("tool_update", &self.tool_update.is_some())
             .field("tool_event", &self.tool_event.is_some())
@@ -277,6 +286,7 @@ impl ToolContext {
             child_config: None,
             child_model: None,
             child_tools: None,
+            parent_instruction_state: None,
             current_turn: None,
             tool_update: None,
             tool_event: None,
@@ -379,6 +389,17 @@ impl ToolContext {
         self.child_model = Some(model);
         self.child_tools = Some(tools);
         self.current_turn = Some(current_turn);
+        self
+    }
+
+    /// Thread the parent agent's visible instruction state to child
+    /// runtimes spawned through this context (Delegate/DelegateSwarm).
+    #[must_use]
+    pub fn with_parent_instruction_state(
+        mut self,
+        state: Option<crate::instructions::AgentInstructionState>,
+    ) -> Self {
+        self.parent_instruction_state = state;
         self
     }
 

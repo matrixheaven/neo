@@ -187,6 +187,14 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub instruction_registry: Option<Arc<InstructionRegistry>>,
+    /// Session-shared record of currently blocked instruction scopes, keyed
+    /// per agent id inside each entry. While a scope is blocked, read-only
+    /// diagnosis may proceed but mutation/execution batches touching the
+    /// scope stay blocked until the source fingerprint changes. Shared
+    /// across per-turn runtime reconstruction; agent visibility stays local.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub blocked_instruction_scopes: Arc<Mutex<Vec<BlockedInstructionScope>>>,
     /// How a child agent spawned from this config inherits instruction
     /// visibility. Set from the delegate context mode at child creation and
     /// immutable once cloned into the child config.
@@ -206,6 +214,27 @@ pub struct AgentConfig {
 /// the conservative global/workspace baseline (no parent scope seeding).
 const fn default_instruction_inheritance() -> InstructionInheritance {
     InstructionInheritance::Summary
+}
+
+/// One currently blocked instruction scope for one agent. Registered when a
+/// preflight reconciliation returns `Block`; consulted while the blocked
+/// epoch's fingerprint stays current so mutation/execution batches touching
+/// the scope keep blocking while read-only diagnosis proceeds. Entries are
+/// dropped when a fresh reconciliation of a covered target shows the failure
+/// fingerprint changed (fixed or re-resolved).
+#[derive(Debug, Clone)]
+pub struct BlockedInstructionScope {
+    /// Agent whose model visibility owns this blocked state.
+    pub agent_id: String,
+    /// Fingerprint hash of the blocked reconciliation (failure identity).
+    pub fingerprint: String,
+    /// Canonical directories governed by the blocked reconciliation: probe
+    /// targets plus the epoch's scope directories.
+    pub directories: Vec<PathBuf>,
+    /// Display-safe failure data shown in blocked tool results.
+    pub failure: crate::instructions::InstructionFailure,
+    /// Generation of the blocked epoch (already visible to the model).
+    pub generation: u64,
 }
 
 impl AgentConfig {
@@ -253,6 +282,7 @@ impl AgentConfig {
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
             instruction_registry: None,
+            blocked_instruction_scopes: Arc::new(Mutex::new(Vec::new())),
             instruction_inheritance: default_instruction_inheritance(),
             cached_tool_spec_tokens: std::sync::OnceLock::new(),
         }

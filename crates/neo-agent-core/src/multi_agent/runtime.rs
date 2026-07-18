@@ -1315,7 +1315,7 @@ impl MultiAgentRuntime {
             return self.finish_child_run(snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_messages = self.replay_child_prior_messages(&snapshot).await;
+        let prior_context = self.replay_child_context(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
@@ -1326,7 +1326,7 @@ impl MultiAgentRuntime {
         let run = run_agent_snapshot(
             deps,
             prompt,
-            prior_messages,
+            prior_context,
             live_steer.handle(),
             agent_id.as_str().to_owned(),
             child_wire_path,
@@ -1405,7 +1405,7 @@ impl MultiAgentRuntime {
             return self.finish_child_run(snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_messages = self.replay_child_prior_messages(&snapshot).await;
+        let prior_context = self.replay_child_context(&snapshot).await;
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
@@ -1416,7 +1416,7 @@ impl MultiAgentRuntime {
         let run = run_agent_snapshot(
             deps,
             prompt,
-            prior_messages,
+            prior_context,
             live_steer.handle(),
             agent_id.as_str().to_owned(),
             child_wire_path,
@@ -1707,16 +1707,23 @@ impl MultiAgentRuntime {
             .map(|session_dir| crate::session::agent_wire_path(session_dir, agent_id))
     }
 
-    async fn replay_child_prior_messages(&self, snapshot: &AgentSnapshot) -> Vec<AgentMessage> {
+    /// Replay the child's prior context (messages plus instruction
+    /// visibility state) from its wire JSONL. Falls back to the snapshot's
+    /// stored messages when no readable wire exists.
+    async fn replay_child_context(&self, snapshot: &AgentSnapshot) -> AgentContext {
+        let fallback = || {
+            let mut context = AgentContext::new();
+            for message in &snapshot.prior_messages {
+                context.append_message(message.clone());
+            }
+            context
+        };
         let Some(wire_path) = self.child_wire_path(snapshot.id.as_str()) else {
-            return snapshot.prior_messages.clone();
+            return fallback();
         };
         crate::session::JsonlSessionReader::replay_context(wire_path)
             .await
-            .map_or_else(
-                |_| snapshot.prior_messages.clone(),
-                |context| context.messages().to_vec(),
-            )
+            .unwrap_or_else(|_| fallback())
     }
 
     async fn register_persistent_agent(
@@ -1864,7 +1871,7 @@ pub async fn seed_child_instruction_baseline(
 async fn run_agent_snapshot(
     deps: ChildRuntimeDeps,
     prompt: String,
-    prior_messages: Vec<AgentMessage>,
+    prior_context: AgentContext,
     steer_input: SteerInputHandle,
     agent_id: String,
     child_wire_path: Option<PathBuf>,
@@ -1901,20 +1908,27 @@ async fn run_agent_snapshot(
         None
     };
     let mut persistence = crate::session::SessionEventPersistence::default();
-    let mut context = AgentContext::new();
-    for message in prior_messages {
-        context.append_message(message);
-    }
+    let mut context = prior_context;
     // Materialize the child-owned instruction baseline before the child's
     // first prompt: attach the session-shared registry handle, reconcile a
     // baseline keyed by this child's actual agent id, and pin the result.
-    let baseline_epoch = seed_child_instruction_baseline(
-        &mut context,
-        &child_config,
-        parent_instruction_state.as_ref(),
-        &agent_id,
-    )
-    .await;
+    // A resumed child (replay already restored an epoch) skips re-baselining
+    // and reconciles its replayed state against current disk at the first
+    // live tool preflight, like the main agent.
+    let baseline_epoch = if context.instruction_state().visible_generation == 0 {
+        seed_child_instruction_baseline(
+            &mut context,
+            &child_config,
+            parent_instruction_state.as_ref(),
+            &agent_id,
+        )
+        .await
+    } else {
+        if let Some(registry) = child_config.instruction_registry.clone() {
+            context.attach_instruction_registry(registry);
+        }
+        None
+    };
     let child_runtime =
         AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);

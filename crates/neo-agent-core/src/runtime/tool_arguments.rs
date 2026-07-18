@@ -9,6 +9,9 @@
 //! JSON is surfaced as a `ToolResult` error *before* permission checks or
 //! execution run, so the model sees the failure and can retry.
 
+use std::path::{Path, PathBuf};
+
+use crate::tools::normalize_path;
 use crate::{AgentToolCall, ToolResult};
 use neo_ai::ToolSpec;
 
@@ -279,11 +282,131 @@ fn complete_value_end(raw: &str, start: usize) -> Option<usize> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Typed instruction-scope probes
+// ---------------------------------------------------------------------------
+
+/// A typed instruction-scope probe derived from one prepared tool call.
+///
+/// Probes come only from typed arguments — never from shell command text,
+/// MCP payloads, or additional workspace roots. `Read`/`Write`/`Edit` probe
+/// the parent directory of the target file, `List`/`Grep`/`Find`/`Glob`
+/// probe their explicit root (defaulting to the primary workspace), and
+/// `Bash`/`Terminal`(start) probe the explicit `cwd` (defaulting to the
+/// primary workspace). Anything else carries no probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionScopeProbe {
+    /// Directory whose primary-workspace-to-target chain scope discovery
+    /// scans for `AGENTS.md` files.
+    pub target_directory: PathBuf,
+}
+
+impl InstructionScopeProbe {
+    /// Derive the probe for one prepared tool call. Returns `None` when the
+    /// tool class carries no probe or the typed path resolves outside the
+    /// primary workspace.
+    #[must_use]
+    pub fn from_prepared_tool(
+        name: &str,
+        arguments: &serde_json::Value,
+        primary_workspace: &Path,
+    ) -> Option<Self> {
+        let target_directory = match name {
+            "Read" | "Write" | "Edit" => {
+                let path = arguments.get("path").and_then(serde_json::Value::as_str)?;
+                let resolved = resolve_probe_path(path, primary_workspace)?;
+                // File tools probe the file's parent directory.
+                probe_existing_directory(resolved.parent()?, primary_workspace)
+            }
+            "List" | "Grep" | "Find" | "Glob" => {
+                let root = arguments
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty());
+                match root {
+                    Some(root) => {
+                        let resolved = resolve_probe_path(root, primary_workspace)?;
+                        probe_existing_directory(&resolved, primary_workspace)
+                    }
+                    None => Some(primary_workspace.to_path_buf()),
+                }
+            }
+            "Bash" => probe_shell_cwd(arguments, primary_workspace),
+            "Terminal" => {
+                let mode = arguments
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if mode != "start" {
+                    return None;
+                }
+                probe_shell_cwd(arguments, primary_workspace)
+            }
+            _ => return None,
+        }?;
+        Some(Self { target_directory })
+    }
+}
+
+/// Probe the explicit `cwd` of a shell tool, falling back to the primary
+/// workspace when no `cwd` is given. The command string is never inspected.
+fn probe_shell_cwd(arguments: &serde_json::Value, primary_workspace: &Path) -> Option<PathBuf> {
+    let cwd = arguments
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    match cwd {
+        Some(cwd) => {
+            let resolved = resolve_probe_path(cwd, primary_workspace)?;
+            probe_existing_directory(&resolved, primary_workspace)
+        }
+        None => Some(primary_workspace.to_path_buf()),
+    }
+}
+
+/// Resolve a typed path argument against the primary workspace. Relative
+/// paths join the workspace; absolute paths must stay inside it (lexically,
+/// or through a symlinked prefix once canonicalized).
+fn resolve_probe_path(raw: &str, primary_workspace: &Path) -> Option<PathBuf> {
+    let candidate = Path::new(raw);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        primary_workspace.join(candidate)
+    };
+    let normalized = normalize_path(&joined);
+    if normalized.starts_with(primary_workspace) {
+        return Some(normalized);
+    }
+    // Absolute paths may reach the workspace through a symlinked prefix.
+    let canonical = normalized.canonicalize().ok()?;
+    canonical
+        .starts_with(primary_workspace)
+        .then_some(canonical)
+}
+
+/// Reduce `candidate` to the deepest existing directory on its own chain
+/// that stays inside the primary workspace. A file argument probes its
+/// parent; a missing directory probes its deepest existing ancestor (a
+/// missing directory holds no `AGENTS.md`, but its ancestors may).
+fn probe_existing_directory(candidate: &Path, primary_workspace: &Path) -> Option<PathBuf> {
+    let mut current = Some(candidate);
+    while let Some(dir) = current {
+        if !dir.starts_with(primary_workspace) {
+            return None;
+        }
+        if dir.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
     fn bash_spec() -> ToolSpec {
         ToolSpec {
             name: "Bash".to_owned(),
@@ -376,5 +499,117 @@ mod tests {
             &[bash_spec()],
         );
         assert!(matches!(outcome, ToolArgumentsOutcome::Invalid { .. }));
+    }
+
+    #[test]
+    fn typed_scope_probes_cover_files_roots_and_explicit_shell_cwds_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested = workspace.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::write(nested.join("file.txt"), "body").expect("nested file");
+        let external = temp.path().join("external.txt");
+        std::fs::write(&external, "outside").expect("external file");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let nested = workspace.join("nested");
+        let external = external.canonicalize().expect("canonical external");
+
+        let probe = |name: &str, arguments: serde_json::Value| {
+            InstructionScopeProbe::from_prepared_tool(name, &arguments, &workspace)
+                .map(|probe| probe.target_directory)
+        };
+        let absolute = |path: &std::path::Path| path.to_string_lossy().to_string();
+
+        // Read/Write/Edit probe the parent directory of the typed file path.
+        for name in ["Read", "Write", "Edit"] {
+            assert_eq!(
+                probe(name, json!({ "path": "nested/file.txt" })),
+                Some(nested.clone()),
+                "{name} relative path"
+            );
+            assert_eq!(
+                probe(name, json!({ "path": absolute(&nested.join("file.txt")) })),
+                Some(nested.clone()),
+                "{name} absolute path"
+            );
+            assert_eq!(
+                probe(name, json!({ "path": absolute(&external) })),
+                None,
+                "{name} external absolute path"
+            );
+        }
+        // List/Grep/Find/Glob probe the explicit root; an omitted root is the
+        // primary workspace.
+        for name in ["List", "Grep", "Find", "Glob"] {
+            assert_eq!(
+                probe(name, json!({ "path": "nested" })),
+                Some(nested.clone()),
+                "{name} explicit root"
+            );
+            assert_eq!(
+                probe(name, json!({})),
+                Some(workspace.clone()),
+                "{name} default root"
+            );
+            assert_eq!(
+                probe(name, json!({ "path": absolute(&external) })),
+                None,
+                "{name} external root"
+            );
+        }
+        // A file-valued Grep path probes the file's parent directory.
+        assert_eq!(
+            probe("Grep", json!({ "pattern": "x", "path": "nested/file.txt" })),
+            Some(nested.clone())
+        );
+        // Bash and Terminal(start) probe the explicit cwd, falling back to the
+        // primary workspace. Command strings are never parsed for paths.
+        assert_eq!(
+            probe("Bash", json!({ "command": "true" })),
+            Some(workspace.clone())
+        );
+        assert_eq!(
+            probe("Bash", json!({ "command": "true", "cwd": "nested" })),
+            Some(nested.clone())
+        );
+        assert_eq!(
+            probe("Bash", json!({ "command": "cd nested && cat AGENTS.md" })),
+            Some(workspace.clone()),
+            "shell command text must not influence the probe"
+        );
+        assert_eq!(
+            probe(
+                "Bash",
+                json!({ "command": "true", "cwd": absolute(&external) })
+            ),
+            None
+        );
+        assert_eq!(
+            probe("Terminal", json!({ "mode": "start", "command": "top" })),
+            Some(workspace.clone())
+        );
+        assert_eq!(
+            probe(
+                "Terminal",
+                json!({ "mode": "start", "command": "top", "cwd": "nested" })
+            ),
+            Some(nested.clone())
+        );
+        for mode in ["write", "read", "resize", "stop"] {
+            assert_eq!(
+                probe(
+                    "Terminal",
+                    json!({ "mode": mode, "handle": "h", "cwd": "nested" })
+                ),
+                None,
+                "Terminal {mode} adds no new probe"
+            );
+        }
+        // Other tools and MCP-style names never probe.
+        for name in ["TodoList", "Delegate", "mcp__docs__search"] {
+            assert_eq!(probe(name, json!({})), None, "{name}");
+        }
+        // Paths escaping the workspace never probe.
+        assert_eq!(probe("Read", json!({ "path": "../outside.txt" })), None);
     }
 }

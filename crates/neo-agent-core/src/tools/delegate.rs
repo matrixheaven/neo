@@ -677,7 +677,12 @@ fn child_runtime_deps(ctx: &ToolContext) -> Result<ChildRuntimeDeps, ToolError> 
             tool: "Delegate".to_owned(),
             message: "Delegate requires tool registry in ToolContext".to_owned(),
         })?;
-    Ok(ChildRuntimeDeps::new(config, model, tools).with_cancel_token(ctx.cancel_token.clone()))
+    let mut deps =
+        ChildRuntimeDeps::new(config, model, tools).with_cancel_token(ctx.cancel_token.clone());
+    if let Some(state) = &ctx.parent_instruction_state {
+        deps = deps.with_parent_instruction_state(state.clone());
+    }
+    Ok(deps)
 }
 
 fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<(), ToolError> {

@@ -1,23 +1,28 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use neo_ai::ModelClient;
 use tokio_util::sync::CancellationToken;
 
-use super::config::{AgentConfig, ToolExecutionMode};
+use super::config::{AgentConfig, BlockedInstructionScope, ToolExecutionMode};
+use super::context::AgentContext;
 use super::error::AgentRuntimeError;
 use super::events::{
     EventEmitter, emit_shell_finished, emit_shell_started, emit_terminal_events,
     make_tool_event_callback, make_tool_update_callback,
 };
+use super::instruction_context::InstructionContextBridge;
 use super::permission::{
-    PermissionPreparation, current_permission_mode, permission_preparation_for_mode,
-    prepare_tool_call,
+    current_permission_mode, permission_preparation_for_mode, resolve_permission_preparation,
 };
 use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
 use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
-use super::tool_arguments::prepare_tool_arguments;
+use super::tool_arguments::{InstructionScopeProbe, prepare_tool_arguments};
+use crate::instructions::{
+    InstructionEpochData, InstructionFailure, InstructionFingerprint, InstructionPreflightDecision,
+    InstructionReconcileKind, InstructionReconcileRequest,
+};
 use crate::skills::SkillStoreHandle;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
@@ -31,16 +36,6 @@ pub(super) enum ToolSchedulingClass {
     ParallelSafe,
     Exclusive,
     BlockingDialog,
-}
-
-pub(super) struct PreparedToolCall {
-    pub(super) result: PreparedToolCallResult,
-    pub(super) access: ToolAccess,
-}
-
-pub(super) enum PreparedToolCallResult {
-    Run,
-    Skip(ToolResult),
 }
 
 pub(super) fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
@@ -95,7 +90,538 @@ pub fn emit_repaired_tool_arguments_warning(tool_name: &str, warning: &str) {
     tracing::warn!(tool_name, warning, "tool arguments repaired");
 }
 
-#[allow(clippy::too_many_arguments)]
+// ---------------------------------------------------------------------------
+// Batch pipeline outcome
+// ---------------------------------------------------------------------------
+
+/// The outcome of one assistant tool-call batch: the provider-valid results
+/// in original call order plus, for deferred/blocked batches, the instruction
+/// epoch the turn loop must emit after appending the results.
+pub(super) struct ToolBatchOutcome {
+    pub results: Vec<(AgentToolCall, ToolResult)>,
+    /// Fresh epoch to emit after the tool results (defer/block). `None` for
+    /// executed batches and for policy-blocked batches (whose blocked epoch
+    /// is already visible).
+    pub pending_epoch: Option<PendingInstructionEpoch>,
+    /// Whether any tool body actually ran (drives post-tool reconciliation).
+    pub executed_any: bool,
+    /// Frozen preflight probe targets. `Some` whenever a registry is
+    /// attached — also when empty — so post-tool reconciliation can run;
+    /// `None` when instruction preflight is not wired at all.
+    pub preflight_targets: Option<Vec<PathBuf>>,
+}
+
+/// A fresh defer/block epoch plus the fingerprint to record after emission.
+pub(super) struct PendingInstructionEpoch {
+    pub epoch: InstructionEpochData,
+    pub fingerprint: InstructionFingerprint,
+}
+
+// ---------------------------------------------------------------------------
+// Instruction preflight
+// ---------------------------------------------------------------------------
+
+/// Typed probe targets for one batch: deduplicated reconcile targets plus a
+/// per-call probe map used for blocked-scope coverage checks.
+struct BatchProbes {
+    targets: Vec<PathBuf>,
+    per_call: Vec<Option<PathBuf>>,
+}
+
+/// The preflight gate for one fully parsed batch.
+enum InstructionGate {
+    /// No registry, no workspace, or no typed probes: run the legacy path
+    /// without a fingerprint recheck.
+    Bypass,
+    /// Preflight passed; recheck this fingerprint after authorization.
+    Proceed(InstructionFingerprint),
+    /// A fresh reconciliation deferred or blocked the whole batch.
+    Synthesize(Box<PendingInstructionEpoch>),
+    /// A previously visible blocked scope still governs a mutation/execution
+    /// call in this batch; block the whole batch without a new epoch.
+    PolicyBlocked(BlockedInstructionScope),
+}
+
+fn current_agent_id(config: &AgentConfig) -> String {
+    config
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| crate::session::MAIN_AGENT_ID.to_owned())
+}
+
+fn canonical_lenient(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Mutation/execution tool classes that stay blocked while their scope is
+/// blocked (read-only `Read`/`List`/`Grep`/`Find`/`Glob` may diagnose).
+fn is_mutation_or_execution_tool(name: &str) -> bool {
+    matches!(name, "Write" | "Edit" | "Bash" | "Terminal")
+}
+
+/// Directories governed by one fresh decision: the batch's canonical probe
+/// targets plus the epoch's scope directories.
+fn governed_directories(targets: &[PathBuf], epoch: &InstructionEpochData) -> Vec<PathBuf> {
+    let mut directories = targets.to_vec();
+    for scope in &epoch.scopes {
+        if !directories.contains(&scope.display_path) {
+            directories.push(scope.display_path.clone());
+        }
+    }
+    directories
+}
+
+/// Collect typed probes for every valid call in the batch. Returns `None`
+/// when no registry or workspace root is available (preflight unwired).
+fn collect_batch_probes(
+    workspace: &Path,
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+) -> BatchProbes {
+    let mut targets: Vec<PathBuf> = Vec::new();
+    let mut per_call = Vec::with_capacity(prepared.len());
+    for (tool_call, parsed) in prepared {
+        let probe = parsed
+            .as_ref()
+            .ok()
+            .and_then(|prepared_call| {
+                InstructionScopeProbe::from_prepared_tool(
+                    &tool_call.name,
+                    &prepared_call.arguments,
+                    workspace,
+                )
+            })
+            .map(|probe| canonical_lenient(&probe.target_directory));
+        if let Some(dir) = &probe
+            && !targets.contains(dir)
+        {
+            targets.push(dir.clone());
+        }
+        per_call.push(probe);
+    }
+    BatchProbes { targets, per_call }
+}
+
+/// Run instruction preflight for the whole parsed batch. Preflight runs
+/// before any permission prompt, scheduling, `before_tool_call`,
+/// `ToolExecutionStarted`, or tool body: a deferred or blocked batch never
+/// partially executes.
+async fn instruction_batch_preflight(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+) -> (InstructionGate, Option<BatchProbes>) {
+    let Some(registry) = emitter.context.instruction_registry() else {
+        return (InstructionGate::Bypass, None);
+    };
+    let Some(workspace) = config.workspace_root.clone() else {
+        return (InstructionGate::Bypass, None);
+    };
+    let probes = collect_batch_probes(&workspace, prepared);
+    if probes.targets.is_empty() {
+        // No typed probes: nothing new to discover before this batch.
+        return (InstructionGate::Bypass, Some(probes));
+    }
+    let agent_id = current_agent_id(config);
+    let deferred_tool_ids: Vec<String> = prepared
+        .iter()
+        .filter(|(_, parsed)| parsed.is_ok())
+        .map(|(tool_call, _)| tool_call.id.to_string())
+        .collect();
+    let request = InstructionReconcileRequest {
+        agent_id: agent_id.clone(),
+        kind: InstructionReconcileKind::ToolPreflight,
+        target_directories: probes.targets.clone(),
+        budget: InstructionContextBridge::budget(config, &emitter.context),
+        deferred_tool_ids,
+    };
+    match registry
+        .reconcile(request, emitter.context.instruction_state())
+        .await
+    {
+        InstructionPreflightDecision::Proceed { fingerprint } => {
+            clear_stale_blocked_scopes(config, &agent_id, &probes.targets, &fingerprint.hash);
+            if let Some(blocked) =
+                current_blocked_scope(config, &agent_id, prepared, &probes, &fingerprint.hash)
+            {
+                return (InstructionGate::PolicyBlocked(blocked), Some(probes));
+            }
+            record_decision_fingerprint(&mut emitter.context, &fingerprint);
+            (InstructionGate::Proceed(fingerprint), Some(probes))
+        }
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => {
+            clear_covered_blocked_scopes(config, &agent_id, &probes.targets);
+            (
+                InstructionGate::Synthesize(Box::new(PendingInstructionEpoch {
+                    epoch,
+                    fingerprint,
+                })),
+                Some(probes),
+            )
+        }
+        InstructionPreflightDecision::Block { epoch, fingerprint } => (
+            InstructionGate::Synthesize(Box::new(PendingInstructionEpoch { epoch, fingerprint })),
+            Some(probes),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocked-scope registry (session-shared, agent-local entries)
+// ---------------------------------------------------------------------------
+
+/// Register one freshly blocked scope for `agent_id`, replacing any entry
+/// with the same fingerprint.
+pub(super) fn register_blocked_scope(
+    config: &AgentConfig,
+    agent_id: &str,
+    fingerprint: &str,
+    directories: Vec<PathBuf>,
+    failure: InstructionFailure,
+    generation: u64,
+) {
+    let mut store = config
+        .blocked_instruction_scopes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.retain(|entry| !(entry.agent_id == agent_id && entry.fingerprint == fingerprint));
+    store.push(BlockedInstructionScope {
+        agent_id: agent_id.to_owned(),
+        fingerprint: fingerprint.to_owned(),
+        directories,
+        failure,
+        generation,
+    });
+}
+
+/// Drop entries for `agent_id` covered by `targets` whose fingerprint no
+/// longer matches the fresh reconciliation: the failure was fixed or
+/// re-resolved, so the blocked state is stale.
+fn clear_stale_blocked_scopes(
+    config: &AgentConfig,
+    agent_id: &str,
+    targets: &[PathBuf],
+    fresh_hash: &str,
+) {
+    let mut store = config
+        .blocked_instruction_scopes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.retain(|entry| {
+        if entry.agent_id != agent_id {
+            return true;
+        }
+        let covered = entry
+            .directories
+            .iter()
+            .any(|dir| targets.iter().any(|target| target.starts_with(dir)));
+        !covered || entry.fingerprint == fresh_hash
+    });
+}
+
+/// Drop every entry for `agent_id` covered by `targets`: a successful
+/// resolution replaced the failure state.
+fn clear_covered_blocked_scopes(config: &AgentConfig, agent_id: &str, targets: &[PathBuf]) {
+    let mut store = config
+        .blocked_instruction_scopes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.retain(|entry| {
+        if entry.agent_id != agent_id {
+            return true;
+        }
+        !entry
+            .directories
+            .iter()
+            .any(|dir| targets.iter().any(|target| target.starts_with(dir)))
+    });
+}
+
+/// The first still-current blocked entry governing a mutation/execution
+/// call in this batch. An entry is current when the fresh reconciliation of
+/// the same targets reproduces its failure fingerprint.
+fn current_blocked_scope(
+    config: &AgentConfig,
+    agent_id: &str,
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+    probes: &BatchProbes,
+    fresh_hash: &str,
+) -> Option<BlockedInstructionScope> {
+    let store = config
+        .blocked_instruction_scopes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    store
+        .iter()
+        .find(|entry| {
+            if entry.agent_id != agent_id || entry.fingerprint != fresh_hash {
+                return false;
+            }
+            prepared
+                .iter()
+                .zip(probes.per_call.iter())
+                .any(|((tool_call, parsed), probe)| {
+                    parsed.is_ok()
+                        && is_mutation_or_execution_tool(tool_call.name.as_ref())
+                        && probe.as_ref().is_some_and(|probe| {
+                            entry.directories.iter().any(|dir| probe.starts_with(dir))
+                        })
+                })
+        })
+        .cloned()
+}
+
+/// Record the decision fingerprint so an unchanged re-probe proceeds
+/// silently. Callers that emit the epoch through an `EventEmitter` must call
+/// this after the emission (the emitter applies visibility only).
+pub(super) fn record_decision_fingerprint(
+    context: &mut AgentContext,
+    fingerprint: &InstructionFingerprint,
+) {
+    context.instruction_state_mut().last_epoch_fingerprint = Some(fingerprint.hash.clone());
+}
+
+/// Apply one reconciliation decision made outside the tool-batch path
+/// (baseline establishment, post-tool reconciliation): emit the epoch when
+/// the decision produced one, record the decision fingerprint, and maintain
+/// the session blocked-scope registry. Returns the emitted epoch, if any.
+pub(super) fn apply_reconciliation_decision(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    decision: InstructionPreflightDecision,
+    targets: &[PathBuf],
+) -> Option<InstructionEpochData> {
+    let agent_id = current_agent_id(config);
+    match decision {
+        InstructionPreflightDecision::Proceed { fingerprint } => {
+            clear_stale_blocked_scopes(config, &agent_id, targets, &fingerprint.hash);
+            record_decision_fingerprint(&mut emitter.context, &fingerprint);
+            None
+        }
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => {
+            clear_covered_blocked_scopes(config, &agent_id, targets);
+            record_decision_fingerprint_after_epoch(emitter, &epoch, &fingerprint);
+            Some(epoch)
+        }
+        InstructionPreflightDecision::Block { epoch, fingerprint } => {
+            let governed = governed_directories(targets, &epoch);
+            if let Some(failure) = epoch.failure.clone() {
+                register_blocked_scope(
+                    config,
+                    &agent_id,
+                    &fingerprint.hash,
+                    governed,
+                    failure,
+                    epoch.generation,
+                );
+            }
+            record_decision_fingerprint_after_epoch(emitter, &epoch, &fingerprint);
+            Some(epoch)
+        }
+    }
+}
+
+/// Emit the epoch event (which applies model visibility) and then record the
+/// decision fingerprint.
+fn record_decision_fingerprint_after_epoch(
+    emitter: &mut EventEmitter,
+    epoch: &InstructionEpochData,
+    fingerprint: &InstructionFingerprint,
+) {
+    emitter.emit(AgentEvent::InstructionEpoch {
+        epoch: epoch.clone(),
+    });
+    record_decision_fingerprint(&mut emitter.context, fingerprint);
+}
+
+// ---------------------------------------------------------------------------
+// Synthesized deferred/blocked results
+// ---------------------------------------------------------------------------
+
+/// One provider-valid non-error deferred result: no side effect occurred
+/// because project instructions changed; the model re-issues the call after
+/// reading the new epoch.
+fn deferred_tool_result(epoch: &InstructionEpochData) -> ToolResult {
+    ToolResult::ok(format!(
+        "Tool call deferred: project instructions changed (instruction epoch {}). No side \
+         effect occurred. Read the new instructions, then re-issue the tool call.",
+        epoch.generation
+    ))
+    .with_details(serde_json::json!({
+        "status": "deferred",
+        "reason": "instruction_epoch",
+        "side_effect_occurred": false,
+        "generation": epoch.generation,
+    }))
+}
+
+/// One structured blocked result for a scope whose failure epoch is (or is
+/// about to be) visible.
+fn blocked_tool_result(failure: &InstructionFailure, generation: u64) -> ToolResult {
+    ToolResult::error(format!(
+        "Tool call blocked: instruction scope blocked ({}): {}. No side effect occurred. \
+         Resolve the instruction problem to load the scope; read-only Read, List, Grep, Find, \
+         and Glob diagnosis is allowed.",
+        failure.kind.describe(),
+        failure.detail
+    ))
+    .with_details(serde_json::json!({
+        "status": "blocked",
+        "reason": "instruction_scope_blocked",
+        "side_effect_occurred": false,
+        "generation": generation,
+        "failure": {
+            "kind": failure.kind.describe(),
+            "path": failure.display_path.display().to_string(),
+            "detail": failure.detail,
+        },
+    }))
+}
+
+/// Build results for a batch stopped by a fresh defer/block decision: every
+/// valid call receives the deferred/blocked payload; invalid-argument calls
+/// keep their parse-error results.
+fn synthesized_batch_results(
+    prepared: &[(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+    epoch: &InstructionEpochData,
+) -> Vec<(AgentToolCall, ToolResult)> {
+    prepared
+        .iter()
+        .map(|(tool_call, parsed)| {
+            let result = match parsed {
+                Ok(_) => match &epoch.failure {
+                    Some(failure) => blocked_tool_result(failure, epoch.generation),
+                    None => deferred_tool_result(epoch),
+                },
+                Err(error) => error.clone(),
+            };
+            ((*tool_call).clone(), result)
+        })
+        .collect()
+}
+
+/// Emit plain finished events for synthesized results. No
+/// `ToolExecutionStarted`, shell, terminal, or skill side events fire for
+/// calls that never began execution.
+fn emit_synthesized_finished(
+    turn: u32,
+    results: &[(AgentToolCall, ToolResult)],
+    emitter: &mut EventEmitter,
+) {
+    for (tool_call, result) in results {
+        emitter.emit(AgentEvent::ToolExecutionFinished {
+            turn,
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            result: result.clone(),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authorization phase
+// ---------------------------------------------------------------------------
+
+/// One authorized call: its scheduling class and the authorization outcome.
+struct AuthorizedToolCall<'a> {
+    tool_call: &'a AgentToolCall,
+    prepared: Option<&'a super::tool_arguments::PreparedToolCall>,
+    class: ToolSchedulingClass,
+    outcome: AuthorizedToolCallOutcome,
+}
+
+enum AuthorizedToolCallOutcome {
+    /// Approved to run with this access grant.
+    Run(ToolAccess),
+    /// Terminal result without running the body (invalid arguments,
+    /// `before_tool_call` block, or permission denial).
+    Terminal(ToolResult),
+}
+
+/// Build the permission decision for every call in the batch. Dialogs await
+/// sequentially; `before_tool_call` runs here, after instruction preflight
+/// and before the fingerprint recheck.
+async fn authorize_tool_batch<'a>(
+    config: &AgentConfig,
+    prepared: &'a [(
+        &'a AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+    turn: u32,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Vec<AuthorizedToolCall<'a>> {
+    let mut authorized = Vec::with_capacity(prepared.len());
+    for (tool_call, parsed) in prepared {
+        let entry = match parsed {
+            Err(error) => AuthorizedToolCall {
+                tool_call,
+                prepared: None,
+                class: ToolSchedulingClass::ParallelSafe,
+                outcome: AuthorizedToolCallOutcome::Terminal(error.clone()),
+            },
+            Ok(prepared_call) => {
+                let preparation =
+                    permission_preparation_for_mode(config, tool_call, &prepared_call.arguments);
+                let class = scheduling_class_for_preparation(
+                    config,
+                    tool_call,
+                    &preparation,
+                    &prepared_call.arguments,
+                );
+                let outcome = if let Some(blocked) =
+                    before_tool_result(config, tool_call, cancel_token).await
+                {
+                    AuthorizedToolCallOutcome::Terminal(blocked)
+                } else {
+                    match resolve_permission_preparation(
+                        config,
+                        preparation,
+                        tool_call,
+                        &prepared_call.arguments,
+                        turn,
+                        emitter,
+                        cancel_token,
+                    )
+                    .await
+                    {
+                        super::permission::PermissionResolution::Run(access) => {
+                            AuthorizedToolCallOutcome::Run(access)
+                        }
+                        super::permission::PermissionResolution::Terminal(result) => {
+                            AuthorizedToolCallOutcome::Terminal(result)
+                        }
+                    }
+                };
+                AuthorizedToolCall {
+                    tool_call,
+                    prepared: Some(prepared_call),
+                    class,
+                    outcome,
+                }
+            }
+        };
+        authorized.push(entry);
+    }
+    authorized
+}
+
+// ---------------------------------------------------------------------------
+// Batch execution
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn execute_tool_calls(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,
@@ -106,57 +632,168 @@ pub(super) async fn execute_tool_calls(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
-) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
+) -> Result<ToolBatchOutcome, AgentRuntimeError> {
+    // Phase 1 — parse every call up front. Invalid arguments produce valid
+    // error results later without letting valid calls bypass preflight.
     let tool_specs = registry.specs();
     let prepared = prepare_tool_calls_for_execution(tool_calls, &tool_specs);
 
-    let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
-        || prepared.iter().any(|(tool_call, parsed)| {
-            let prep = match parsed {
-                Ok(prepared) => {
-                    permission_preparation_for_mode(config, tool_call, &prepared.arguments)
-                }
-                Err(_) => return false, // invalid args bypass scheduling — handled inline
-            };
-            let scheduling = scheduling_class_for_preparation(
-                config,
-                tool_call,
-                &prep,
-                parsed_prepared_arguments(parsed),
-            );
-            scheduling == ToolSchedulingClass::BlockingDialog
-                || scheduling == ToolSchedulingClass::Exclusive
-        });
+    // Phase 2 — instruction preflight over all typed probes. Nothing below
+    // runs before preflight returns Proceed: no permission prompt,
+    // scheduling, `before_tool_call`, `ToolExecutionStarted`, or tool body.
+    let (gate, probes) = instruction_batch_preflight(config, emitter, &prepared).await;
+    let preflight_targets = probes.as_ref().map(|probes| probes.targets.clone());
+    let fingerprint = match gate {
+        InstructionGate::Bypass => None,
+        InstructionGate::Proceed(fingerprint) => Some(fingerprint),
+        InstructionGate::Synthesize(pending) => {
+            let PendingInstructionEpoch { epoch, fingerprint } = *pending;
+            if let Some(failure) = epoch.failure.clone() {
+                let targets = preflight_targets.clone().unwrap_or_default();
+                register_blocked_scope(
+                    config,
+                    &epoch.agent_id,
+                    &fingerprint.hash,
+                    governed_directories(&targets, &epoch),
+                    failure,
+                    epoch.generation,
+                );
+            }
+            let results = synthesized_batch_results(&prepared, &epoch);
+            emit_synthesized_finished(turn, &results, emitter);
+            return Ok(ToolBatchOutcome {
+                results,
+                pending_epoch: Some(PendingInstructionEpoch { epoch, fingerprint }),
+                executed_any: false,
+                preflight_targets,
+            });
+        }
+        InstructionGate::PolicyBlocked(blocked) => {
+            let results = prepared
+                .iter()
+                .map(|(tool_call, parsed)| {
+                    let result = match parsed {
+                        Ok(_) => blocked_tool_result(&blocked.failure, blocked.generation),
+                        Err(error) => error.clone(),
+                    };
+                    ((*tool_call).clone(), result)
+                })
+                .collect::<Vec<_>>();
+            emit_synthesized_finished(turn, &results, emitter);
+            return Ok(ToolBatchOutcome {
+                results,
+                pending_epoch: None,
+                executed_any: false,
+                preflight_targets,
+            });
+        }
+    };
 
-    let results = if needs_sequential {
-        execute_tool_calls_sequential(
+    // Phase 3 — authorize the full batch (dialogs await sequentially).
+    let authorized = authorize_tool_batch(config, &prepared, turn, emitter, cancel_token).await;
+
+    // Phase 4 — one frozen fingerprint recheck after all authorization. A
+    // source changed while a dialog waited returns to the defer path instead
+    // of executing against stale instructions.
+    if let Some(fingerprint) = fingerprint {
+        let registry_handle = emitter
+            .context
+            .instruction_registry()
+            .expect("a proceeded gate implies an attached registry");
+        match registry_handle
+            .recheck(&fingerprint, emitter.context.instruction_state())
+            .await
+        {
+            InstructionPreflightDecision::Proceed { fingerprint } => {
+                record_decision_fingerprint(&mut emitter.context, &fingerprint);
+            }
+            InstructionPreflightDecision::Defer { epoch, fingerprint }
+            | InstructionPreflightDecision::Block { epoch, fingerprint } => {
+                let targets = preflight_targets.clone().unwrap_or_default();
+                let governed = governed_directories(&targets, &epoch);
+                if let Some(failure) = epoch.failure.clone() {
+                    register_blocked_scope(
+                        config,
+                        &epoch.agent_id,
+                        &fingerprint.hash,
+                        governed.clone(),
+                        failure,
+                        epoch.generation,
+                    );
+                } else {
+                    clear_covered_blocked_scopes(config, &epoch.agent_id, &targets);
+                }
+                // Calls already denied or invalid keep their results; only
+                // approved calls are deferred.
+                let results = authorized
+                    .iter()
+                    .map(|entry| {
+                        let result = match &entry.outcome {
+                            AuthorizedToolCallOutcome::Run(_) => match &epoch.failure {
+                                Some(failure) => blocked_tool_result(failure, epoch.generation),
+                                None => deferred_tool_result(&epoch),
+                            },
+                            AuthorizedToolCallOutcome::Terminal(result) => result.clone(),
+                        };
+                        (entry.tool_call.clone(), result)
+                    })
+                    .collect::<Vec<_>>();
+                emit_synthesized_finished(turn, &results, emitter);
+                return Ok(ToolBatchOutcome {
+                    results,
+                    pending_epoch: Some(PendingInstructionEpoch { epoch, fingerprint }),
+                    executed_any: false,
+                    preflight_targets,
+                });
+            }
+        }
+    }
+
+    // Phase 5 — schedule and execute the authorized batch.
+    let tool_context = default_tool_context(
+        config,
+        model,
+        Arc::clone(&registry),
+        turn,
+        cancel_token,
+        process_supervisor.clone(),
+        emitter
+            .context
+            .instruction_registry()
+            .is_some()
+            .then(|| emitter.context.instruction_state().clone()),
+    )?;
+    let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
+        || authorized
+            .iter()
+            .any(|entry| entry.class != ToolSchedulingClass::ParallelSafe);
+
+    let (mut results, executed_any) = if needs_sequential {
+        execute_authorized_sequential(
             config,
-            Arc::clone(&model),
             Arc::clone(&registry),
             skills,
             turn,
-            &prepared,
+            &authorized,
+            &tool_context,
             emitter,
             cancel_token,
-            process_supervisor,
         )
-        .await
+        .await?
     } else {
-        execute_tool_calls_parallel(
+        execute_authorized_parallel(
             config,
-            model,
-            registry,
+            Arc::clone(&registry),
             skills,
             turn,
-            &prepared,
+            &authorized,
+            &tool_context,
             emitter,
             cancel_token,
-            process_supervisor,
         )
-        .await
+        .await?
     };
 
-    let mut results = results?;
     // Attach plan details while plan mode is still active, before the side-effect
     // events below flip it off.
     attach_exit_plan_details(config, &mut results);
@@ -172,19 +809,12 @@ pub(super) async fn execute_tool_calls(
             });
         }
     }
-    Ok(results)
-}
-
-/// Helper to extract the parsed arguments reference for scheduling decisions.
-fn parsed_prepared_arguments(
-    parsed: &Result<super::tool_arguments::PreparedToolCall, ToolResult>,
-) -> &serde_json::Value {
-    match parsed {
-        Ok(prepared) => &prepared.arguments,
-        // Invalid args never reach scheduling (returned false above); this
-        // fallback is never used but must be valid.
-        Err(_) => &serde_json::Value::Null,
-    }
+    Ok(ToolBatchOutcome {
+        results,
+        pending_epoch: None,
+        executed_any,
+        preflight_targets,
+    })
 }
 
 fn emit_tool_execution_finished(
@@ -234,10 +864,13 @@ fn emit_tool_execution_finished(
 fn scheduling_class_for_preparation(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    preparation: &PermissionPreparation,
+    preparation: &super::permission::PermissionPreparation,
     arguments: &serde_json::Value,
 ) -> ToolSchedulingClass {
-    if matches!(preparation, PermissionPreparation::Ask { .. }) {
+    if matches!(
+        preparation,
+        super::permission::PermissionPreparation::Ask { .. }
+    ) {
         return ToolSchedulingClass::BlockingDialog;
     }
     if tool_call.name.as_ref() == "AskUserQuestion" && !ask_user_runs_in_background(arguments) {
@@ -271,139 +904,35 @@ pub(super) fn ask_user_runs_in_background(arguments: &serde_json::Value) -> bool
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_tool_calls_sequential(
+async fn execute_authorized_sequential(
     config: &AgentConfig,
-    model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,
     skills: Option<&SkillStoreHandle>,
     turn: u32,
-    prepared: &[(
-        &AgentToolCall,
-        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
-    )],
+    authorized: &[AuthorizedToolCall<'_>],
+    tool_context: &ToolContext,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
-    process_supervisor: &ProcessSupervisor,
-) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(
-        config,
-        model,
-        Arc::clone(&registry),
-        turn,
-        cancel_token,
-        process_supervisor.clone(),
-    )?;
+) -> Result<(Vec<(AgentToolCall, ToolResult)>, bool), AgentRuntimeError> {
     let mut results = Vec::new();
-    for (tool_call, parsed) in prepared {
-        // Invalid arguments: emit a finished error without starting execution.
-        let prepared_call = match parsed {
-            Ok(prepared) => prepared,
-            Err(error_result) => {
-                let result = error_result.clone();
-                emit_tool_execution_finished(turn, tool_call, None, &result, emitter);
-                results.push(((*tool_call).clone(), result));
-                continue;
-            }
-        };
-        emitter.emit(AgentEvent::ToolExecutionStarted {
-            turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            arguments: prepared_call.arguments.clone(),
-        });
-        let mut result =
-            if let Some(blocked) = before_tool_result(config, tool_call, cancel_token).await {
-                blocked
-            } else {
-                prepare_and_run_tool(
-                    config,
-                    registry.as_ref(),
-                    skills,
-                    &tool_context,
-                    turn,
-                    tool_call,
-                    &prepared_call.arguments,
-                    emitter,
-                    cancel_token,
-                )
-                .await?
+    let mut executed_any = false;
+    for entry in authorized {
+        let tool_call = entry.tool_call;
+        let Some(prepared_call) = entry.prepared else {
+            // Invalid arguments: emit a finished error without starting execution.
+            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+                unreachable!("unparsed calls always carry a terminal result");
             };
-        if !cancel_token.is_cancelled() {
-            result = after_tool_result(config, tool_call, result, cancel_token).await;
-        }
-        emit_shell_finished(turn, tool_call, &result, emitter);
-        emit_terminal_events(
-            turn,
-            &prepared_call.arguments,
-            tool_call,
-            &result,
-            &tool_context,
-            emitter,
-        );
-        emit_tool_execution_finished(
-            turn,
-            tool_call,
-            Some(&prepared_call.arguments),
-            &result,
-            emitter,
-        );
-        results.push(((*tool_call).clone(), result));
-        if cancel_token.is_cancelled() {
-            break;
-        }
-    }
-    Ok(results)
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn execute_tool_calls_parallel(
-    config: &AgentConfig,
-    model: Arc<dyn ModelClient>,
-    registry: Arc<ToolRegistry>,
-    skills: Option<&SkillStoreHandle>,
-    turn: u32,
-    prepared: &[(
-        &AgentToolCall,
-        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
-    )],
-    emitter: &mut EventEmitter,
-    cancel_token: &CancellationToken,
-    process_supervisor: &ProcessSupervisor,
-) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(
-        config,
-        model,
-        Arc::clone(&registry),
-        turn,
-        cancel_token,
-        process_supervisor.clone(),
-    )?;
-    let mut completed = Vec::with_capacity(prepared.len());
-    let mut running = FuturesUnordered::new();
-
-    for (index, (tool_call, parsed)) in prepared.iter().cloned().enumerate() {
-        if cancel_token.is_cancelled() {
-            break;
-        }
-
-        // Invalid arguments: emit a finished error without starting execution.
-        let prepared_call = match parsed {
-            Ok(prepared) => prepared,
-            Err(error_result) => {
-                let result = error_result;
-                emit_tool_execution_finished(turn, tool_call, None, &result, emitter);
-                completed.push((index, (*tool_call).clone(), result));
-                continue;
-            }
+            emit_tool_execution_finished(turn, tool_call, None, result, emitter);
+            results.push((tool_call.clone(), result.clone()));
+            continue;
         };
-
-        emitter.emit(AgentEvent::ToolExecutionStarted {
-            turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            arguments: prepared_call.arguments.clone(),
-        });
-        if let Some(mut result) = before_tool_result(config, tool_call, cancel_token).await {
+        let AuthorizedToolCallOutcome::Run(access) = &entry.outcome else {
+            // Terminal result (before-hook block or permission denial).
+            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+                unreachable!("matched above");
+            };
+            let mut result = result.clone();
             if !cancel_token.is_cancelled() {
                 result = after_tool_result(config, tool_call, result, cancel_token).await;
             }
@@ -413,7 +942,7 @@ async fn execute_tool_calls_parallel(
                 &prepared_call.arguments,
                 tool_call,
                 &result,
-                &tool_context,
+                tool_context,
                 emitter,
             );
             emit_tool_execution_finished(
@@ -423,46 +952,137 @@ async fn execute_tool_calls_parallel(
                 &result,
                 emitter,
             );
-            completed.push((index, (*tool_call).clone(), result));
+            results.push((tool_call.clone(), result));
+            if cancel_token.is_cancelled() {
+                break;
+            }
             continue;
+        };
+        emitter.emit(AgentEvent::ToolExecutionStarted {
+            turn,
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            arguments: prepared_call.arguments.clone(),
+        });
+        let sink = emitter.sink();
+        let context = tool_context
+            .clone()
+            .with_access(*access)
+            .with_tool_update(make_tool_update_callback(
+                sink.clone(),
+                turn,
+                tool_call.id.to_string(),
+                tool_call.name.to_string(),
+            ))
+            .with_tool_event(make_tool_event_callback(sink));
+        if tool_call.name.as_ref() == "Bash" {
+            emit_shell_started(turn, &prepared_call.arguments, tool_call, &context, emitter);
         }
-
-        let permission_prep = prepare_tool_call(
-            config,
+        let mut result = run_tool_with_cancel(
+            skills,
+            registry.as_ref(),
             tool_call,
             &prepared_call.arguments,
-            turn,
-            emitter,
+            &context,
             cancel_token,
         )
         .await;
-        if let PreparedToolCallResult::Skip(result) = permission_prep.result {
-            if !cancel_token.is_cancelled() {
-                let result = after_tool_result(config, tool_call, result, cancel_token).await;
-                emit_shell_finished(turn, tool_call, &result, emitter);
-                emit_terminal_events(
-                    turn,
-                    &prepared_call.arguments,
-                    tool_call,
-                    &result,
-                    &tool_context,
-                    emitter,
-                );
-                emit_tool_execution_finished(
-                    turn,
-                    tool_call,
-                    Some(&prepared_call.arguments),
-                    &result,
-                    emitter,
-                );
-                completed.push((index, (*tool_call).clone(), result));
-            }
-            continue;
+        executed_any = true;
+        if !cancel_token.is_cancelled() {
+            result = after_tool_result(config, tool_call, result, cancel_token).await;
         }
+        emit_shell_finished(turn, tool_call, &result, emitter);
+        emit_terminal_events(
+            turn,
+            &prepared_call.arguments,
+            tool_call,
+            &result,
+            tool_context,
+            emitter,
+        );
+        emit_tool_execution_finished(
+            turn,
+            tool_call,
+            Some(&prepared_call.arguments),
+            &result,
+            emitter,
+        );
+        results.push((tool_call.clone(), result));
+        if cancel_token.is_cancelled() {
+            break;
+        }
+    }
+    Ok((results, executed_any))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_authorized_parallel(
+    config: &AgentConfig,
+    registry: Arc<ToolRegistry>,
+    skills: Option<&SkillStoreHandle>,
+    turn: u32,
+    authorized: &[AuthorizedToolCall<'_>],
+    tool_context: &ToolContext,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Result<(Vec<(AgentToolCall, ToolResult)>, bool), AgentRuntimeError> {
+    let mut completed = Vec::with_capacity(authorized.len());
+    let mut running = FuturesUnordered::new();
+    let mut executed_any = false;
+
+    for (index, entry) in authorized.iter().enumerate() {
+        if cancel_token.is_cancelled() {
+            break;
+        }
+        let tool_call = entry.tool_call;
+        let Some(prepared_call) = entry.prepared else {
+            // Invalid arguments: emit a finished error without starting execution.
+            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+                unreachable!("unparsed calls always carry a terminal result");
+            };
+            emit_tool_execution_finished(turn, tool_call, None, result, emitter);
+            completed.push((index, tool_call.clone(), result.clone()));
+            continue;
+        };
+        let AuthorizedToolCallOutcome::Run(access) = &entry.outcome else {
+            // Terminal result (before-hook block or permission denial).
+            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+                unreachable!("matched above");
+            };
+            let mut result = result.clone();
+            if !cancel_token.is_cancelled() {
+                result = after_tool_result(config, tool_call, result, cancel_token).await;
+            }
+            emit_shell_finished(turn, tool_call, &result, emitter);
+            emit_terminal_events(
+                turn,
+                &prepared_call.arguments,
+                tool_call,
+                &result,
+                tool_context,
+                emitter,
+            );
+            emit_tool_execution_finished(
+                turn,
+                tool_call,
+                Some(&prepared_call.arguments),
+                &result,
+                emitter,
+            );
+            completed.push((index, tool_call.clone(), result));
+            continue;
+        };
+
+        emitter.emit(AgentEvent::ToolExecutionStarted {
+            turn,
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            arguments: prepared_call.arguments.clone(),
+        });
 
         let config = config.clone();
         let registry = Arc::clone(&registry);
-        let tool_context = tool_context.clone().with_access(permission_prep.access);
+        let tool_context = tool_context.clone().with_access(*access);
         let cancel_token = cancel_token.clone();
         let sink = emitter.sink();
         let arguments = prepared_call.arguments.clone();
@@ -493,29 +1113,25 @@ async fn execute_tool_calls_parallel(
 
     while let Some(outcome) = running.next().await {
         let (index, tool_call, result) = outcome?;
-        // Re-derive parsed arguments for shell/terminal event emission.
-        let arguments = match &prepared[index].1 {
-            Ok(p) => p.arguments.clone(),
-            Err(_) => serde_json::Value::Null,
+        executed_any = true;
+        let arguments = match authorized[index].prepared {
+            Some(p) => p.arguments.clone(),
+            None => serde_json::Value::Null,
         };
         emit_shell_finished(turn, &tool_call, &result, emitter);
-        emit_terminal_events(
-            turn,
-            &arguments,
-            &tool_call,
-            &result,
-            &tool_context,
-            emitter,
-        );
+        emit_terminal_events(turn, &arguments, &tool_call, &result, tool_context, emitter);
         emit_tool_execution_finished(turn, &tool_call, Some(&arguments), &result, emitter);
         completed.push((index, tool_call, result));
     }
 
     completed.sort_by_key(|(index, _, _)| *index);
-    Ok(completed
-        .into_iter()
-        .map(|(_, tool_call, result)| (tool_call, result))
-        .collect())
+    Ok((
+        completed
+            .into_iter()
+            .map(|(_, tool_call, result)| (tool_call, result))
+            .collect(),
+        executed_any,
+    ))
 }
 
 async fn before_tool_result(
@@ -552,51 +1168,6 @@ async fn after_tool_result(
         biased;
         result = async_after_tool_call(tool_call.clone(), result, cancel_token.clone()) => result,
         () = cancel_token.cancelled() => cancelled_tool_result(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn prepare_and_run_tool(
-    config: &AgentConfig,
-    registry: &ToolRegistry,
-    skills: Option<&SkillStoreHandle>,
-    tool_context: &ToolContext,
-    turn: u32,
-    tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
-    emitter: &mut EventEmitter,
-    cancel_token: &CancellationToken,
-) -> Result<ToolResult, AgentRuntimeError> {
-    let prepared =
-        prepare_tool_call(config, tool_call, arguments, turn, emitter, cancel_token).await;
-    match prepared.result {
-        PreparedToolCallResult::Skip(result) => Ok(result),
-        PreparedToolCallResult::Run => {
-            let sink = emitter.sink();
-            let context = tool_context
-                .clone()
-                .with_access(prepared.access)
-                .with_tool_update(make_tool_update_callback(
-                    sink.clone(),
-                    turn,
-                    tool_call.id.to_string(),
-                    tool_call.name.to_string(),
-                ))
-                .with_tool_event(make_tool_event_callback(sink));
-            if tool_call.name.as_ref() == "Bash" {
-                emit_shell_started(turn, arguments, tool_call, &context, emitter);
-            }
-            let result = run_tool_with_cancel(
-                skills,
-                registry,
-                tool_call,
-                arguments,
-                &context,
-                cancel_token,
-            )
-            .await;
-            Ok(result)
-        }
     }
 }
 
@@ -670,6 +1241,7 @@ fn model_bash_error_result(tool_context: &ToolContext, error: &ToolError) -> Too
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn default_tool_context(
     config: &AgentConfig,
     model: Arc<dyn ModelClient>,
@@ -677,6 +1249,7 @@ fn default_tool_context(
     turn: u32,
     cancel_token: &CancellationToken,
     process_supervisor: ProcessSupervisor,
+    parent_instruction_state: Option<crate::instructions::AgentInstructionState>,
 ) -> Result<ToolContext, AgentRuntimeError> {
     let workspace_root = if let Some(workspace_root) = &config.workspace_root {
         workspace_root.clone()
@@ -710,7 +1283,8 @@ fn default_tool_context(
                 .with_background_tasks(config.background_tasks.clone())
                 .with_shell_runtime(config.shell_runtime.clone())
                 .with_multi_agent(multi_agent)
-                .with_child_runtime(config.clone(), model, registry, turn);
+                .with_child_runtime(config.clone(), model, registry, turn)
+                .with_parent_instruction_state(parent_instruction_state);
             if let Some(session_directory) = &config.session_directory {
                 context.with_agent_session_context(
                     session_directory.clone(),

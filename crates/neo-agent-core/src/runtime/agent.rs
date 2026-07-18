@@ -18,7 +18,7 @@ use super::events::*;
 use super::plan_orchestration::*;
 use super::queue::*;
 use super::skill_dispatch::*;
-use super::turn_loop::{emit_run_finished, run_agent_turn};
+use super::turn_loop::{emit_run_finished, establish_instruction_baseline, run_agent_turn};
 use crate::compaction::projection::ProjectionPlan;
 use crate::compaction::summary::run_full_compaction;
 use crate::goal::GoalManager;
@@ -203,6 +203,10 @@ impl AgentRuntime {
                     message: skill_context,
                 });
             }
+            // Baseline-before-user: new sessions and pre-feature resumes
+            // (visible_generation == 0) establish one durable instruction
+            // epoch before the first user message is appended.
+            establish_instruction_baseline(&config, &mut emitter).await;
             emitter.emit(AgentEvent::MessageAppended { message });
             if let Err(err) = run_agent_turn(
                 model,

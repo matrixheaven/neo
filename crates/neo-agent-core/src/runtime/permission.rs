@@ -5,9 +5,7 @@ use tokio_util::sync::CancellationToken;
 use super::config::AgentConfig;
 use super::events::EventPublisher;
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
-use super::tool_dispatch::{
-    PreparedToolCall, PreparedToolCallResult, ask_user_runs_in_background, cancelled_tool_result,
-};
+use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
@@ -49,25 +47,31 @@ pub(super) enum PermissionPreparation {
     Deny(String),
 }
 
-pub(super) async fn prepare_tool_call(
+/// The outcome of resolving one [`PermissionPreparation`]: run with an
+/// access grant, or finish with a terminal result (denial/cancellation).
+pub(super) enum PermissionResolution {
+    Run(ToolAccess),
+    Terminal(ToolResult),
+}
+
+/// Resolve one permission preparation into an execution decision. Approval
+/// dialogs emit `ApprovalRequested` and await the configured handler; this
+/// runs during the batch authorization phase, after instruction preflight
+/// and before the frozen fingerprint recheck.
+pub(super) async fn resolve_permission_preparation(
     config: &AgentConfig,
+    preparation: PermissionPreparation,
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,
     turn: u32,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
-) -> PreparedToolCall {
-    let preparation = permission_preparation_for_mode(config, tool_call, arguments);
-
+) -> PermissionResolution {
     match preparation {
-        PermissionPreparation::Run(access) => PreparedToolCall {
-            result: PreparedToolCallResult::Run,
-            access,
-        },
-        PermissionPreparation::Deny(message) => PreparedToolCall {
-            result: PreparedToolCallResult::Skip(ToolResult::error(message)),
-            access: ToolAccess::none(),
-        },
+        PermissionPreparation::Run(access) => PermissionResolution::Run(access),
+        PermissionPreparation::Deny(message) => {
+            PermissionResolution::Terminal(ToolResult::error(message))
+        }
         PermissionPreparation::Ask {
             operation,
             subject,
@@ -88,14 +92,8 @@ pub(super) async fn prepare_tool_call(
             )
             .await
             {
-                Some(result) => PreparedToolCall {
-                    result: PreparedToolCallResult::Skip(result),
-                    access: ToolAccess::none(),
-                },
-                None => PreparedToolCall {
-                    result: PreparedToolCallResult::Run,
-                    access: access_for_tool(tool_call, true),
-                },
+                Some(result) => PermissionResolution::Terminal(result),
+                None => PermissionResolution::Run(access_for_tool(tool_call, true)),
             }
         }
     }

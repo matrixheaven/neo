@@ -61,6 +61,7 @@ pub(super) fn workspace_context_message(config: &AgentConfig) -> Option<AgentMes
          - Read may accept absolute paths when the user asks for them or the task requires them.\n\
          - Write, Edit, Bash, and Terminal are governed by Neo's permission layer; write and shell tools are constrained by workspace permissions.\n\
          - Shell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `cwd` field for a workspace subdirectory.\n\
+         - Commands that work inside a nested project subtree must set the tool's typed `cwd` field (Bash, Terminal start) to that subtree. Command text is never inspected for paths, so nested AGENTS.md instructions load only from typed `cwd`/path arguments.\n\
          - Network access is not a separate Neo prompt guarantee; it depends on the available tools, host environment, and permission decisions.\n\
          - If an approval is denied, treat it as the user's decision and choose a different safe path instead of retrying the same request.",
         workspace_root.display()

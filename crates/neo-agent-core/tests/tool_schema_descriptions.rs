@@ -1,6 +1,73 @@
 use neo_agent_core::ToolRegistry;
 use serde_json::Value;
 
+/// Terminal(start) exposes a typed `cwd` and both shell tools require it for
+/// nested scopes, because command strings are never parsed for paths.
+#[test]
+fn terminal_start_exposes_cwd_and_requires_it_for_nested_scope() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let specs = registry.specs();
+    let terminal = specs
+        .iter()
+        .find(|spec| spec.name == "Terminal")
+        .expect("Terminal spec");
+    let bash = specs
+        .iter()
+        .find(|spec| spec.name == "Bash")
+        .expect("Bash spec");
+
+    // Terminal's schema exposes `cwd` as a start-only working directory.
+    let cwd_schema = terminal
+        .input_schema
+        .get("properties")
+        .and_then(|properties| properties.get("cwd"))
+        .expect("Terminal must expose a `cwd` property");
+    let cwd_description = cwd_schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("`cwd` description");
+    assert!(
+        cwd_description.contains("start"),
+        "`cwd` must be documented as start-only: {cwd_description}"
+    );
+    assert!(
+        cwd_description.contains("AGENTS.md"),
+        "`cwd` must name the nested AGENTS.md scope requirement: {cwd_description}"
+    );
+
+    // Both shell tools' guidance requires the typed `cwd` for nested scopes.
+    for (name, description) in [
+        ("Terminal", &terminal.description),
+        ("Bash", &bash.description),
+    ] {
+        assert!(
+            description.contains("cwd"),
+            "{name} guidance must mention `cwd`"
+        );
+        assert!(
+            description.contains("never parsed") || description.contains("never inspected"),
+            "{name} guidance must state command text is not parsed for paths: {description}"
+        );
+        assert!(
+            description.contains("AGENTS.md"),
+            "{name} guidance must name the nested AGENTS.md requirement: {description}"
+        );
+    }
+
+    // Bash's `cwd` field carries the same nested-scope requirement.
+    let bash_cwd = bash
+        .input_schema
+        .get("properties")
+        .and_then(|properties| properties.get("cwd"))
+        .and_then(|cwd| cwd.get("description"))
+        .and_then(Value::as_str)
+        .expect("Bash `cwd` description");
+    assert!(
+        bash_cwd.contains("AGENTS.md"),
+        "Bash `cwd` must name the nested AGENTS.md scope requirement: {bash_cwd}"
+    );
+}
+
 /// Verifies that every built-in tool's input schema has a non-empty description
 /// on every object property (recursing into `$defs`/`definitions`).
 #[test]

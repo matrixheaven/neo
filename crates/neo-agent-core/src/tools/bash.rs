@@ -38,7 +38,7 @@ struct BashInput {
     #[schemars(description = "The shell command to execute.")]
     command: String,
     #[schemars(
-        description = "The workspace-relative working directory in which to run the command. When omitted, the command runs in the session working directory."
+        description = "The workspace-relative working directory in which to run the command. When omitted, the command runs in the session working directory. Supply it whenever the command works inside a nested project subtree: command text is never inspected for paths, so nested AGENTS.md instructions load only from this typed cwd."
     )]
     cwd: Option<String>,
     #[schemars(
@@ -82,6 +82,7 @@ If `run_in_background=true`, the command will be started as a background task an
 - Avoid using `..` to access files or directories outside the working directory.
 - Avoid modifying files outside the working directory unless explicitly instructed to do so.
 - Never run commands that require superuser privileges unless explicitly instructed to do so.
+- When a command works inside a nested project subtree, set the `cwd` field to that subtree instead of embedding `cd <path> &&` in the command. The command string is never parsed for paths, so nested AGENTS.md instructions apply only when the typed `cwd` names the subtree.
 
 **Guidelines for efficiency:**
 - For multiple related commands, use `&&` to chain them in a single call, e.g. `cd /path && ls -la`

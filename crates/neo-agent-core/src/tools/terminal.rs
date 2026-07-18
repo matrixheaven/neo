@@ -27,6 +27,10 @@ struct TerminalInput {
     handle: Option<String>,
     #[schemars(description = "Input text. Required for write.")]
     input: Option<String>,
+    #[schemars(
+        description = "Working directory for the launched process. Only valid for start; rejected for other modes. Relative paths resolve against the session working directory. Supply it whenever the command works inside a nested project subtree: command text is never inspected for paths, so nested AGENTS.md instructions load only from this typed cwd."
+    )]
+    cwd: Option<String>,
     #[schemars(description = "Terminal columns. Defaults to 80 for start.")]
     cols: Option<u16>,
     #[schemars(description = "Terminal rows. Defaults to 24 for start.")]
@@ -47,7 +51,9 @@ enum TerminalMode {
 
 const DESCRIPTION: &str = r"Operate a real PTY session with start/write/read/resize/stop modes.
 
-Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle. Write sends input, Read returns output since the prior read, Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is bounded by the runtime limit.";
+Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle. Write sends input, Read returns output since the prior read, Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is bounded by the runtime limit.
+
+`cwd` is accepted only for start and sets the launched process's working directory. When the command works inside a nested project subtree, you must set `cwd` to that subtree: the command string is never parsed for paths, so nested AGENTS.md instructions apply only when the typed `cwd` (or path) argument names the subtree.";
 
 pub struct TerminalTool;
 
@@ -68,6 +74,12 @@ impl Tool for TerminalTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: TerminalInput = parse_input(self.name(), input)?;
+            if input.cwd.is_some() && input.mode != TerminalMode::Start {
+                return Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: "`cwd` is only valid for mode `start`".to_owned(),
+                });
+            }
             let max_output_bytes = input
                 .max_output_bytes
                 .unwrap_or(ctx.max_output_bytes)
@@ -77,6 +89,7 @@ impl Tool for TerminalTool {
                     start_terminal(
                         ctx,
                         &required_field(self.name(), input.command, "command")?,
+                        input.cwd.as_deref(),
                         input.cols,
                         input.rows,
                     )
@@ -127,6 +140,7 @@ impl Tool for TerminalTool {
 async fn start_terminal(
     ctx: &ToolContext,
     command: &str,
+    cwd: Option<&str>,
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<ToolResult, ToolError> {
@@ -138,11 +152,15 @@ async fn start_terminal(
         ctx.shell_runtime.runtime_root(),
         std::path::PathBuf::as_path,
     );
+    let cwd = match cwd {
+        Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
+        None => ctx.cwd.clone(),
+    };
     let client = GuardianClient::start_terminal(
         &ctx.shell_runtime,
         task_id,
         command.to_owned(),
-        &ctx.cwd,
+        &cwd,
         status_dir,
         cols,
         rows,
