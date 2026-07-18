@@ -1,7 +1,7 @@
 # Neo Stream Retry and Reconnect Design
 
-**Date:** 2026-07-16  
-**Status:** Approved in design discussion; written-spec review pending  
+**Date:** 2026-07-16; hardened 2026-07-18  
+**Status:** Approved design; 2026-07-18 written revision pending review  
 **Scope:** `neo-ai`, `neo-agent-core`, `neo-agent`, `neo-tui`, session JSONL
 
 ## Motivation
@@ -22,6 +22,13 @@ That makes request counts and session behavior unpredictable.
 Neo will use one runtime-owned retry loop with exact request replay, mutable
 attempt-local UI state, and a durable retry lifecycle.
 
+The hardening revision also closes two observed gaps. A provider can remain
+silent forever without producing either a stream event or an error, leaving
+only the generic footer spinner. Providers can also report a permanent billing
+quota failure using an HTTP status otherwise associated with authentication or
+rate limiting. Neo must bound stream silence and distinguish permanent quota
+exhaustion from transient rate limiting before it decides to retry.
+
 ## Goals
 
 - Recover transient request and stream transport failures automatically.
@@ -29,7 +36,10 @@ attempt-local UI state, and a durable retry lifecycle.
 - Preserve provider prompt-cache identity across ordinary retries.
 - Ensure failed attempt output never enters canonical context or session replay.
 - Honor provider `Retry-After` values with a cancellable countdown.
-- Make the retry budget configurable from one global TOML section.
+- Make the retry budget and stream-silence deadlines configurable from one
+  global TOML section.
+- Stop immediately on permanent quota exhaustion and preserve the provider's
+  actionable error detail.
 - Keep interactive, run, RPC, and child-agent behavior consistent.
 
 ## Non-goals
@@ -40,6 +50,7 @@ attempt-local UI state, and a durable retry lifecycle.
 - Automatically resuming an in-flight request after process crash.
 - Provider- or model-specific retry overrides.
 - Configurable backoff factor, jitter, or delay caps.
+- Provider- or model-specific stream timeout overrides.
 - A new hosted telemetry or metrics subsystem.
 
 ## Architecture and ownership
@@ -62,6 +73,7 @@ The runtime constructs one canonical `ChatRequest` for a model step. It owns:
 - retry budget and attempt numbering;
 - retryable-error classification decisions;
 - backoff and `Retry-After` waiting;
+- first-event and between-event stream deadlines;
 - cancellation during waiting, connect, and body streaming;
 - attempt transaction boundaries;
 - retry lifecycle events.
@@ -112,6 +124,7 @@ issued; cancelling while waiting does not consume it.
 Configuration
 RateLimit { message, retry_after }
 Auth
+QuotaExhausted { message }
 ContextOverflow
 Server { status, message, retry_after }
 Transport { message }
@@ -129,28 +142,58 @@ Retryable classes:
 
 Terminal classes:
 
-- 401/403 authentication failures;
+- 401 authentication failures;
+- permanent quota exhaustion, including HTTP 402, structured
+  `insufficient_quota`, `insufficient_balance`, `billing_limit_exceeded`,
+  `usage_limit_exceeded`, and `payment_required` errors;
+- HTTP 403 or 429 responses whose structured code or sanitized body identifies
+  permanent quota exhaustion; otherwise 403 remains `Auth` and 429 remains
+  retryable `RateLimit`;
 - ordinary 4xx and configuration failures;
 - context overflow, which remains owned by compaction recovery;
 - user cancellation;
 - deterministic protocol failures, including malformed UTF-8/JSON or an
   invalid complete SSE frame.
 
+Body fallback classification is deliberately narrow and case-insensitive. It
+matches only `usage limit for this billing cycle`, `purchase extra usage`,
+`insufficient balance`, `insufficient credits`, `quota exhausted`, or
+`billing limit exceeded`. Adding another phrase requires a provider fixture;
+generic words such as `quota`, `limit`, or `billing` alone never make a
+403/429 terminal.
+
 A clean stream close without a completion marker is still an incomplete
 transport and is retryable. A complete but invalid frame is a protocol error
 and is not retried.
 
+Silence is also an incomplete transport. The first-event deadline begins when
+the provider stream is first polled and ends when the first normalized
+`AiStreamEvent` arrives. After that, the idle deadline restarts after every
+normalized event. Provider keepalive comments that do not produce an
+`AiStreamEvent` do not reset either deadline. Expiry returns `Transport`
+through the same attempt boundary as connection reset or premature EOF, so no
+second retry owner is introduced.
+
 ## Backoff and configuration
 
-The only user-facing setting is:
+The user-facing settings are:
 
 ```toml
 [runtime.retry]
 max_retries = 5
+first_event_timeout_secs = 60
+stream_idle_timeout_secs = 120
 ```
 
 `max_retries` is a `u32`; `100` is valid. Zero disables automatic retry. The
 default is five retries after the initial request.
+
+`first_event_timeout_secs` bounds response opening plus the wait for the first
+normalized model event. `stream_idle_timeout_secs` bounds silence between later
+normalized events. Their defaults are 60 and 120 seconds respectively. Each is
+a `u64`; zero disables only that deadline. Expiry is a retryable `Transport`
+failure, while `Esc` remains terminal cancellation and wins a simultaneous
+deadline race.
 
 Without `Retry-After`, delay is exponential with additive jitter:
 
@@ -205,10 +248,12 @@ While the request is being issued, the header changes to `connecting`. On
 `RetryResumed`, the entry is replaced in place by the new attempt's live
 thinking/text/tool draft. No failed retry card is appended at the bottom.
 
-The entry uses warning styling while waiting and error styling after exhaustion.
-Details are normalized and width-wrapped; full error chains remain in logs and
-JSONL. Attempt counts use stable width constraints so `9/10` and `99/100` do
-not shift layout.
+The entry owns an animated spinner while waiting or connecting. It uses warning
+styling while waiting and error styling after exhaustion. Details are
+normalized and width-wrapped; the TUI removes redundant canonical prefixes such
+as `transport error:` after it has already rendered the `Network` title. Full
+error chains remain in logs and JSONL. Retry counts use stable width constraints
+so `9/10` and `99/100` do not shift layout.
 
 The runtime emits only `delay_ms`. The TUI derives the countdown from a local
 monotonic `Instant` and schedules redraws at second boundaries. It does not
@@ -219,8 +264,15 @@ attempt, error detail, and countdown have one visual owner: the inline retry
 entry.
 
 On success the entry disappears as a retry status and the winning live content
-occupies the same position. On exhaustion it becomes the terminal error entry.
+occupies the same position. On exhaustion it becomes the single terminal error
+entry. Its header says `retry disabled`, `after 1 retry`, or `after N retries`;
+it never calls the retry count an attempt count. The following generic `Error`
+and `RunFinished(Error)` events must not append duplicate terminal status rows.
 On user cancellation it follows existing interrupted-turn finalization.
+
+`QuotaExhausted` never creates a reconnect entry. It renders one terminal error
+entry containing the sanitized provider detail, rather than replacing that
+detail with a generic `Check API key` action.
 
 ## Persistence, replay, and other surfaces
 
@@ -230,9 +282,12 @@ agent writers. It must support flushing multiple events for one input because
 winning attempt detail is released as a batch.
 
 Retry lifecycle events are written immediately. Stream-detail events are held
-by attempt and are written only for the winning attempt. Replay ignores retry
-lifecycle events as visual transcript entries, while export/debug readers can
-inspect them as structured records.
+by attempt and are written only for the winning attempt. Replay ignores
+transient `RetryScheduled`, `RetryStarted`, `RetryResumed`, and
+`RetrySucceeded` entries, but rehydrates `RetryExhausted` as the single
+durable terminal retry card. Its following generic `Error` and
+`RunFinished(Error)` events are deduped against that card. Export/debug readers
+can inspect every lifecycle record.
 
 If the process exits during backoff or an attempt, the next process does not
 automatically resend the ambiguous request. Replay finalizes the open turn as
@@ -256,6 +311,10 @@ Focused tests should cover:
 - EOF before terminal marker maps to retryable `Transport`;
 - malformed complete JSON/SSE maps to non-retryable `Protocol`;
 - retryability for transport, 408, 429, 5xx, auth, context, and cancellation.
+- HTTP 402 and permanent-quota 403/429 bodies map to terminal
+  `QuotaExhausted`, while ordinary 403/429 behavior remains unchanged;
+- structured `insufficient_quota` and `insufficient_balance` stream failures
+  map to terminal `QuotaExhausted`.
 
 ### `neo-agent-core`
 
@@ -265,11 +324,14 @@ Focused tests should cover:
 - event order matches the state machine;
 - zero retries, high retry counts, exhaustion, non-retryable errors, and
   cancellation during backoff;
+- first-event silence and between-event silence become retryable transport
+  failures, restart the frozen request, and remain cancellable;
 - local backoff, `Retry-After`, 24-hour cap, and invalid-header fallback.
 
 ### `neo-agent`
 
-- default and explicit `[runtime.retry] max_retries = 100` loading;
+- default, zero-disabled, and explicit high values for all three
+  `[runtime.retry]` settings;
 - JSONL contains lifecycle plus winning attempt only;
 - failed attempt detail is absent from JSONL;
 - JSON output and non-TTY stderr behavior.
@@ -278,13 +340,20 @@ Focused tests should cover:
 
 - one entry is mutated across retries;
 - countdown formatting and long durations;
+- animated waiting and connecting states;
 - resume replaces the retry entry in place;
-- exhaustion becomes one final error entry;
-- replay does not render historical retry status.
+- exhaustion uses retry-count wording and becomes one final error entry without
+  a generic run-finished duplicate;
+- transport detail has no redundant prefix and quota detail remains visible;
+- replay restores only exhausted retry terminal cards.
 
 ## Migration and cleanup
 
 Implementation deletes the provider-level retry loop, `RequestOptions.retries`,
 the old in-band `AiStreamEvent::Error`, and tests that assert the removed
 behavior. Config and user documentation are updated in both English and
-Chinese. No compatibility alias or second retry path is retained.
+Chinese. Both configuration guides document the three settings, defaults,
+zero-disable behavior, first-event versus idle semantics, retryable classes,
+terminal quota behavior, request-count meaning, cache-stable frozen replay,
+`Retry-After`, and `Esc`. No compatibility alias or second retry path is
+retained.

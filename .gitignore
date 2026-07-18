@@ -4,7 +4,6 @@ target
 .DS_Store
 .worktrees/
 .superpowers
-docs/superpowers/
 .mimocode
 .codegraph/
 docs/node_modules/
