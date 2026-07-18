@@ -1,7 +1,7 @@
 # Neo Stream Retry and Reconnect Design
 
 **Date:** 2026-07-16; hardened 2026-07-18  
-**Status:** Approved design; 2026-07-18 written revision pending review  
+**Status:** Approved
 **Scope:** `neo-ai`, `neo-agent-core`, `neo-agent`, `neo-tui`, session JSONL
 
 ## Motivation
