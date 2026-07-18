@@ -1,15 +1,17 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use neo_ai::{AiStreamEvent, ChatRequest, ModelClient};
 use tokio_util::sync::CancellationToken;
 
+use super::config::AgentConfig;
 use super::error::AgentRuntimeError;
 use super::events::EventEmitter;
 use crate::{AgentEvent, AgentMessage, AgentTokenUsage, AgentToolCall, Content, StopReason};
 
 pub(super) async fn run_model_attempt(
     model: Arc<dyn ModelClient>,
+    config: &AgentConfig,
     request: ChatRequest,
     turn: u32,
     emitter: &mut EventEmitter,
@@ -19,12 +21,25 @@ pub(super) async fn run_model_attempt(
     let mut state = ModelTurnState::new();
     let mut stream = model.stream_chat(request);
     let mut resumed_retry = resumed_retry;
+    let mut received_event = false;
 
-    while let Some(event) = next_model_event(&mut stream, cancel_token).await {
+    while let Some(event) = next_model_event(
+        &mut stream,
+        cancel_token,
+        if received_event {
+            config.stream_idle_timeout_secs
+        } else {
+            config.first_event_timeout_secs
+        },
+        !received_event,
+    )
+    .await
+    {
         if cancel_token.is_cancelled() {
             return Err(neo_ai::AiError::Cancelled.into());
         }
         let event = event?;
+        received_event = true;
         if let Some(retry) = resumed_retry.take() {
             emitter.emit(AgentEvent::RetryResumed { turn, retry });
         }
@@ -237,9 +252,49 @@ impl ModelTurnState {
 async fn next_model_event(
     stream: &mut futures::stream::BoxStream<'_, Result<AiStreamEvent, neo_ai::AiError>>,
     cancel_token: &CancellationToken,
+    timeout_secs: u64,
+    waiting_for_first_event: bool,
 ) -> Option<Result<AiStreamEvent, neo_ai::AiError>> {
+    let timeout = if timeout_secs == 0 {
+        futures::future::Either::Left(std::future::pending::<()>())
+    } else {
+        futures::future::Either::Right(tokio::time::sleep(Duration::from_secs(timeout_secs)))
+    };
+    tokio::pin!(timeout);
     tokio::select! {
-        event = stream.next() => event,
+        biased;
         () = cancel_token.cancelled() => Some(Err(neo_ai::AiError::Cancelled)),
+        event = stream.next() => event,
+        () = &mut timeout => Some(Err(neo_ai::AiError::Transport {
+            message: if waiting_for_first_event {
+                format!("timed out waiting {timeout_secs}s for the first model stream event")
+            } else {
+                format!("model stream idle for {timeout_secs}s")
+            },
+        })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn next_model_event_prefers_cancel_over_ready_event() {
+        for iteration in 0..32 {
+            let mut stream = futures::stream::iter([Ok(AiStreamEvent::MessageStart {
+                id: "ready".to_owned(),
+            })])
+            .boxed();
+            let cancel_token = CancellationToken::new();
+            cancel_token.cancel();
+
+            let event = next_model_event(&mut stream, &cancel_token, 60, true).await;
+
+            assert!(
+                matches!(event, Some(Err(neo_ai::AiError::Cancelled))),
+                "ready event won cancellation race at iteration {iteration}"
+            );
+        }
     }
 }

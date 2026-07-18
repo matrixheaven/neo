@@ -16,6 +16,7 @@ use neo_ai::{
 };
 use serde_json::json;
 use std::{
+    collections::VecDeque,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -2249,6 +2250,183 @@ async fn runtime_emits_empty_todo_update_for_clear() {
         matches!(event, AgentEvent::TodoUpdated { todos, .. } if todos.is_empty())
     }));
     assert!(context.todos().is_empty());
+}
+
+#[tokio::test]
+async fn stream_first_event_timeout_retries_same_request() {
+    let harness = DelayedHarness::from_turns([
+        vec![DelayedStep::Delay(Duration::from_secs(2))],
+        vec![
+            DelayedStep::Event(AiStreamEvent::MessageStart {
+                id: "retry".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::TextDelta {
+                text: "complete".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.first_event_timeout_secs = 1;
+    config.stream_idle_timeout_secs = 0;
+    config.max_retries = 1;
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("retry silence"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("retry should succeed");
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&requests[0]).expect("serialize first request"),
+        serde_json::to_value(&requests[1]).expect("serialize retry request")
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled {
+            retry: 1,
+            error_code,
+            message,
+            ..
+        } if error_code == "provider.transport_error"
+            && message.contains("first model stream event")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetrySucceeded {
+            retries_used: 1,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn stream_idle_timeout_retries_and_discards_partial_attempt() {
+    let harness = DelayedHarness::from_turns([
+        vec![
+            DelayedStep::Event(AiStreamEvent::MessageStart {
+                id: "discarded".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::TextDelta {
+                text: "discarded partial".to_owned(),
+            }),
+            DelayedStep::Delay(Duration::from_secs(2)),
+        ],
+        vec![
+            DelayedStep::Event(AiStreamEvent::MessageStart {
+                id: "winning".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::TextDelta {
+                text: "winning answer".to_owned(),
+            }),
+            DelayedStep::Event(AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.first_event_timeout_secs = 0;
+    config.stream_idle_timeout_secs = 1;
+    config.max_retries = 1;
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("retry idle stream"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("retry should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled {
+            error_code,
+            message,
+            ..
+        } if error_code == "provider.transport_error"
+            && message.contains("model stream idle for 1s")
+    )));
+    let appended = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended {
+                message: message @ AgentMessage::Assistant { .. },
+            } => Some(message.text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(appended, ["winning answer"]);
+    assert!(!context.messages().iter().any(|message| {
+        matches!(message, AgentMessage::Assistant { .. })
+            && message.text().contains("discarded partial")
+    }));
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&requests[0]).expect("serialize first request"),
+        serde_json::to_value(&requests[1]).expect("serialize retry request")
+    );
+}
+
+#[tokio::test]
+async fn stream_timeout_zero_waits_until_cancelled() {
+    let harness = DelayedHarness::new(vec![DelayedStep::Delay(Duration::from_secs(5))]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.first_event_timeout_secs = 0;
+    config.stream_idle_timeout_secs = 0;
+    config.max_retries = 0;
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("cancel silent stream"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("silent stream cancellation should not stall")
+    {
+        let event = event.expect("cancelled stream should remain in-band");
+        let turn_started = matches!(event, AgentEvent::TurnStarted { .. });
+        events.push(event);
+        if turn_started {
+            cancel.cancel();
+        }
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: StopReason::Cancelled,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryExhausted { .. }
+    )));
 }
 
 #[tokio::test]
@@ -7403,6 +7581,10 @@ fn model_with_capabilities(capabilities: ModelCapabilities) -> ModelSpec {
 
 impl DelayedHarness {
     fn new(steps: Vec<DelayedStep>) -> Self {
+        Self::from_turns([steps])
+    }
+
+    fn from_turns(turns: impl IntoIterator<Item = Vec<DelayedStep>>) -> Self {
         Self {
             model: ModelSpec {
                 provider: ProviderId("delayed".to_owned()),
@@ -7419,7 +7601,7 @@ impl DelayedHarness {
                 },
             },
             client: Arc::new(DelayedModelClient {
-                steps: Mutex::new(Some(steps)),
+                steps: Mutex::new(turns.into_iter().collect()),
                 requests: Mutex::new(Vec::new()),
             }),
         }
@@ -7432,6 +7614,14 @@ impl DelayedHarness {
     fn client(&self) -> Arc<dyn ModelClient> {
         self.client.clone()
     }
+
+    fn requests(&self) -> Vec<ChatRequest> {
+        self.client
+            .requests
+            .lock()
+            .expect("request lock poisoned")
+            .clone()
+    }
 }
 
 #[derive(Clone)]
@@ -7441,7 +7631,7 @@ enum DelayedStep {
 }
 
 struct DelayedModelClient {
-    steps: Mutex<Option<Vec<DelayedStep>>>,
+    steps: Mutex<VecDeque<Vec<DelayedStep>>>,
     requests: Mutex<Vec<ChatRequest>>,
 }
 
@@ -7458,7 +7648,7 @@ impl ModelClient for DelayedModelClient {
             .steps
             .lock()
             .expect("steps lock poisoned")
-            .take()
+            .pop_front()
             .unwrap_or_default();
         futures::stream::unfold(steps.into_iter(), |mut steps| async move {
             loop {

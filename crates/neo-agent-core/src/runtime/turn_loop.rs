@@ -100,6 +100,7 @@ async fn run_model_request_with_retries(
     loop {
         match run_model_attempt(
             Arc::clone(model),
+            config,
             request.clone(),
             turn,
             emitter,

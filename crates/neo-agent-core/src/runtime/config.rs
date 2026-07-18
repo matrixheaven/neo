@@ -39,6 +39,9 @@ pub type ApprovalHandler =
 pub type AsyncApprovalHandler =
     Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionApprovalDecision> + Send + Sync>;
 
+pub const DEFAULT_FIRST_EVENT_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum QueueMode {
     All,
@@ -62,6 +65,8 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub max_retries: u32,
+    pub first_event_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
     pub reasoning: ReasoningSelection,
     pub replay_reasoning: bool,
     pub tools: Vec<ToolSpec>,
@@ -214,6 +219,8 @@ impl AgentConfig {
             temperature: None,
             max_tokens: None,
             max_retries: 5,
+            first_event_timeout_secs: DEFAULT_FIRST_EVENT_TIMEOUT_SECS,
+            stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
             reasoning: ReasoningSelection::Off,
             replay_reasoning: true,
             tools: Vec::new(),
