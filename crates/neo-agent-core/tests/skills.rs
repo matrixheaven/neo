@@ -2,8 +2,10 @@ use std::{collections::HashMap, fs, path::Path};
 
 use neo_agent_core::skills::{
     LoadedSkill, SkillArgument, SkillInvocation, SkillLoadError, SkillManifest, SkillSource,
-    SkillStore, SkillType, builtin::builtin_skills, discovery::discover_skills, expand_skill_body,
-    load_skill_file, parse_skill_invocation,
+    SkillStore, SkillType,
+    builtin::builtin_skills,
+    discovery::{discover_skills, user_skill_dirs},
+    expand_skill_body, load_skill_file, parse_skill_invocation,
 };
 use serde_json::json;
 
@@ -36,6 +38,21 @@ Use focused findings.
     );
     assert!(skill.body.contains("Use focused findings."));
     assert_eq!(skill.root, dir.path());
+}
+
+#[test]
+fn load_skill_repairs_unquoted_description_containing_colon_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let description =
+        "Use when the conversation contains an explicit `TDD Route: strict` decision.";
+    write(
+        dir.path().join("SKILL.md"),
+        &format!("---\nname: test-driven-development\ndescription: {description}\n---\nbody\n"),
+    );
+
+    let skill = load_skill_file(&dir.path().join("SKILL.md"), SkillSource::default()).unwrap();
+
+    assert_eq!(skill.manifest.description, description);
 }
 
 #[test]
@@ -257,6 +274,12 @@ fn parse_skill_invocation_handles_named_and_positional_args() {
 
     assert_eq!(invocation.positional, vec!["#123"]);
     assert_eq!(invocation.named.get("mode"), Some(&"full".into()));
+}
+
+#[test]
+fn user_skill_dirs_contains_only_neo_skills() {
+    let home = Path::new("/home/alice/.neo");
+    assert_eq!(user_skill_dirs(home), vec![home.join("skills")]);
 }
 
 #[test]

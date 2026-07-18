@@ -66,7 +66,7 @@ At startup Neo scans skills in the following order — **a higher-priority skill
 
 | Priority | Source | Path | Purpose |
 | --- | --- | --- | --- |
-| 1 | **user** | `~/.neo/skills/`, `~/.neo/.agents/skills/` | Private user skills, highest priority |
+| 1 | **user** | `~/.neo/skills/` | Private user skills, highest priority |
 | 2 | **extra** | Directories pointed to by `extra_skill_dirs` / `skill_path` in config | Team-shared directories |
 | 3 | **builtin** | `~/.neo/skills/.builtin/` (extracted from the binary on first launch) | Neo's built-in skills |
 

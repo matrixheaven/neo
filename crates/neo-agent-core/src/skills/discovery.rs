@@ -79,8 +79,5 @@ fn discover_recursive(
 
 #[must_use]
 pub fn user_skill_dirs(user_dir: &Path) -> Vec<PathBuf> {
-    vec![
-        user_dir.join("skills"),
-        user_dir.join(".agents").join("skills"),
-    ]
+    vec![user_dir.join("skills")]
 }

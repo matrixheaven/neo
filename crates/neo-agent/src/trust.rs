@@ -35,7 +35,6 @@ impl TrustSource {
 pub enum TrustInputKind {
     ContextFile,
     NeoDir,
-    AgentsSkillsDir,
 }
 
 /// Trust-sensitive inputs discovered in or above the project directory.
@@ -199,9 +198,6 @@ pub(crate) fn trust_dialog_data_from_inputs(
                         neo_tui::dialogs::TrustDialogInputKind::ContextFile
                     }
                     TrustInputKind::NeoDir => neo_tui::dialogs::TrustDialogInputKind::NeoDir,
-                    TrustInputKind::AgentsSkillsDir => {
-                        neo_tui::dialogs::TrustDialogInputKind::AgentsSkillsDir
-                    }
                 },
             })
             .collect(),
@@ -279,10 +275,6 @@ fn inputs_in_dir(directory: &Path) -> anyhow::Result<Vec<(PathBuf, TrustInputKin
     let neo_dir = directory.join(".neo");
     if neo_dir.is_dir() {
         result.push((neo_dir, TrustInputKind::NeoDir));
-    }
-    let agents_skills_dir = directory.join(".agents").join("skills");
-    if agents_skills_dir.is_dir() {
-        result.push((agents_skills_dir, TrustInputKind::AgentsSkillsDir));
     }
     Ok(result)
 }
@@ -436,26 +428,15 @@ mod tests {
     }
 
     #[test]
-    fn trust_inputs_detect_neo_directory_and_agents_skills() {
+    fn trust_inputs_detect_neo_directory_and_ignore_agents_skills() {
         let root = TempDir::new().expect("tempdir");
         let project = root.path().join("project");
         fs::create_dir_all(project.join(".neo")).expect("create .neo");
         fs::create_dir_all(project.join(".agents").join("skills")).expect("create skills");
 
         let inputs = collect_project_trust_inputs(&project).expect("collect");
-        assert_eq!(inputs.detected.len(), 2);
-        assert!(
-            inputs
-                .detected
-                .iter()
-                .any(|(_, kind)| *kind == TrustInputKind::NeoDir)
-        );
-        assert!(
-            inputs
-                .detected
-                .iter()
-                .any(|(_, kind)| *kind == TrustInputKind::AgentsSkillsDir)
-        );
+        assert_eq!(inputs.detected.len(), 1);
+        assert_eq!(inputs.detected[0].1, TrustInputKind::NeoDir);
     }
 
     #[test]

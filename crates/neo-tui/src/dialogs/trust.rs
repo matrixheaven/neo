@@ -27,7 +27,6 @@ pub struct TrustDialogInput {
 pub enum TrustDialogInputKind {
     ContextFile,
     NeoDir,
-    AgentsSkillsDir,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,7 +414,7 @@ impl TrustDialogState {
 
         let with_slash = match input.kind {
             TrustDialogInputKind::ContextFile => relative,
-            TrustDialogInputKind::NeoDir | TrustDialogInputKind::AgentsSkillsDir => {
+            TrustDialogInputKind::NeoDir => {
                 if relative.ends_with('/') || relative.is_empty() {
                     relative
                 } else {

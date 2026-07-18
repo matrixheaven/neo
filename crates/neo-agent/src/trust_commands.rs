@@ -77,6 +77,5 @@ fn kind_label(kind: TrustInputKind) -> &'static str {
     match kind {
         TrustInputKind::ContextFile => "context file",
         TrustInputKind::NeoDir => "neo directory",
-        TrustInputKind::AgentsSkillsDir => "agents skills directory",
     }
 }

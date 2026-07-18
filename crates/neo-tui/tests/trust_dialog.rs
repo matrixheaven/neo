@@ -18,10 +18,6 @@ fn sample_data() -> TrustDialogData {
                 path: PathBuf::from("/Users/me/src/acme/tools/cli/.neo"),
                 kind: TrustDialogInputKind::NeoDir,
             },
-            TrustDialogInput {
-                path: PathBuf::from("/Users/me/src/acme/tools/cli/.agents/skills"),
-                kind: TrustDialogInputKind::AgentsSkillsDir,
-            },
         ],
         parent_candidates: vec![
             PathBuf::from("/Users/me/src/acme/tools"),
@@ -65,7 +61,6 @@ fn trust_dialog_renders_detected_inputs_without_file_contents() {
     assert!(text.contains("Detected"), "{text}");
     assert!(text.contains("AGENTS.md"), "{text}");
     assert!(text.contains(".neo/"), "{text}");
-    assert!(text.contains(".agents/skills/"), "{text}");
     assert!(
         !text.contains("injected prompt text"),
         "must not render file contents: {text}"

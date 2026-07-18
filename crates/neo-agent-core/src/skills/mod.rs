@@ -224,7 +224,7 @@ pub fn load_skill_file(
     })?;
     let (frontmatter, body) = split_frontmatter(&source)
         .ok_or_else(|| SkillLoadError::MissingFrontmatter(path.to_path_buf()))?;
-    let manifest: SkillManifest = serde_yaml::from_str(frontmatter).map_err(|parse_err| {
+    let manifest = parse_skill_manifest(frontmatter).map_err(|parse_err| {
         SkillLoadError::ParseFrontmatter {
             path: path.to_path_buf(),
             source: parse_err,
@@ -242,6 +242,99 @@ pub fn load_skill_file(
         body: body.trim_start_matches('\n').to_owned(),
         source: skill_source,
     })
+}
+
+fn parse_skill_manifest(frontmatter: &str) -> Result<SkillManifest, serde_yaml::Error> {
+    match serde_yaml::from_str(frontmatter) {
+        Ok(manifest) => Ok(manifest),
+        Err(original_error) => {
+            let Some(repaired) = repair_frontmatter_scalar_fields(frontmatter) else {
+                return Err(original_error);
+            };
+            serde_yaml::from_str(&repaired).map_err(|_| original_error)
+        }
+    }
+}
+
+// Match Codex's bounded repair for third-party scalar prose while keeping strict YAML primary.
+fn repair_frontmatter_scalar_fields(frontmatter: &str) -> Option<String> {
+    let mut changed = false;
+    let mut block_scalar_indent: Option<usize> = None;
+    let mut repaired_lines = Vec::new();
+    for line in frontmatter.lines() {
+        let indent = line
+            .chars()
+            .take_while(|character| *character == ' ')
+            .count();
+        if let Some(block_indent) = block_scalar_indent {
+            if line.trim().is_empty() || indent > block_indent {
+                repaired_lines.push(line.to_owned());
+                continue;
+            }
+            block_scalar_indent = None;
+        }
+
+        let Some((key, value)) = line.split_once(':') else {
+            repaired_lines.push(line.to_owned());
+            continue;
+        };
+        if key.trim().is_empty() || !value.chars().next().is_none_or(char::is_whitespace) {
+            repaired_lines.push(line.to_owned());
+            continue;
+        }
+
+        let trimmed_start = value.trim_start();
+        let leading_whitespace = &value[..value.len() - trimmed_start.len()];
+        let mut scalar = trimmed_start;
+        let mut comment = "";
+        for (index, character) in trimmed_start.char_indices() {
+            if character == '#'
+                && (index == 0
+                    || trimmed_start[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace))
+            {
+                let comment_start = trimmed_start[..index].trim_end().len();
+                scalar = &trimmed_start[..comment_start];
+                comment = &trimmed_start[comment_start..];
+                break;
+            }
+        }
+
+        let scalar = scalar.trim_end();
+        let Some(first_char) = scalar.chars().next() else {
+            repaired_lines.push(line.to_owned());
+            continue;
+        };
+        if matches!(first_char, '|' | '>') {
+            block_scalar_indent = Some(indent);
+            repaired_lines.push(line.to_owned());
+            continue;
+        }
+        if matches!(first_char, '\'' | '"') {
+            repaired_lines.push(line.to_owned());
+            continue;
+        }
+
+        let has_colon_separator = scalar
+            .chars()
+            .zip(scalar.chars().skip(1))
+            .any(|(character, next)| character == ':' && next.is_whitespace());
+        let invalid_flow_like_scalar = matches!(first_char, '[' | '{' | '@' | '`')
+            && serde_yaml::from_str::<serde_yaml::Value>(scalar).is_err();
+        if !has_colon_separator && !invalid_flow_like_scalar {
+            repaired_lines.push(line.to_owned());
+            continue;
+        }
+
+        let quoted_scalar = format!("'{}'", scalar.replace('\'', "''"));
+        repaired_lines.push(format!(
+            "{key}:{leading_whitespace}{quoted_scalar}{comment}"
+        ));
+        changed = true;
+    }
+    changed.then(|| repaired_lines.join("\n"))
 }
 
 #[must_use]
