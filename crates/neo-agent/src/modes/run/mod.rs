@@ -932,7 +932,11 @@ mod tests {
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
                 tool_execution_mode: ToolExecutionMode::Sequential,
-                retry: RuntimeRetryConfig { max_retries: 100 },
+                retry: RuntimeRetryConfig {
+                    max_retries: 100,
+                    first_event_timeout_secs: 7,
+                    stream_idle_timeout_secs: 11,
+                },
                 compaction: Some(RuntimeCompactionConfig {
                     enabled: true,
                     max_estimated_tokens: 16_000,
@@ -976,6 +980,8 @@ mod tests {
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
         assert_eq!(agent_config.max_retries, 100);
+        assert_eq!(agent_config.first_event_timeout_secs, 7);
+        assert_eq!(agent_config.stream_idle_timeout_secs, 11);
         assert_eq!(
             agent_config.reasoning,
             neo_ai::ReasoningSelection::Effort {

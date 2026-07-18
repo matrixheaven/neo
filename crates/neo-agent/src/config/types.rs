@@ -214,6 +214,10 @@ pub(crate) struct FileRuntimeConfig {
 pub(crate) struct FileRuntimeRetryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) first_event_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stream_idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

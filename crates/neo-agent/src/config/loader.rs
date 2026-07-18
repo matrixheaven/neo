@@ -9,8 +9,8 @@ use anyhow::Context;
 use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_agent_core::{
-    PermissionMode, QueueMode, ShellLimits, ShellRuntime, ToolExecutionMode,
-    scavenge_completed_runtime_instances,
+    DEFAULT_FIRST_EVENT_TIMEOUT_SECS, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, PermissionMode, QueueMode,
+    ShellLimits, ShellRuntime, ToolExecutionMode, scavenge_completed_runtime_instances,
 };
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::notify::NotificationMode;
@@ -220,6 +220,7 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
     let Some(runtime) = runtime else {
         return RuntimeConfig::default();
     };
+    let retry = runtime.retry.unwrap_or_default();
     RuntimeConfig {
         temperature: runtime.temperature,
         max_tokens: runtime.max_tokens,
@@ -237,10 +238,13 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
             .tool_execution_mode
             .unwrap_or(ToolExecutionMode::Parallel),
         retry: RuntimeRetryConfig {
-            max_retries: runtime
-                .retry
-                .and_then(|retry| retry.max_retries)
-                .unwrap_or(5),
+            max_retries: retry.max_retries.unwrap_or(5),
+            first_event_timeout_secs: retry
+                .first_event_timeout_secs
+                .unwrap_or(DEFAULT_FIRST_EVENT_TIMEOUT_SECS),
+            stream_idle_timeout_secs: retry
+                .stream_idle_timeout_secs
+                .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
         },
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
         shell: runtime_shell_from_file(runtime.shell),
@@ -643,6 +647,8 @@ fn config_with_default_compaction(config: &FileConfig) -> FileConfig {
 fn default_file_runtime_retry() -> FileRuntimeRetryConfig {
     FileRuntimeRetryConfig {
         max_retries: Some(5),
+        first_event_timeout_secs: Some(DEFAULT_FIRST_EVENT_TIMEOUT_SECS),
+        stream_idle_timeout_secs: Some(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
     }
 }
 

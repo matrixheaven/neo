@@ -50,6 +50,8 @@ pub(crate) fn agent_config_for_app(
     agent_config.reasoning = config.runtime.reasoning.clone();
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
     agent_config.max_retries = config.runtime.retry.max_retries;
+    agent_config.first_event_timeout_secs = config.runtime.retry.first_event_timeout_secs;
+    agent_config.stream_idle_timeout_secs = config.runtime.retry.stream_idle_timeout_secs;
     if let Some(system_prompt) =
         resources::load_system_prompt(config.system_prompt_file.as_deref(), skill_store)?
     {

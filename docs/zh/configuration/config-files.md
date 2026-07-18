@@ -121,14 +121,28 @@ effort = "high"
 
 ### `[runtime.retry]` 子表
 
-Neo 仅在 runtime 层重试瞬时 model 请求和 stream 故障：
+Neo 会在 runtime 层重试可重试的 `Transport`、`RateLimit` 和 `Server` 故障；永久性的 `QuotaExhausted` 是 terminal：
 
 ```toml
 [runtime.retry]
 max_retries = 5
+first_event_timeout_secs = 60
+stream_idle_timeout_secs = 120
 ```
 
-`max_retries` 表示首次请求之后允许的重试请求次数（默认 `5`）；设为 `0` 可禁用重试。有效的 `Retry-After` 延迟会覆盖本地 backoff，并以 24 小时为上限。按 `Esc` 可中断正在进行的 stream 或等待中的重试。
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `max_retries` | u32 | `5` | 首次请求之后允许的重试请求次数 |
+| `first_event_timeout_secs` | u64 | `60` | 等待首个规范化 stream event 的 deadline |
+| `stream_idle_timeout_secs` | u64 | `120` | 后续规范化 stream event 之间允许的最长静默时间 |
+
+三个 `0` 的语义彼此独立：`max_retries = 0` 只禁用重试，`first_event_timeout_secs = 0` 只禁用首事件 deadline，`stream_idle_timeout_secs = 0` 只禁用 idle deadline。Neo 始终会发出首次请求；`max_retries` 只计算额外请求，因此 `max_retries = 100` 最多允许 101 次总请求。
+
+首事件 deadline 持续到 Neo 收到第一个规范化 stream event。之后 idle deadline 衡量后续规范化 event 之间的静默时间。provider 的 keepalive 注释不会重置任一 deadline。deadline 到期会被归类为可重试的 `Transport` failure。
+
+普通重试会重新发送同一个冻结请求，因此 prompt 与 cache identity 保持稳定。失败尝试产生的 delta 不会持久化到 canonical context，也不会进入 replay。有效的 `Retry-After` 会覆盖本地 backoff，并以 24 小时为上限。永久性的 `QuotaExhausted` 是 terminal：Neo 不会重试，也不会显示重连 Card。
+
+按 `Esc` 可取消正在进行的 stream 或 retry wait。内联 Card 会在 waiting 或 connecting 时动画显示；replay 只恢复 exhausted state，绝不恢复进行中的动画。
 
 ### `[runtime.compaction]` 子表
 

@@ -121,14 +121,28 @@ effort = "high"
 
 ### `[runtime.retry]` Sub-Table
 
-Neo retries transient model request and stream failures only at runtime:
+Neo retries retryable `Transport`, `RateLimit`, and `Server` failures at runtime; permanent `QuotaExhausted` is terminal:
 
 ```toml
 [runtime.retry]
 max_retries = 5
+first_event_timeout_secs = 60
+stream_idle_timeout_secs = 120
 ```
 
-`max_retries` is the number of retry requests allowed after the initial request (default `5`); `0` disables retries. A valid `Retry-After` delay overrides local backoff and is capped at 24 hours. Press `Esc` to interrupt an active stream or a pending retry wait.
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `max_retries` | u32 | `5` | Retry requests allowed after the initial request |
+| `first_event_timeout_secs` | u64 | `60` | Deadline for the first normalized stream event |
+| `stream_idle_timeout_secs` | u64 | `120` | Maximum silence between later normalized stream events |
+
+The three `0` values are independent: `max_retries = 0` disables retries, `first_event_timeout_secs = 0` disables only the first-event deadline, and `stream_idle_timeout_secs = 0` disables only the idle deadline. Neo always makes the initial request; `max_retries` counts additional requests, so `max_retries = 100` permits up to 101 total requests.
+
+The first-event deadline runs until Neo receives the first normalized stream event. After that, the idle deadline measures silence between later normalized events. Provider keepalive comments do not reset either deadline. A deadline expiry is a retryable `Transport` failure.
+
+Ordinary retries resend the same frozen request, keeping prompt and cache identity stable. Deltas from a failed attempt are not persisted to canonical context and are not included in replay. A valid `Retry-After` overrides local backoff and is capped at 24 hours. Permanent `QuotaExhausted` is terminal: Neo does not retry it or show a reconnect Card.
+
+Press `Esc` to cancel an active stream or retry wait. The inline Card animates while waiting or connecting; replay restores only an exhausted state, never an in-progress animation.
 
 ### `[runtime.compaction]` Sub-Table
 

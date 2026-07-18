@@ -5,7 +5,10 @@ use std::{
 };
 
 use neo_agent_core::multi_agent::MultiAgentRuntime;
-use neo_agent_core::{BackgroundTaskManager, ShellLimits, ShellRuntime, WorkspaceAccessPolicy};
+use neo_agent_core::{
+    BackgroundTaskManager, DEFAULT_FIRST_EVENT_TIMEOUT_SECS, DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
+    ShellLimits, ShellRuntime, WorkspaceAccessPolicy,
+};
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
@@ -195,11 +198,17 @@ impl Default for RuntimeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRetryConfig {
     pub max_retries: u32,
+    pub first_event_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
 }
 
 impl Default for RuntimeRetryConfig {
     fn default() -> Self {
-        Self { max_retries: 5 }
+        Self {
+            max_retries: 5,
+            first_event_timeout_secs: DEFAULT_FIRST_EVENT_TIMEOUT_SECS,
+            stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
+        }
     }
 }
 
@@ -431,18 +440,26 @@ max_active_commands = 51
     }
 
     #[test]
-    fn runtime_retry_defaults_and_loads_explicit_max_retries() {
+    fn runtime_retry_defaults_and_loads_explicit_values() {
         let config = super::loader::runtime_from_file_for_tests(Some(
             crate::config::types::FileRuntimeConfig {
                 retry: Some(crate::config::types::FileRuntimeRetryConfig {
                     max_retries: Some(100),
+                    first_event_timeout_secs: Some(7),
+                    stream_idle_timeout_secs: Some(11),
                 }),
                 ..crate::config::types::FileRuntimeConfig::default()
             },
         ));
 
         assert_eq!(config.retry.max_retries, 100);
-        assert_eq!(RuntimeConfig::default().retry.max_retries, 5);
+        assert_eq!(config.retry.first_event_timeout_secs, 7);
+        assert_eq!(config.retry.stream_idle_timeout_secs, 11);
+
+        let defaults = RuntimeConfig::default().retry;
+        assert_eq!(defaults.max_retries, 5);
+        assert_eq!(defaults.first_event_timeout_secs, 60);
+        assert_eq!(defaults.stream_idle_timeout_secs, 120);
     }
 
     #[test]
