@@ -10,14 +10,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::permission::ApprovalRequest;
 use crate::instructions::{InstructionInheritance, InstructionRegistry};
 use crate::multi_agent::MultiAgentRuntime;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
 use crate::tools::{BackgroundTaskManager, ShellRuntime};
 use crate::workspace_policy::WorkspaceAccessPolicy;
 use crate::{
-    AgentMessage, AgentToolCall, PermissionApprovalDecision, PermissionMode, PlanMode,
+    AgentMessage, AgentToolCall, ApprovalRequest, ApprovalResponse, PermissionMode, PlanMode,
     TodoEventData, ToolResult,
 };
 
@@ -34,10 +33,9 @@ pub type AsyncAfterToolCallHook = Arc<
         + Send
         + Sync,
 >;
-pub type ApprovalHandler =
-    Arc<dyn Fn(&ApprovalRequest) -> PermissionApprovalDecision + Send + Sync>;
+pub type ApprovalHandler = Arc<dyn Fn(&ApprovalRequest) -> ApprovalResponse + Send + Sync>;
 pub type AsyncApprovalHandler =
-    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionApprovalDecision> + Send + Sync>;
+    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, ApprovalResponse> + Send + Sync>;
 
 pub const DEFAULT_FIRST_EVENT_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
@@ -121,19 +119,6 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub goal_mode_authoring: bool,
-    /// Side-channel for `ExitPlanMode` Revise feedback, keyed by `tool_call.id`.
-    /// Populated by the approval handler when the user picks Revise.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub plan_review_feedback: Arc<Mutex<std::collections::HashMap<String, String>>>,
-    /// Side-channel for the `ExitPlanMode` selected-option label, keyed by
-    /// `tool_call.id`. Populated by the approval handler when the user picks a
-    /// model-supplied option from the plan-review picker. Consumed by
-    /// `attach_exit_plan_details` to prefix the tool result with
-    /// "Selected approach: <label>" so the model runs only that branch.
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub plan_review_selected_label: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Narrow reusable approval grants for this session. Keyed by
     /// [`SessionApprovalKey`] (exact canonical command + cwd, exact file
     /// write/edit path), never by tool name, so approving one command never
@@ -269,8 +254,6 @@ impl AgentConfig {
             async_approval_handler: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
-            plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            plan_review_selected_label: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_approvals: Arc::new(Mutex::new(std::collections::HashSet::new())),
             prefix_approval_rules: Arc::new(Mutex::new(ApprovalRuleStore::default())),
             home_dir: None,
@@ -419,7 +402,7 @@ impl AgentConfig {
     #[must_use]
     pub fn with_approval_handler(
         mut self,
-        handler: impl Fn(&ApprovalRequest) -> PermissionApprovalDecision + Send + Sync + 'static,
+        handler: impl Fn(&ApprovalRequest) -> ApprovalResponse + Send + Sync + 'static,
     ) -> Self {
         self.approval_handler = Some(Arc::new(handler));
         self
@@ -429,7 +412,7 @@ impl AgentConfig {
     pub fn with_async_approval_handler<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = PermissionApprovalDecision> + Send + 'static,
+        Fut: Future<Output = ApprovalResponse> + Send + 'static,
     {
         self.async_approval_handler = Some(Arc::new(move |request| handler(request).boxed()));
         self

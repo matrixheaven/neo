@@ -9,6 +9,10 @@ use neo_agent_core::multi_agent::{
     AgentSnapshot, DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+    PermissionOperation,
+};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Finalization, strip_ansi};
 use neo_tui::transcript::{ShellRunComponent, TranscriptEntry, TranscriptPane, TranscriptStore};
@@ -95,16 +99,46 @@ fn finish_test_tool(pane: &mut TranscriptPane) {
     });
 }
 
+fn shell_test_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Approve once".to_owned(),
+            description: None,
+            action: ApprovalAction::PermitOnce,
+        },
+        ApprovalOption {
+            label: "Reject".to_owned(),
+            description: None,
+            action: ApprovalAction::Reject,
+        },
+    ]
+}
+
+fn shell_test_request(id: &str, command: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: command.to_owned(),
+            cwd: None,
+        },
+        options: shell_test_options(),
+    }
+}
+
+fn approved_resolution() -> ApprovalResolution {
+    ApprovalResolution::Selected {
+        action: ApprovalAction::PermitOnce,
+        label: "Approved".to_owned(),
+        feedback: None,
+    }
+}
+
 fn request_test_approval(pane: &mut TranscriptPane) {
     pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "approval-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf 1".to_owned(),
-        arguments: serde_json::json!({ "command": "printf 1" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: shell_test_request("approval-1", "printf 1"),
     });
 }
 
@@ -362,7 +396,7 @@ fn terminal_mcp_status_ignores_late_connecting_update() {
 fn resolved_approval_ignores_repeated_request() {
     let mut pane = TranscriptPane::new(80, 12);
     request_test_approval(&mut pane);
-    pane.resolve_approval("approval-1", "Approved");
+    pane.resolve_approval("approval-1", approved_resolution());
     let revision = pane.transcript().entry_revisions()[0];
 
     request_test_approval(&mut pane);

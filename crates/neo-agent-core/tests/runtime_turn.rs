@@ -1,11 +1,11 @@
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
-    AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, CompactionSummary, Content,
-    PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, SessionApprovalKey,
-    SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, SkillInvocationOutcome,
-    SkillInvocationSource, StopReason, TodoEventData, Tool, ToolContext, ToolError,
-    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    AgentToolCall, ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest,
+    ApprovalResponse, AskUserTool, CompactionSettings, CompactionSummary, Content, PermissionMode,
+    PermissionOperation, QueueMode, SessionApprovalKey, SessionApprovalScope, ShellCommandOrigin,
+    ShellCommandOutcome, SkillInvocationOutcome, SkillInvocationSource, StopReason, TodoEventData,
+    Tool, ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, main_agent_plans_dir, workspace_sessions_dir},
     skills::SkillStore,
@@ -41,6 +41,130 @@ async fn collect_turn_events(
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed")
+}
+
+fn select_action(request: &ApprovalRequest, action: ApprovalAction) -> ApprovalResponse {
+    assert!(
+        request.options.iter().any(|option| option.action == action),
+        "action {action:?} not offered in {:?}",
+        request
+            .options
+            .iter()
+            .map(|option| &option.action)
+            .collect::<Vec<_>>()
+    );
+    ApprovalResponse::Selected {
+        request_id: request.id.clone(),
+        action,
+        feedback: None,
+    }
+}
+
+fn permit_once(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::PermitOnce)
+}
+
+fn reject_action(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::Reject)
+}
+
+fn permit_for_session(request: &ApprovalRequest) -> ApprovalResponse {
+    let action = request
+        .options
+        .iter()
+        .find_map(|option| match &option.action {
+            ApprovalAction::PermitForSession { .. } => Some(option.action.clone()),
+            _ => None,
+        })
+        .expect("PermitForSession option");
+    select_action(request, action)
+}
+
+fn permit_for_prefix(request: &ApprovalRequest) -> ApprovalResponse {
+    let action = request
+        .options
+        .iter()
+        .find_map(|option| match &option.action {
+            ApprovalAction::PermitForPrefix { .. } => Some(option.action.clone()),
+            _ => None,
+        })
+        .expect("PermitForPrefix option");
+    select_action(request, action)
+}
+
+fn first_offered_action(request: &ApprovalRequest) -> ApprovalResponse {
+    let action = request
+        .options
+        .first()
+        .map(|option| option.action.clone())
+        .expect("approval options");
+    select_action(request, action)
+}
+
+fn approve_plan(request: &ApprovalRequest) -> ApprovalResponse {
+    let action = request
+        .options
+        .iter()
+        .find_map(|option| match &option.action {
+            ApprovalAction::ApprovePlan { .. } => Some(option.action.clone()),
+            _ => None,
+        })
+        .expect("ApprovePlan option");
+    select_action(request, action)
+}
+
+fn approve_plan_with_label(request: &ApprovalRequest, label: &str) -> ApprovalResponse {
+    let action = request
+        .options
+        .iter()
+        .find_map(|option| match &option.action {
+            ApprovalAction::ApprovePlan {
+                selection: Some(selection),
+            } if selection.label == label => Some(option.action.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("ApprovePlan selection {label:?}"));
+    select_action(request, action)
+}
+
+fn reject_plan(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::RejectPlan)
+}
+
+fn start_goal(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::StartGoal)
+}
+
+fn reject_goal(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::RejectGoal)
+}
+
+fn revise_goal_with_feedback(request: &ApprovalRequest, feedback: &str) -> ApprovalResponse {
+    assert!(
+        request.options.iter().any(|option| {
+            matches!(
+                option.action,
+                ApprovalAction::ReviseGoal {
+                    preset_feedback: None
+                }
+            )
+        }),
+        "ReviseGoal manual feedback option not offered"
+    );
+    ApprovalResponse::Selected {
+        request_id: request.id.clone(),
+        action: ApprovalAction::ReviseGoal {
+            preset_feedback: None,
+        },
+        feedback: Some(feedback.to_owned()),
+    }
+}
+
+fn approval_request_id(event: &AgentEvent) -> Option<&str> {
+    match event {
+        AgentEvent::ApprovalRequested { request } => Some(request.id.as_str()),
+        _ => None,
+    }
 }
 
 #[tokio::test]
@@ -3659,14 +3783,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
         .expect("tool loop should succeed");
 
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "needs approval" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -3701,6 +3818,40 @@ fn echo_tool_session_scope(workspace: impl Into<String>) -> SessionApprovalScope
         }],
         label: "Approve this tool for this session".to_owned(),
         detail: "Tool: echo".to_owned(),
+    }
+}
+
+fn echo_tool_options(workspace: impl Into<String>) -> Vec<ApprovalOption> {
+    let scope = echo_tool_session_scope(workspace);
+    vec![
+        ApprovalOption {
+            label: "Approve once".to_owned(),
+            description: None,
+            action: ApprovalAction::PermitOnce,
+        },
+        ApprovalOption {
+            label: scope.label.clone(),
+            description: Some(scope.detail.clone()),
+            action: ApprovalAction::PermitForSession { scope },
+        },
+        ApprovalOption {
+            label: "Reject".to_owned(),
+            description: None,
+            action: ApprovalAction::Reject,
+        },
+    ]
+}
+
+fn echo_tool_approval_request(id: &str, workspace: impl Into<String>) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::Tool,
+        presentation: ApprovalPresentation::Tool {
+            title: "Run tool?".to_owned(),
+            details: vec!["tool: echo".to_owned()],
+        },
+        options: echo_tool_options(workspace),
     }
 }
 
@@ -3747,8 +3898,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
             .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler(|request| {
                 assert_eq!(request.operation, PermissionOperation::Tool);
-                assert_eq!(request.subject, "echo");
-                PermissionApprovalDecision::AllowOnce
+                permit_once(request)
             }),
         harness.client(),
         tools,
@@ -3764,14 +3914,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         .expect("approved tool loop should succeed");
 
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "approved" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert_eq!(
         *executed.lock().expect("executed lock poisoned"),
@@ -3856,13 +3999,13 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
         AgentConfig::for_model(harness.model())
             .with_permission_mode(PermissionMode::Ask)
             .with_live_permission_mode(Arc::clone(&live_mode))
-            .with_approval_handler(move |_request| {
+            .with_approval_handler(move |request| {
                 // Flip the live mode to Auto before returning so the second tool
                 // call is prepared under Auto and must not request approval again.
                 if let Ok(mut mode) = live_for_handler.write() {
                     *mode = PermissionMode::Auto;
                 }
-                PermissionApprovalDecision::AllowOnce
+                permit_once(request)
             }),
         harness.client(),
         tools,
@@ -3880,13 +4023,13 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
     let first_approval = events.iter().any(|event| {
         matches!(
             event,
-            AgentEvent::ApprovalRequested { id, .. } if id == "tool_1"
+            AgentEvent::ApprovalRequested { request } if request.id == "tool_1"
         )
     });
     let second_approval = events.iter().any(|event| {
         matches!(
             event,
-            AgentEvent::ApprovalRequested { id, .. } if id == "tool_2"
+            AgentEvent::ApprovalRequested { request } if request.id == "tool_2"
         )
     });
     assert!(
@@ -3978,7 +4121,7 @@ async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() 
                     result
                 }
             })
-            .with_approval_handler(|_request| PermissionApprovalDecision::AllowOnce),
+            .with_approval_handler(|request| permit_once(request)),
         harness.client(),
         tools,
     );
@@ -3995,13 +4138,13 @@ async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() 
     let first_approval = events.iter().any(|event| {
         matches!(
             event,
-            AgentEvent::ApprovalRequested { id, .. } if id == "tool_1"
+            AgentEvent::ApprovalRequested { request } if request.id == "tool_1"
         )
     });
     let second_approval = events.iter().any(|event| {
         matches!(
             event,
-            AgentEvent::ApprovalRequested { id, .. } if id == "tool_2"
+            AgentEvent::ApprovalRequested { request } if request.id == "tool_2"
         )
     });
     assert!(
@@ -4061,8 +4204,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
             .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler(|request| {
                 assert_eq!(request.operation, PermissionOperation::Tool);
-                assert_eq!(request.subject, "echo");
-                PermissionApprovalDecision::Reject
+                reject_action(request)
             }),
         harness.client(),
         tools,
@@ -4078,14 +4220,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         .expect("denied tool loop should succeed");
 
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "denied" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
@@ -4100,7 +4235,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
 struct AsyncEchoRuntime {
     runtime: AgentRuntime,
     executed: Arc<Mutex<Vec<String>>>,
-    decision_sender: oneshot::Sender<PermissionApprovalDecision>,
+    decision_sender: oneshot::Sender<ApprovalResponse>,
     observed_requests: Arc<Mutex<Vec<ApprovalRequest>>>,
 }
 
@@ -4168,8 +4303,8 @@ fn async_echo_runtime(harness: &FakeHarness) -> AsyncEchoRuntime {
 }
 
 fn take_decision_receiver(
-    receiver: &Arc<Mutex<Option<oneshot::Receiver<PermissionApprovalDecision>>>>,
-) -> oneshot::Receiver<PermissionApprovalDecision> {
+    receiver: &Arc<Mutex<Option<oneshot::Receiver<ApprovalResponse>>>>,
+) -> oneshot::Receiver<ApprovalResponse> {
     receiver
         .lock()
         .expect("decision receiver lock poisoned")
@@ -4252,32 +4387,20 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         *observed_requests
             .lock()
             .expect("observed requests lock poisoned"),
-        vec![ApprovalRequest {
-            turn: 1,
-            id: "tool_1".to_owned(),
-            operation: PermissionOperation::Tool,
-            subject: "echo".to_owned(),
-            arguments: json!({ "text": "async approved" }),
-            session_scope: Some(echo_tool_session_scope("")),
-            prefix_rule: None,
-            suggestions: vec![],
-        }]
+        vec![echo_tool_approval_request("tool_1", "")]
     );
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "async approved" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_waits_for_approval_decision(&mut stream, "executing").await;
 
     decision_sender
-        .send(PermissionApprovalDecision::AllowOnce)
+        .send(ApprovalResponse::Selected {
+            request_id: "tool_1".to_owned(),
+            action: ApprovalAction::PermitOnce,
+            feedback: None,
+        })
         .expect("send allow decision");
     while let Some(event) = stream.next().await {
         events.push(event.expect("event should be ok"));
@@ -4322,21 +4445,18 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
     collect_until_approval(&mut stream, &mut events).await;
 
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "async denied" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
     assert_waits_for_approval_decision(&mut stream, "denying").await;
 
     decision_sender
-        .send(PermissionApprovalDecision::Reject)
+        .send(ApprovalResponse::Selected {
+            request_id: "tool_1".to_owned(),
+            action: ApprovalAction::Reject,
+            feedback: None,
+        })
         .expect("send deny decision");
     while let Some(event) = stream.next().await {
         events.push(event.expect("event should be ok"));
@@ -4383,14 +4503,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
     collect_until_approval(&mut stream, &mut events).await;
 
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "async cancelled" }),
-        session_scope: Some(echo_tool_session_scope("")),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_1", ""),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
 
@@ -4465,7 +4578,11 @@ async fn parallel_mode_serializes_ask_approval_batches() {
     );
 
     decision_sender
-        .send(PermissionApprovalDecision::AllowOnce)
+        .send(ApprovalResponse::Selected {
+            request_id: "tool_1".to_owned(),
+            action: ApprovalAction::PermitOnce,
+            feedback: None,
+        })
         .expect("send allow decision");
     while let Some(event) = stream.next().await {
         events.push(event.expect("event should be ok"));
@@ -4578,8 +4695,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
             .expect("workspace config")
             .with_approval_handler(|request| {
                 assert_eq!(request.operation, PermissionOperation::FileWrite);
-                assert_eq!(request.subject, "approved.txt");
-                PermissionApprovalDecision::AllowOnce
+                permit_once(request)
             }),
         harness.client(),
         ToolRegistry::with_builtin_tools(),
@@ -4598,20 +4714,15 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
     // because the workspace path is dynamic (tempdir).
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::ApprovalRequested {
-            id,
-            operation: PermissionOperation::FileWrite,
-            subject,
-            arguments,
-            session_scope,
-            ..
-        } if id == "tool_1"
-            && subject == "approved.txt"
-            && arguments == &json!({ "path": "approved.txt", "content": "ok" })
-            && session_scope.as_ref().is_some_and(|scope|
-                scope.label == "Approve writes to this file for this session"
-                && scope.keys.len() == 1
-            )
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::FileWrite
+                && request.options.iter().any(|option| matches!(
+                    &option.action,
+                    ApprovalAction::PermitForSession { scope }
+                        if scope.label == "Approve writes to this file for this session"
+                            && scope.keys.len() == 1
+                ))
     )));
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("approved.txt")).expect("written file"),
@@ -5831,14 +5942,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
         "Read should run without approval in ask mode"
     );
     assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_2".to_owned(),
-        operation: PermissionOperation::Tool,
-        subject: "echo".to_owned(),
-        arguments: json!({ "text": "needs approval" }),
-        session_scope: Some(echo_tool_session_scope(workspace_key)),
-        prefix_rule: None,
-        suggestions: vec![],
+        request: echo_tool_approval_request("tool_2", workspace_key),
     }));
 }
 
@@ -5883,9 +5987,9 @@ async fn runtime_session_approval_persists_for_same_tool() {
             .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler({
                 let count = Arc::clone(&approval_count);
-                move |_request| {
+                move |request| {
                     *count.lock().expect("count lock poisoned") += 1;
-                    PermissionApprovalDecision::AllowForSession
+                    permit_for_session(request)
                 }
             }),
         harness.client(),
@@ -5956,7 +6060,7 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
     ]);
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::PlanTransition);
-        PermissionApprovalDecision::AllowOnce
+        approve_plan(request)
     });
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -5972,20 +6076,23 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
 
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::ApprovalRequested {
-            turn: 1,
-            id,
-            operation: PermissionOperation::PlanTransition,
-            subject,
-            arguments,
-            session_scope: None,
-            prefix_rule: None,
-            ..
-        } if id == "tool_1"
-            && subject == "Exit plan mode"
-            && arguments.get("plan_summary").and_then(|v| v.as_str()) == Some("Ready to execute")
-            && arguments.get("plan_content").and_then(|v| v.as_str()) == Some("do the thing")
-            && arguments.get("plan_path").is_some()
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::PlanTransition
+                && matches!(
+                    request.presentation,
+                    ApprovalPresentation::Plan { .. }
+                )
+                && matches!(
+                    request.options.first().map(|option| &option.action),
+                    Some(ApprovalAction::ApprovePlan { selection: None })
+                )
+                && request.options.iter().any(|option| {
+                    matches!(option.action, ApprovalAction::RejectPlan)
+                })
+                && !request.options.iter().any(|option| {
+                    matches!(option.action, ApprovalAction::PermitForSession { .. })
+                })
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -6053,7 +6160,7 @@ async fn exit_plan_mode_continues_loop_after_approval() {
     ]);
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::PlanTransition);
-        PermissionApprovalDecision::AllowOnce
+        approve_plan(request)
     });
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -6090,10 +6197,10 @@ async fn exit_plan_mode_continues_loop_after_approval() {
 /// Regression: when the user approves a specific model-supplied plan-review
 /// option, the runtime prefixes the `ExitPlanMode` tool result with
 /// "Selected approach: <label>" so the model executes only that branch. The
-/// selected label reaches the runtime through the `plan_review_selected_label`
-/// side-channel, mirroring the Revise-feedback channel.
+/// selection is carried as typed `ApprovalAction::ApprovePlan` metadata — not
+/// a global side map.
 #[tokio::test]
-async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
+async fn exit_plan_mode_plan_selection_label_prefixes_tool_result() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -6108,12 +6215,11 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
     set_config_permission_mode(&mut config, PermissionMode::Ask);
-    let plan_path = {
+    {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         let data = pm.enter(&plans_dir, true).expect("enter plan mode");
         std::fs::write(&data.path, "ship feature X").expect("write plan");
-        data.path
-    };
+    }
 
     let harness = FakeHarness::from_turns([
         vec![
@@ -6153,15 +6259,9 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
             },
         ],
     ]);
-    // The TUI would populate this side-channel after the user picked "Option A".
-    let selected_label_map = Arc::clone(&config.plan_review_selected_label);
-    {
-        let mut labels = selected_label_map.lock().expect("selected label lock");
-        labels.insert("tool_1".to_owned(), "Option A".to_owned());
-    }
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::PlanTransition);
-        PermissionApprovalDecision::AllowOnce
+        approve_plan_with_label(request, "Option A")
     });
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -6194,13 +6294,6 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
         turn2_text.contains("Execute ONLY the selected approach"),
         "turn 2 request must carry the execute-only instruction"
     );
-    // The label is consumed once.
-    let labels = selected_label_map.lock().expect("selected label lock");
-    assert!(
-        !labels.contains_key("tool_1"),
-        "selected label should be consumed after attach_exit_plan_details"
-    );
-    let _ = plan_path;
 }
 
 /// Regression: `ExitGoalMode` starts the durable goal and the run ends
@@ -6250,7 +6343,7 @@ async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
     ]);
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::GoalTransition);
-        PermissionApprovalDecision::AllowOnce
+        start_goal(request)
     });
     let goal_manager = Arc::new(
         neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
@@ -6288,6 +6381,375 @@ async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
     );
     let active = goal_manager.active().expect("active goal");
     assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
+}
+
+/// Generic plan approval (no model-supplied alternatives) must offer
+/// `ApprovePlan { selection: None }` — never a fabricated selection named
+/// "Approve" — and must not write `plan_selected_label` into tool details.
+#[tokio::test]
+async fn exit_plan_mode_generic_approval_has_no_selected_approach() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    setup_active_plan(&mut config, &home, &workspace, "generic plan body");
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert!(matches!(
+            request.options.first().map(|option| &option.action),
+            Some(ApprovalAction::ApprovePlan { selection: None })
+        ));
+        approve_plan(request)
+    });
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve plan"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let plan_request = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ApprovalRequested { request }
+                if request.operation == PermissionOperation::PlanTransition =>
+            {
+                Some(request)
+            }
+            _ => None,
+        })
+        .expect("plan approval request");
+    assert!(matches!(
+        plan_request.options.first().map(|option| &option.action),
+        Some(ApprovalAction::ApprovePlan { selection: None })
+    ));
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { name, result, .. } if name == "ExitPlanMode" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("ExitPlanMode finished");
+    assert!(
+        !finished.content.contains("Selected approach:"),
+        "generic approve must not fabricate a selected approach"
+    );
+    if let Some(details) = finished.details.as_ref() {
+        assert!(
+            details.get("plan_selected_label").is_none(),
+            "generic approve must not set plan_selected_label"
+        );
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::PlanModeExited { turn, .. } if *turn == 1
+    )));
+}
+
+/// Typed plan selection reaches the ExitPlanMode tool result details without
+/// a side map keyed by tool id.
+#[tokio::test]
+async fn exit_plan_mode_typed_selection_reaches_tool_result() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    setup_active_plan(&mut config, &home, &workspace, "choose carefully");
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: json!({
+                    "plan_summary": "Two approaches",
+                    "options": [
+                        {"label": "Fast path", "description": "ship sooner"},
+                        {"label": "Safe path", "description": "more checks"}
+                    ]
+                })
+                .to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config =
+        config.with_approval_handler(|request| approve_plan_with_label(request, "Safe path"));
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("pick safe"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    // Re-emitted finished event after decoration carries selection details.
+    let selected_plan_result = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { name, result, .. }
+                if name == "ExitPlanMode" && !result.is_error =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("selected ExitPlanMode result");
+    assert!(
+        selected_plan_result
+            .content
+            .contains("Selected approach: Safe path"),
+        "content prefix missing: {}",
+        selected_plan_result.content
+    );
+    assert!(matches!(
+        selected_plan_result.details.as_ref(),
+        Some(details) if details["plan_selected_label"] == "Safe path"
+    ));
+}
+
+/// RejectGoal and ReviseGoal must not create a durable goal and must leave
+/// goal authoring pending (no GoalStarted).
+#[tokio::test]
+async fn exit_goal_mode_reject_and_revise_create_no_goal() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+
+    let goal_payload = json!({
+        "objective": "Ship goal mode",
+        "completion_criterion": "Goal tests pass",
+        "phases": ["Draft", "Implement"],
+    });
+
+    // --- RejectGoal ---
+    {
+        let mut config = AgentConfig::for_model(fake_model());
+        config.home_dir = Some(home.path().to_path_buf());
+        config.workspace_root = Some(workspace_root.clone());
+        set_config_permission_mode(&mut config, PermissionMode::Ask);
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "msg_1".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "tool_1".to_owned(),
+                    name: "ExitGoalMode".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "tool_1".to_owned(),
+                    raw_arguments: goal_payload.to_string(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: neo_ai::StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            final_done_turn(),
+        ]);
+        let config = config.with_approval_handler(|request| {
+            assert!(matches!(
+                request.options.as_slice(),
+                [
+                    ApprovalOption {
+                        action: ApprovalAction::StartGoal,
+                        ..
+                    },
+                    ApprovalOption {
+                        action: ApprovalAction::RejectGoal,
+                        ..
+                    },
+                    ApprovalOption {
+                        action: ApprovalAction::ReviseGoal { .. },
+                        ..
+                    },
+                ]
+            ));
+            reject_goal(request)
+        });
+        let goal_manager = Arc::new(
+            neo_agent_core::goal::GoalManager::load(home.path().join("reject"))
+                .await
+                .expect("goal manager"),
+        );
+        let mut registry = ToolRegistry::with_builtin_tools();
+        registry.register_goal_tools(Arc::clone(&goal_manager));
+        let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+            .with_goal_manager(&goal_manager);
+        let mut context = AgentContext::new();
+
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text("reject goal"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("turn should succeed");
+
+        let goal_request = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ApprovalRequested { request }
+                    if request.operation == PermissionOperation::GoalTransition =>
+                {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("goal approval request");
+        assert!(matches!(
+            goal_request.options.as_slice(),
+            [
+                ApprovalOption {
+                    action: ApprovalAction::StartGoal,
+                    ..
+                },
+                ApprovalOption {
+                    action: ApprovalAction::RejectGoal,
+                    ..
+                },
+                ApprovalOption {
+                    action: ApprovalAction::ReviseGoal { .. },
+                    ..
+                },
+            ]
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::GoalStarted { .. })),
+            "RejectGoal must not start a goal"
+        );
+        assert!(
+            goal_manager.active().is_none(),
+            "no active goal after reject"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished {
+                name,
+                result,
+                ..
+            } if name == "ExitGoalMode" && result.content.contains("approval denied")
+        )));
+    }
+
+    // --- ReviseGoal ---
+    {
+        let mut config = AgentConfig::for_model(fake_model());
+        config.home_dir = Some(home.path().to_path_buf());
+        config.workspace_root = Some(workspace_root);
+        set_config_permission_mode(&mut config, PermissionMode::Ask);
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "msg_1".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "tool_1".to_owned(),
+                    name: "ExitGoalMode".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "tool_1".to_owned(),
+                    raw_arguments: goal_payload.to_string(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: neo_ai::StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            final_done_turn(),
+        ]);
+        let config = config.with_approval_handler(|request| {
+            revise_goal_with_feedback(request, "add a validation phase")
+        });
+        let goal_manager = Arc::new(
+            neo_agent_core::goal::GoalManager::load(home.path().join("revise"))
+                .await
+                .expect("goal manager"),
+        );
+        let mut registry = ToolRegistry::with_builtin_tools();
+        registry.register_goal_tools(Arc::clone(&goal_manager));
+        let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+            .with_goal_manager(&goal_manager);
+        let mut context = AgentContext::new();
+
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text("revise goal"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("turn should succeed");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::GoalStarted { .. })),
+            "ReviseGoal must not start a goal"
+        );
+        assert!(
+            goal_manager.active().is_none(),
+            "no active goal after revise"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished {
+                name,
+                result,
+                ..
+            } if name == "ExitGoalMode"
+                && !result.is_error
+                && result.content.contains("User requested revisions")
+                && result.content.contains("add a validation phase")
+        )));
+    }
 }
 
 /// Regression: even if a session-scoped approval (`AllowForSession`) is returned
@@ -6342,7 +6804,8 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::PlanTransition);
         // Pretend the (now-removed) "Approve for this session" option was chosen.
-        PermissionApprovalDecision::AllowForSession
+        // Session option is not offered for plan/goal transitions.
+        first_offered_action(request)
     });
 
     let runtime =
@@ -6408,7 +6871,7 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
     ]);
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::GoalTransition);
-        PermissionApprovalDecision::AllowOnce
+        start_goal(request)
     });
     let goal_manager = Arc::new(
         neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
@@ -6429,20 +6892,24 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::GoalTransition,
-        subject: "Start reviewed goal".to_owned(),
-        arguments: json!({
-            "objective": "Ship goal mode",
-            "completion_criterion": "Goal tests pass",
-            "phases": ["Draft", "Implement", "Audit"],
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::GoalTransition
+                && matches!(
+                    request.presentation,
+                    ApprovalPresentation::Goal { .. }
+                )
+                && matches!(
+                    request.options.as_slice(),
+                    [
+                        ApprovalOption { action: ApprovalAction::StartGoal, .. },
+                        ApprovalOption { action: ApprovalAction::RejectGoal, .. },
+                        ApprovalOption { action: ApprovalAction::ReviseGoal { .. }, .. },
+                    ]
+                )
+    )));
     assert!(events.contains(&AgentEvent::GoalStarted {
         turn: 1,
         objective: "Ship goal mode".to_owned(),
@@ -6452,7 +6919,8 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
 }
 
 #[tokio::test]
-async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback() {
+async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active() {
+    // RejectPlan must deny with "approval denied" and leave plan mode active.
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -6473,7 +6941,6 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
         std::fs::write(&data.path, "do the thing").expect("write plan");
     }
     let plan_mode = Arc::clone(&config.plan_mode);
-    let plan_review_feedback = Arc::clone(&config.plan_review_feedback);
 
     let harness = FakeHarness::from_turns([
         vec![
@@ -6497,12 +6964,9 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
     ]);
     let config = config.with_approval_handler(move |request| {
         if request.operation == PermissionOperation::PlanTransition {
-            if let Ok(mut map) = plan_review_feedback.lock() {
-                map.insert(request.id.clone(), "add more detail".to_owned());
-            }
-            PermissionApprovalDecision::Reject
+            reject_plan(request)
         } else {
-            PermissionApprovalDecision::AllowOnce
+            permit_once(request)
         }
     });
     let runtime =
@@ -6521,7 +6985,7 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
         !events
             .iter()
             .any(|event| matches!(event, AgentEvent::PlanModeExited { .. })),
-        "plan mode should remain active after revise"
+        "plan mode should remain active after RejectPlan"
     );
     assert!(events.iter().any(|event| matches!(
         event,
@@ -6530,7 +6994,9 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback(
             name,
             result,
             ..
-        } if id == "tool_1" && name == "ExitPlanMode" && result.content.contains("User requested revisions")
+        } if id == "tool_1"
+            && name == "ExitPlanMode"
+            && result.content.contains("approval denied")
     )));
     assert!(plan_mode.read().expect("plan mode lock").is_active());
 }
@@ -6824,17 +7290,17 @@ async fn ask_mode_asks_for_bash() {
     // dynamic workspace path.
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::ApprovalRequested {
-            id,
-            operation: PermissionOperation::Shell,
-            subject,
-            arguments,
-            session_scope,
-            ..
-        } if id == "tool_1"
-            && subject == "mkdir test_dir"
-            && arguments == &json!({ "command": "mkdir test_dir" })
-            && session_scope.as_ref().is_some_and(|s| !s.is_empty())
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::Shell
+                && matches!(
+                    &request.presentation,
+                    ApprovalPresentation::Command { command, .. }
+                        if command == "mkdir test_dir"
+                )
+                && request.options.iter().any(|option| {
+                    matches!(option.action, ApprovalAction::PermitForSession { .. })
+                })
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -7042,7 +7508,7 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
     ]);
     let config = config.with_approval_handler(|request| {
         assert_eq!(request.operation, PermissionOperation::PlanTransition);
-        PermissionApprovalDecision::AllowOnce
+        approve_plan(request)
     });
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -7058,20 +7524,16 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
 
     assert!(events.iter().any(|e| matches!(
         e,
-        AgentEvent::ApprovalRequested {
-            turn: 1,
-            id,
-            operation: PermissionOperation::PlanTransition,
-            subject,
-            arguments,
-            session_scope: None,
-            prefix_rule: None,
-            ..
-        } if id == "tool_1"
-            && subject == "Exit plan mode"
-            && arguments.get("plan_summary").and_then(|v| v.as_str()) == Some("Ready")
-            && arguments.get("plan_content").and_then(|v| v.as_str()) == Some("do the thing")
-            && arguments.get("plan_path").is_some()
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::PlanTransition
+                && matches!(
+                    request.options.first().map(|option| &option.action),
+                    Some(ApprovalAction::ApprovePlan { selection: None })
+                )
+                && !request.options.iter().any(|option| {
+                    matches!(option.action, ApprovalAction::PermitForSession { .. })
+                })
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -8168,6 +8630,145 @@ fn count_approval_requests(events: &[AgentEvent]) -> usize {
         .count()
 }
 
+fn first_approval_request(events: &[AgentEvent]) -> &ApprovalRequest {
+    events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ApprovalRequested { request } => Some(request),
+            _ => None,
+        })
+        .expect("expected ApprovalRequested")
+}
+
+async fn collect_approval_request_for_tool(
+    name: &str,
+    raw_arguments: serde_json::Value,
+    workspace: &std::path::Path,
+) -> ApprovalRequest {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: name.to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: raw_arguments.to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace)
+            .expect("workspace root")
+            .with_approval_handler(|request| permit_once(request)),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve me"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+    first_approval_request(&events).clone()
+}
+
+#[tokio::test]
+async fn approval_requests_only_offer_runtime_supported_actions() {
+    let workspace = tempfile::tempdir().expect("workspace");
+
+    let background = collect_approval_request_for_tool(
+        "Bash",
+        json!({ "command": "sleep 1", "run_in_background": true }),
+        workspace.path(),
+    )
+    .await;
+    assert_eq!(
+        background
+            .options
+            .iter()
+            .map(|option| &option.action)
+            .collect::<Vec<_>>(),
+        vec![&ApprovalAction::PermitOnce, &ApprovalAction::Reject],
+    );
+    assert!(matches!(
+        background.presentation,
+        ApprovalPresentation::Command { .. }
+    ));
+
+    let foreground = collect_approval_request_for_tool(
+        "Bash",
+        json!({ "command": "python script.py" }),
+        workspace.path(),
+    )
+    .await;
+    assert!(matches!(
+        foreground.options.as_slice(),
+        [
+            ApprovalOption {
+                action: ApprovalAction::PermitOnce,
+                ..
+            },
+            ApprovalOption {
+                action: ApprovalAction::PermitForSession { .. },
+                ..
+            },
+            ApprovalOption {
+                action: ApprovalAction::PermitForPrefix { .. },
+                ..
+            },
+            ApprovalOption {
+                action: ApprovalAction::Reject,
+                ..
+            },
+        ]
+    ));
+    assert!(matches!(
+        foreground.presentation,
+        ApprovalPresentation::Command { .. }
+    ));
+
+    let write = collect_approval_request_for_tool(
+        "Write",
+        json!({ "path": "approved.txt", "content": "ok" }),
+        workspace.path(),
+    )
+    .await;
+    assert!(matches!(
+        write.options.as_slice(),
+        [
+            ApprovalOption {
+                action: ApprovalAction::PermitOnce,
+                ..
+            },
+            ApprovalOption {
+                action: ApprovalAction::PermitForSession { .. },
+                ..
+            },
+            ApprovalOption {
+                action: ApprovalAction::Reject,
+                ..
+            },
+        ]
+    ));
+    assert!(matches!(
+        write.presentation,
+        ApprovalPresentation::Tool { .. }
+    ));
+}
+
 #[tokio::test]
 async fn layer1_bash_session_approval_exact_command_only() {
     // Approving `git status` must NOT cover `git log`. Core regression test.
@@ -8217,9 +8818,9 @@ async fn layer1_bash_session_approval_exact_command_only() {
             .expect("workspace root")
             .with_approval_handler({
                 let count = Arc::clone(&approval_count);
-                move |_request| {
+                move |request| {
                     *count.lock().expect("count lock poisoned") += 1;
-                    PermissionApprovalDecision::AllowForSession
+                    permit_for_session(request)
                 }
             }),
         harness.client(),
@@ -8272,7 +8873,7 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
         .with_permission_mode(PermissionMode::Ask)
         .with_workspace_root(workspace.path())
         .expect("workspace root")
-        .with_approval_handler(|_request| PermissionApprovalDecision::AllowForSession);
+        .with_approval_handler(|request| permit_for_session(request));
     let prefix_store = Arc::clone(&config.prefix_approval_rules);
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -8288,8 +8889,12 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
 
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::ApprovalRequested { prefix_rule: Some(rule), .. }
-            if rule.prefix == vec!["python".to_owned()]
+        AgentEvent::ApprovalRequested { request }
+            if request.options.iter().any(|option| matches!(
+                &option.action,
+                ApprovalAction::PermitForPrefix { rule }
+                    if rule.prefix == vec!["python".to_owned()]
+            ))
     )));
     assert!(
         prefix_store
@@ -8328,7 +8933,7 @@ async fn allow_for_prefix_persists_prefix_rule() {
         .with_permission_mode(PermissionMode::Ask)
         .with_workspace_root(workspace.path())
         .expect("workspace root")
-        .with_approval_handler(|_request| PermissionApprovalDecision::AllowForPrefix);
+        .with_approval_handler(|request| permit_for_prefix(request));
     let prefix_store = Arc::clone(&config.prefix_approval_rules);
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -8386,9 +8991,9 @@ async fn layer3_safe_command_auto_approved() {
             .expect("workspace root")
             .with_approval_handler({
                 let count = Arc::clone(&approval_count);
-                move |_request| {
+                move |request| {
                     *count.lock().expect("count lock poisoned") += 1;
-                    PermissionApprovalDecision::AllowOnce
+                    permit_once(request)
                 }
             }),
         harness.client(),
@@ -8438,7 +9043,7 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
             .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace root")
-            .with_approval_handler(|_request| PermissionApprovalDecision::AllowOnce),
+            .with_approval_handler(|request| permit_once(request)),
         harness.client(),
         ToolRegistry::with_builtin_tools(),
     );
@@ -8455,11 +9060,14 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
         1,
         "dangerous commands must prompt"
     );
-    // The approval event must carry NO session_scope (so it can't be cached).
+    // The approval event must offer NO session option (so it can't be cached).
     let has_scope = events.iter().any(|event| {
         matches!(
             event,
-            AgentEvent::ApprovalRequested { session_scope: Some(s), .. } if !s.is_empty()
+            AgentEvent::ApprovalRequested { request }
+                if request.options.iter().any(|option| {
+                    matches!(option.action, ApprovalAction::PermitForSession { .. })
+                })
         )
     });
     assert!(
@@ -9722,7 +10330,7 @@ async fn one_new_scope_defers_every_call_in_a_parallel_mixed_batch() {
                     .lock()
                     .expect("approvals lock")
                     .push(request.clone());
-                PermissionApprovalDecision::AllowOnce
+                permit_once(request)
             }
         });
     let runtime =
@@ -9881,11 +10489,11 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
         )]),
         end_turn_events("done"),
     ]);
-    let (decision_sender, decision_receiver) = oneshot::channel::<PermissionApprovalDecision>();
+    let (decision_sender, decision_receiver) = oneshot::channel::<ApprovalResponse>();
     let decision_receiver = Arc::new(Mutex::new(Some(decision_receiver)));
     let config = preflight_config(&fixture, &second_harness)
         .with_permission_mode(PermissionMode::Ask)
-        .with_async_approval_handler(move |_request| {
+        .with_async_approval_handler(move |request| {
             let receiver = decision_receiver
                 .lock()
                 .expect("decision receiver lock")
@@ -9920,7 +10528,11 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
     )
     .expect("mutate AGENTS.md");
     decision_sender
-        .send(PermissionApprovalDecision::AllowOnce)
+        .send(ApprovalResponse::Selected {
+            request_id: "write_1".to_owned(),
+            action: ApprovalAction::PermitOnce,
+            feedback: None,
+        })
         .expect("send decision");
     while let Some(event) = stream.next().await {
         events.push(event.expect("event ok"));

@@ -18,10 +18,65 @@ use neo_agent_core::session::{
     session_state_path,
 };
 use neo_agent_core::{
-    AgentContext, AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content,
+    AgentContext, AgentEvent, AgentMessage, AgentToolCall, ApprovalAction, ApprovalOption,
+    ApprovalPresentation, ApprovalRequest, ApprovalResolution, CompactionSummary, Content,
     ContextWindowSource, PermissionOperation, StopReason, TodoEventData,
 };
 use serde_json::json;
+
+fn background_bash_request() -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: "background-bash".to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::Reject,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn jsonl_session_round_trips_requested_and_resolved_approval() {
+    let request = background_bash_request();
+    let requested = AgentEvent::ApprovalRequested {
+        request: request.clone(),
+    };
+    let resolved = AgentEvent::ApprovalResolved {
+        turn: 1,
+        request_id: request.id.clone(),
+        resolution: ApprovalResolution::Selected {
+            action: ApprovalAction::Reject,
+            label: "Reject".to_owned(),
+            feedback: None,
+        },
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    writer.append(&requested).await.expect("append request");
+    writer.append(&resolved).await.expect("append resolution");
+    writer.flush().await.expect("flush");
+    assert_eq!(
+        JsonlSessionReader::read_all(&path).await.expect("read"),
+        vec![requested, resolved]
+    );
+}
 
 #[tokio::test]
 async fn jsonl_session_appends_reads_and_replays_events() {
@@ -112,14 +167,27 @@ async fn jsonl_session_preserves_newline_when_large_unflushed_event_is_followed_
             .expect("create session");
         writer
             .append(&AgentEvent::ApprovalRequested {
-                turn: 1,
-                id: "call_approval".to_owned(),
-                operation: PermissionOperation::FileWrite,
-                subject: "docs/large.md".to_owned(),
-                arguments: json!({ "content": "x".repeat(16 * 1024) }),
-                session_scope: None,
-                prefix_rule: None,
-                suggestions: Vec::new(),
+                request: ApprovalRequest {
+                    turn: 1,
+                    id: "call_approval".to_owned(),
+                    operation: PermissionOperation::FileWrite,
+                    presentation: ApprovalPresentation::Tool {
+                        title: "Write file?".to_owned(),
+                        details: vec!["docs/large.md".to_owned(), "x".repeat(16 * 1024)],
+                    },
+                    options: vec![
+                        ApprovalOption {
+                            label: "Approve once".to_owned(),
+                            description: None,
+                            action: ApprovalAction::PermitOnce,
+                        },
+                        ApprovalOption {
+                            label: "Reject".to_owned(),
+                            description: None,
+                            action: ApprovalAction::Reject,
+                        },
+                    ],
+                },
             })
             .await
             .expect("append large approval");
@@ -154,14 +222,27 @@ async fn jsonl_session_reads_concatenated_records_from_interrupted_append() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
     let approval = AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "call_approval".to_owned(),
-        operation: PermissionOperation::FileWrite,
-        subject: "docs/large.md".to_owned(),
-        arguments: json!({ "content": "x".repeat(16 * 1024) }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
+        request: ApprovalRequest {
+            turn: 1,
+            id: "call_approval".to_owned(),
+            operation: PermissionOperation::FileWrite,
+            presentation: ApprovalPresentation::Tool {
+                title: "Write file?".to_owned(),
+                details: vec!["docs/large.md".to_owned(), "x".repeat(16 * 1024)],
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve once".to_owned(),
+                    description: None,
+                    action: ApprovalAction::PermitOnce,
+                },
+                ApprovalOption {
+                    label: "Reject".to_owned(),
+                    description: None,
+                    action: ApprovalAction::Reject,
+                },
+            ],
+        },
     };
     let continued = AgentEvent::MessageAppended {
         message: AgentMessage::user_text("continued"),

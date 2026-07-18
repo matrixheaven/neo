@@ -111,6 +111,11 @@ impl SessionEventPersistence {
             // Live queue rank/wait ticks must not land in session JSONL.
             AgentEvent::ToolExecutionQueueUpdated { .. }
             | AgentEvent::ShellCommandQueueUpdated { .. } => Vec::new(),
+            // Durable transcript-only approval lifecycle. Never model messages;
+            // never rehydrated into PendingApproval or grants on resume.
+            AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {
+                vec![event.clone()]
+            }
             // The catch-all also covers `AgentEvent::InstructionEpoch`: the
             // epoch is the single persisted source for instruction model
             // content and transcript metadata, persisted exactly once and

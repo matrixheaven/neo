@@ -1,8 +1,13 @@
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
+    PermissionOperation,
+};
+use neo_tui::input::{InputEvent, KeyId, KeybindingAction};
 use neo_tui::primitive::theme::ChromeMode;
 use neo_tui::shell::{
-    ApprovalChoice, CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState,
-    NeoChromeState, Overlay, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
-    SessionPickerScope, SessionPickerState, StreamUpdate, ToolStatusKind,
+    CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState, NeoChromeState, Overlay,
+    OverlayKind, PickerItem, PromptEdit, SessionPickerItem, SessionPickerScope, SessionPickerState,
+    StreamUpdate, ToolStatusKind,
 };
 use neo_tui::tasks_browser::{
     TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,
@@ -13,18 +18,6 @@ use neo_tui::terminal_image::{
 use neo_tui::transcript::{TranscriptImageAttachment, TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 use std::time::Instant;
-
-fn write_session_scope() -> neo_agent_core::SessionApprovalScope {
-    neo_agent_core::SessionApprovalScope {
-        keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
-            workspace: "/tmp/neo-ws".to_owned(),
-            path: "/tmp/neo-ws/approved.txt".to_owned(),
-            operation: neo_agent_core::FileWriteApprovalOperation::Write,
-        }],
-        label: "Approve writes to this file for this session".to_owned(),
-        detail: "/tmp/neo-ws/approved.txt".to_owned(),
-    }
-}
 
 fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
     render_chrome_lines(app, usize::from(width), 30)
@@ -539,8 +532,256 @@ fn app_shell_footer_keeps_context_usage_within_narrow_width() {
     );
 }
 
+fn background_request() -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: "background-bash".to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::Reject,
+            },
+        ],
+    }
+}
+
+fn plan_revision_request() -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: PermissionOperation::PlanTransition,
+        presentation: ApprovalPresentation::Plan {
+            title: "Plan Review".to_owned(),
+            path: None,
+            markdown: "Ready?".to_owned(),
+            summary: Some("Ready?".to_owned()),
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve".to_owned(),
+                description: None,
+                action: ApprovalAction::ApprovePlan { selection: None },
+            },
+            ApprovalOption {
+                label: "Suggestion: Keep 85% window".to_owned(),
+                description: Some("Keep compaction at 85%.".to_owned()),
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: Some("Keep compaction at 85%.".to_owned()),
+                },
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::RejectPlan,
+            },
+            ApprovalOption {
+                label: "Reject with feedback".to_owned(),
+                description: None,
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: None,
+                },
+            },
+        ],
+    }
+}
+
+fn complete_plan_revision(app: &mut NeoChromeState) -> ApprovalResponse {
+    // First confirm enters editing with preset.
+    assert!(
+        app.handle_pending_approval_input(InputEvent::Submit)
+            .is_none(),
+        "first Enter on revision enters feedback editing"
+    );
+    let (_, _, feedback, collecting) = app.approval_selection().expect("pending");
+    assert!(collecting);
+    assert_eq!(feedback, "Keep compaction at 85%.");
+    // Edit the preset, then submit.
+    app.handle_pending_approval_input(InputEvent::Insert(' '));
+    app.handle_pending_approval_input(InputEvent::Insert('x'));
+    app.handle_pending_approval_input(InputEvent::Submit)
+        .expect("Enter after feedback submits")
+}
+
 #[test]
-fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
+fn approval_selection_returns_the_visible_option_action() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.push_approval(background_request());
+    app.handle_pending_approval_input(InputEvent::Key(KeyId::new("down").unwrap()));
+
+    let rendered = render_app(80, &app).join("\n");
+    assert!(rendered.contains("2. Reject"), "frame: {rendered}");
+    assert_eq!(
+        app.approval_selection().map(|(_, selected, ..)| selected),
+        Some(1)
+    );
+
+    let response = app
+        .handle_pending_approval_input(InputEvent::Key(KeyId::new("enter").unwrap()))
+        .expect("Enter resolves visible Reject");
+    assert!(matches!(
+        response,
+        ApprovalResponse::Selected {
+            action: ApprovalAction::Reject,
+            feedback: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn approval_digits_while_editing_feedback_do_not_reselect_options() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    // Two adjacent revise options so arrow can retarget the editor without
+    // landing on a non-revise option in between.
+    app.push_approval(ApprovalRequest {
+        turn: 1,
+        id: "exit-plan-digits".to_owned(),
+        operation: PermissionOperation::PlanTransition,
+        presentation: ApprovalPresentation::Plan {
+            title: "Plan Review".to_owned(),
+            path: None,
+            markdown: "Ready?".to_owned(),
+            summary: Some("Ready?".to_owned()),
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve".to_owned(),
+                description: None,
+                action: ApprovalAction::ApprovePlan { selection: None },
+            },
+            ApprovalOption {
+                label: "Suggestion A".to_owned(),
+                description: None,
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: Some("Keep 85%.".to_owned()),
+                },
+            },
+            ApprovalOption {
+                label: "Suggestion B".to_owned(),
+                description: None,
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: Some("Keep 70%.".to_owned()),
+                },
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::RejectPlan,
+            },
+        ],
+    });
+
+    // Select suggestion A (index 1) and enter feedback editing.
+    assert!(app.choose_approval_number(2).is_none());
+    let (_, selected, feedback, collecting) = app.approval_selection().expect("pending");
+    assert_eq!(selected, 1);
+    assert!(collecting);
+    assert_eq!(feedback, "Keep 85%.");
+
+    // Digit that is a valid option index must append to feedback, not re-select
+    // or submit.
+    assert!(
+        app.handle_pending_approval_input(InputEvent::Insert('3'))
+            .is_none(),
+        "digit while editing must not resolve approval"
+    );
+    let (_, selected, feedback, collecting) = app.approval_selection().expect("still pending");
+    assert_eq!(
+        selected, 1,
+        "selection must not change on digit while editing"
+    );
+    assert!(collecting);
+    assert_eq!(feedback, "Keep 85%.3");
+
+    // Arrow while collecting onto another revise re-seeds that option's preset.
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown));
+    let (_, selected, feedback, collecting) = app.approval_selection().expect("pending");
+    assert_eq!(selected, 2);
+    assert!(
+        collecting,
+        "landing on another revise keeps the editor open"
+    );
+    assert_eq!(
+        feedback, "Keep 70%.",
+        "must re-seed from the newly selected revise preset, not carry prior text"
+    );
+
+    // Arrow onto a non-revise option exits the editor.
+    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown));
+    let (_, selected, feedback, collecting) = app.approval_selection().expect("pending");
+    assert_eq!(selected, 3);
+    assert!(
+        !collecting,
+        "non-revise selection must exit feedback editing"
+    );
+    assert!(feedback.is_empty());
+}
+
+#[test]
+fn plan_revision_arrow_and_number_share_one_editor_path() {
+    // Arrow path.
+    let mut arrow_app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    arrow_app.push_approval(plan_revision_request());
+    arrow_app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown));
+    assert!(matches!(
+        arrow_app.approval_selected_action(),
+        Some(ApprovalAction::RevisePlan {
+            preset_feedback: Some(text)
+        }) if text == "Keep compaction at 85%."
+    ));
+    assert!(
+        !render_app(100, &arrow_app)
+            .iter()
+            .any(|line| line.contains("feedback:")),
+        "navigation alone must not enter feedback editing"
+    );
+    let arrow_response = complete_plan_revision(&mut arrow_app);
+
+    // Number path in a fresh app.
+    let mut number_app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    number_app.push_approval(plan_revision_request());
+    assert!(
+        number_app.choose_approval_number(2).is_none(),
+        "number selects revision and enters editing without submitting"
+    );
+    let (_, selected, feedback, collecting) = number_app.approval_selection().expect("pending");
+    assert_eq!(selected, 1);
+    assert!(collecting);
+    assert_eq!(feedback, "Keep compaction at 85%.");
+    // Allow the same edit as the arrow path, then submit.
+    number_app.handle_pending_approval_input(InputEvent::Insert(' '));
+    number_app.handle_pending_approval_input(InputEvent::Insert('x'));
+    let number_response = number_app
+        .handle_pending_approval_input(InputEvent::Submit)
+        .expect("number path submits after edit");
+
+    assert_eq!(arrow_response, number_response);
+    assert!(matches!(
+        arrow_response,
+        ApprovalResponse::Selected {
+            action: ApprovalAction::RevisePlan {
+                preset_feedback: Some(ref preset)
+            },
+            feedback: Some(ref text),
+            ..
+        } if preset == "Keep compaction at 85%." && text == "Keep compaction at 85%. x"
+    ));
+}
+
+#[test]
+fn event_approval_requested_does_not_open_live_modal() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.push_overlay(Overlay::new(
         "commands",
@@ -553,404 +794,44 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
     assert!(app.focused_overlay().is_some());
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 7,
-        id: "approval-7".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "shell.run".to_owned(),
-        arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: background_request(),
     });
 
-    assert_eq!(app.mode(), ChromeMode::Approval);
-    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Approve));
-    assert!(app.focused_overlay().is_none());
-}
-
-#[test]
-fn plan_review_modal_offers_only_approve_reject_revise() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-    assert!(app.approval_is_pending());
-
-    // Number 1 = Approve confirms immediately.
-    let result = app
-        .choose_approval_number(1)
-        .expect("plan review option 1 (Approve) should confirm");
-    assert_eq!(result.request_id, "exit-plan-1");
-    assert_eq!(result.choice, ApprovalChoice::Approve);
+    // Observable event alone must not open the live chrome modal.
     assert!(!app.approval_is_pending());
+    assert!(app.focused_overlay().is_some());
+    assert_ne!(app.mode(), ChromeMode::Approval);
 }
 
 #[test]
-fn plan_review_number_two_is_reject_in_three_option_modal() {
+fn push_approval_stores_request_and_blocks_prompt() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // In the 3-option plan review modal, number 2 = Reject (no feedback).
-    let result = app
-        .choose_approval_number(2)
-        .expect("plan review option 2 (Reject) should confirm");
-
-    assert_eq!(result.request_id, "exit-plan-1");
-    assert_eq!(result.choice, ApprovalChoice::Deny);
-    assert!(
-        result.feedback.is_none(),
-        "Reject must not collect feedback"
-    );
-}
-
-#[test]
-fn plan_review_number_three_is_revise_and_collects_feedback() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // Number 3 = Revise does NOT confirm yet; it enters feedback collection.
-    let pre = app.choose_approval_number(3);
-    assert!(
-        pre.is_none(),
-        "Revise should enter feedback collection, not confirm"
-    );
-    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
-
-    app.handle_pending_approval_input(neo_tui::input::InputEvent::Insert('r'));
-    let result = app
-        .handle_pending_approval_input(neo_tui::input::InputEvent::Submit)
-        .expect("confirming revise feedback returns a result");
-
-    assert_eq!(result.request_id, "exit-plan-1");
-    assert_eq!(result.choice, ApprovalChoice::Revise);
-    assert_eq!(result.feedback.as_deref(), Some("r"));
-}
-
-#[test]
-fn arrow_nav_to_revise_waits_for_enter_before_collecting_feedback() {
-    use neo_tui::input::{InputEvent, KeybindingAction};
-
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // Options: [0] Approve, [1] Reject, [2] Reject with feedback.
-    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [1] Reject
-    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → [2] Revise
-    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
-    assert!(
-        !render_app(100, &app)
-            .iter()
-            .any(|line| line.contains("feedback:")),
-        "selecting Revise should not render feedback input before Enter"
-    );
-
-    app.handle_pending_approval_input(InputEvent::Insert('x'));
-    let (_, _, feedback, _, collecting_feedback) =
-        app.approval_selection().expect("approval selection");
-    assert_eq!(
-        feedback, "",
-        "typing before confirming Revise must not start feedback input"
-    );
-    assert!(!collecting_feedback);
-
-    // First Enter on Revise should enter feedback input mode, not submit.
-    let result = app.handle_pending_approval_input(InputEvent::Submit);
-    assert!(
-        result.is_none(),
-        "first Enter on Revise should enter feedback collection, not submit"
-    );
-    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
-    assert!(
-        app.approval_selection()
-            .is_some_and(|(_, _, _, _, collecting)| collecting),
-        "Enter on Revise should activate feedback collection"
-    );
-
-    // Type feedback.
-    app.handle_pending_approval_input(InputEvent::Insert('f'));
-    app.handle_pending_approval_input(InputEvent::Insert('x'));
-
-    // Now Enter should submit with the feedback.
-    let result = app
-        .handle_pending_approval_input(InputEvent::Submit)
-        .expect("Enter after typing feedback should submit");
-    assert_eq!(result.request_id, "exit-plan-1");
-    assert_eq!(result.choice, ApprovalChoice::Revise);
-    assert_eq!(result.feedback.as_deref(), Some("fx"));
-}
-
-#[test]
-fn plan_review_with_options_aligns_chrome_and_transcript_revise_index() {
-    use neo_tui::input::{InputEvent, KeybindingAction};
-
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({
-            "plan_summary": "Ready",
-            "options": [
-                {"label": "Approach A", "description": "Simple"},
-                {"label": "Approach B", "description": "Fast"},
-            ]
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // Chrome has 4 options: [0] A, [1] B, [2] Reject, [3] Revise.
-    // Navigate to Revise (index 3).
-    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 1
-    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 2
-    app.handle_pending_approval_input(InputEvent::Action(KeybindingAction::SelectDown)); // → 3
-    assert_eq!(
-        app.approval_choice(),
-        Some(ApprovalChoice::Revise),
-        "Chrome should be on Revise at index 3"
-    );
-
-    assert!(
-        app.handle_pending_approval_input(InputEvent::Submit)
-            .is_none(),
-        "first Enter on Revise should enter feedback collection"
-    );
-
-    // Typing works after the user explicitly enters feedback mode.
-    app.handle_pending_approval_input(InputEvent::Insert('f'));
-    app.handle_pending_approval_input(InputEvent::Insert('x'));
-
-    // Verify feedback was collected.
-    let result = app
-        .handle_pending_approval_input(InputEvent::Submit)
-        .expect("Submit after typing should produce a result");
-    assert_eq!(result.choice, ApprovalChoice::Revise);
-    assert_eq!(result.feedback.as_deref(), Some("fx"));
-}
-
-#[test]
-fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // The plan review modal has only 3 options, so number 4 is out of range and
-    // must not confirm. This locks the 3-option layout (a 4-option modal would
-    // let number 4 select Revise).
-    let result = app.choose_approval_number(4);
-    assert!(
-        result.is_none(),
-        "number 4 must be out of range in the 3-option plan review modal"
-    );
-}
-
-#[test]
-fn plan_review_renders_model_options_as_picker_choices() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({
-            "plan_summary": "Two approaches",
-            "options": [
-                {"label": "Option A", "description": "fast"},
-                {"label": "Option B", "description": "safe"},
-            ],
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
+    app.push_approval(background_request());
     assert!(app.approval_is_pending());
-
-    // Layout: 1=Approach: Option A, 2=Approach: Option B, 3=Reject, 4=Revise.
-    // Picking number 2 approves model option "Option B" and surfaces its label.
-    let result = app
-        .choose_approval_number(2)
-        .expect("option B should confirm as an approve choice");
-    assert_eq!(result.request_id, "exit-plan-1");
-    assert_eq!(result.choice, ApprovalChoice::Approve);
+    assert_eq!(app.mode(), ChromeMode::Approval);
+    assert!(app.focused_overlay_blocks_prompt());
     assert_eq!(
-        result.selected_option_label.as_deref(),
-        Some("Option B"),
-        "approving a model option must surface its label for the runtime"
-    );
-    assert!(
-        result.feedback.is_none(),
-        "approving an option must not collect feedback"
+        app.pending_approval()
+            .map(|modal| modal.request.options.len()),
+        Some(2)
     );
 }
 
 #[test]
-fn plan_review_approve_option_a_surfaces_its_label() {
+fn escape_cancels_with_escape_reason() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({
-            "plan_summary": "Two approaches",
-            "options": [
-                {"label": "Option A", "description": "fast"},
-                {"label": "Option B", "description": "safe"},
-            ],
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // Number 1 is the first model option (Option A).
-    let result = app
-        .choose_approval_number(1)
-        .expect("option A should confirm");
-    assert_eq!(result.choice, ApprovalChoice::Approve);
-    assert_eq!(result.selected_option_label.as_deref(), Some("Option A"));
-}
-
-#[test]
-fn plan_review_reject_does_not_surface_a_selected_label() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({
-            "plan_summary": "Two approaches",
-            "options": [
-                {"label": "Option A", "description": "fast"},
-                {"label": "Option B", "description": "safe"},
-            ],
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    // Reject is now number 3 in the 5-option layout (A, B, Reject, Revise).
-    let result = app
-        .choose_approval_number(3)
-        .expect("Reject should confirm");
-    assert_eq!(result.choice, ApprovalChoice::Deny);
-    assert!(
-        result.selected_option_label.is_none(),
-        "Reject must not surface a model option label"
-    );
-}
-
-#[test]
-fn scope_less_tool_approval_omits_approve_for_session_option() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "shell-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "shell.run".to_owned(),
-        arguments: serde_json::json!({ "command": "cargo test" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    let result = app
-        .choose_approval_number(2)
-        .expect("tool approval option 2 should confirm");
-    assert_eq!(result.request_id, "shell-1");
-    assert_eq!(result.choice, ApprovalChoice::Deny);
-}
-
-#[test]
-fn scoped_tool_approval_number_two_is_approve_for_session() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "write-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::FileWrite,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({ "path": "approved.txt" }),
-        session_scope: Some(write_session_scope()),
-        prefix_rule: None,
-        suggestions: vec![],
-    });
-
-    let result = app
-        .choose_approval_number(2)
-        .expect("scoped approval option 2 should confirm");
-    assert_eq!(result.request_id, "write-1");
-    assert_eq!(result.choice, ApprovalChoice::AlwaysApprove);
-    assert!(!result.picked_prefix);
-}
-
-#[test]
-fn prefix_tool_approval_marks_prefix_choice() {
-    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "shell-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "cargo test".to_owned(),
-        arguments: serde_json::json!({ "command": "cargo test" }),
-        session_scope: Some(write_session_scope()),
-        prefix_rule: Some(neo_agent_core::PrefixApprovalRule {
-            prefix: vec!["cargo".to_owned(), "test".to_owned()],
-            label: "cargo test".to_owned(),
-        }),
-        suggestions: vec![],
-    });
-
-    let result = app
-        .choose_approval_number(3)
-        .expect("prefix approval option should confirm");
-    assert_eq!(result.choice, ApprovalChoice::AlwaysApprove);
-    assert!(result.picked_prefix);
+    app.push_approval(background_request());
+    let response = app
+        .handle_pending_approval_input(InputEvent::Cancel)
+        .expect("escape cancels");
+    assert!(matches!(
+        response,
+        ApprovalResponse::Cancelled {
+            reason: neo_agent_core::ApprovalCancelReason::Escape,
+            ..
+        }
+    ));
+    assert!(!app.approval_is_pending());
 }
 
 #[test]
@@ -994,16 +875,7 @@ fn blocking_question_dialog_hides_composer_prompt() {
 fn pending_approval_hides_composer_prompt() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "approval-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Bash".to_owned(),
-        arguments: serde_json::json!({ "command": "echo hi" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
-    });
+    app.push_approval(background_request());
 
     let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
     let (lines, cursor) = tui.render_frame(80, 20);

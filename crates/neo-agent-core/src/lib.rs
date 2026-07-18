@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod compaction;
 pub mod events;
 pub mod goal;
@@ -17,6 +18,10 @@ pub mod tools;
 pub mod workflow;
 pub mod workspace_policy;
 
+pub use approval::{
+    ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation,
+    ApprovalProtocolError, ApprovalRequest, ApprovalResolution, ApprovalResponse, PlanSelection,
+};
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,
     generate_compaction_summary, render_messages_to_text,
@@ -25,8 +30,8 @@ pub use events::*;
 pub use messages::*;
 pub use mode::*;
 pub use permissions::{
-    ApprovalRuleStore, FileWriteApprovalOperation, PermissionApprovalDecision, PermissionMode,
-    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope, ToolAccess,
+    ApprovalRuleStore, FileWriteApprovalOperation, PermissionMode, PermissionOperation,
+    PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope, ToolAccess,
     command_might_be_dangerous, is_known_safe_command,
 };
 pub use runtime::*;

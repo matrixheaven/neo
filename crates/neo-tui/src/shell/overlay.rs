@@ -1,4 +1,3 @@
-use super::approval::ApprovalRequestModal;
 use super::command_palette::CommandPaletteState;
 use super::dialog_dispatch::handle_dialog_selection;
 use super::pickers::{ModelPickerState, PromptCompletionState};
@@ -49,7 +48,6 @@ impl Overlay {
             return;
         }
         match &mut self.kind {
-            OverlayKind::Approval(request) => request.move_down(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_down(),
             kind => handle_dialog_selection(kind, KeybindingAction::SelectDown),
         }
@@ -61,7 +59,6 @@ impl Overlay {
             return;
         }
         match &mut self.kind {
-            OverlayKind::Approval(request) => request.move_up(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_up(),
             kind => handle_dialog_selection(kind, KeybindingAction::SelectUp),
         }
@@ -129,7 +126,6 @@ pub enum OverlayKind {
     SessionPicker(SessionPickerState),
     ModelPicker(ModelPickerState),
     PromptCompletion(PromptCompletionState),
-    Approval(ApprovalRequestModal),
     QuestionDialog(QuestionStateMachine),
     Message(String),
     // Neo rich dialogs
@@ -240,7 +236,7 @@ impl OverlayKind {
     fn compact_height(&self) -> Option<u16> {
         match self {
             Self::CommandPalette(_) => Some(12),
-            Self::PromptCompletion(_) | Self::Approval(_) => Some(8),
+            Self::PromptCompletion(_) => Some(8),
             Self::Message(_) => Some(3),
             _ => None,
         }

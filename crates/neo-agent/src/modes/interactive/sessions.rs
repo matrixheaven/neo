@@ -175,13 +175,11 @@ impl InteractiveController {
     fn reset_for_new_session(&mut self) {
         self.active_turn = None;
         self.pending_approvals.clear();
-        self.resolved_approvals.clear();
         self.pending_questions.clear();
         self.pending_question_prompts.clear();
         self.pending_background_question_followups.clear();
         self.pending_skill_context = None;
         self.pending_skill_user_message_to_suppress = None;
-        self.pending_plan_review_feedback.clear();
         self.clear_pending_exit_confirmation();
         self.close_inline_prompt_completion();
         self.tui.chrome_mut().clear_interrupted_turn_state();

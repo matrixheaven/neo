@@ -64,7 +64,7 @@ The permission mode decides whether Neo asks you to confirm each tool call. Swit
 | --- | --- | --- |
 | **Ask** (default) | — | Commands, edits, and other risky actions ask first; read-only/search tools run directly |
 | **Auto** | `--auto` | Unattended execution: tool actions are auto-approved and `AskUserQuestion` is unavailable during the running turn |
-| **YOLO** | `--yolo` | Auto-approves tool actions and plan transitions, but Neo may still actively ask you questions when needed |
+| **YOLO** | `--yolo` | Auto-approves ordinary tool actions. PlanMode and GoalMode reviews are still shown (same as Ask). Neo may still ask questions when needed |
 
 > `--auto` and `--yolo` are mutually exclusive. Auto is suited to scripted/headless flows; YOLO fits workflows where you want to let go but keep the option for interactive questions.
 
@@ -74,23 +74,33 @@ Inside the TUI you can switch at any time with `/ask` `/auto` `/yolo`, or cycle 
 
 ## Approval dialog
 
-When Neo needs to execute a tool call that requires approval, an approval dialog appears. Options:
+When Neo needs to execute a tool call that requires approval, an approval dialog appears. **Options are dynamic**: the runtime only offers actions it can honor for that call. Labels are presentation-only; selection submits the typed action from the request.
+
+### Ordinary Tool / Shell
 
 | Option | Meaning |
 | --- | --- |
-| **Approve** | Allow this one time |
-| **Always Approve** (exact) | Auto-approve this exact command for the rest of the session |
-| **Always Approve** (prefix) | Auto-approve any command with the same prefix this session |
+| **Approve once** | Allow this one time |
+| **Session grant** (when offered) | Auto-approve matching operations for the rest of the session |
+| **Prefix grant** (when offered) | Auto-approve shell commands sharing a safe token prefix |
 | **Reject** | Deny this call; Neo receives the rejection signal and adapts |
-| **Revise** | Reject with revision feedback; Neo reads your note and retries |
+
+Ordinary Tool/Shell approvals **do not offer revision feedback**. Session and prefix grants appear only when a safe reusable scope exists.
+
+**Background Bash** never offers a reusable grant — only one-shot Approve and Reject.
+
+### Plan / Goal review
+
+Plan and Goal reviews use the same dialog chrome with their own action set (see [Plan mode](plan-mode.md) and [Goal mode](goals.md)). **Ask** and **Yolo** show these reviews; **Auto** skips them.
 
 Keys:
 
 | Key | Action |
 | --- | --- |
 | `↑` `↓` / `PageUp` `PageDown` | Navigate between options |
-| `Enter` | Confirm the selected option |
-| `Esc` / `Ctrl+C` | Reject and cancel (also interrupts any running turn) |
+| `Enter` | Confirm the selected option (revision actions then collect non-empty feedback) |
+| Number keys | Jump to the N-th visible option |
+| `Esc` / `Ctrl+C` | Cancel the request (also interrupts any running turn) |
 
 ## Streaming output
 

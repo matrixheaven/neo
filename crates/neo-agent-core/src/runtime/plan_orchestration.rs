@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use super::config::AgentConfig;
 use super::events::EventEmitter;
-use crate::{AgentEvent, AgentToolCall, ToolResult};
+use super::tool_arguments::ApprovalExecutionContext;
+use crate::{AgentEvent, AgentToolCall, PlanSelection, ToolResult};
 
 pub(super) fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
     config
@@ -11,9 +12,16 @@ pub(super) fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
         .map(crate::session::main_agent_plans_dir)
 }
 
-pub(super) fn attach_exit_plan_details(
+/// Attach plan content/path details and, when present, the typed plan-selection
+/// decoration carried on `PreparedToolCall.approval`.
+///
+/// `approvals` is batch-order parallel to `tool_results` (same index as the
+/// authorized prepared call). Selection is read directly from that field —
+/// never looked up by tool id.
+pub(super) fn attach_exit_plan_details<'a>(
     config: &AgentConfig,
     tool_results: &mut [(AgentToolCall, ToolResult)],
+    approvals: impl IntoIterator<Item = Option<&'a ApprovalExecutionContext>>,
 ) {
     let pm = config.plan_mode.read().unwrap();
     if !pm.is_active() {
@@ -22,37 +30,42 @@ pub(super) fn attach_exit_plan_details(
     let Some(plan_data) = pm.data().ok().flatten() else {
         return;
     };
-    let mut selected_labels = config.plan_review_selected_label.lock().ok();
-    for (tool_call, result) in tool_results {
-        if tool_call.name.as_ref() == "ExitPlanMode" {
-            if result.details.is_none() {
-                result.details = Some(serde_json::json!({
-                    "plan_content": plan_data.content,
-                    "plan_path": plan_data.path.display().to_string(),
-                }));
-            }
-            // When the user approved a specific model-supplied option from
-            // the plan-review picker, prefix the tool result so the model runs
-            // only the selected branch. The label is consumed once.
-            if !result.is_error
-                && let Some(labels) = selected_labels.as_mut()
-                && let Some(label) = labels.remove(tool_call.id.as_ref())
-                && !label.trim().is_empty()
-            {
-                result.content = format!(
-                    "Selected approach: {label}\n\
-                     Execute ONLY the selected approach. Do not execute any unselected alternatives.\n\n{}",
-                    result.content
-                );
-                if let Some(details) = result.details.as_mut()
-                    && let Some(obj) = details.as_object_mut()
-                {
-                    obj.insert(
-                        "plan_selected_label".to_string(),
-                        serde_json::Value::String(label),
-                    );
-                }
-            }
+    for ((tool_call, result), approval) in tool_results.iter_mut().zip(approvals) {
+        if tool_call.name.as_ref() != "ExitPlanMode" {
+            continue;
+        }
+        if result.details.is_none() {
+            result.details = Some(serde_json::json!({
+                "plan_content": plan_data.content,
+                "plan_path": plan_data.path.display().to_string(),
+            }));
+        }
+        if result.is_error {
+            continue;
+        }
+        let Some(ApprovalExecutionContext::Plan { selection }) = approval else {
+            continue;
+        };
+        let Some(PlanSelection { label, .. }) = selection else {
+            continue;
+        };
+        if label.trim().is_empty() {
+            continue;
+        }
+        result.content = format!(
+            "Selected approach: {label}\n\
+             Execute ONLY the selected approach. Do not execute any unselected alternatives.\n\n{}",
+            result.content
+        );
+        if let Some(details) = result
+            .details
+            .get_or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+        {
+            details.insert(
+                "plan_selected_label".to_owned(),
+                serde_json::Value::String(label.clone()),
+            );
         }
     }
 }

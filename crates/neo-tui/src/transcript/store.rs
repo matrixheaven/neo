@@ -531,7 +531,7 @@ impl TranscriptStore {
         mutate: impl FnOnce(&mut ApprovalPromptData) -> bool,
     ) -> bool {
         let index = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.id == id),
+            |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.id() == id),
         );
         let Some(index) = index else {
             return false;
@@ -553,7 +553,7 @@ impl TranscriptStore {
     #[must_use]
     pub fn approval(&self, id: &str) -> Option<&ApprovalPromptData> {
         self.entries.iter().find_map(|entry| match entry {
-            TranscriptEntry::ApprovalPrompt(data) if data.id == id => Some(data),
+            TranscriptEntry::ApprovalPrompt(data) if data.id() == id => Some(data),
             _ => None,
         })
     }
@@ -647,7 +647,7 @@ impl TranscriptStore {
             .entries
             .iter()
             .rposition(
-                |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == data.id),
+                |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == data.id()),
             )
             .map(|index| index + 1);
         if let Some(index) = insert_at {

@@ -1,8 +1,7 @@
 use std::borrow::Borrow;
 
 use neo_agent_core::{
-    AgentEvent, AgentToolCall, PermissionOperation, PlanSuggestion, ShellCommandOrigin,
-    ShellCommandOutcome, ToolResult,
+    AgentEvent, AgentToolCall, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
 };
 
 use crate::shell::ToolStatusKind;
@@ -337,43 +336,22 @@ impl TranscriptPane {
                 }
                 true
             }
-            AgentEvent::ApprovalRequested {
-                id,
-                operation,
-                subject,
-                arguments,
-                session_scope,
-                prefix_rule,
-                suggestions,
+            AgentEvent::ApprovalRequested { request, .. } => {
+                // Upsert the request exactly — never reconstruct options from
+                // raw arguments or append session/prefix choices. Live chrome
+                // is opened only by the PendingApproval channel, never here.
+                self.upsert_approval(request.clone());
+                self.mark_dirty();
+                true
+            }
+            AgentEvent::ApprovalResolved {
+                request_id,
+                resolution,
                 ..
             } => {
-                let mut session_label = session_scope
-                    .as_ref()
-                    .filter(|scope| !scope.is_empty())
-                    .map(|scope| scope.label.clone());
-                // Tool and shell approvals always offer a session-approval option,
-                // even when no explicit session scope was derived. Use the default
-                // label so the modal keeps its four-option layout.
-                if session_label.is_none()
-                    && matches!(
-                        operation,
-                        PermissionOperation::Tool | PermissionOperation::Shell
-                    )
-                {
-                    session_label = Some("Approve for this session".to_owned());
-                }
-                let prefix_label = prefix_rule
-                    .as_ref()
-                    .map(|rule| format!("Approve commands starting with {}", rule.label));
-                self.request_approval(
-                    id.clone(),
-                    *operation,
-                    subject,
-                    arguments,
-                    session_label,
-                    prefix_label,
-                    suggestions.clone(),
-                );
+                // Resolve the matching card by request id. Canonical label and
+                // action come from the event; interactive feedback is cleared.
+                self.resolve_approval(request_id, resolution.clone());
                 true
             }
             AgentEvent::ToolExecutionUpdate {
@@ -752,29 +730,6 @@ impl TranscriptPane {
             return;
         }
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Queued);
-        self.mark_dirty();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn request_approval(
-        &mut self,
-        id: String,
-        operation: PermissionOperation,
-        subject: &str,
-        arguments: &serde_json::Value,
-        session_option_label: Option<String>,
-        prefix_option_label: Option<String>,
-        suggestions: Vec<PlanSuggestion>,
-    ) {
-        self.upsert_approval(
-            id,
-            operation,
-            subject,
-            arguments,
-            session_option_label,
-            prefix_option_label,
-            suggestions,
-        );
         self.mark_dirty();
     }
 

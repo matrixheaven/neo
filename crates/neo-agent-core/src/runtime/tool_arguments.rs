@@ -12,8 +12,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::tools::normalize_path;
-use crate::{AgentToolCall, ToolResult};
+use crate::{AgentToolCall, PlanSelection, ToolResult};
 use neo_ai::ToolSpec;
+
+/// Runtime-only execution metadata carried from a validated approval into tool
+/// dispatch. Ordinary grants leave it as `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ApprovalExecutionContext {
+    Plan { selection: Option<PlanSelection> },
+    Goal,
+}
 
 /// A fully prepared tool call: the parsed arguments plus the raw canonical
 /// string they were derived from.
@@ -26,6 +34,13 @@ pub struct PreparedToolCall {
     /// When the arguments were recovered via guarded repair, a human-readable
     /// warning describing what happened. `None` for cleanly parsed arguments.
     pub warning: Option<String>,
+    /// Execution context from a validated Plan/Goal approval.
+    ///
+    /// Written during authorization when the user selects `ApprovePlan` or
+    /// `StartGoal`. Ordinary grants leave this as `None`. Decoration and
+    /// mode-exit consumers read this field directly (batch-order), never via
+    /// a tool-id side map.
+    pub(super) approval: Option<ApprovalExecutionContext>,
 }
 
 /// Outcome of attempting to parse raw tool-call arguments.
@@ -58,6 +73,7 @@ pub fn prepare_tool_arguments(
             raw_arguments: tool_call.raw_arguments.to_string(),
             arguments,
             warning: None,
+            approval: None,
         }),
         ToolArgumentsOutcome::Repaired { arguments, warning } => Ok(PreparedToolCall {
             id: tool_call.id.to_string(),
@@ -65,6 +81,7 @@ pub fn prepare_tool_arguments(
             raw_arguments: tool_call.raw_arguments.to_string(),
             arguments,
             warning: Some(warning),
+            approval: None,
         }),
         ToolArgumentsOutcome::Invalid {
             message,

@@ -26,7 +26,6 @@ pub use config::*;
 pub use context::*;
 pub use error::*;
 pub use instruction_context::*;
-pub use permission::*;
 pub use queue::*;
 pub(crate) use tokens::*;
 pub use tool_dispatch::emit_repaired_tool_arguments_warning;

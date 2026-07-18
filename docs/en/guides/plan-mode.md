@@ -13,7 +13,7 @@ Once in plan mode, Neo **can only use read-only tools** (Read / Grep / Glob, etc
                                                   ▼                       ▼                       ▼
                                                Approve                Revise                  Reject
                                                   │                       │                       │
-                                            Continue              Back to editing the plan    Cancel the plan
+                                     Exit plan + continue     Keep PlanMode active    Keep PlanMode active
 ```
 
 ## Entering / exiting plan mode
@@ -29,19 +29,19 @@ Once in plan mode, Neo **can only use read-only tools** (Read / Grep / Glob, etc
 
 ## Approval flow
 
-When Neo finishes the plan and calls `ExitPlanMode` (in Ask/YOLO mode), an approval dialog appears:
+When Neo finishes the plan and calls `ExitPlanMode` (in Ask/Yolo mode), a review dialog appears. Options are **dynamic** and only include actions the runtime can honor:
 
 | Option | Meaning |
 | --- | --- |
-| **Approve** | Approve the plan, exit plan mode, and start executing |
-| **Reject** | Reject the plan, exit plan mode, but do not execute |
-| **Revise** | Reject with feedback; Neo rewrites the plan file based on your note and resubmits |
+| **Approve** | Approve the plan (or a chosen alternative), **exit plan mode**, and continue executing |
+| **Reject** | Deny exit; **Plan mode stays active** so Neo can keep working on the plan |
+| **Revise** (with feedback) | Request changes; **Plan mode stays active** and your feedback returns to the model |
 
 `ExitPlanMode` can also carry:
 
 - **`plan_summary`**: a short overview of the plan (the plan body itself should already be written to the plan file).
-- **`options`**: up to 3 alternative plans, each with a label and description; the recommended option's label gets a `(Recommended)` suffix and is placed first. The system automatically appends Reject / Revise controls.
-- **`suggestions`**: up to 5 preset "revision suggestions"; selecting one auto-fills the feedback text.
+- **`options`**: up to 3 alternative plans, each with a label and description; the recommended option's label gets a `(Recommended)` suffix and is placed first. Each alternative is an Approve action with typed selection metadata. The system appends Reject and Revise controls.
+- **`suggestions`**: up to 5 preset revision suggestions; selecting one seeds the feedback editor for a Revise action.
 
 > Reserved labels: `approve` / `reject` / `revise` / `reject and exit` cannot be used as option labels.
 
@@ -49,9 +49,9 @@ When Neo finishes the plan and calls `ExitPlanMode` (in Ask/YOLO mode), an appro
 
 | Permission mode | `EnterPlanMode` | `ExitPlanMode` |
 | --- | --- | --- |
-| **Ask** | Enter directly | Pops approval dialog |
-| **YOLO** | Enter directly | Pops approval dialog |
-| **Auto** | Enter directly | **No dialog** — exits plan mode and starts executing |
+| **Ask** | Enter directly | Shows plan review |
+| **Yolo** | Enter directly | Shows plan review |
+| **Auto** | Enter directly | **Skips review** — exits plan mode and starts executing |
 
 ## Plan file
 

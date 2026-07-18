@@ -2,6 +2,10 @@ use neo_agent_core::instructions::{
     InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome, InstructionScopeData,
     InstructionScopeKind,
 };
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+    PermissionOperation,
+};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Finalization, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
@@ -9,6 +13,49 @@ use neo_tui::transcript::{
     McpStartupPhase, McpStartupStatusData, StatusSeverity, TranscriptBrowserState, TranscriptEntry,
     TranscriptPane,
 };
+use std::path::PathBuf;
+
+fn shell_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Approve once".to_owned(),
+            description: None,
+            action: ApprovalAction::PermitOnce,
+        },
+        ApprovalOption {
+            label: "Reject".to_owned(),
+            description: None,
+            action: ApprovalAction::Reject,
+        },
+    ]
+}
+
+fn shell_request(
+    id: &str,
+    command: &str,
+    cwd: Option<&str>,
+    options: Vec<ApprovalOption>,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: command.to_owned(),
+            cwd: cwd.map(PathBuf::from),
+        },
+        options,
+    }
+}
+
+fn approved_resolution() -> ApprovalResolution {
+    ApprovalResolution::Selected {
+        action: ApprovalAction::PermitOnce,
+        label: "Approved".to_owned(),
+        feedback: None,
+    }
+}
 
 /// Strip ANSI + trim from a frame line, for content assertions.
 fn plain(line: &str) -> String {
@@ -365,17 +412,12 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
         arguments: serde_json::json!({ "command": "echo hello" }),
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "bash-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "echo hello".to_owned(),
-        arguments: serde_json::json!({
-            "command": "echo hello",
-            "cwd": "/Users/chenyuanhao/Workspace/neo"
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: shell_request(
+            "bash-1",
+            "echo hello",
+            Some("/Users/chenyuanhao/Workspace/neo"),
+            shell_options(),
+        ),
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 16);
@@ -395,17 +437,14 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
             .any(|line| line.contains("cwd: /Users/chenyuanhao/Workspace/neo"))
     );
     assert!(frame.iter().any(|line| line.contains("$ echo hello")));
+    // Request options are rendered as-is — no synthetic session option.
     assert!(frame.iter().any(|line| line.contains("1. Approve once")));
+    assert!(frame.iter().any(|line| line.contains("2. Reject")));
     assert!(
-        frame
+        !frame
             .iter()
-            .any(|line| line.contains("2. Approve for this session"))
-    );
-    assert!(frame.iter().any(|line| line.contains("3. Reject")));
-    assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("4. Reject with feedback"))
+            .any(|line| line.contains("Approve for this session")),
+        "transcript must not invent session options: {frame:?}"
     );
     assert!(
         frame.iter().any(|line| {
@@ -431,14 +470,7 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
     for number in 1..=3 {
         let command = format!("printf {number}");
         transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-            turn: 1,
-            id: format!("bash-{number}"),
-            operation: neo_agent_core::PermissionOperation::Shell,
-            subject: command.clone(),
-            arguments: serde_json::json!({ "command": command }),
-            session_scope: None,
-            prefix_rule: None,
-            suggestions: vec![],
+            request: shell_request(&format!("bash-{number}"), &command, None, shell_options()),
         });
     }
 
@@ -455,23 +487,23 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
 }
 
 #[test]
-fn transcript_pane_renders_terminal_approval_prompt() {
+fn transcript_pane_renders_tool_presentation_from_request() {
     let mut transcript_pane = TranscriptPane::new(100, 18);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "terminal-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "bash --noprofile --norc".to_owned(),
-        arguments: serde_json::json!({
-            "mode": "start",
-            "command": "bash --noprofile --norc",
-            "cols": 80,
-            "rows": 24
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: ApprovalRequest {
+            turn: 1,
+            id: "terminal-1".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: "Start terminal?".to_owned(),
+                details: vec![
+                    "mode: start".to_owned(),
+                    "$ bash --noprofile --norc".to_owned(),
+                ],
+            },
+            options: shell_options(),
+        },
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -485,21 +517,23 @@ fn transcript_pane_renders_terminal_approval_prompt() {
 }
 
 #[test]
-fn transcript_pane_renders_task_stop_approval_prompt() {
+fn transcript_pane_renders_task_stop_from_request_details() {
     let mut transcript_pane = TranscriptPane::new(100, 18);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "stop-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "bash-1234".to_owned(),
-        arguments: serde_json::json!({
-            "task_id": "bash-1234",
-            "reason": "no longer needed"
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: ApprovalRequest {
+            turn: 1,
+            id: "stop-1".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: "Stop background task?".to_owned(),
+                details: vec![
+                    "task_id: bash-1234".to_owned(),
+                    "reason: no longer needed".to_owned(),
+                ],
+            },
+            options: shell_options(),
+        },
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -517,26 +551,71 @@ fn transcript_pane_renders_task_stop_approval_prompt() {
 }
 
 #[test]
-fn transcript_pane_renders_write_approval_prompt() {
+fn transcript_pane_renders_write_approval_from_request() {
     let mut transcript_pane = TranscriptPane::new(100, 18);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "write-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::FileWrite,
-        subject: "src/lib.rs".to_owned(),
-        arguments: serde_json::json!({
-            "path": "src/lib.rs",
-            "content": "pub fn demo() {}"
-        }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: ApprovalRequest {
+            turn: 1,
+            id: "write-1".to_owned(),
+            operation: PermissionOperation::FileWrite,
+            presentation: ApprovalPresentation::Tool {
+                title: "Write file?".to_owned(),
+                details: vec!["path: src/lib.rs".to_owned()],
+            },
+            options: shell_options(),
+        },
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
     assert!(frame.iter().any(|line| line.contains("Write file?")));
     assert!(frame.iter().any(|line| line.contains("path: src/lib.rs")));
+}
+
+#[test]
+fn approval_resolution_updates_the_matching_inline_card() {
+    let mut transcript_pane = TranscriptPane::new(100, 24);
+    let request = shell_request("bash-1", "sleep 5", None, shell_options());
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: request.clone(),
+    });
+    transcript_pane.select_approval("bash-1", 1, "scratch feedback", true);
+
+    let resolution = ApprovalResolution::Selected {
+        action: ApprovalAction::Reject,
+        label: "Reject".to_owned(),
+        feedback: None,
+    };
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalResolved {
+        turn: 1,
+        request_id: request.id.clone(),
+        resolution: resolution.clone(),
+    });
+
+    let card = transcript_pane
+        .transcript()
+        .approval("bash-1")
+        .expect("matching approval card");
+    assert_eq!(
+        card.state,
+        neo_tui::transcript::ApprovalDisplayState::Resolved(resolution)
+    );
+    assert!(!card.feedback_active);
+    assert!(
+        card.feedback_input.is_empty(),
+        "resolved cards must drop interactive feedback"
+    );
+
+    let frame = plain_frame(&mut transcript_pane, 100, 24);
+    assert!(
+        frame.iter().any(|line| line.trim() == "approval: Rejected"),
+        "frame should show the resolved reject status from the event: {frame:?}"
+    );
+    assert!(
+        !frame.iter().any(|line| line.contains("↑/↓ select")),
+        "resolved card must not keep the interactive prompt: {frame:?}"
+    );
 }
 
 #[test]
@@ -546,17 +625,10 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
     for number in 1..=2 {
         let command = format!("printf {number}");
         transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-            turn: 1,
-            id: format!("bash-{number}"),
-            operation: neo_agent_core::PermissionOperation::Shell,
-            subject: command.clone(),
-            arguments: serde_json::json!({ "command": command }),
-            session_scope: None,
-            prefix_rule: None,
-            suggestions: vec![],
+            request: shell_request(&format!("bash-{number}"), &command, None, shell_options()),
         });
     }
-    transcript_pane.resolve_approval("bash-1", "Approved");
+    transcript_pane.resolve_approval("bash-1", approved_resolution());
 
     let frame = plain_frame(&mut transcript_pane, 100, 24);
     assert!(frame.iter().any(|line| line.contains("Approved")));
@@ -565,51 +637,39 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
 }
 
 #[test]
-fn finalizing_transcript_drops_queued_approvals_before_exit() {
+fn finalizing_transcript_preserves_queued_approvals_before_exit() {
     let mut transcript_pane = TranscriptPane::new(100, 24);
 
     for number in 1..=2 {
         let command = format!("printf {number}");
         transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-            turn: 1,
-            id: format!("historical-{number}"),
-            operation: neo_agent_core::PermissionOperation::Shell,
-            subject: command.clone(),
-            arguments: serde_json::json!({ "command": command }),
-            session_scope: None,
-            prefix_rule: None,
-            suggestions: vec![],
+            request: shell_request(
+                &format!("historical-{number}"),
+                &command,
+                None,
+                shell_options(),
+            ),
         });
     }
     transcript_pane.finalize_interrupted_live_entries();
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 2,
-        id: "current".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf current".to_owned(),
-        arguments: serde_json::json!({ "command": "printf current" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: shell_request("current", "printf current", None, shell_options()),
     });
-    transcript_pane.resolve_approval("current", "Approved");
+    transcript_pane.resolve_approval("current", approved_resolution());
 
     let ids = transcript_pane
         .transcript()
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::ApprovalPrompt(data) => Some(data.id.as_str()),
+            TranscriptEntry::ApprovalPrompt(data) => Some(data.id()),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(ids.contains(&"historical-1"));
+    assert!(ids.contains(&"historical-2"));
     assert!(ids.contains(&"current"));
-    assert!(
-        !ids.contains(&"historical-2"),
-        "queued approval resurrected: {ids:?}"
-    );
 }
 
 #[test]
@@ -629,14 +689,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         arguments: serde_json::json!({ "command": "printf 2" }),
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf 1".to_owned(),
-        arguments: serde_json::json!({ "command": "printf 1" }),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: vec![],
+        request: shell_request("tool-1", "printf 1", None, shell_options()),
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 24);
@@ -658,7 +711,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         "approval should stay near matching tool: {frame:?}"
     );
 
-    transcript_pane.resolve_approval("tool-1", "Approved");
+    transcript_pane.resolve_approval("tool-1", approved_resolution());
     let resolved = plain_frame(&mut transcript_pane, 100, 24);
     assert!(
         resolved
@@ -1147,7 +1200,11 @@ fn transcript_pane_accumulates_tool_argument_delta_fragments() {
     });
 
     let frame = plain_frame(&mut transcript_pane, 80, 12);
-    assert!(frame.iter().any(|l| l.contains("Preparing Read (README.md)")));
+    assert!(
+        frame
+            .iter()
+            .any(|l| l.contains("Preparing Read (README.md)"))
+    );
 }
 
 #[test]

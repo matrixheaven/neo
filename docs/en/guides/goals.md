@@ -61,7 +61,7 @@ There are two equivalent creation paths in goal mode: **AI drafts → user appro
 | **Implement** | `active` | The runtime drives it continuously, deciding at each turn-end whether to continue |
 | **Audit** | `complete` / `blocked` / `paused` | Switched by the AI calling `UpdateGoalStatus` |
 
-> In **Auto** permission mode, `ExitGoalMode` does not pop an approval dialog and the goal starts immediately; in **Ask / YOLO** modes, the user must Approve / Reject / Revise in a blocking dialog.
+> Goal review displays **objective**, **completion criterion**, and **phases**. **Approve** starts the durable goal; **Reject** and **Revise create no goal** (Revise returns feedback while goal authoring stays active). In **Auto**, `ExitGoalMode` skips the review and the goal starts immediately; in **Ask / Yolo**, the user must Approve / Reject / Revise in a blocking dialog.
 
 After each turn, if the goal is still `active`, the runtime automatically injects a goal-continuation system message prompting Neo to keep going; if the goal is complete and the queue still has goals, the next one starts automatically.
 
@@ -92,7 +92,7 @@ Neo picks its own tools and fixes lint issues across multiple turns, deciding fo
 Design and implement a CLI subcommand neo foo; show the plan first
 ```
 
-In goal mode, Neo first drafts the objective, completion_criterion, and phases, then calls `ExitGoalMode` to pop an approval dialog where you can Approve, Revise (with feedback), or Reject.
+In goal mode, Neo first drafts the objective, completion_criterion, and phases, then calls `ExitGoalMode` to open a review that shows those fields. You can Approve (creates the goal), Revise with feedback (no goal created), or Reject (no goal created).
 
 ### Queue a follow-up goal
 

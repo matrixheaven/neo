@@ -33,9 +33,9 @@ use futures::StreamExt;
 use neo_agent_core::goal::GoalManager;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEventPersistence};
 use neo_agent_core::{
-    AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
-    ListSkillsTool, McpConnectionManager, MessageOrigin, MoveSkillTool, PendingQuestion,
-    PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool,
+    AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalRequest, ApprovalResponse,
+    AskUserTool, Content, CreateSkillTool, ListSkillsTool, McpConnectionManager, MessageOrigin,
+    MoveSkillTool, PendingQuestion, SteerInputHandle, SummarizeSessionsTool,
     instructions::InstructionRegistry, mode::PlanMode, skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -92,19 +92,13 @@ pub struct PromptTurn {
     pub assistant_text: String,
 }
 
-pub struct PromptApprovalRequest {
-    pub id: String,
-    pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
-    pub feedback_tx: Option<oneshot::Sender<Option<String>>>,
-    /// Returns the model-supplied plan-review option label the user picked,
-    /// when the approval was an `ExitPlanMode` plan-review approve choice.
-    pub selected_label_tx: Option<oneshot::Sender<Option<String>>>,
-    /// Display label for the session-approval option (Layer 1). `None` hides it.
-    pub session_option_label: Option<String>,
-    /// Display label for the prefix-approval option (Layer 2). `None` hides it.
-    /// When the user picks the prefix option, the controller sets
-    /// `prefix_rule` so the runtime persists the rule.
-    pub prefix_option_label: Option<String>,
+/// One live approval: the canonical request plus its single response channel.
+///
+/// The UI registers this atomically (store responder, open chrome modal, upsert
+/// transcript). The runtime handler awaits exactly one `ApprovalResponse`.
+pub struct PendingApproval {
+    pub request: ApprovalRequest,
+    pub response_tx: oneshot::Sender<ApprovalResponse>,
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
@@ -129,7 +123,6 @@ async fn run_prompt_with_retry_notices(
     let runtime = runtime_for_config(
         config,
         Some(session_root_from_wire_path(&session_path)?),
-        None,
         None,
         None,
         None,
@@ -165,7 +158,6 @@ async fn run_prompt_ephemeral(
     let user_message = user_message(content, MessageOrigin::User);
     let runtime = runtime_for_config(
         config,
-        None,
         None,
         None,
         None,
@@ -213,7 +205,6 @@ async fn run_prompt_in_session(
         None,
         None,
         None,
-        None,
         false,
         SteerInputHandle::new(),
         None,
@@ -240,12 +231,11 @@ pub async fn run_prompt_streaming(
     prompt_origin: MessageOrigin,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    approval_tx: mpsc::UnboundedSender<PendingApproval>,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
-    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
@@ -263,7 +253,6 @@ pub async fn run_prompt_streaming(
         Some(prepared.session_directory.clone()),
         Some(approval_tx),
         question_tx,
-        plan_review_feedback.clone(),
         plan_mode.clone(),
         goal_mode_authoring,
         steer_input,
@@ -286,12 +275,11 @@ pub async fn run_prompt_in_session_streaming(
     prompt_origin: MessageOrigin,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    approval_tx: mpsc::UnboundedSender<PendingApproval>,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
-    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
@@ -314,7 +302,6 @@ pub async fn run_prompt_in_session_streaming(
         Some(prepared.session_directory.clone()),
         Some(approval_tx),
         question_tx,
-        plan_review_feedback.clone(),
         plan_mode.clone(),
         goal_mode_authoring,
         steer_input,
@@ -457,9 +444,8 @@ async fn run_prepared_streaming_turn(
 async fn runtime_for_config(
     config: &AppConfig,
     session_directory: Option<PathBuf>,
-    approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+    approval_tx: Option<mpsc::UnboundedSender<PendingApproval>>,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
-    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
@@ -491,20 +477,6 @@ async fn runtime_for_config(
     }
     if goal_mode_authoring {
         agent_config = agent_config.with_goal_mode_authoring(true);
-    }
-    if let Some(feedback) = plan_review_feedback {
-        // Merge into the existing map rather than replacing the entire Arc.
-        // The async approval handler may have already inserted Revise feedback
-        // for the current turn into this map via the side-channel. Replacing
-        // the Arc here would discard that entry, causing permission.rs to
-        // find an empty map and return "approval denied" instead of the
-        // user's revision note.
-        let mut map = agent_config
-            .plan_review_feedback
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.clear();
-        map.extend(feedback);
     }
     let mut tools = runtime::tool_registry_for_config(
         config,
@@ -842,10 +814,11 @@ mod tests {
 
     use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
     use neo_agent_core::{
-        AgentConfig, AgentContext, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings,
-        Content, McpConnectionManager, MessageOrigin, PermissionApprovalDecision, PermissionMode,
-        PermissionOperation, ProcessSupervisor, QueueMode, StopReason as AgentStopReason,
-        ToolExecutionMode, ToolRegistry,
+        AgentConfig, AgentContext, AgentEvent, AgentMessage, ApprovalAction, ApprovalOption,
+        ApprovalPresentation, ApprovalRequest, ApprovalResponse, CompactionSettings, Content,
+        McpConnectionManager, MessageOrigin, PermissionMode, PermissionOperation,
+        ProcessSupervisor, QueueMode, StopReason as AgentStopReason, ToolExecutionMode,
+        ToolRegistry,
         harness::FakeHarness,
         session::{JsonlSessionReader, JsonlSessionWriter},
         skills::SkillStore,
@@ -865,7 +838,7 @@ mod tests {
     use super::session_mgmt::{
         create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
-    use super::{PromptApprovalRequest, run_prompt_with_runtime, runtime_for_config, user_message};
+    use super::{PendingApproval, run_prompt_with_runtime, runtime_for_config, user_message};
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, RuntimeRetryConfig, TuiConfig,
@@ -1416,6 +1389,58 @@ mod tests {
         );
     }
 
+    fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::Tool,
+            presentation: ApprovalPresentation::Tool {
+                title: "Run tool?".to_owned(),
+                details: vec![format!("tool: {id}")],
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve once".to_owned(),
+                    description: None,
+                    action: ApprovalAction::PermitOnce,
+                },
+                ApprovalOption {
+                    label: "Reject".to_owned(),
+                    description: None,
+                    action: ApprovalAction::Reject,
+                },
+            ],
+        }
+    }
+
+    fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::PlanTransition,
+            presentation: ApprovalPresentation::Plan {
+                title: "Plan Review".to_owned(),
+                path: None,
+                markdown: "Ready".to_owned(),
+                summary: Some("Ready".to_owned()),
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve".to_owned(),
+                    description: None,
+                    action: ApprovalAction::ApprovePlan { selection: None },
+                },
+                ApprovalOption {
+                    label: "Reject with feedback".to_owned(),
+                    description: None,
+                    action: ApprovalAction::RevisePlan {
+                        preset_feedback: None,
+                    },
+                },
+            ],
+        }
+    }
+
     #[tokio::test]
     async fn agent_config_for_app_async_approval_channel_waits_for_ui_decision() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1466,37 +1491,32 @@ mod tests {
             .async_approval_handler
             .expect("async approval handler");
 
-        let decision = tokio::spawn(handler(ApprovalRequest {
-            turn: 1,
-            id: "tool-1".to_owned(),
-            operation: PermissionOperation::Tool,
-            subject: "Write".to_owned(),
-            arguments: serde_json::json!({"path": "approved.txt"}),
-            session_scope: None,
-            prefix_rule: None,
-            suggestions: Vec::new(),
-        }));
-        let PromptApprovalRequest {
-            id,
-            decision_tx,
-            feedback_tx: _,
-            selected_label_tx: _,
-            session_option_label: _,
-            prefix_option_label: _,
+        let response_task = tokio::spawn(handler(sample_tool_approval_request("tool-1")));
+        let PendingApproval {
+            request,
+            response_tx,
         } = approval_rx.recv().await.expect("approval waiter");
 
-        assert_eq!(id, "tool-1");
-        decision_tx
-            .send(PermissionApprovalDecision::AllowOnce)
-            .expect("send decision");
-        assert_eq!(
-            decision.await.expect("approval task joins"),
-            PermissionApprovalDecision::AllowOnce
-        );
+        assert_eq!(request.id, "tool-1");
+        response_tx
+            .send(ApprovalResponse::Selected {
+                request_id: request.id,
+                action: ApprovalAction::PermitOnce,
+                feedback: None,
+            })
+            .expect("send response");
+        assert!(matches!(
+            response_task.await.expect("approval task joins"),
+            ApprovalResponse::Selected {
+                action: ApprovalAction::PermitOnce,
+                feedback: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
-    async fn async_approval_handler_stores_plan_revision_feedback_in_current_config_map() {
+    async fn async_approval_handler_returns_revision_feedback_atomically() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = test_config(temp.path());
         config.default_provider = "test-provider".to_owned();
@@ -1526,7 +1546,6 @@ mod tests {
             None,
             Some(approval_tx),
             None,
-            Some(BTreeMap::new()),
             None,
             false,
             neo_agent_core::SteerInputHandle::new(),
@@ -1536,53 +1555,37 @@ mod tests {
         )
         .await
         .expect("runtime");
-        let current_feedback = Arc::clone(&runtime.config().plan_review_feedback);
         let handler = runtime
             .config()
             .async_approval_handler
             .clone()
             .expect("async approval handler");
 
-        let decision = tokio::spawn(handler(ApprovalRequest {
-            turn: 1,
-            id: "tool-1".to_owned(),
-            operation: PermissionOperation::PlanTransition,
-            subject: "Exit plan mode".to_owned(),
-            arguments: serde_json::json!({"plan_summary": "Ready"}),
-            session_scope: None,
-            prefix_rule: None,
-            suggestions: Vec::new(),
-        }));
-        let PromptApprovalRequest {
-            id,
-            decision_tx,
-            feedback_tx,
-            selected_label_tx: _,
-            session_option_label: _,
-            prefix_option_label: _,
+        let response_task = tokio::spawn(handler(sample_plan_approval_request("tool-1")));
+        let PendingApproval {
+            request,
+            response_tx,
         } = approval_rx.recv().await.expect("approval waiter");
 
-        assert_eq!(id, "tool-1");
-        feedback_tx
-            .expect("feedback channel")
-            .send(Some("tighten the implementation scope".to_owned()))
-            .expect("send feedback");
-        decision_tx
-            .send(PermissionApprovalDecision::Reject)
-            .expect("send decision");
+        assert_eq!(request.id, "tool-1");
+        response_tx
+            .send(ApprovalResponse::Selected {
+                request_id: request.id,
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: None,
+                },
+                feedback: Some("tighten the implementation scope".to_owned()),
+            })
+            .expect("send response");
 
-        assert_eq!(
-            decision.await.expect("approval task joins"),
-            PermissionApprovalDecision::Reject
-        );
-        assert_eq!(
-            current_feedback
-                .lock()
-                .expect("feedback lock")
-                .get("tool-1")
-                .map(String::as_str),
-            Some("tighten the implementation scope")
-        );
+        match response_task.await.expect("approval task joins") {
+            ApprovalResponse::Selected {
+                action: ApprovalAction::RevisePlan { .. },
+                feedback: Some(feedback),
+                ..
+            } => assert_eq!(feedback, "tighten the implementation scope"),
+            other => panic!("expected revise response, got {other:?}"),
+        }
     }
 
     #[tokio::test]

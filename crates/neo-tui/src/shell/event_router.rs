@@ -1,10 +1,9 @@
-use neo_agent_core::{AgentEvent, PermissionOperation, PlanSuggestion};
+use neo_agent_core::AgentEvent;
 
 use crate::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus};
 use crate::widgets::{TodoDisplayItem, TodoDisplayStatus};
 
-use super::approval::ApprovalRequestModal;
 use super::context::ContextWindow;
 use super::state::NeoChromeState;
 use super::stream::StreamUpdate;
@@ -81,112 +80,10 @@ impl NeoChromeState {
                 self.retry_exhausted_error_turn = Some(turn);
                 self.mode = ChromeMode::Streaming;
             }
-            AgentEvent::ApprovalRequested {
-                id,
-                operation,
-                subject,
-                arguments,
-                session_scope,
-                prefix_rule,
-                ..
-            } => {
-                let is_review = matches!(
-                    operation,
-                    PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
-                );
-                let body = if arguments.is_null() {
-                    subject
-                } else {
-                    format!("{subject}\n{arguments}")
-                };
-                // Derive the dynamic option labels. Review transitions and
-                // scope-less prompts omit both; prefix is offered only when the
-                // runtime proposed a persistent rule.
-                let session_label = if is_review {
-                    None
-                } else {
-                    session_scope
-                        .as_ref()
-                        .filter(|scope| !scope.is_empty())
-                        .map(|scope| scope.label.clone())
-                };
-                let prefix_label = if is_review {
-                    None
-                } else {
-                    prefix_rule
-                        .as_ref()
-                        .map(|rule| format!("Approve commands starting with {}", rule.label))
-                };
-                self.pending_approvals.push_back(
-                    if operation == PermissionOperation::PlanTransition {
-                        // ExitPlanMode carries `{plan_summary, options: [{label, description}]}`.
-                        // Surface the model-supplied options as a real picker (mirrors
-                        // kimi-code) instead of dumping the raw JSON into the body.
-                        let (option_labels, options_body) =
-                            crate::primitive::theme::plan_review_options(&arguments);
-                        let body = match arguments.get("plan_summary").and_then(|v| v.as_str()) {
-                            Some(summary) if !summary.trim().is_empty() => {
-                                if options_body.is_empty() {
-                                    summary.to_owned()
-                                } else {
-                                    format!("{summary}\n\n{options_body}")
-                                }
-                            }
-                            _ => options_body,
-                        };
-                        let suggestions = arguments
-                            .get("suggestions")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(|item| {
-                                        let label = item.get("label")?.as_str()?.to_owned();
-                                        let description = item
-                                            .get("description")
-                                            .and_then(serde_json::Value::as_str)
-                                            .unwrap_or(&label)
-                                            .to_owned();
-                                        let feedback = item
-                                            .get("feedback")
-                                            .and_then(serde_json::Value::as_str)
-                                            .map(str::to_owned)
-                                            .or_else(|| Some(description.clone()));
-                                        Some(PlanSuggestion {
-                                            label,
-                                            description,
-                                            feedback,
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        ApprovalRequestModal::new_plan_review(
-                            id,
-                            crate::primitive::theme::review_title(operation),
-                            body,
-                            option_labels,
-                            suggestions,
-                        )
-                    } else if is_review {
-                        ApprovalRequestModal::new_review(
-                            id,
-                            crate::primitive::theme::review_title(operation),
-                            body,
-                        )
-                    } else {
-                        ApprovalRequestModal::new_with_options(
-                            id,
-                            format!("{operation:?} approval"),
-                            body,
-                            session_label,
-                            prefix_label,
-                        )
-                    },
-                );
-                self.focused_overlay = None;
-                self.mode = ChromeMode::Approval;
-            }
+            // Live modal is opened by the interactive controller via
+            // `push_approval` from the PendingApproval channel — not from this
+            // observable event. Passive status only.
+            AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
             AgentEvent::ContextWindowUpdated {
                 used_tokens,
                 projected_tokens,

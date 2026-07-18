@@ -172,7 +172,7 @@ neo run "审查这段代码 @src/parser.rs"
 
 ```bash
 neo --auto             # Auto 权限模式：自动批准工具调用
-neo --yolo             # YOLO 模式：自动批准工具与计划转换，但仍可向用户提问
+neo --yolo             # YOLO 模式：自动批准普通工具；Plan/Goal 审核仍会弹出；仍可向用户提问
 neo --verbose          # 打印详细启动诊断
 neo --config <path>    # 指定配置文件（覆盖 ~/.neo/config.toml）
 ```

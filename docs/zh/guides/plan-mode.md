@@ -13,7 +13,7 @@
                                             ▼               ▼               ▼
                                          Approve        Revise          Reject
                                             │               │               │
-                                         继续执行      回到计划修改       取消计划
+                                    退出计划并继续   保持计划模式激活   保持计划模式激活
 ```
 
 ## 进入 / 退出计划模式
@@ -29,19 +29,19 @@
 
 ## 审批流程
 
-当 Neo 完成方案、调用 `ExitPlanMode` 时（或在 Ask/YOLO 模式下），会弹出审批对话框：
+当 Neo 完成方案、调用 `ExitPlanMode` 时（Ask/Yolo 模式下），会弹出审阅对话框。**选项是动态的**，只包含运行时能兑现的动作：
 
 | 选项 | 含义 |
 | --- | --- |
-| **Approve** | 批准方案，退出计划模式并开始执行 |
-| **Reject** | 拒绝方案，退出计划模式但不执行 |
-| **Revise** | 附反馈拒绝，Neo 据此改写计划文件后再次提交 |
+| **Approve** | 批准方案（或所选备选），**退出计划模式**并继续执行 |
+| **Reject** | 拒绝退出；**计划模式保持激活**，Neo 可继续完善方案 |
+| **Revise**（附反馈） | 要求修改；**计划模式保持激活**，你的反馈会返回给模型 |
 
 `ExitPlanMode` 还可携带：
 
 - **`plan_summary`**：方案的简短概述（方案本体应已写入计划文件）。
-- **`options`**：最多 3 个备选方案，每个含 label 与 description；推荐项的 label 加 `(Recommended)` 后缀并排在第一位。系统会自动附加 Reject / Revise 控件。
-- **`suggestions`**：最多 5 个预设的「修订建议」，选中后自动填入反馈文本。
+- **`options`**：最多 3 个备选方案，每个含 label 与 description；推荐项的 label 加 `(Recommended)` 后缀并排在第一位。每个备选都是带类型化选择元数据的 Approve 动作。系统会附加 Reject 与 Revise 控件。
+- **`suggestions`**：最多 5 个预设修订建议；选中后会为 Revise 动作预填反馈编辑器。
 
 > 保留字 label：`approve` / `reject` / `revise` / `reject and exit` 不能作为 option 标签。
 
@@ -49,9 +49,9 @@
 
 | 权限模式 | `EnterPlanMode` | `ExitPlanMode` |
 | --- | --- | --- |
-| **Ask** | 直接进入 | 弹审批对话框 |
-| **YOLO** | 直接进入 | 弹审批对话框 |
-| **Auto** | 直接进入 | **不弹框**，直接退出计划模式开始执行 |
+| **Ask** | 直接进入 | 显示计划审阅 |
+| **Yolo** | 直接进入 | 显示计划审阅 |
+| **Auto** | 直接进入 | **跳过审阅**，直接退出计划模式开始执行 |
 
 ## 计划文件
 

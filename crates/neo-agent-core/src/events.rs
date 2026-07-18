@@ -7,7 +7,10 @@ use crate::multi_agent::{
     AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
     SwarmSnapshot,
 };
-use crate::{AgentMessage, AgentToolCall, PermissionOperation, ShellCommandOutcome, ToolResult};
+use crate::{
+    AgentMessage, AgentToolCall, ApprovalRequest, ApprovalResolution, ShellCommandOutcome,
+    ToolResult,
+};
 
 /// A preset revision suggestion offered during plan review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -215,22 +218,12 @@ pub enum AgentEvent {
         outcome: String,
     },
     ApprovalRequested {
+        request: ApprovalRequest,
+    },
+    ApprovalResolved {
         turn: u32,
-        id: String,
-        operation: PermissionOperation,
-        subject: String,
-        arguments: serde_json::Value,
-        /// Reusable session scope (Layer 1). `None` for review transitions and
-        /// scope-ineligible prompts. `#[serde(default)]` keeps old JSONL working.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_scope: Option<crate::permissions::SessionApprovalScope>,
-        /// Proposed persistent prefix rule (Layer 2). `None` when no prefix
-        /// option should be offered.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefix_rule: Option<crate::permissions::PrefixApprovalRule>,
-        /// Preset revision suggestions for plan review (`PlanTransition` only).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        suggestions: Vec<PlanSuggestion>,
+        request_id: String,
+        resolution: ApprovalResolution,
     },
     ShellCommandStarted {
         turn: u32,

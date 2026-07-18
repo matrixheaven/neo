@@ -93,7 +93,7 @@ fn status_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> 
         TranscriptEntry::Status { text, .. } => Some(("Status", text.clone())),
         TranscriptEntry::RetryStatus { data } => Some(("Retry", data.message.clone())),
         TranscriptEntry::McpStartupStatus { data } => Some(("MCP", data.message())),
-        TranscriptEntry::ApprovalPrompt(data) => Some(("Approval", data.title.clone())),
+        TranscriptEntry::ApprovalPrompt(data) => Some(("Approval", data.title().to_owned())),
         _ => None,
     }
 }

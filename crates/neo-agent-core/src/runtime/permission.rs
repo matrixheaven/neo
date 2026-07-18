@@ -1,40 +1,27 @@
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
 use tokio_util::sync::CancellationToken;
 
 use super::config::AgentConfig;
 use super::events::EventPublisher;
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
+use super::tool_arguments::ApprovalExecutionContext;
 use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
 };
 use crate::tools::normalize_path;
-use crate::tools::plan_mode::prevalidate_exit_plan_mode;
-use crate::{
-    AgentEvent, AgentToolCall, PermissionApprovalDecision, PermissionMode, PermissionOperation,
-    PlanModeGuard, ToolAccess, ToolResult, check_plan_mode_guard, is_active_plan_file_path,
+use crate::tools::plan_mode::{
+    ExitPlanModeInput, ExitPlanModeOption, ExitPlanModeSuggestion, prevalidate_exit_plan_mode,
 };
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ApprovalRequest {
-    pub turn: u32,
-    pub id: String,
-    pub operation: PermissionOperation,
-    pub subject: String,
-    pub arguments: serde_json::Value,
-    /// Reusable session scope for this request, when safely derivable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_scope: Option<SessionApprovalScope>,
-    /// Proposed persistent prefix rule for this request (Layer 2), when the
-    /// command reduces to a stable argv prefix. `None` when no prefix option
-    /// should be offered (compound/opaque commands, non-shell tools).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix_rule: Option<PrefixApprovalRule>,
-    /// Preset revision suggestions for plan review (`PlanTransition` only).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suggestions: Vec<crate::PlanSuggestion>,
-}
+use crate::tools::{ExitGoalModeArgs, prevalidate_exit_goal_mode};
+use crate::{
+    AgentEvent, AgentToolCall, ApprovalAction, ApprovalCancelReason, ApprovalOption,
+    ApprovalPresentation, ApprovalRequest, ApprovalResolution, PermissionMode, PermissionOperation,
+    PlanModeGuard, PlanSelection, ToolAccess, ToolResult, check_plan_mode_guard,
+    is_active_plan_file_path,
+};
 
 pub(super) enum PermissionPreparation {
     Run(ToolAccess),
@@ -48,9 +35,13 @@ pub(super) enum PermissionPreparation {
 }
 
 /// The outcome of resolving one [`PermissionPreparation`]: run with an
-/// access grant, or finish with a terminal result (denial/cancellation).
+/// access grant (and optional Plan/Goal execution context), or finish with a
+/// terminal result (denial/cancellation/revision feedback).
 pub(super) enum PermissionResolution {
-    Run(ToolAccess),
+    Run {
+        access: ToolAccess,
+        approval: Option<ApprovalExecutionContext>,
+    },
     Terminal(ToolResult),
 }
 
@@ -68,7 +59,10 @@ pub(super) async fn resolve_permission_preparation(
     cancel_token: &CancellationToken,
 ) -> PermissionResolution {
     match preparation {
-        PermissionPreparation::Run(access) => PermissionResolution::Run(access),
+        PermissionPreparation::Run(access) => PermissionResolution::Run {
+            access,
+            approval: None,
+        },
         PermissionPreparation::Deny(message) => {
             PermissionResolution::Terminal(ToolResult::error(message))
         }
@@ -92,8 +86,11 @@ pub(super) async fn resolve_permission_preparation(
             )
             .await
             {
-                Some(result) => PermissionResolution::Terminal(result),
-                None => PermissionResolution::Run(access_for_tool(tool_call, true)),
+                AppliedApproval::Terminal(result) => PermissionResolution::Terminal(result),
+                AppliedApproval::Allow { approval } => PermissionResolution::Run {
+                    access: access_for_tool(tool_call, true),
+                    approval,
+                },
             }
         }
     }
@@ -129,7 +126,7 @@ pub(super) fn permission_preparation_for_mode(
     }
 
     // 9-10. Transition tools (ExitPlanMode, ExitGoalMode).
-    if let Some(prep) = check_transition_tools(config, tool_call, mode) {
+    if let Some(prep) = check_transition_tools(config, tool_call, arguments, mode) {
         return prep;
     }
 
@@ -251,6 +248,7 @@ fn check_cached_approvals(
 fn check_transition_tools(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
     mode: PermissionMode,
 ) -> Option<PermissionPreparation> {
     if tool_call.name.as_ref() == "ExitPlanMode" {
@@ -261,10 +259,7 @@ fn check_transition_tools(
         // the error simultaneously. By validating here we skip the dialog
         // and let execute() return the error directly to the model.
         if exit_plan_mode_has_reviewable_plan(config)
-            && serde_json::from_str::<serde_json::Value>(&tool_call.raw_arguments)
-                .ok()
-                .and_then(|v| prevalidate_exit_plan_mode(&v).ok())
-                .is_some()
+            && prevalidate_exit_plan_mode(arguments).is_ok()
         {
             return Some(PermissionPreparation::Ask {
                 operation: PermissionOperation::PlanTransition,
@@ -280,12 +275,16 @@ fn check_transition_tools(
         if mode == PermissionMode::Auto {
             return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
         }
-        return Some(PermissionPreparation::Ask {
-            operation: PermissionOperation::GoalTransition,
-            subject: "Start reviewed goal".to_owned(),
-            session_scope: None,
-            prefix_rule: None,
-        });
+        // Skip the review dialog when the payload can never succeed.
+        if prevalidate_exit_goal_mode(arguments).is_ok() {
+            return Some(PermissionPreparation::Ask {
+                operation: PermissionOperation::GoalTransition,
+                subject: "Start reviewed goal".to_owned(),
+                session_scope: None,
+                prefix_rule: None,
+            });
+        }
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
 
     None
@@ -401,6 +400,498 @@ fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
     }
 }
 
+/// Build ordinary Tool/Shell approval options. Labels are presentation-only;
+/// callers must branch on the typed `ApprovalAction`, never on label text.
+fn ordinary_approval_options(
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
+) -> Vec<ApprovalOption> {
+    let mut options = vec![ApprovalOption {
+        label: "Approve once".to_owned(),
+        description: None,
+        action: ApprovalAction::PermitOnce,
+    }];
+    if let Some(scope) = session_scope.filter(|scope| !scope.is_empty()) {
+        options.push(ApprovalOption {
+            label: scope.label.clone(),
+            description: Some(scope.detail.clone()),
+            action: ApprovalAction::PermitForSession { scope },
+        });
+    }
+    if let Some(rule) = prefix_rule {
+        options.push(ApprovalOption {
+            label: format!("Approve commands starting with {}", rule.label),
+            description: None,
+            action: ApprovalAction::PermitForPrefix { rule },
+        });
+    }
+    options.push(ApprovalOption {
+        label: "Reject".to_owned(),
+        description: None,
+        action: ApprovalAction::Reject,
+    });
+    options
+}
+
+/// Presentation copy for ordinary Tool/Shell approvals.
+fn ordinary_approval_presentation(
+    operation: PermissionOperation,
+    subject: &str,
+    arguments: &serde_json::Value,
+) -> ApprovalPresentation {
+    let is_task_stop =
+        operation == PermissionOperation::Shell && arguments.get("task_id").is_some();
+    let is_terminal = operation == PermissionOperation::Shell && arguments.get("mode").is_some();
+    let is_edit = operation == PermissionOperation::FileWrite
+        && (arguments.get("old").is_some()
+            || arguments.get("new").is_some()
+            || arguments.get("replace_all").is_some());
+
+    if is_task_stop {
+        return ApprovalPresentation::Tool {
+            title: "Stop background task?".to_owned(),
+            details: compact_details([
+                labeled_argument(arguments, "task_id"),
+                labeled_argument(arguments, "reason"),
+            ]),
+        };
+    }
+
+    if is_terminal || operation == PermissionOperation::Shell {
+        let title = if is_terminal {
+            terminal_approval_title(arguments)
+        } else {
+            "Run this command?".to_owned()
+        };
+        let command = arguments
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(subject)
+            .to_owned();
+        let cwd = arguments
+            .get("cwd")
+            .or_else(|| arguments.get("workdir"))
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from);
+        return ApprovalPresentation::Command {
+            title,
+            command,
+            cwd,
+        };
+    }
+
+    if is_edit {
+        return ApprovalPresentation::Tool {
+            title: "Edit file?".to_owned(),
+            details: compact_details([
+                labeled_argument(arguments, "path"),
+                labeled_argument(arguments, "replace_all"),
+            ]),
+        };
+    }
+
+    match operation {
+        PermissionOperation::FileWrite => ApprovalPresentation::Tool {
+            title: "Write file?".to_owned(),
+            details: compact_details([labeled_argument(arguments, "path")]),
+        },
+        PermissionOperation::FileRead => ApprovalPresentation::Tool {
+            title: "Read workspace data?".to_owned(),
+            details: non_empty_details(
+                compact_details([
+                    labeled_argument(arguments, "path"),
+                    labeled_argument(arguments, "pattern"),
+                ]),
+                || vec![format!("target: {subject}")],
+            ),
+        },
+        PermissionOperation::Tool => ApprovalPresentation::Tool {
+            title: "Run tool?".to_owned(),
+            details: compact_details([Some(format!("tool: {subject}"))]),
+        },
+        PermissionOperation::UserQuestion => ApprovalPresentation::Tool {
+            title: "User question".to_owned(),
+            details: compact_details([Some(subject.to_owned())]),
+        },
+        PermissionOperation::PlanTransition | PermissionOperation::GoalTransition => {
+            unreachable!("Plan/Goal use dedicated presentation builders")
+        }
+        PermissionOperation::Shell => unreachable!("Shell handled above"),
+    }
+}
+
+fn plan_approval_options(input: &ExitPlanModeInput) -> Vec<ApprovalOption> {
+    let mut options = Vec::new();
+    let alternatives = input.options.as_deref().unwrap_or(&[]);
+    if alternatives.is_empty() {
+        options.push(ApprovalOption {
+            label: "Approve".to_owned(),
+            description: None,
+            action: ApprovalAction::ApprovePlan { selection: None },
+        });
+    } else {
+        for option in alternatives {
+            options.push(approve_plan_option(option));
+        }
+    }
+    for suggestion in input.suggestions.as_deref().unwrap_or(&[]) {
+        options.push(revise_plan_suggestion_option(suggestion));
+    }
+    options.push(ApprovalOption {
+        label: "Reject".to_owned(),
+        description: None,
+        action: ApprovalAction::RejectPlan,
+    });
+    options.push(ApprovalOption {
+        label: "Reject with feedback".to_owned(),
+        description: None,
+        action: ApprovalAction::RevisePlan {
+            preset_feedback: None,
+        },
+    });
+    options
+}
+
+fn approve_plan_option(option: &ExitPlanModeOption) -> ApprovalOption {
+    ApprovalOption {
+        label: format!("Approach: {}", option.label),
+        description: option.description.clone(),
+        action: ApprovalAction::ApprovePlan {
+            selection: Some(PlanSelection {
+                label: option.label.clone(),
+                description: option.description.clone(),
+            }),
+        },
+    }
+}
+
+fn revise_plan_suggestion_option(suggestion: &ExitPlanModeSuggestion) -> ApprovalOption {
+    let preset = suggestion
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| suggestion.description.clone());
+    ApprovalOption {
+        label: suggestion.label.clone(),
+        description: Some(suggestion.description.clone()),
+        action: ApprovalAction::RevisePlan {
+            preset_feedback: Some(preset),
+        },
+    }
+}
+
+fn goal_approval_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Approve".to_owned(),
+            description: None,
+            action: ApprovalAction::StartGoal,
+        },
+        ApprovalOption {
+            label: "Reject".to_owned(),
+            description: None,
+            action: ApprovalAction::RejectGoal,
+        },
+        ApprovalOption {
+            label: "Reject with feedback".to_owned(),
+            description: None,
+            action: ApprovalAction::ReviseGoal {
+                preset_feedback: None,
+            },
+        },
+    ]
+}
+
+fn build_plan_approval_request(
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+) -> ApprovalRequest {
+    // Prevalidation already ran; fall back to empty options if reparse fails.
+    let input = serde_json::from_value::<ExitPlanModeInput>(arguments.clone()).unwrap_or(
+        ExitPlanModeInput {
+            plan_summary: None,
+            options: None,
+            suggestions: None,
+        },
+    );
+    let summary = input
+        .plan_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let (path, markdown) = config
+        .plan_mode
+        .read()
+        .ok()
+        .and_then(|pm| pm.data().ok().flatten())
+        .map(|data| (Some(data.path), data.content))
+        .unwrap_or((None, String::new()));
+    ApprovalRequest {
+        turn,
+        id: tool_call.id.to_string(),
+        operation: PermissionOperation::PlanTransition,
+        presentation: ApprovalPresentation::Plan {
+            title: "Plan Review".to_owned(),
+            path,
+            markdown,
+            summary,
+        },
+        options: plan_approval_options(&input),
+    }
+}
+
+fn build_goal_approval_request(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+) -> ApprovalRequest {
+    let args =
+        serde_json::from_value::<ExitGoalModeArgs>(arguments.clone()).unwrap_or(ExitGoalModeArgs {
+            objective: String::new(),
+            completion_criterion: None,
+            phases: Vec::new(),
+        });
+    ApprovalRequest {
+        turn,
+        id: tool_call.id.to_string(),
+        operation: PermissionOperation::GoalTransition,
+        presentation: ApprovalPresentation::Goal {
+            title: "Start reviewed goal".to_owned(),
+            objective: args.objective,
+            completion_criterion: args.completion_criterion,
+            phases: args.phases,
+        },
+        options: goal_approval_options(),
+    }
+}
+
+fn terminal_approval_title(arguments: &serde_json::Value) -> String {
+    match arguments
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "start" => "Start terminal?".to_owned(),
+        "write" => "Write to terminal?".to_owned(),
+        "resize" => "Resize terminal?".to_owned(),
+        "stop" => "Stop terminal?".to_owned(),
+        _ => "Use terminal?".to_owned(),
+    }
+}
+
+fn labeled_argument(arguments: &serde_json::Value, key: &str) -> Option<String> {
+    let value = arguments.get(key)?;
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => Some(format!("{key}: {value}")),
+        serde_json::Value::Bool(value) => Some(format!("{key}: {value}")),
+        serde_json::Value::Number(value) => Some(format!("{key}: {value}")),
+        _ => None,
+    }
+}
+
+fn compact_details(lines: impl IntoIterator<Item = Option<String>>) -> Vec<String> {
+    lines.into_iter().flatten().collect()
+}
+
+fn non_empty_details(details: Vec<String>, fallback: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    if details.is_empty() {
+        fallback()
+    } else {
+        details
+    }
+}
+
+fn build_ordinary_approval_request(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+    operation: PermissionOperation,
+    subject: &str,
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        turn,
+        id: tool_call.id.to_string(),
+        operation,
+        presentation: ordinary_approval_presentation(operation, subject, arguments),
+        options: ordinary_approval_options(session_scope, prefix_rule),
+    }
+}
+
+fn build_approval_request(
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+    operation: PermissionOperation,
+    subject: &str,
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
+) -> ApprovalRequest {
+    match operation {
+        PermissionOperation::PlanTransition => {
+            build_plan_approval_request(config, turn, tool_call, arguments)
+        }
+        PermissionOperation::GoalTransition => {
+            build_goal_approval_request(turn, tool_call, arguments)
+        }
+        _ => build_ordinary_approval_request(
+            turn,
+            tool_call,
+            arguments,
+            operation,
+            subject,
+            session_scope,
+            prefix_rule,
+        ),
+    }
+}
+
+/// Outcome of applying a validated approval resolution.
+enum AppliedApproval {
+    Allow {
+        approval: Option<ApprovalExecutionContext>,
+    },
+    Terminal(ToolResult),
+}
+
+/// Persist a Layer-2 prefix rule, rolling back the in-memory insert when disk
+/// write fails. Returns `None` on success (continue execution) or a tool error.
+fn persist_prefix_rule_or_error(
+    config: &AgentConfig,
+    rule: PrefixApprovalRule,
+) -> Option<ToolResult> {
+    if ApprovalRuleStore::is_would_approve_all(&rule.prefix) {
+        return None;
+    }
+    let should_save = if let Ok(mut store) = config.prefix_approval_rules.lock() {
+        let was_new = !store.prefix_rules.iter().any(|r| r.prefix == rule.prefix);
+        store.insert(rule.clone());
+        was_new
+    } else {
+        false
+    };
+    if should_save && let Err(error) = config.save_prefix_approval_rules() {
+        if let Ok(mut store) = config.prefix_approval_rules.lock() {
+            store
+                .prefix_rules
+                .retain(|saved| saved.prefix != rule.prefix);
+        }
+        tracing::warn!(%error, "failed to persist prefix approval rule");
+        return Some(ToolResult::error(format!(
+            "failed to persist prefix approval rule: {error}"
+        )));
+    }
+    None
+}
+
+fn apply_approval_resolution(
+    config: &AgentConfig,
+    operation: PermissionOperation,
+    subject: &str,
+    resolution: ApprovalResolution,
+) -> AppliedApproval {
+    match resolution {
+        ApprovalResolution::Cancelled { .. } => {
+            AppliedApproval::Terminal(permission_error(operation, subject, "approval cancelled"))
+        }
+        ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            ..
+        } => AppliedApproval::Allow { approval: None },
+        ApprovalResolution::Selected {
+            action: ApprovalAction::PermitForSession { scope },
+            ..
+        } => {
+            // Layer 1: record each narrow key (exact canonical command/cwd,
+            // exact file path/op). With no derived scope this degrades to a
+            // no-op PermitOnce — it never creates a tool-name wildcard.
+            if let Ok(mut approved) = config.session_approvals.lock() {
+                scope.record(&mut approved);
+            }
+            AppliedApproval::Allow { approval: None }
+        }
+        ApprovalResolution::Selected {
+            action: ApprovalAction::PermitForPrefix { rule },
+            ..
+        } => match persist_prefix_rule_or_error(config, rule) {
+            Some(error) => AppliedApproval::Terminal(error),
+            None => AppliedApproval::Allow { approval: None },
+        },
+        ApprovalResolution::Selected {
+            action: ApprovalAction::Reject,
+            ..
+        } => AppliedApproval::Terminal(permission_error(operation, subject, "approval denied")),
+        ApprovalResolution::Selected {
+            action: ApprovalAction::ApprovePlan { selection },
+            ..
+        } => AppliedApproval::Allow {
+            approval: Some(ApprovalExecutionContext::Plan { selection }),
+        },
+        ApprovalResolution::Selected {
+            action: ApprovalAction::StartGoal,
+            ..
+        } => AppliedApproval::Allow {
+            approval: Some(ApprovalExecutionContext::Goal),
+        },
+        ApprovalResolution::Selected {
+            action: ApprovalAction::RejectPlan,
+            ..
+        } => AppliedApproval::Terminal(permission_error(
+            PermissionOperation::PlanTransition,
+            "Exit plan mode",
+            "approval denied",
+        )),
+        ApprovalResolution::Selected {
+            action: ApprovalAction::RejectGoal,
+            ..
+        } => AppliedApproval::Terminal(permission_error(
+            PermissionOperation::GoalTransition,
+            "Start reviewed goal",
+            "approval denied",
+        )),
+        ApprovalResolution::Selected {
+            action: ApprovalAction::RevisePlan { .. },
+            feedback,
+            ..
+        } => {
+            let feedback = feedback.unwrap_or_default();
+            AppliedApproval::Terminal(ToolResult::ok(format!(
+                "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
+            )))
+        }
+        ApprovalResolution::Selected {
+            action: ApprovalAction::ReviseGoal { .. },
+            feedback,
+            ..
+        } => {
+            let feedback = feedback.unwrap_or_default();
+            AppliedApproval::Terminal(ToolResult::ok(format!(
+                "User requested revisions. Goal mode remains active.\n\nFeedback: {feedback}"
+            )))
+        }
+    }
+}
+
+fn emit_approval_resolved(
+    emitter: &mut impl EventPublisher,
+    turn: u32,
+    request_id: &str,
+    resolution: ApprovalResolution,
+) {
+    emitter.emit(AgentEvent::ApprovalResolved {
+        turn,
+        request_id: request_id.to_owned(),
+        resolution,
+    });
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn resolve_approval(
     config: &AgentConfig,
@@ -413,146 +904,76 @@ async fn resolve_approval(
     prefix_rule: Option<PrefixApprovalRule>,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
-) -> Option<ToolResult> {
-    let mut approval_arguments = arguments.clone();
-    // For plan transitions, inject the plan file content so the TUI can
-    // render it inside the approval dialog.
-    if operation == PermissionOperation::PlanTransition
-        && let Ok(plan_mode) = config.plan_mode.read()
-        && let Ok(Some(plan_data)) = plan_mode.data()
-        && let Some(obj) = approval_arguments.as_object_mut()
-    {
-        obj.insert(
-            "plan_content".to_string(),
-            serde_json::Value::String(plan_data.content.clone()),
-        );
-        obj.insert(
-            "plan_path".to_string(),
-            serde_json::Value::String(plan_data.path.display().to_string()),
-        );
-    }
-    let suggestions = parse_plan_suggestions(arguments);
-    let request = ApprovalRequest {
+) -> AppliedApproval {
+    let request = build_approval_request(
+        config,
         turn,
-        id: tool_call.id.to_string(),
+        tool_call,
+        arguments,
         operation,
-        subject: subject.clone(),
-        arguments: approval_arguments,
-        session_scope: session_scope.clone(),
-        prefix_rule: prefix_rule.clone(),
-        suggestions: suggestions.clone(),
-    };
+        &subject,
+        session_scope,
+        prefix_rule,
+    );
     emitter.emit(AgentEvent::ApprovalRequested {
-        turn: request.turn,
-        id: request.id.clone(),
-        operation: request.operation,
-        subject: request.subject.clone(),
-        arguments: request.arguments.clone(),
-        session_scope: request.session_scope.clone(),
-        prefix_rule: request.prefix_rule.clone(),
-        suggestions,
+        request: request.clone(),
     });
-    let decision = if let Some(handler) = &config.approval_handler {
+    let response = if let Some(handler) = &config.approval_handler {
         handler(&request)
     } else if let Some(handler) = &config.async_approval_handler {
         tokio::select! {
             biased;
-            () = cancel_token.cancelled() => return Some(cancelled_tool_result()),
-            decision = handler(request.clone()) => decision,
+            () = cancel_token.cancelled() => {
+                emit_approval_resolved(
+                    emitter,
+                    request.turn,
+                    &request.id,
+                    ApprovalResolution::Cancelled {
+                        reason: ApprovalCancelReason::Interrupt,
+                    },
+                );
+                return AppliedApproval::Terminal(cancelled_tool_result());
+            }
+            response = handler(request.clone()) => response,
         }
     } else {
-        return Some(permission_error(operation, &subject, "approval required"));
+        // No handler: close the request with Cancelled so UI/session never
+        // leave an unpaired ApprovalRequested open.
+        emit_approval_resolved(
+            emitter,
+            request.turn,
+            &request.id,
+            ApprovalResolution::Cancelled {
+                reason: ApprovalCancelReason::SessionEnded,
+            },
+        );
+        return AppliedApproval::Terminal(permission_error(
+            operation,
+            &subject,
+            "approval required",
+        ));
     };
-    match decision {
-        PermissionApprovalDecision::AllowOnce => None,
-        PermissionApprovalDecision::AllowForSession => {
-            // Layer 1: record each narrow key (exact canonical command/cwd,
-            // exact file path/op). With no derived scope this degrades to a
-            // no-op AllowOnce — it never creates a tool-name wildcard.
-            if let Some(scope) = &session_scope
-                && let Ok(mut set) = config.session_approvals.lock()
-            {
-                scope.record(&mut set);
-            }
-            None
+    let resolution = match request.validate_response(&response) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            // Invalid responses are rejected at the trust boundary; still emit a
+            // terminal resolution so every ApprovalRequested has a pair.
+            emit_approval_resolved(
+                emitter,
+                request.turn,
+                &request.id,
+                ApprovalResolution::Cancelled {
+                    reason: ApprovalCancelReason::SessionEnded,
+                },
+            );
+            return AppliedApproval::Terminal(ToolResult::error(format!(
+                "invalid approval response for {}: {error:?}",
+                request.id
+            )));
         }
-        PermissionApprovalDecision::AllowForPrefix => {
-            if let Some(rule) = &prefix_rule
-                && !ApprovalRuleStore::is_would_approve_all(&rule.prefix)
-            {
-                let should_save = if let Ok(mut store) = config.prefix_approval_rules.lock() {
-                    let was_new = !store.prefix_rules.iter().any(|r| r.prefix == rule.prefix);
-                    store.insert(rule.clone());
-                    was_new
-                } else {
-                    false
-                };
-                if should_save && let Err(error) = config.save_prefix_approval_rules() {
-                    if let Ok(mut store) = config.prefix_approval_rules.lock() {
-                        store
-                            .prefix_rules
-                            .retain(|saved| saved.prefix != rule.prefix);
-                    }
-                    tracing::warn!(%error, "failed to persist prefix approval rule");
-                    return Some(ToolResult::error(format!(
-                        "failed to persist prefix approval rule: {error}"
-                    )));
-                }
-            }
-            None
-        }
-        PermissionApprovalDecision::Reject => {
-            // Review feedback is delivered via the review-feedback side-channel.
-            if matches!(tool_call.name.as_ref(), "ExitPlanMode" | "ExitGoalMode")
-                && let Some(feedback) = config
-                    .plan_review_feedback
-                    .lock()
-                    .ok()
-                    .and_then(|mut m| m.remove(tool_call.id.as_ref()))
-            {
-                let target = if tool_call.name.as_ref() == "ExitGoalMode" {
-                    "Goal mode"
-                } else {
-                    "Plan mode"
-                };
-                return Some(ToolResult::ok(format!(
-                    "User requested revisions. {target} remains active.\n\nFeedback: {feedback}"
-                )));
-            }
-            Some(permission_error(operation, &subject, "approval denied"))
-        }
-    }
-}
-
-/// Extract preset revision suggestions from `ExitPlanMode`/`ExitGoalMode` arguments.
-fn parse_plan_suggestions(arguments: &serde_json::Value) -> Vec<crate::PlanSuggestion> {
-    arguments
-        .get("suggestions")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let label = item.get("label")?.as_str()?.to_owned();
-                    let description = item
-                        .get("description")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or(&label)
-                        .to_owned();
-                    let feedback = item
-                        .get("feedback")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                        .or_else(|| Some(description.clone()));
-                    Some(crate::PlanSuggestion {
-                        label,
-                        description,
-                        feedback,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    };
+    emit_approval_resolved(emitter, request.turn, &request.id, resolution.clone());
+    apply_approval_resolution(config, operation, &subject, resolution)
 }
 
 fn permission_error(

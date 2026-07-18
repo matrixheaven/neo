@@ -534,30 +534,36 @@ fn emit_synthesized_finished(
 // ---------------------------------------------------------------------------
 
 /// One authorized call: its scheduling class and the authorization outcome.
+///
+/// Plan/Goal execution metadata lives only on [`PreparedToolCall::approval`]
+/// after a successful allow — not on a separate outcome field or id map.
 struct AuthorizedToolCall<'a> {
     tool_call: &'a AgentToolCall,
-    prepared: Option<&'a super::tool_arguments::PreparedToolCall>,
+    prepared: Option<super::tool_arguments::PreparedToolCall>,
     class: ToolSchedulingClass,
     outcome: AuthorizedToolCallOutcome,
 }
 
 enum AuthorizedToolCallOutcome {
     /// Approved to run with this access grant.
-    Run(ToolAccess),
+    Run { access: ToolAccess },
     /// Terminal result without running the body (invalid arguments,
-    /// `before_tool_call` block, or permission denial).
+    /// `before_tool_call` block, permission denial, or revision feedback).
     Terminal(ToolResult),
 }
 
 /// Build the permission decision for every call in the batch. Dialogs await
 /// sequentially; `before_tool_call` runs here, after instruction preflight
 /// and before the fingerprint recheck.
+///
+/// Consumes the prepared batch so each call can be re-owned with
+/// `PreparedToolCall.approval` written from the validated resolution.
 async fn authorize_tool_batch<'a>(
     config: &AgentConfig,
-    prepared: &'a [(
+    prepared: Vec<(
         &'a AgentToolCall,
         Result<super::tool_arguments::PreparedToolCall, ToolResult>,
-    )],
+    )>,
     turn: u32,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
@@ -569,9 +575,9 @@ async fn authorize_tool_batch<'a>(
                 tool_call,
                 prepared: None,
                 class: ToolSchedulingClass::ParallelSafe,
-                outcome: AuthorizedToolCallOutcome::Terminal(error.clone()),
+                outcome: AuthorizedToolCallOutcome::Terminal(error),
             },
-            Ok(prepared_call) => {
+            Ok(mut prepared_call) => {
                 let preparation =
                     permission_preparation_for_mode(config, tool_call, &prepared_call.arguments);
                 let class = scheduling_class_for_preparation(
@@ -596,8 +602,10 @@ async fn authorize_tool_batch<'a>(
                     )
                     .await
                     {
-                        super::permission::PermissionResolution::Run(access) => {
-                            AuthorizedToolCallOutcome::Run(access)
+                        super::permission::PermissionResolution::Run { access, approval } => {
+                            // Single home for Plan/Goal execution context.
+                            prepared_call.approval = approval;
+                            AuthorizedToolCallOutcome::Run { access }
                         }
                         super::permission::PermissionResolution::Terminal(result) => {
                             AuthorizedToolCallOutcome::Terminal(result)
@@ -690,7 +698,9 @@ pub(super) async fn execute_tool_calls(
     };
 
     // Phase 3 — authorize the full batch (dialogs await sequentially).
-    let authorized = authorize_tool_batch(config, &prepared, turn, emitter, cancel_token).await;
+    // Consumes `prepared` so Allow can write Plan/Goal context onto
+    // `PreparedToolCall.approval` (single transport home).
+    let authorized = authorize_tool_batch(config, prepared, turn, emitter, cancel_token).await;
 
     // Phase 4 — one frozen fingerprint recheck after all authorization. A
     // source changed while a dialog waited returns to the defer path instead
@@ -729,7 +739,7 @@ pub(super) async fn execute_tool_calls(
                     .iter()
                     .map(|entry| {
                         let result = match &entry.outcome {
-                            AuthorizedToolCallOutcome::Run(_) => match &epoch.failure {
+                            AuthorizedToolCallOutcome::Run { .. } => match &epoch.failure {
                                 Some(failure) => blocked_tool_result(failure, epoch.generation),
                                 None => deferred_tool_result(&epoch),
                             },
@@ -795,8 +805,15 @@ pub(super) async fn execute_tool_calls(
     };
 
     // Attach plan details while plan mode is still active, before the side-effect
-    // events below flip it off.
-    attach_exit_plan_details(config, &mut results);
+    // events below flip it off. Selection decoration reads
+    // `PreparedToolCall.approval` in batch order — no tool-id map.
+    attach_exit_plan_details(
+        config,
+        &mut results,
+        authorized
+            .iter()
+            .map(|entry| entry.prepared.as_ref().and_then(|p| p.approval.as_ref())),
+    );
     // Re-emit the finished event for ExitPlanMode so the TUI can render the
     // plan box from the freshly attached details.
     for (tool_call, result) in &results {
@@ -924,7 +941,7 @@ async fn execute_authorized_sequential(
     let mut executed_any = false;
     for entry in authorized {
         let tool_call = entry.tool_call;
-        let Some(prepared_call) = entry.prepared else {
+        let Some(prepared_call) = entry.prepared.as_ref() else {
             // Invalid arguments: emit a finished error without starting execution.
             let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
                 unreachable!("unparsed calls always carry a terminal result");
@@ -933,7 +950,7 @@ async fn execute_authorized_sequential(
             results.push((tool_call.clone(), result.clone()));
             continue;
         };
-        let AuthorizedToolCallOutcome::Run(access) = &entry.outcome else {
+        let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
             // Terminal result (before-hook block or permission denial).
             let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
                 unreachable!("matched above");
@@ -1016,13 +1033,7 @@ async fn execute_authorized_sequential(
             tool_context,
             emitter,
         );
-        emit_tool_execution_finished(
-            turn,
-            tool_call,
-            Some(arguments.as_ref()),
-            &result,
-            emitter,
-        );
+        emit_tool_execution_finished(turn, tool_call, Some(arguments.as_ref()), &result, emitter);
         results.push((tool_call.clone(), result));
         if cancel_token.is_cancelled() {
             break;
@@ -1051,7 +1062,7 @@ async fn execute_authorized_parallel(
             break;
         }
         let tool_call = entry.tool_call;
-        let Some(prepared_call) = entry.prepared else {
+        let Some(prepared_call) = entry.prepared.as_ref() else {
             // Invalid arguments: emit a finished error without starting execution.
             let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
                 unreachable!("unparsed calls always carry a terminal result");
@@ -1060,7 +1071,7 @@ async fn execute_authorized_parallel(
             completed.push((index, tool_call.clone(), result.clone()));
             continue;
         };
-        let AuthorizedToolCallOutcome::Run(access) = &entry.outcome else {
+        let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
             // Terminal result (before-hook block or permission denial).
             let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
                 unreachable!("matched above");
@@ -1144,7 +1155,7 @@ async fn execute_authorized_parallel(
     while let Some(outcome) = running.next().await {
         let (index, tool_call, result) = outcome?;
         executed_any = true;
-        let arguments = match authorized[index].prepared {
+        let arguments = match authorized[index].prepared.as_ref() {
             Some(p) => p.arguments.clone(),
             None => serde_json::Value::Null,
         };
@@ -1356,14 +1367,14 @@ mod tests {
     use neo_ai::ModelClient;
     use tokio_util::sync::CancellationToken;
 
-    use super::{execute_tool_calls, EventEmitter};
+    use super::{EventEmitter, execute_tool_calls};
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
     use crate::tools::{
         ShellAdmissionClass, ShellAdmissionRequest, ShellLimits, ShellRuntime, ToolRegistry,
     };
     use crate::{
-        AgentContext, AgentEvent, AgentToolCall, PermissionApprovalDecision, PermissionMode,
+        AgentContext, AgentEvent, AgentToolCall, ApprovalAction, ApprovalResponse, PermissionMode,
         ProcessSupervisor,
     };
 
@@ -1391,7 +1402,11 @@ mod tests {
             .with_workspace_root(workspace.path())
             .expect("workspace root")
             .with_permission_mode(PermissionMode::Ask)
-            .with_approval_handler(|_| PermissionApprovalDecision::AllowOnce)
+            .with_approval_handler(|request| ApprovalResponse::Selected {
+                request_id: request.id.clone(),
+                action: ApprovalAction::PermitOnce,
+                feedback: None,
+            })
             .with_tool_execution_mode(ToolExecutionMode::Sequential)
             .with_shell_runtime(runtime);
         let model: Arc<dyn ModelClient> =
@@ -1457,4 +1472,3 @@ mod tests {
         assert!(!model_visible.contains("waiting_ms"));
     }
 }
-

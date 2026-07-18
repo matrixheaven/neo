@@ -4,21 +4,21 @@ use anyhow::Context;
 use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
-    AgentConfig, CompactionSettings, HttpConfig, HttpOAuthConfig, McpClient, McpConnectionManager,
-    ProcessSupervisor, StdioConfig, ToolRegistry, build_http_client, build_stdio_client,
+    AgentConfig, ApprovalCancelReason, ApprovalResponse, CompactionSettings, HttpConfig,
+    HttpOAuthConfig, McpClient, McpConnectionManager, ProcessSupervisor, StdioConfig, ToolRegistry,
+    build_http_client, build_stdio_client,
 };
-use neo_agent_core::{PermissionApprovalDecision, PermissionOperation};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{AppConfig, McpServerConfig, McpTransport, neo_home};
 use crate::mcp_ops::{mcp_oauth_identity_for_server, mcp_oauth_service_for_current_home};
-use crate::modes::run::PromptApprovalRequest;
+use crate::modes::run::PendingApproval;
 use crate::resources;
 
 pub(crate) fn agent_config_for_app(
     model: neo_ai::ModelSpec,
     config: &AppConfig,
-    approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+    approval_tx: Option<mpsc::UnboundedSender<PendingApproval>>,
     skill_store: &SkillStore,
     instruction_registry: Option<Arc<InstructionRegistry>>,
 ) -> anyhow::Result<AgentConfig> {
@@ -93,68 +93,29 @@ pub(crate) fn agent_config_for_app(
 
 fn attach_async_approval_handler(
     agent_config: AgentConfig,
-    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    approval_tx: mpsc::UnboundedSender<PendingApproval>,
 ) -> AgentConfig {
-    let plan_review_feedback = Arc::clone(&agent_config.plan_review_feedback);
-    let plan_review_selected_label = Arc::clone(&agent_config.plan_review_selected_label);
     agent_config.with_async_approval_handler(move |request| {
         let approval_tx = approval_tx.clone();
-        let plan_review_feedback = Arc::clone(&plan_review_feedback);
-        let plan_review_selected_label = Arc::clone(&plan_review_selected_label);
         async move {
-            let (decision_tx, decision_rx) = oneshot::channel();
-            let (feedback_tx, feedback_rx) = oneshot::channel();
-            let (selected_label_tx, selected_label_rx) = oneshot::channel();
-            let id = request.id.clone();
-            let operation = request.operation;
-            let session_scope = request.session_scope.clone();
-            let prefix_rule = request.prefix_rule.clone();
-            let session_option_label = session_scope
-                .as_ref()
-                .filter(|scope| !scope.is_empty())
-                .map(|scope| scope.label.clone());
-            let prefix_option_label = prefix_rule
-                .as_ref()
-                .map(|rule| format!("Approve commands starting with {}", rule.label));
+            let request_id = request.id.clone();
+            let (response_tx, response_rx) = oneshot::channel();
             if approval_tx
-                .send(PromptApprovalRequest {
-                    id,
-                    decision_tx,
-                    feedback_tx: Some(feedback_tx),
-                    selected_label_tx: Some(selected_label_tx),
-                    session_option_label,
-                    prefix_option_label,
+                .send(PendingApproval {
+                    request,
+                    response_tx,
                 })
                 .is_err()
             {
-                return PermissionApprovalDecision::Reject;
+                return ApprovalResponse::Cancelled {
+                    request_id,
+                    reason: ApprovalCancelReason::SessionEnded,
+                };
             }
-            let decision = decision_rx
-                .await
-                .unwrap_or(PermissionApprovalDecision::Reject);
-            if decision == PermissionApprovalDecision::Reject
-                && matches!(
-                    operation,
-                    PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
-                )
-                && let Ok(Some(feedback)) = feedback_rx.await
-                && !feedback.trim().is_empty()
-                && let Ok(mut map) = plan_review_feedback.lock()
-            {
-                map.insert(request.id.clone(), feedback);
-            }
-            // The user approved a specific model-supplied plan-review
-            // option. Record its label so `attach_exit_plan_details` can
-            // prefix the tool result with "Selected approach: <label>".
-            if decision == PermissionApprovalDecision::AllowOnce
-                && operation == PermissionOperation::PlanTransition
-                && let Ok(Some(label)) = selected_label_rx.await
-                && !label.trim().is_empty()
-                && let Ok(mut map) = plan_review_selected_label.lock()
-            {
-                map.insert(request.id.clone(), label);
-            }
-            decision
+            response_rx.await.unwrap_or(ApprovalResponse::Cancelled {
+                request_id,
+                reason: ApprovalCancelReason::SessionEnded,
+            })
         }
     })
 }

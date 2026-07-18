@@ -2,12 +2,39 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult,
     goal::{Goal, GoalError, GoalManager, GoalStatus},
 };
+
+/// Pre-validates `ExitGoalMode` input without executing the tool. Used by the
+/// permission layer to skip the approval dialog when the input is invalid —
+/// the tool will still run and return the error, but the user won't see a
+/// meaningless approval prompt for an invocation that can never succeed.
+pub fn prevalidate_exit_goal_mode(input: &Value) -> Result<(), ToolError> {
+    let args = serde_json::from_value::<ExitGoalModeArgs>(input.clone()).map_err(|error| {
+        ToolError::InvalidInput {
+            tool: "ExitGoalMode".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    let invalid = args.objective.trim().is_empty()
+        || args
+            .completion_criterion
+            .as_deref()
+            .is_some_and(|criterion| criterion.trim().is_empty())
+        || args.phases.iter().any(|phase| phase.trim().is_empty());
+    if invalid {
+        return Err(ToolError::InvalidInput {
+            tool: "ExitGoalMode".to_owned(),
+            message: "objective, present completion criterion, and every phase must be non-empty"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StartGoalArgs {
@@ -226,6 +253,7 @@ impl Tool for ExitGoalModeTool {
 
     fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
+            prevalidate_exit_goal_mode(&input)?;
             let args: ExitGoalModeArgs =
                 serde_json::from_value(input).map_err(|err| ToolError::InvalidInput {
                     tool: "ExitGoalMode".to_owned(),

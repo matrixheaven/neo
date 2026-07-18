@@ -24,9 +24,8 @@ use anyhow::{Context, Result};
 use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, McpOAuthService,
-    McpOAuthServiceConfig, McpServerStatus, MessageOrigin, PendingQuestion,
-    PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
-    ShellCommandOrigin, ShellCommandOutcome,
+    McpOAuthServiceConfig, McpServerStatus, MessageOrigin, PendingQuestion, PermissionMode,
+    ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
     instructions::{InstructionRegistry, InstructionRegistryConfig},
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
@@ -36,9 +35,8 @@ use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction, KeybindingsManager},
     primitive::InputResult,
     shell::{
-        ApprovalChoice, ApprovalResult, ContextWindow, MainAgentTokenUsage, NeoChromeState,
-        OverlayKind, PickerItem, PromptCompletionPrefix, PromptEdit, SessionPickerItem,
-        SessionPickerScope, StreamUpdate,
+        ContextWindow, MainAgentTokenUsage, NeoChromeState, OverlayKind, PickerItem,
+        PromptCompletionPrefix, PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
     },
     transcript::{TranscriptPane, frame_content_width},
 };
@@ -95,7 +93,6 @@ use prompt_completion::{CompletionCatalog, CompletionSource, completion_source_c
 mod mode_state;
 
 mod approval;
-use approval::PendingApprovalResponse;
 
 mod slash_commands;
 
@@ -359,12 +356,9 @@ pub(crate) struct InteractiveController {
     btw_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::modes::btw::BtwEvent>>,
     #[cfg(test)]
     btw_client: Option<Arc<dyn neo_ai::ModelClient>>,
-    pending_approvals: BTreeMap<String, PendingApprovalResponse>,
-    /// Approvals resolved by the TUI before `PromptApprovalRequest` arrived
-    /// from the runtime (a race between event processing and channel setup).
-    /// Stores `(decision, feedback)` so the user's Revise feedback survives
-    /// the deferred handoff in `register_pending_approval`.
-    resolved_approvals: BTreeMap<String, (PermissionApprovalDecision, Option<String>)>,
+    /// Live approvals keyed by request id. Each entry owns the single response
+    /// channel for that request; opened only via `register_pending_approval`.
+    pending_approvals: BTreeMap<String, crate::modes::run::PendingApproval>,
     /// Pending `AskUser` question response channels, keyed by question id.
     pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
     pending_question_prompts: BTreeMap<String, Vec<neo_agent_core::QuestionEventData>>,
@@ -409,9 +403,6 @@ pub(crate) struct InteractiveController {
     /// into `TurnRequest`/`AppConfig`, and `set_permission_mode` writes here so
     /// a running turn picks up the new mode at its next tool call.
     live_permission_mode: Arc<RwLock<PermissionMode>>,
-    /// Revise/feedback text keyed by approval request id, waiting to be sent to
-    /// the runtime with the next turn.
-    pending_plan_review_feedback: BTreeMap<String, String>,
     /// Workspace-scoped prompt history store. `None` for test controllers that
     /// do not exercise persistence. Real controllers seed `PromptState` from
     /// this on startup and append accepted prompts to it after each submit.
@@ -445,7 +436,7 @@ pub(crate) struct InteractiveController {
 
 pub(crate) struct TurnChannels {
     events: mpsc::UnboundedSender<Result<AgentEvent>>,
-    approvals: mpsc::UnboundedSender<crate::modes::run::PromptApprovalRequest>,
+    approvals: mpsc::UnboundedSender<crate::modes::run::PendingApproval>,
     session_ids: mpsc::UnboundedSender<String>,
     cancel_token: CancellationToken,
     /// Channel sender for `AskUserTool`'s reverse-RPC questions.
@@ -464,7 +455,7 @@ impl TurnChannels {
 
 pub(super) struct RunningTurn {
     pub(super) events: mpsc::UnboundedReceiver<Result<AgentEvent>>,
-    pub(super) approvals: mpsc::UnboundedReceiver<crate::modes::run::PromptApprovalRequest>,
+    pub(super) approvals: mpsc::UnboundedReceiver<crate::modes::run::PendingApproval>,
     pub(super) session_ids: mpsc::UnboundedReceiver<String>,
     pub(super) task: JoinHandle<Result<TurnOutcome>>,
     pub(super) cancel_token: CancellationToken,
@@ -502,10 +493,6 @@ pub(crate) struct TurnRequest {
     pub plan_mode: Arc<RwLock<PlanMode>>,
     /// Whether this turn should use AI-assisted goal authoring.
     pub goal_mode_authoring: bool,
-    /// Revise/feedback text keyed by approval request id, waiting to be sent to
-    /// the runtime. The production driver is responsible for forwarding this to
-    /// the runtime's plan-review side-channel when possible.
-    pub plan_review_feedback: std::collections::BTreeMap<String, String>,
     pub mcp_manager: Option<McpConnectionManager>,
     /// Live config snapshot at dispatch time. Lets the turn driver pick up
     /// providers/models added at runtime (e.g. via `/provider`) instead of the
@@ -542,7 +529,6 @@ impl TurnRequest {
             workspace_policy: Arc::new(RwLock::new(None)),
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
-            plan_review_feedback: BTreeMap::new(),
             mcp_manager: None,
             base_config: None,
             instruction_registry: None,
@@ -746,8 +732,7 @@ impl InteractiveController {
                                 turn: 0,
                                 id: id.clone(),
                                 position,
-                                waiting_ms: u64::try_from(waiting.as_millis())
-                                    .unwrap_or(u64::MAX),
+                                waiting_ms: u64::try_from(waiting.as_millis()).unwrap_or(u64::MAX),
                             });
                         }
                         neo_agent_core::tools::ShellAdmissionEvent::Started => {
@@ -813,7 +798,6 @@ impl InteractiveController {
             #[cfg(test)]
             btw_client: None,
             pending_approvals: BTreeMap::new(),
-            resolved_approvals: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
             pending_question_prompts: BTreeMap::new(),
             pending_background_question_followups: VecDeque::new(),
@@ -844,7 +828,6 @@ impl InteractiveController {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
-            pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
             trust_store: None,
             workspace_store: None,
@@ -1311,10 +1294,10 @@ impl InteractiveController {
         let Some(number) = approval_number(character) else {
             return false;
         };
-        let Some(result) = self.tui.chrome_mut().choose_approval_number(number) else {
+        let Some(response) = self.tui.chrome_mut().choose_approval_number(number) else {
             return false;
         };
-        self.resolve_approval(&result);
+        self.resolve_approval(response);
         true
     }
 
@@ -1349,26 +1332,17 @@ impl InteractiveController {
             }
             return true;
         }
-        let Some(overlay) = self.tui.chrome_mut().close_focused_overlay() else {
-            return false;
-        };
-        if let OverlayKind::Approval(modal) = overlay.kind {
-            self.resolve_approval(&ApprovalResult {
-                request_id: modal.request_id,
-                choice: ApprovalChoice::Deny,
-                feedback: None,
-                picked_prefix: false,
-                selected_option_label: None,
-            });
-        }
-        true
+        // Approvals live only in `pending_approvals` (not a focused overlay).
+        // Escape for live approvals is handled by `reject_pending_approval` /
+        // `handle_pending_approval_input` → `deny_approval`.
+        self.tui.chrome_mut().close_focused_overlay().is_some()
     }
 
     fn reject_pending_approval(&mut self) -> bool {
-        let Some(result) = self.tui.chrome_mut().deny_approval() else {
+        let Some(response) = self.tui.chrome_mut().deny_approval() else {
             return false;
         };
-        self.resolve_approval(&result);
+        self.resolve_approval(response);
         true
     }
 
@@ -1910,7 +1884,7 @@ impl InteractiveController {
     }
 
     fn sync_inline_approval_selection(&mut self) {
-        let Some((id, selected, feedback_input, selected_suggestion, collecting_feedback)) =
+        let Some((id, selected, feedback_input, collecting_feedback)) =
             self.tui.chrome().approval_selection()
         else {
             return;
@@ -1921,36 +1895,8 @@ impl InteractiveController {
             &id,
             selected,
             &feedback_input,
-            selected_suggestion,
             collecting_feedback,
         );
-    }
-
-    fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
-        // Pre-resolved entry: the user already responded via the TUI before
-        // this channel was registered. Forward the preserved feedback so the
-        // runtime receives it — sending None here caused the model to lose
-        // the user's revision note entirely.
-        if let Some((decision, feedback)) = self.resolved_approvals.remove(&approval.id) {
-            if let Some(tx) = approval.feedback_tx {
-                let _ = tx.send(feedback);
-            }
-            if let Some(tx) = approval.selected_label_tx {
-                let _ = tx.send(None);
-            }
-            let _ = approval.decision_tx.send(decision);
-        } else {
-            self.pending_approvals.insert(
-                approval.id,
-                PendingApprovalResponse {
-                    decision_tx: approval.decision_tx,
-                    feedback_tx: approval.feedback_tx,
-                    selected_label_tx: approval.selected_label_tx,
-                    session_option_label: approval.session_option_label,
-                    prefix_option_label: approval.prefix_option_label,
-                },
-            );
-        }
     }
 
     /// Register a pending `AskUser` question. Stores the oneshot response channel
@@ -2283,8 +2229,10 @@ fn replay_session_into_transcript(
                     // InstructionEpoch event, never as ordinary transcript prose.
                     AgentMessage::Instruction { .. } => {}
                 },
-                AgentEvent::ApprovalRequested { .. }
-                | AgentEvent::RetryScheduled { .. }
+                // Retry intermediate ticks are live-only. ApprovalRequested and
+                // ApprovalResolved are transcript-only history: apply them so
+                // cards rehydrate, but never create PendingApproval or chrome.
+                AgentEvent::RetryScheduled { .. }
                 | AgentEvent::RetryStarted { .. }
                 | AgentEvent::RetryResumed { .. }
                 | AgentEvent::RetrySucceeded { .. } => {}

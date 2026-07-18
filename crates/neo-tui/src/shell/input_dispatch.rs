@@ -3,7 +3,8 @@ use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
 use crate::primitive::theme::ChromeMode;
 
-use super::approval::{self, ApprovalResult};
+use neo_agent_core::ApprovalResponse;
+
 use super::overlay::{Overlay, OverlayKind};
 use super::state::NeoChromeState;
 
@@ -340,14 +341,22 @@ impl NeoChromeState {
         self.with_focused_overlay_mut(Overlay::move_selection_up);
     }
 
-    pub fn handle_pending_approval_input(&mut self, input: InputEvent) -> Option<ApprovalResult> {
+    pub fn handle_pending_approval_input(&mut self, input: InputEvent) -> Option<ApprovalResponse> {
         let input = Self::translate_key_event_for_dialog(input);
         match input {
             InputEvent::Insert(character) => {
-                if let Some(number) = approval::approval_number(character)
-                    && let Some(result) = self.choose_approval_number(number)
+                let number = character.to_digit(10).map(|value| value as usize);
+                // While editing revision feedback, digits are text — never
+                // re-select options or confirm.
+                if let Some(number @ 1..=9) = number
+                    && let Some(approval) = self.pending_approvals.front()
+                    && !approval.is_collecting_feedback()
+                    && number <= approval.request.options.len()
                 {
-                    return Some(result);
+                    if let Some(approval) = self.pending_approvals.front_mut() {
+                        approval.selected = number - 1;
+                    }
+                    return self.confirm_or_edit_selected_approval();
                 }
                 if let Some(approval) = self.pending_approvals.front_mut() {
                     approval.insert_feedback(&character.to_string());
@@ -375,27 +384,8 @@ impl NeoChromeState {
                 None
             }
             InputEvent::Submit
-            | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) =>
-            {
-                // Two-step Enter for Revise:
-                // 1st Enter — if Revise is selected but feedback collection
-                //   hasn't started yet, activate it and stay in the dialog.
-                //   The user can then type their revision note.
-                // 2nd Enter — once feedback is non-empty, submit.
-                // An empty Enter after collection starts is a no-op (prevents
-                // accidental empty submissions).
-                if let Some(approval) = self.pending_approvals.front_mut()
-                    && approval.modal.selected_choice() == Some(approval::ApprovalChoice::Revise)
-                {
-                    if !approval.is_collecting_feedback() {
-                        approval.begin_feedback_collection();
-                        return None;
-                    }
-                    if approval.feedback_input.is_empty() {
-                        return None;
-                    }
-                }
-                self.confirm_approval()
+            | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) => {
+                self.confirm_or_edit_selected_approval()
             }
             InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {
                 self.deny_approval()

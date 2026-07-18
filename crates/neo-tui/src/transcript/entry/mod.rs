@@ -13,7 +13,10 @@ use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
 use crate::transcript::ToolCallComponent;
 use crate::transcript::WorkflowCardComponent;
-use neo_agent_core::{PlanSuggestion, SkillInvocationOutcome, SkillInvocationSource};
+use neo_agent_core::{
+    ApprovalAction, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+    SkillInvocationOutcome, SkillInvocationSource,
+};
 use serde::{Deserialize, Serialize};
 
 mod copy;
@@ -35,46 +38,53 @@ pub struct BannerData {
     pub mcp: Option<String>,
 }
 
+/// Transcript display lifecycle for one approval request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalDisplayState {
+    Pending,
+    Resolved(ApprovalResolution),
+    Abandoned,
+}
+
+/// Transcript entry for a canonical approval request.
+///
+/// Holds the immutable runtime-owned request plus mutable view state only.
+/// Labels are presentation-only; option actions are never reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPromptData {
-    pub id: String,
-    pub title: String,
-    pub details: Vec<String>,
-    pub queued_label: String,
-    pub queued_count: usize,
+    pub request: ApprovalRequest,
     pub selected: usize,
     pub feedback_input: String,
     #[serde(default)]
     pub feedback_active: bool,
-    pub resolved: Option<String>,
-    /// Dynamic label for the reusable session-approval option (Layer 1).
-    /// `None` omits the option, keeping numeric shortcuts aligned.
+    pub state: ApprovalDisplayState,
+    /// UI-only queue badge for additional pending approvals waiting behind this
+    /// active prompt. Not part of the protocol request/response.
     #[serde(default)]
-    pub session_option_label: Option<String>,
-    /// Dynamic label for the persistent prefix-approval option (Layer 2).
-    /// `None` omits the option.
-    #[serde(default)]
-    pub prefix_option_label: Option<String>,
-    /// Plan file content to render inside the approval dialog (`PlanTransition` only).
-    #[serde(default)]
-    pub plan_content: Option<String>,
-    /// Plan file path for the box title (`PlanTransition` only).
-    #[serde(default)]
-    pub plan_path: Option<String>,
-    /// Model-supplied option labels for plan review (`PlanTransition` only).
-    /// When non-empty, these replace the generic "Approve once" option so
-    /// that the rendered option list matches the chrome's one-to-one.
-    #[serde(default)]
-    pub plan_option_labels: Vec<String>,
-    /// Preset revision suggestions for plan review (`PlanTransition` only).
-    #[serde(default)]
-    pub suggestions: Vec<PlanSuggestion>,
-    /// Index of the currently selected preset suggestion, if any. When set,
-    /// the corresponding suggestion's feedback text is populated into
-    /// [`Self::feedback_input`] and the option selection moves to
-    /// "Reject with feedback".
-    #[serde(default)]
-    pub selected_suggestion: Option<usize>,
+    pub queued_count: usize,
+}
+
+impl ApprovalPromptData {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.request.id.as_str()
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        match &self.request.presentation {
+            ApprovalPresentation::Command { title, .. }
+            | ApprovalPresentation::Tool { title, .. }
+            | ApprovalPresentation::Plan { title, .. }
+            | ApprovalPresentation::Goal { title, .. } => title.as_str(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        matches!(self.state, ApprovalDisplayState::Pending)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,10 +537,10 @@ impl TranscriptEntry {
             Self::ToolRun { component } => component.finalization(),
             Self::ShellRun { component } => component.finalization(),
             Self::ApprovalPrompt(data) => {
-                if data.resolved.is_some() {
-                    Finalization::Finalized
-                } else {
+                if data.is_pending() {
                     Finalization::Live
+                } else {
+                    Finalization::Finalized
                 }
             }
             Self::Compaction { phase, percent, .. } => {
@@ -585,8 +595,12 @@ impl TranscriptEntry {
             ),
             Self::ShellRun { component } => component.interrupt(),
             Self::ApprovalPrompt(data) => {
-                data.resolved = Some("Interrupted when terminal exited".to_owned());
-                true
+                if data.is_pending() {
+                    data.state = ApprovalDisplayState::Abandoned;
+                    true
+                } else {
+                    false
+                }
             }
             Self::Compaction { percent, .. } => {
                 let percent = *percent;
@@ -995,88 +1009,41 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     let body = Style::default().fg(theme.text_primary);
     let muted = Style::default().fg(theme.text_muted);
     let selected = Style::default().fg(theme.status_ok).bold();
-    if let Some(resolved) = &data.resolved {
-        return vec![Line::styled(format!("approval: {resolved}"), muted)];
+    match &data.state {
+        ApprovalDisplayState::Resolved(resolution) => {
+            let label = resolution_display_label(resolution);
+            return vec![Line::styled(format!("approval: {label}"), muted)];
+        }
+        ApprovalDisplayState::Abandoned => {
+            return vec![Line::styled("approval: Abandoned", muted)];
+        }
+        ApprovalDisplayState::Pending => {}
     }
 
     let line = "\u{2500}".repeat(width.max(1));
     let mut rows = vec![Line::styled(line.clone(), border)];
     rows.extend(styled_wrap_with_indent(
-        &format!("▶ {}", data.title),
+        &format!("▶ {}", data.title()),
         width,
         2,
         2,
         title,
     ));
     rows.push(Line::raw(""));
-    for detail in &data.details {
-        rows.extend(styled_wrap_with_indent(detail, width, 2, 4, body));
+    for detail in presentation_detail_lines(&data.request.presentation) {
+        rows.extend(styled_wrap_with_indent(&detail, width, 2, 4, body));
     }
     rows.push(Line::raw(""));
-    // Render the plan content box (PlanTransition only).
-    if let Some(plan_content) = &data.plan_content {
-        let plan_box = PlanBoxComponent::new(plan_content.clone(), data.plan_path.clone());
-        let box_lines = plan_box.render(width, theme);
-        for line in box_lines {
-            rows.push(line);
+    if let ApprovalPresentation::Plan { markdown, path, .. } = &data.request.presentation {
+        if !markdown.trim().is_empty() {
+            let plan_path = path.as_ref().map(|p| p.display().to_string());
+            let plan_box = PlanBoxComponent::new(markdown.clone(), plan_path);
+            rows.extend(plan_box.render(width, theme));
+            rows.push(Line::raw(""));
         }
-        rows.push(Line::raw(""));
     }
-    // Render preset revision suggestions (PlanTransition only).
-    if !data.suggestions.is_empty() {
-        rows.push(Line::styled("  Suggestions:", title));
-        for (index, suggestion) in data.suggestions.iter().enumerate() {
-            let number = index + 1;
-            let is_selected = data.selected_suggestion == Some(index);
-            let prefix = if is_selected { "  ▶ " } else { "    " };
-            let style = if is_selected { selected } else { body };
-            rows.extend(styled_wrap_with_prefix(
-                &format!("{}. {}", number, suggestion.label),
-                width,
-                prefix,
-                "     ",
-                style,
-            ));
-            if !suggestion.description.is_empty() {
-                rows.extend(styled_wrap_with_indent(
-                    &suggestion.description,
-                    width,
-                    7,
-                    7,
-                    muted,
-                ));
-            }
-        }
-        rows.push(Line::raw(""));
-    }
-    // Build the option list dynamically. For plan reviews with custom
-    // options, use the model-supplied labels so the list matches the
-    // chrome one-to-one. Otherwise fall back to a single "Approve once".
-    // The session-approval (Layer 1) and prefix-rule (Layer 2) options
-    // appear only when their labels are `Some`, so numeric shortcuts and
-    // the feedback-input index track the visible list.
-    let mut options: Vec<String> = if data.plan_option_labels.is_empty() {
-        vec!["Approve once".to_owned()]
-    } else {
-        data.plan_option_labels
-            .iter()
-            .map(|label| format!("Approach: {label}"))
-            .collect()
-    };
-    if let Some(label) = &data.session_option_label {
-        options.push(label.clone());
-    }
-    if let Some(label) = &data.prefix_option_label {
-        options.push(label.clone());
-    }
-    for suggestion in &data.suggestions {
-        options.push(format!("Suggestion: {}", suggestion.label));
-    }
-    options.push("Reject".to_owned());
-    options.push("Reject with feedback".to_owned());
-    let revise_index = options.len() - 1;
 
-    for (index, label) in options.iter().enumerate() {
+    for (index, option) in data.request.options.iter().enumerate() {
         let prefix = if data.selected == index {
             "  ▶ "
         } else {
@@ -1088,15 +1055,28 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
             body
         };
         rows.extend(styled_wrap_with_prefix(
-            &format!("{}. {label}", index + 1),
+            &format!("{}. {}", index + 1, option.label),
             width,
             prefix,
             "     ",
             style,
         ));
+        if let Some(description) = &option.description {
+            rows.extend(styled_wrap_with_indent(description, width, 7, 7, muted));
+        }
     }
     rows.push(Line::raw(""));
-    if data.feedback_active && data.selected == revise_index {
+    let revise_selected = data
+        .request
+        .options
+        .get(data.selected)
+        .is_some_and(|option| {
+            matches!(
+                option.action,
+                ApprovalAction::RevisePlan { .. } | ApprovalAction::ReviseGoal { .. }
+            )
+        });
+    if data.feedback_active && revise_selected {
         let feedback = if data.feedback_input.is_empty() {
             "feedback: ▌".to_owned()
         } else {
@@ -1111,14 +1091,8 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         } else {
             "approvals"
         };
-        let queued_label = data.queued_label.trim();
-        let label = if queued_label.is_empty() {
-            suffix.to_owned()
-        } else {
-            format!("{queued_label} {suffix}")
-        };
         rows.extend(styled_wrap_with_indent(
-            &format!("queued: {} {label} waiting", data.queued_count),
+            &format!("queued: {} {suffix} waiting", data.queued_count),
             width,
             2,
             2,
@@ -1135,6 +1109,52 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     ));
     rows.push(Line::styled(line, border));
     rows
+}
+
+fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String> {
+    match presentation {
+        ApprovalPresentation::Command { command, cwd, .. } => {
+            let mut lines = Vec::new();
+            if let Some(cwd) = cwd {
+                lines.push(format!("cwd: {}", cwd.display()));
+            }
+            lines.push(format!("$ {command}"));
+            lines
+        }
+        ApprovalPresentation::Tool { details, .. } => details.clone(),
+        ApprovalPresentation::Plan { summary, .. } => summary
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .into_iter()
+            .collect(),
+        ApprovalPresentation::Goal {
+            objective,
+            completion_criterion,
+            phases,
+            ..
+        } => {
+            let mut lines = vec![objective.clone()];
+            if let Some(criterion) = completion_criterion {
+                lines.push(criterion.clone());
+            }
+            lines.extend(phases.iter().cloned());
+            lines
+        }
+    }
+}
+
+fn resolution_display_label(resolution: &ApprovalResolution) -> String {
+    match resolution {
+        // Pure reject actions render a stable past-tense status word. Other
+        // selected actions keep the event's canonical option label.
+        ApprovalResolution::Selected {
+            action: ApprovalAction::Reject | ApprovalAction::RejectPlan | ApprovalAction::RejectGoal,
+            ..
+        } => "Rejected".to_owned(),
+        ApprovalResolution::Selected { label, .. } => label.clone(),
+        ApprovalResolution::Cancelled { reason } => format!("cancelled ({reason:?})"),
+    }
 }
 
 fn styled_wrap_with_indent(
@@ -1581,74 +1601,76 @@ amigo",
         assert!(text.contains("24k"), "{text}");
     }
 
-    #[test]
-    fn approval_prompt_renders_suggestions() {
-        let data = ApprovalPromptData {
-            id: "test-id".to_owned(),
-            title: "Plan Review".to_owned(),
-            details: vec!["Ready to build with this plan?".to_owned()],
-            queued_label: String::new(),
+    fn plan_prompt_data(
+        selected: usize,
+        feedback_active: bool,
+        feedback_input: String,
+    ) -> ApprovalPromptData {
+        use neo_agent_core::{ApprovalAction, ApprovalOption, PermissionOperation};
+        ApprovalPromptData {
+            request: ApprovalRequest {
+                turn: 1,
+                id: "test-id".to_owned(),
+                operation: PermissionOperation::PlanTransition,
+                presentation: ApprovalPresentation::Plan {
+                    title: "Plan Review".to_owned(),
+                    path: None,
+                    markdown: String::new(),
+                    summary: Some("Ready?".to_owned()),
+                },
+                options: vec![
+                    ApprovalOption {
+                        label: "Approve".to_owned(),
+                        description: None,
+                        action: ApprovalAction::ApprovePlan { selection: None },
+                    },
+                    ApprovalOption {
+                        label: "Suggestion: Keep 85% window".to_owned(),
+                        description: Some("Keep compaction window at 85%.".to_owned()),
+                        action: ApprovalAction::RevisePlan {
+                            preset_feedback: Some("Keep compaction at 85%.".to_owned()),
+                        },
+                    },
+                    ApprovalOption {
+                        label: "Reject".to_owned(),
+                        description: None,
+                        action: ApprovalAction::RejectPlan,
+                    },
+                    ApprovalOption {
+                        label: "Reject with feedback".to_owned(),
+                        description: None,
+                        action: ApprovalAction::RevisePlan {
+                            preset_feedback: None,
+                        },
+                    },
+                ],
+            },
+            selected,
+            feedback_input,
+            feedback_active,
+            state: ApprovalDisplayState::Pending,
             queued_count: 0,
-            selected: 0,
-            feedback_input: String::new(),
-            feedback_active: false,
-            resolved: None,
-            session_option_label: None,
-            prefix_option_label: None,
-            plan_content: None,
-            plan_path: None,
-            plan_option_labels: Vec::new(),
-            suggestions: vec![
-                PlanSuggestion {
-                    label: "Keep 85% window".to_owned(),
-                    description: "Keep compaction window at 85%.".to_owned(),
-                    feedback: Some("Keep compaction at 85%.".to_owned()),
-                },
-                PlanSuggestion {
-                    label: "Accept as-is".to_owned(),
-                    description: "No changes needed.".to_owned(),
-                    feedback: Some("No changes.".to_owned()),
-                },
-            ],
-            selected_suggestion: None,
-        };
+        }
+    }
+
+    #[test]
+    fn approval_prompt_renders_canonical_options() {
+        let data = plan_prompt_data(0, false, String::new());
         let lines = TranscriptEntry::ApprovalPrompt(data)
             .render(80, &TuiTheme::default())
             .into_iter()
             .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         let text = lines.join("\n");
-        assert!(text.contains("Suggestions:"), "{text}");
-        assert!(text.contains("1. Keep 85% window"), "{text}");
+        assert!(text.contains("1. Approve"), "{text}");
+        assert!(text.contains("2. Suggestion: Keep 85% window"), "{text}");
         assert!(text.contains("Keep compaction window at 85%."), "{text}");
-        assert!(text.contains("2. Accept as-is"), "{text}");
+        assert!(text.contains("3. Reject"), "{text}");
     }
 
     #[test]
-    fn approval_prompt_highlights_selected_suggestion() {
-        let data = ApprovalPromptData {
-            id: "test-id".to_owned(),
-            title: "Plan Review".to_owned(),
-            details: vec!["Ready?".to_owned()],
-            queued_label: String::new(),
-            queued_count: 0,
-            // Options: [0] Approve once, [1] Suggestion, [2] Reject, [3] Revise.
-            selected: 3,
-            feedback_input: "Keep compaction at 85%.".to_owned(),
-            feedback_active: true,
-            resolved: None,
-            session_option_label: None,
-            prefix_option_label: None,
-            plan_content: None,
-            plan_path: None,
-            plan_option_labels: Vec::new(),
-            suggestions: vec![PlanSuggestion {
-                label: "Keep 85% window".to_owned(),
-                description: "Keep compaction window at 85%.".to_owned(),
-                feedback: Some("Keep compaction at 85%.".to_owned()),
-            }],
-            selected_suggestion: Some(0),
-        };
+    fn approval_prompt_highlights_selected_revision_feedback() {
+        let data = plan_prompt_data(1, true, "Keep compaction at 85%.".to_owned());
         let lines = TranscriptEntry::ApprovalPrompt(data)
             .render(80, &TuiTheme::default())
             .into_iter()
@@ -1660,25 +1682,7 @@ amigo",
 
     #[test]
     fn approval_prompt_hides_feedback_until_input_is_active() {
-        let data = ApprovalPromptData {
-            id: "test-id".to_owned(),
-            title: "Plan Review".to_owned(),
-            details: vec!["Ready?".to_owned()],
-            queued_label: String::new(),
-            queued_count: 0,
-            // Options: [0] Approve once, [1] Reject, [2] Revise.
-            selected: 2,
-            feedback_input: String::new(),
-            feedback_active: false,
-            resolved: None,
-            session_option_label: None,
-            prefix_option_label: None,
-            plan_content: None,
-            plan_path: None,
-            plan_option_labels: Vec::new(),
-            suggestions: Vec::new(),
-            selected_suggestion: None,
-        };
+        let data = plan_prompt_data(3, false, String::new());
         let lines = TranscriptEntry::ApprovalPrompt(data)
             .render(80, &TuiTheme::default())
             .into_iter()
@@ -1690,24 +1694,7 @@ amigo",
 
     #[test]
     fn approval_prompt_shows_feedback_when_input_is_active() {
-        let data = ApprovalPromptData {
-            id: "test-id".to_owned(),
-            title: "Plan Review".to_owned(),
-            details: vec!["Ready?".to_owned()],
-            queued_label: String::new(),
-            queued_count: 0,
-            selected: 2,
-            feedback_input: String::new(),
-            feedback_active: true,
-            resolved: None,
-            session_option_label: None,
-            prefix_option_label: None,
-            plan_content: None,
-            plan_path: None,
-            plan_option_labels: Vec::new(),
-            suggestions: Vec::new(),
-            selected_suggestion: None,
-        };
+        let data = plan_prompt_data(3, true, String::new());
         let lines = TranscriptEntry::ApprovalPrompt(data)
             .render(80, &TuiTheme::default())
             .into_iter()

@@ -9,9 +9,9 @@ At runtime Neo has three named modes — `Ask`, `Auto`, and `Yolo` — plus **Pl
 | Mode | String value | Behavior |
 | --- | --- | --- |
 | **Ask** | `"ask"` | Default. Read-like tools (`Read`/`List`/`Grep`/`Glob`, etc.) and known-safe commands are auto-approved; writes, shell, and tool calls always pop up an approval dialog |
-| **Auto** | `"auto"` | Automatically approves all tool calls (including shell and writes). However, `AskUserQuestion` is hard-denied, and `ExitPlanMode` / `ExitGoalMode` still require approval |
-| **Yolo** | `"yolo"` | Approves everything, including dangerous commands; also skips project trust checks. Use only in controlled environments |
-| **Plan** | — | Entered when the model calls `EnterPlanMode`; only read-only tools and writes to the current plan file are allowed, and `ExitPlanMode` requires user approval to exit |
+| **Auto** | `"auto"` | Automatically approves all tool calls (including shell, writes, `ExitPlanMode`, and `ExitGoalMode`). `AskUserQuestion` is hard-denied |
+| **Yolo** | `"yolo"` | Approves ordinary tool calls including dangerous commands and skips project trust checks, but still shows Plan/Goal review dialogs. Use only in controlled environments |
+| **Plan** | — | Entered when the model calls `EnterPlanMode`; only read-only tools and writes to the current plan file are allowed, and `ExitPlanMode` requires user approval to exit (except in Auto) |
 
 > Precedence of the three modes: the CLI flags `--yolo` / `--auto` override the config file; they cannot be used together. While running, you can switch in real time via slash commands, and the change takes effect immediately on the turn in progress.
 
@@ -26,16 +26,30 @@ neo --auto
 neo --yolo
 ```
 
-## Approval Granularity
+## Dynamic approval options
 
-In Ask mode, every call requiring approval offers several granularity options (determined by `PermissionApprovalDecision`):
+When Neo needs approval, the dialog is built from a single runtime-owned request. **Options are dynamic**: the list includes only actions the runtime can honor for that call — labels are presentation copy, not a separate semantic source.
 
-| Decision | Description | Storage location |
+### Ordinary Tool / Shell approvals
+
+For ordinary Tool and Shell approvals the offered actions are:
+
+| Option | Description | Storage |
 | --- | --- | --- |
-| **Allow once** (single) | Approves only this occurrence; the next time still requires approval | Not persisted |
-| **Allow for session** (session) | Automatically approves identical operations within the current session | In memory (`session_approvals`) |
-| **Allow for prefix** (prefix) | Future shell commands starting with this prefix are auto-approved | On disk (`~/.neo/approval_rules.json`) |
+| **Approve once** | Approves only this occurrence; the next time still requires approval | Not persisted |
+| **Session grant** (when available) | Auto-approves matching operations for the rest of the session | In memory (`session_approvals`) |
+| **Prefix grant** (when available) | Future shell commands starting with this prefix are auto-approved | On disk (`~/.neo/approval_rules.json`) |
 | **Reject** | Denies, returns `approval denied` to the model | — |
+
+Ordinary Tool/Shell approvals **do not offer revision feedback**. Session and prefix grants appear only when the runtime can derive a safe reusable scope; if neither applies, the dialog shows only Approve once and Reject.
+
+**Background Bash** never offers a reusable grant: session and prefix options are omitted, so only one-shot Approve and Reject are available.
+
+### Plan and Goal review
+
+- **Plan (`ExitPlanMode`)**: Approve (optionally with an alternative approach) exits plan mode and continues; **Reject** and **Revise** keep Plan mode active so Neo can revise the plan.
+- **Goal (`ExitGoalMode`)**: The review shows **objective**, **completion criterion**, and **phases**. Approve starts the goal; **Reject** and **Revise create no goal**.
+- **Ask** and **Yolo** show Plan/Goal review dialogs. **Auto** skips them and proceeds without a review prompt.
 
 ### Session-Level (Layer 1)
 
@@ -77,13 +91,13 @@ In Ask mode, Neo first classifies the command to decide whether to skip approval
 From tool call initiation to execution, Neo short-circuits in the following order (returning as soon as any layer matches):
 
 1. **Plan mode hard guard**: if in Plan mode and the tool is not on the read-only whitelist → denied outright.
-2. **Auto / background AskUser**: Auto mode denies `AskUserQuestion` and approves everything else; background `AskUserQuestion` never pops a dialog; `EnterPlanMode` is auto-approved in all modes.
+2. **Auto / background AskUser**: Auto mode denies `AskUserQuestion` and approves everything else (including Plan/Goal exits); background `AskUserQuestion` never pops a dialog; `EnterPlanMode` is auto-approved in all modes.
 3. **Prefix rules (Layer 2)**: matches a persisted prefix → approved.
 4. **Session cache (Layer 1)**: matches an exact key already approved this session → approved.
-5. **State-transition tools**: `ExitPlanMode` / `ExitGoalMode` require separate approval (even in Auto mode).
-6. **Yolo mode**: approves all remaining calls.
+5. **State-transition tools**: `ExitPlanMode` / `ExitGoalMode` pop a review dialog in Ask and Yolo (Auto already approved them in step 2).
+6. **Yolo mode**: approves remaining ordinary tool calls (Plan/Goal reviews already handled above).
 7. **Safety classification**: safe commands are approved; dangerous commands force a dialog; default-approved tools (`Read`/`List`/`Grep`/`Find`/`Glob`/`TodoList`/`TaskList`/`TaskOutput`/`Skill`/`AskUserQuestion`/`Sleep`) are approved.
-8. **Fallback**: pops the approval dialog, waiting for the user to choose Allow once / Allow for session / Allow for prefix / Reject.
+8. **Fallback**: pops the approval dialog with only the actions the runtime can honor for that call (Approve once, optional session/prefix grants, Reject — no revision feedback on ordinary tools).
 
 > Real-time: modes switched via `/ask`, `/auto`, `/yolo`, `/permissions` take effect immediately — there is no need to cancel the current turn; the next tool call will be evaluated against the new mode.
 

@@ -1,5 +1,3 @@
-use neo_agent_core::PermissionOperation;
-
 use crate::primitive::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,35 +266,4 @@ pub(crate) fn format_token_count(tokens: u32) -> String {
     } else {
         tokens.to_string()
     }
-}
-
-pub(crate) fn review_title(operation: PermissionOperation) -> &'static str {
-    match operation {
-        PermissionOperation::GoalTransition => "Goal Review",
-        _ => "Plan Review",
-    }
-}
-
-/// Extract the model-supplied option labels and a human-readable summary from
-/// an `ExitPlanMode` approval request's arguments. Returns `(labels, body)`
-/// where `labels` is the ordered list of approach labels (empty when the model
-/// supplied no alternatives) and `body` is a rendered list of
-/// `label — description` lines for the dialog body.
-pub(crate) fn plan_review_options(arguments: &serde_json::Value) -> (Vec<String>, String) {
-    let Some(options) = arguments.get("options").and_then(|v| v.as_array()) else {
-        return (Vec::new(), String::new());
-    };
-    let mut labels = Vec::new();
-    let mut lines = Vec::new();
-    for option in options {
-        let Some(label) = option.get("label").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        labels.push(label.to_owned());
-        match option.get("description").and_then(|v| v.as_str()) {
-            Some(desc) if !desc.trim().is_empty() => lines.push(format!("• {label} — {desc}")),
-            _ => lines.push(format!("• {label}")),
-        }
-    }
-    (labels, lines.join("\n"))
 }

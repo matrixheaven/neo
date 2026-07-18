@@ -853,8 +853,9 @@ impl TranscriptPane {
 
     pub fn finalize_interrupted_live_entries(&mut self) -> bool {
         let mut changed = false;
-        if !self.queued_approvals.is_empty() {
-            self.queued_approvals.clear();
+        while let Some(mut queued) = self.queued_approvals.pop_front() {
+            queued.queued_count = 0;
+            self.transcript.insert_approval_after_tool_or_push(queued);
             changed = true;
         }
         for index in 0..self.transcript.entries().len() {

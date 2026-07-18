@@ -29,14 +29,6 @@ impl Default for PermissionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionApprovalDecision {
-    AllowOnce,
-    AllowForSession,
-    AllowForPrefix,
-    Reject,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum PermissionOperation {
     FileRead,

@@ -28,7 +28,7 @@ fn permission_mode_items() -> Vec<neo_tui::dialogs::ChoiceItem> {
             "permission:yolo",
             "YOLO",
         )
-        .with_description("Automatically approve tool actions and plan transitions. The agent can still ask you explicit questions when your input is needed."),
+        .with_description("Automatically approve ordinary tool actions. PlanMode and GoalMode reviews are still shown (same as Ask). The agent can still ask you explicit questions when your input is needed."),
     ]
 }
 

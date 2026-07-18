@@ -61,7 +61,7 @@ fn render_overlay_content_snapshot(app: &NeoChromeState, content_width: usize) -
         Some(OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
         Some(OverlayKind::PromptCompletion(_)) => vec![],
         Some(OverlayKind::Message(message)) => vec![message.clone()],
-        Some(OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)) | None => Vec::new(),
+        Some(OverlayKind::QuestionDialog(_)) | None => Vec::new(),
         // Rich dialogs — use their own render_lines.
         Some(_) => app.focused_overlay_lines(content_width),
     }

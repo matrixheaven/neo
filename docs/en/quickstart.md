@@ -172,7 +172,7 @@ neo run "Review this code @src/parser.rs"
 
 ```bash
 neo --auto             # Auto permission mode: auto-approve every tool call
-neo --yolo             # YOLO mode: auto-approve tools and plan transitions, but may still ask the user questions
+neo --yolo             # YOLO mode: auto-approve ordinary tools; Plan/Goal reviews still shown; may still ask questions
 neo --verbose          # Print verbose startup diagnostics
 neo --config <path>    # Use a specific config file (overrides ~/.neo/config.toml)
 ```

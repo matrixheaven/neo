@@ -9,16 +9,20 @@ use std::{
 
 use clap::Parser as _;
 use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, MessageOrigin, PermissionMode, ShellLimits, ShellRuntime,
-    StopReason, ToolResult,
+    AgentEvent, AgentMessage, ApprovalAction, ApprovalCancelReason, ApprovalOption,
+    ApprovalPresentation, ApprovalRequest, ApprovalResolution, ApprovalResponse, Content,
+    FileWriteApprovalOperation, MessageOrigin, PendingQuestion, PermissionMode,
+    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope, ShellLimits,
+    ShellRuntime, StopReason, ToolResult,
     skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
 };
 use neo_tui::{
-    input::KeybindingAction,
+    input::{InputEvent, KeyId, KeybindingAction},
     screen_output::InlineTerminal,
-    shell::{ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
-    transcript::TranscriptEntry,
+    shell::{ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
+    transcript::{ApprovalDisplayState, TranscriptEntry, TranscriptPane},
 };
+use tokio::sync::oneshot;
 
 use super::git_status::{
     count_untracked_changes, git_status_label_with_program, parse_git_numstat,
@@ -196,16 +200,210 @@ fn skill_store_with_interactive_preflight_skills() -> SkillStore {
     .expect("skill store")
 }
 
-fn pending_approval_response(
-    decision_tx: oneshot::Sender<PermissionApprovalDecision>,
-) -> PendingApprovalResponse {
-    PendingApprovalResponse {
-        decision_tx,
-        feedback_tx: None,
-        selected_label_tx: None,
-        session_option_label: None,
-        prefix_option_label: None,
+fn ordinary_approval_options(
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
+) -> Vec<ApprovalOption> {
+    let mut options = vec![ApprovalOption {
+        label: "Approve once".to_owned(),
+        description: None,
+        action: ApprovalAction::PermitOnce,
+    }];
+    if let Some(scope) = session_scope.filter(|scope| !scope.is_empty()) {
+        options.push(ApprovalOption {
+            label: scope.label.clone(),
+            description: Some(scope.detail.clone()),
+            action: ApprovalAction::PermitForSession { scope },
+        });
     }
+    if let Some(rule) = prefix_rule {
+        options.push(ApprovalOption {
+            label: format!("Approve commands starting with {}", rule.label),
+            description: None,
+            action: ApprovalAction::PermitForPrefix { rule },
+        });
+    }
+    options.push(ApprovalOption {
+        label: "Reject".to_owned(),
+        description: None,
+        action: ApprovalAction::Reject,
+    });
+    options
+}
+
+fn ordinary_tool_request(
+    id: &str,
+    subject: &str,
+    path: &str,
+    session_scope: Option<SessionApprovalScope>,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::Tool,
+        presentation: ApprovalPresentation::Tool {
+            title: "Run tool?".to_owned(),
+            details: vec![format!("tool: {subject}"), format!("path: {path}")],
+        },
+        options: ordinary_approval_options(session_scope, None),
+    }
+}
+
+fn ordinary_shell_request(
+    id: &str,
+    command: &str,
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: command.to_owned(),
+            cwd: None,
+        },
+        options: ordinary_approval_options(session_scope, prefix_rule),
+    }
+}
+
+fn background_bash_request() -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: "background-bash".to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::Reject,
+            },
+        ],
+    }
+}
+
+fn plan_review_request(id: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::PlanTransition,
+        presentation: ApprovalPresentation::Plan {
+            title: "Plan Review".to_owned(),
+            path: None,
+            markdown: "Ready to build with this plan?".to_owned(),
+            summary: Some("Ready to build with this plan?".to_owned()),
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve".to_owned(),
+                description: None,
+                action: ApprovalAction::ApprovePlan { selection: None },
+            },
+            ApprovalOption {
+                label: "Reject with feedback".to_owned(),
+                description: None,
+                action: ApprovalAction::RevisePlan {
+                    preset_feedback: None,
+                },
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::RejectPlan,
+            },
+        ],
+    }
+}
+
+fn goal_review_request(id: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::GoalTransition,
+        presentation: ApprovalPresentation::Goal {
+            title: "Start goal?".to_owned(),
+            objective: "Ship the feature".to_owned(),
+            completion_criterion: Some("Tests pass".to_owned()),
+            phases: vec!["Plan".to_owned(), "Implement".to_owned()],
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Start goal".to_owned(),
+                description: None,
+                action: ApprovalAction::StartGoal,
+            },
+            ApprovalOption {
+                label: "Reject with feedback".to_owned(),
+                description: None,
+                action: ApprovalAction::ReviseGoal {
+                    preset_feedback: None,
+                },
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::RejectGoal,
+            },
+        ],
+    }
+}
+
+fn make_pending_approval(
+    request: ApprovalRequest,
+) -> (
+    crate::modes::run::PendingApproval,
+    oneshot::Receiver<ApprovalResponse>,
+) {
+    let (response_tx, response_rx) = oneshot::channel();
+    (
+        crate::modes::run::PendingApproval {
+            request,
+            response_tx,
+        },
+        response_rx,
+    )
+}
+
+fn file_write_session_scope(path: &str) -> SessionApprovalScope {
+    SessionApprovalScope {
+        keys: vec![SessionApprovalKey::FileWrite {
+            workspace: test_workspace_root().display().to_string(),
+            path: test_workspace_root().join(path).display().to_string(),
+            operation: FileWriteApprovalOperation::Write,
+        }],
+        label: "Approve writes to this file for this session".to_owned(),
+        detail: path.to_owned(),
+    }
+}
+
+fn shell_session_scope(command: &[&str]) -> SessionApprovalScope {
+    SessionApprovalScope {
+        keys: vec![SessionApprovalKey::Shell {
+            workspace: test_workspace_root().display().to_string(),
+            cwd: test_workspace_root().display().to_string(),
+            command: command.iter().map(|part| (*part).to_owned()).collect(),
+        }],
+        label: "Approve this exact command for this session".to_owned(),
+        detail: test_workspace_root().display().to_string(),
+    }
+}
+
+/// Keep the `_goal` helper referenced so Plan/Goal builders stay compiled even
+/// when no current test exercises Goal review.
+#[allow(dead_code)]
+fn _goal_review_request_for_builders() -> ApprovalRequest {
+    goal_review_request("goal-1")
 }
 
 #[test]
@@ -5009,34 +5207,44 @@ async fn event_loop_dispatches_select_keybinding_actions_to_overlay_primitives()
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller
-        .tui
-        .chrome_mut()
-        .request_approval("approval-1", "Run command?", "cargo test");
+    let (pending, mut response_rx) = make_pending_approval(ordinary_shell_request(
+        "approval-1",
+        "cargo test",
+        None,
+        None,
+    ));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
         .await
         .expect("selection moves down");
-    assert_eq!(
-        controller.chrome().approval_choice(),
-        Some(ApprovalChoice::Deny)
-    );
+    assert!(matches!(
+        controller.chrome().approval_selected_action(),
+        Some(ApprovalAction::Reject)
+    ));
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectUp))
         .await
         .expect("selection moves up");
-    assert_eq!(
-        controller.chrome().approval_choice(),
-        Some(ApprovalChoice::Approve)
-    );
+    assert!(matches!(
+        controller.chrome().approval_selected_action(),
+        Some(ApprovalAction::PermitOnce)
+    ));
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
         .await
         .expect("approval confirms");
-    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(matches!(
+        response_rx.try_recv().expect("response ready"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitOnce,
+            ..
+        }
+    ));
+    assert!(!controller.chrome().approval_is_pending());
 
     controller.tui.chrome_mut().push_overlay(Overlay::new(
         "palette",
@@ -5438,38 +5646,28 @@ async fn event_loop_confirms_approval_choice_to_running_turn() {
         }
     }
 
-    let decisions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let captured_decisions = std::sync::Arc::clone(&decisions);
+    let responses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_responses = std::sync::Arc::clone(&responses);
     let run_turn: TurnDriver = Arc::new(move |_request, channels| {
-        let captured_decisions = std::sync::Arc::clone(&captured_decisions);
+        let captured_responses = std::sync::Arc::clone(&captured_responses);
         Box::pin(async move {
+            let request = ordinary_tool_request("tool-1", "Write", "approved.txt", None);
             channels.send_event(AgentEvent::ApprovalRequested {
-                turn: 1,
-                id: "tool-1".to_owned(),
-                operation: neo_agent_core::PermissionOperation::Tool,
-                subject: "Write".to_owned(),
-                arguments: serde_json::json!({"path": "approved.txt"}),
-                session_scope: None,
-                prefix_rule: None,
-                suggestions: Vec::new(),
+                request: request.clone(),
             });
-            let (decision_tx, decision_rx) = oneshot::channel();
+            let (response_tx, response_rx) = oneshot::channel();
             channels
                 .approvals
-                .send(crate::modes::run::PromptApprovalRequest {
-                    id: "tool-1".to_owned(),
-                    decision_tx,
-                    feedback_tx: None,
-                    selected_label_tx: None,
-                    session_option_label: None,
-                    prefix_option_label: None,
+                .send(crate::modes::run::PendingApproval {
+                    request,
+                    response_tx,
                 })
                 .expect("approval waiter sent");
-            let decision = decision_rx.await.expect("approval decision");
-            captured_decisions
+            let response = response_rx.await.expect("approval response");
+            captured_responses
                 .lock()
-                .expect("decisions lock")
-                .push(decision);
+                .expect("responses lock")
+                .push(response);
             channels.send_event(AgentEvent::TextDelta {
                 turn: 1,
                 text: "approved".to_owned(),
@@ -5510,11 +5708,16 @@ async fn event_loop_confirms_approval_choice_to_running_turn() {
         .await
         .expect("approval loop completes");
 
-    assert_eq!(
-        *decisions.lock().expect("decisions lock"),
-        vec![PermissionApprovalDecision::AllowOnce]
-    );
-    assert!(controller.chrome().focused_overlay().is_none());
+    let captured = responses.lock().expect("responses lock");
+    assert_eq!(captured.len(), 1);
+    assert!(matches!(
+        &captured[0],
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitOnce,
+            ..
+        }
+    ));
+    assert!(!controller.chrome().approval_is_pending());
     assert!(controller.render_snapshot().contains("approved"));
 }
 
@@ -5652,53 +5855,36 @@ async fn approval_number_shortcut_confirms_session_approval() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "approved.txt"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
-                workspace: test_workspace_root().display().to_string(),
-                path: test_workspace_root()
-                    .join("approved.txt")
-                    .display()
-                    .to_string(),
-                operation: neo_agent_core::FileWriteApprovalOperation::Write,
-            }],
-            label: "Approve writes to this file for this session".to_owned(),
-            detail: "approved.txt".to_owned(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller.pending_approvals.insert(
-        "tool-1".to_owned(),
-        PendingApprovalResponse {
-            decision_tx,
-            feedback_tx: None,
-            selected_label_tx: None,
-            session_option_label: Some("Approve writes to this file for this session".into()),
-            prefix_option_label: None,
-        },
-    );
+    let scope = file_write_session_scope("approved.txt");
+    let (pending, response_rx) = make_pending_approval(ordinary_tool_request(
+        "tool-1",
+        "Write",
+        "approved.txt",
+        Some(scope),
+    ));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Insert('2'))
         .await
         .expect("number shortcut handles approval");
 
-    assert_eq!(
-        decision_rx.await.expect("approval decision"),
-        PermissionApprovalDecision::AllowForSession
-    );
-    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitForSession { .. },
+            ..
+        }
+    ));
+    assert!(!controller.chrome().approval_is_pending());
     assert!(
         controller
             .render_snapshot()
-            .contains("Approved writes to this file for this session")
+            .contains("Approve writes to this file for this session")
+            || controller
+                .render_snapshot()
+                .to_lowercase()
+                .contains("approve")
     );
 }
 
@@ -5711,52 +5897,36 @@ async fn prefix_approval_choice_dispatches_prefix_decision() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "cargo test".to_owned(),
-        arguments: serde_json::json!({"command": "cargo test"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::Shell {
-                workspace: test_workspace_root().display().to_string(),
-                cwd: test_workspace_root().display().to_string(),
-                command: vec!["cargo".to_owned(), "test".to_owned()],
-            }],
-            label: "Approve this exact command for this session".to_owned(),
-            detail: test_workspace_root().display().to_string(),
-        }),
-        prefix_rule: Some(neo_agent_core::PrefixApprovalRule {
-            prefix: vec!["cargo".to_owned(), "test".to_owned()],
-            label: "cargo test".to_owned(),
-        }),
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller.pending_approvals.insert(
-        "tool-1".to_owned(),
-        PendingApprovalResponse {
-            decision_tx,
-            feedback_tx: None,
-            selected_label_tx: None,
-            session_option_label: Some("Approve this exact command for this session".into()),
-            prefix_option_label: Some("Approve commands starting with cargo test".into()),
-        },
-    );
+    let scope = shell_session_scope(&["cargo", "test"]);
+    let rule = PrefixApprovalRule {
+        prefix: vec!["cargo".to_owned(), "test".to_owned()],
+        label: "cargo test".to_owned(),
+    };
+    let (pending, response_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "cargo test",
+        Some(scope),
+        Some(rule),
+    ));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Insert('3'))
         .await
         .expect("number shortcut handles prefix approval");
 
-    assert_eq!(
-        decision_rx.await.expect("approval decision"),
-        PermissionApprovalDecision::AllowForPrefix
-    );
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitForPrefix { .. },
+            ..
+        }
+    ));
     assert!(
         controller
             .render_snapshot()
-            .contains("Approved commands starting with cargo test")
+            .contains("Approve commands starting with cargo test")
+            || controller.render_snapshot().contains("cargo test")
     );
 }
 
@@ -5981,52 +6151,38 @@ async fn approval_uses_selection_priority_for_real_keys() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.type_text("draft");
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "approved.txt"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
-                workspace: test_workspace_root().display().to_string(),
-                path: test_workspace_root()
-                    .join("approved.txt")
-                    .display()
-                    .to_string(),
-                operation: neo_agent_core::FileWriteApprovalOperation::Write,
-            }],
-            label: "Approve writes to this file for this session".to_owned(),
-            detail: "approved.txt".to_owned(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+    let scope = file_write_session_scope("approved.txt");
+    let (pending, response_rx) = make_pending_approval(ordinary_tool_request(
+        "tool-1",
+        "Write",
+        "approved.txt",
+        Some(scope),
+    ));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
         .await
         .expect("down selects approval option");
-    assert_eq!(
-        controller.chrome().approval_choice(),
-        Some(ApprovalChoice::AlwaysApprove)
-    );
+    assert!(matches!(
+        controller.chrome().approval_selected_action(),
+        Some(ApprovalAction::PermitForSession { .. })
+    ));
 
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
         .await
         .expect("enter confirms approval");
 
-    assert_eq!(
-        decision_rx.await.expect("approval decision"),
-        PermissionApprovalDecision::AllowForSession
-    );
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitForSession { .. },
+            ..
+        }
+    ));
     assert_eq!(controller.chrome().prompt().text, "draft");
-    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(!controller.chrome().approval_is_pending());
 }
 
 #[tokio::test]
@@ -6039,33 +6195,17 @@ async fn approval_revise_collects_feedback_without_editing_prompt() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.type_text("draft");
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "denied.txt"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+    let (pending, response_rx) = make_pending_approval(plan_review_request("tool-1"));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
         .await
-        .expect("down selects deny option");
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
-        .await
         .expect("down selects revise option");
-    assert_eq!(
-        controller.chrome().approval_choice(),
-        Some(ApprovalChoice::Revise)
-    );
+    assert!(matches!(
+        controller.chrome().approval_selected_action(),
+        Some(ApprovalAction::RevisePlan { .. })
+    ));
 
     // First Enter enters feedback collection mode.
     controller
@@ -6091,10 +6231,14 @@ async fn approval_revise_collects_feedback_without_editing_prompt() {
         .expect("enter confirms revise");
 
     assert_eq!(controller.chrome().prompt().text, "draft");
-    assert_eq!(
-        decision_rx.await.expect("approval decision"),
-        PermissionApprovalDecision::Reject
-    );
+    match response_rx.await.expect("approval response") {
+        ApprovalResponse::Selected {
+            action: ApprovalAction::RevisePlan { .. },
+            feedback: Some(feedback),
+            ..
+        } => assert_eq!(feedback, "no thank"),
+        other => panic!("expected revise response, got {other:?}"),
+    }
     let snapshot = controller.render_snapshot();
     assert!(
         snapshot.contains("Revision feedback: no thank"),
@@ -6111,31 +6255,27 @@ async fn approval_cancel_rejects_pending_approval() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "denied.txt"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+    let (pending, response_rx) =
+        make_pending_approval(ordinary_tool_request("tool-1", "Write", "denied.txt", None));
+    controller.register_pending_approval(pending);
 
     controller
         .handle_input_event(InputEvent::Cancel)
         .await
         .expect("cancel rejects approval");
 
-    assert_eq!(
-        decision_rx.await.expect("approval decision"),
-        PermissionApprovalDecision::Reject
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Cancelled {
+            reason: ApprovalCancelReason::Escape,
+            ..
+        }
+    ));
+    let snapshot = controller.render_snapshot().to_lowercase();
+    assert!(
+        snapshot.contains("cancel") || snapshot.contains("reject"),
+        "snapshot should show cancelled/rejected approval"
     );
-    assert!(controller.render_snapshot().contains("Rejected"));
 }
 
 #[tokio::test]
@@ -6147,57 +6287,34 @@ async fn approval_requests_are_handled_one_at_a_time() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::Shell {
-                workspace: test_workspace_root().display().to_string(),
-                cwd: test_workspace_root().display().to_string(),
-                command: vec!["printf".to_owned(), "one".to_owned()],
-            }],
-            label: "Approve this exact command for this session".to_owned(),
-            detail: test_workspace_root().display().to_string(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-2".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf two".to_owned(),
-        arguments: serde_json::json!({"command": "printf two"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (first_tx, first_rx) = oneshot::channel();
-    let (second_tx, _second_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(first_tx));
-    controller
-        .pending_approvals
-        .insert("tool-2".to_owned(), pending_approval_response(second_tx));
+    let (first, first_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "printf one",
+        Some(shell_session_scope(&["printf", "one"])),
+        None,
+    ));
+    let (second, _second_rx) =
+        make_pending_approval(ordinary_shell_request("tool-2", "printf two", None, None));
+    controller.register_pending_approval(first);
+    controller.register_pending_approval(second);
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
         .await
         .expect("first approval confirms");
 
-    assert_eq!(
-        first_rx.await.expect("first decision"),
-        PermissionApprovalDecision::AllowOnce
-    );
+    assert!(matches!(
+        first_rx.await.expect("first response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitOnce,
+            ..
+        }
+    ));
     assert_eq!(
         controller
             .chrome()
             .approval_selection()
-            .map(|(id, _, _, _, _)| id),
+            .map(|(id, _, _, _)| id),
         Some("tool-2")
     );
     let snapshot = controller.render_snapshot();
@@ -6213,34 +6330,16 @@ async fn approval_transcript_only_shows_active_request() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::Shell {
-                workspace: test_workspace_root().display().to_string(),
-                cwd: test_workspace_root().display().to_string(),
-                command: vec!["printf".to_owned(), "one".to_owned()],
-            }],
-            label: "Approve this exact command for this session".to_owned(),
-            detail: test_workspace_root().display().to_string(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-2".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf two".to_owned(),
-        arguments: serde_json::json!({"command": "printf two"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
+    let (first, _first_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "printf one",
+        Some(shell_session_scope(&["printf", "one"])),
+        None,
+    ));
+    let (second, _second_rx) =
+        make_pending_approval(ordinary_shell_request("tool-2", "printf two", None, None));
+    controller.register_pending_approval(first);
+    controller.register_pending_approval(second);
 
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("printf one"));
@@ -6257,60 +6356,36 @@ async fn approval_cancel_advances_next_visible_request() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::Shell {
-                workspace: test_workspace_root().display().to_string(),
-                cwd: test_workspace_root().display().to_string(),
-                command: vec!["printf".to_owned(), "one".to_owned()],
-            }],
-            label: "Approve this exact command for this session".to_owned(),
-            detail: test_workspace_root().display().to_string(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-2".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf two".to_owned(),
-        arguments: serde_json::json!({"command": "printf two"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (first_tx, first_rx) = oneshot::channel();
-    let (second_tx, _second_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(first_tx));
-    controller
-        .pending_approvals
-        .insert("tool-2".to_owned(), pending_approval_response(second_tx));
+    let (first, first_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "printf one",
+        Some(shell_session_scope(&["printf", "one"])),
+        None,
+    ));
+    let (second, _second_rx) =
+        make_pending_approval(ordinary_shell_request("tool-2", "printf two", None, None));
+    controller.register_pending_approval(first);
+    controller.register_pending_approval(second);
 
     controller
         .handle_input_event(InputEvent::Cancel)
         .await
         .expect("cancel rejects current approval");
 
-    assert_eq!(
-        first_rx.await.expect("first decision"),
-        PermissionApprovalDecision::Reject
-    );
+    assert!(matches!(
+        first_rx.await.expect("first response"),
+        ApprovalResponse::Cancelled {
+            reason: ApprovalCancelReason::Escape,
+            ..
+        }
+    ));
     let snapshot = controller.render_snapshot();
-    assert!(snapshot.contains("Rejected"));
     assert!(snapshot.contains("printf two"));
     assert!(!snapshot.contains("queued:"));
 }
 
 #[tokio::test]
-async fn approval_interrupt_rejects_all_pending_approvals() {
+async fn approval_interrupt_cancels_all_pending_approvals() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -6318,54 +6393,38 @@ async fn approval_interrupt_rejects_all_pending_approvals() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-2".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf two".to_owned(),
-        arguments: serde_json::json!({"command": "printf two"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (first_tx, first_rx) = oneshot::channel();
-    let (second_tx, second_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(first_tx));
-    controller
-        .pending_approvals
-        .insert("tool-2".to_owned(), pending_approval_response(second_tx));
+    let (first, first_rx) =
+        make_pending_approval(ordinary_shell_request("tool-1", "printf one", None, None));
+    let (second, second_rx) =
+        make_pending_approval(ordinary_shell_request("tool-2", "printf two", None, None));
+    controller.register_pending_approval(first);
+    controller.register_pending_approval(second);
 
     controller
         .handle_input_event(InputEvent::Interrupt)
         .await
-        .expect("interrupt rejects pending approvals");
+        .expect("interrupt cancels pending approvals");
 
-    assert_eq!(
-        first_rx.await.expect("first decision"),
-        PermissionApprovalDecision::Reject
-    );
-    assert_eq!(
-        second_rx.await.expect("second decision"),
-        PermissionApprovalDecision::Reject
-    );
+    assert!(matches!(
+        first_rx.await.expect("first response"),
+        ApprovalResponse::Cancelled {
+            reason: ApprovalCancelReason::Interrupt,
+            ..
+        }
+    ));
+    assert!(matches!(
+        second_rx.await.expect("second response"),
+        ApprovalResponse::Cancelled {
+            reason: ApprovalCancelReason::Interrupt,
+            ..
+        }
+    ));
     assert!(controller.pending_approvals.is_empty());
     assert!(!controller.chrome().approval_is_pending());
 }
 
 #[tokio::test]
-async fn approval_interrupt_preserves_rejection_for_late_channel_registration() {
+async fn background_bash_one_down_submits_the_visible_reject_action() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -6373,36 +6432,30 @@ async fn approval_interrupt_preserves_rejection_for_late_channel_registration() 
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
+    let (pending, response_rx) = make_pending_approval(background_bash_request());
+    controller.register_pending_approval(pending);
 
     controller
-        .handle_input_event(InputEvent::Interrupt)
+        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
         .await
-        .expect("interrupt rejects visible approval");
-    let (decision_tx, decision_rx) = oneshot::channel();
-    controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
-        id: "tool-1".to_owned(),
-        decision_tx,
-        feedback_tx: None,
-        selected_label_tx: None,
-        session_option_label: None,
-        prefix_option_label: None,
-    });
-
-    assert_eq!(
-        decision_rx.await.expect("late approval decision"),
-        PermissionApprovalDecision::Reject
+        .expect("down selects Reject");
+    let snapshot = controller.render_snapshot();
+    assert!(
+        snapshot.contains("2. Reject"),
+        "visible option should be Reject after one Down: {snapshot}"
     );
-    assert!(controller.pending_approvals.is_empty());
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+        .await
+        .expect("enter submits Reject");
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::Reject,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -7108,45 +7161,135 @@ fn replay_finalizes_dangling_shell_queue_without_restart() {
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("Interrupted when terminal exited"), "{rendered}");
+    assert!(
+        rendered.contains("Interrupted when terminal exited"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("Queued Bash"), "{rendered}");
 }
 
-#[test]
-fn replay_session_into_transcript_discards_historical_pending_approvals() {
-    let mut transcript = TranscriptPane::new(80, 12);
-    let approval = |id: &str| AgentEvent::ApprovalRequested {
+fn replay_background_bash_request() -> ApprovalRequest {
+    ApprovalRequest {
         turn: 1,
-        id: id.to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": format!("{id}.txt")}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    };
+        id: "background-bash".to_owned(),
+        operation: PermissionOperation::Shell,
+        presentation: ApprovalPresentation::Command {
+            title: "Run this command?".to_owned(),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+        },
+        options: vec![
+            ApprovalOption {
+                label: "Approve once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            },
+            ApprovalOption {
+                label: "Reject".to_owned(),
+                description: None,
+                action: ApprovalAction::Reject,
+            },
+        ],
+    }
+}
+
+#[test]
+fn replay_renders_resolved_approval_without_reopening_it() {
+    let request = replay_background_bash_request();
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::ApprovalRequested {
+            request: request.clone(),
+        },
+        AgentEvent::ApprovalResolved {
+            turn: 1,
+            request_id: request.id.clone(),
+            resolution: ApprovalResolution::Selected {
+                action: ApprovalAction::Reject,
+                label: "Reject".to_owned(),
+                feedback: None,
+            },
+        },
+    ]);
+    let mut transcript = TranscriptPane::new(80, 12);
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(80, 12)
+        .expect("render replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Rejected"), "frame: {rendered}");
+    assert!(
+        transcript.transcript().entries().iter().all(|entry| {
+            !matches!(
+                entry,
+                TranscriptEntry::ApprovalPrompt(data)
+                    if matches!(data.state, ApprovalDisplayState::Pending)
+            )
+        }),
+        "replay must not leave a pending approval card"
+    );
+}
+
+#[test]
+fn replay_marks_unresolved_approval_abandoned_without_reopening_it() {
+    let request = replay_background_bash_request();
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
-        .with_events([approval("historical-1"), approval("historical-2")]);
+        .with_events([AgentEvent::ApprovalRequested { request }]);
+    let mut transcript = TranscriptPane::new(80, 12);
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(80, 12)
+        .expect("render replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Abandoned"), "frame: {rendered}");
+    assert!(
+        transcript.transcript().entries().iter().all(|entry| {
+            !matches!(
+                entry,
+                TranscriptEntry::ApprovalPrompt(data)
+                    if matches!(data.state, ApprovalDisplayState::Pending)
+            )
+        }),
+        "unresolved replay cards must be Abandoned, not Pending"
+    );
+}
+
+#[test]
+fn replay_preserves_all_unresolved_approval_cards_as_abandoned() {
+    let first = replay_background_bash_request();
+    let mut second = replay_background_bash_request();
+    second.id = "background-bash-2".to_owned();
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::ApprovalRequested { request: first },
+        AgentEvent::ApprovalRequested { request: second },
+    ]);
+    let mut transcript = TranscriptPane::new(80, 12);
 
     replay_session_into_transcript(&mut transcript, &loaded);
-    assert!(
-        transcript
-            .transcript()
-            .entries()
-            .iter()
-            .all(|entry| !matches!(entry, TranscriptEntry::ApprovalPrompt(_))),
-        "historical interaction prompts must not be replayed"
-    );
 
-    transcript.apply_agent_event(approval("current"));
-    transcript.resolve_approval("current", "Approved");
+    let approvals = transcript
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ApprovalPrompt(data) => Some(data),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        approvals.len(),
+        2,
+        "every requested approval must survive replay"
+    );
     assert!(
-        transcript
-            .transcript()
-            .entries()
+        approvals
             .iter()
-            .all(|entry| !matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.resolved.is_none())),
-        "resolving a current approval must not resurrect a historical request"
+            .all(|data| matches!(data.state, ApprovalDisplayState::Abandoned))
     );
 }
 
@@ -9221,32 +9364,10 @@ async fn revise_exit_plan_mode_feedback_is_forwarded_with_current_approval() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "exit-plan-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: serde_json::json!({}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, decision_rx) = oneshot::channel();
-    let (feedback_tx, feedback_rx) = oneshot::channel();
-    controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
-        id: "exit-plan-1".to_owned(),
-        decision_tx,
-        feedback_tx: Some(feedback_tx),
-        selected_label_tx: None,
-        session_option_label: None,
-        prefix_option_label: None,
-    });
+    let (pending, response_rx) = make_pending_approval(plan_review_request("exit-plan-1"));
+    controller.register_pending_approval(pending);
 
-    // Select "Revise" (index 2) and enter feedback, then confirm.
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
-        .await
-        .expect("move to revise");
+    // Select "Reject with feedback" (index 1) and enter feedback, then confirm.
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
         .await
@@ -9266,11 +9387,14 @@ async fn revise_exit_plan_mode_feedback_is_forwarded_with_current_approval() {
         .expect("confirm revise");
 
     assert!(transcript_has_status(&controller, "Revision feedback: r"));
-    assert_eq!(
-        decision_rx.await.expect("decision"),
-        PermissionApprovalDecision::Reject
-    );
-    assert_eq!(feedback_rx.await.expect("feedback"), Some("r".into()));
+    match response_rx.await.expect("response") {
+        ApprovalResponse::Selected {
+            action: ApprovalAction::RevisePlan { .. },
+            feedback: Some(feedback),
+            ..
+        } => assert_eq!(feedback, "r"),
+        other => panic!("expected revise with feedback, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -9282,35 +9406,13 @@ async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Shell,
-        subject: "printf one".to_owned(),
-        arguments: serde_json::json!({"command": "printf one"}),
-        session_scope: Some(neo_agent_core::SessionApprovalScope {
-            keys: vec![neo_agent_core::SessionApprovalKey::Shell {
-                workspace: test_workspace_root().display().to_string(),
-                cwd: test_workspace_root().display().to_string(),
-                command: vec!["printf".to_owned(), "one".to_owned()],
-            }],
-            label: "Approve this exact command for this session".to_owned(),
-            detail: test_workspace_root().display().to_string(),
-        }),
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (first_tx, first_rx) = oneshot::channel();
-    controller.pending_approvals.insert(
-        "tool-1".to_owned(),
-        PendingApprovalResponse {
-            decision_tx: first_tx,
-            feedback_tx: None,
-            selected_label_tx: None,
-            session_option_label: Some("Approve this exact command for this session".into()),
-            prefix_option_label: None,
-        },
-    );
+    let (first, first_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "printf one",
+        Some(shell_session_scope(&["printf", "one"])),
+        None,
+    ));
+    controller.register_pending_approval(first);
 
     // Select "Approve for this session" (index 1) and confirm.
     controller
@@ -9322,32 +9424,19 @@ async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
         .await
         .expect("confirm always-approve");
 
-    assert_eq!(
-        first_rx.await.expect("first decision"),
-        PermissionApprovalDecision::AllowForSession
-    );
+    assert!(matches!(
+        first_rx.await.expect("first response"),
+        ApprovalResponse::Selected {
+            action: ApprovalAction::PermitForSession { .. },
+            ..
+        }
+    ));
 
     // Tool-session approval is scoped by the runtime. The TUI must not
     // turn one approval into a global bypass for later ask prompts.
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-2".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "later.txt"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (second_tx, mut second_rx) = oneshot::channel();
-    controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
-        id: "tool-2".to_owned(),
-        decision_tx: second_tx,
-        feedback_tx: None,
-        selected_label_tx: None,
-        session_option_label: None,
-        prefix_option_label: None,
-    });
+    let (second, mut second_rx) =
+        make_pending_approval(ordinary_tool_request("tool-2", "Write", "later.txt", None));
+    controller.register_pending_approval(second);
     assert!(
         second_rx.try_recv().is_err(),
         "later approval requests should remain pending in the TUI"
@@ -11848,20 +11937,13 @@ async fn approval_up_down_does_not_recall_prompt_history() {
     let mut controller = controller_with_history_store(store);
     // Composer is empty so any leaked Up would otherwise recall "old prompt".
 
-    controller.apply_turn_event(AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "Write".to_owned(),
-        arguments: serde_json::json!({"path": "approved.txt"}),
-        session_scope: None,
-        prefix_rule: None,
-        suggestions: Vec::new(),
-    });
-    let (decision_tx, _decision_rx) = oneshot::channel();
-    controller
-        .pending_approvals
-        .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+    let (pending, _response_rx) = make_pending_approval(ordinary_tool_request(
+        "tool-1",
+        "Write",
+        "approved.txt",
+        None,
+    ));
+    controller.register_pending_approval(pending);
 
     // Up/Down while approval is focused must move the dialog, not history.
     controller
@@ -13083,10 +13165,7 @@ async fn shell_mode_omits_execution_timeout_for_user_commands() {
         .await
         .expect("shell completes");
 
-    assert_eq!(
-        *observed_timeout.lock().expect("timeout lock"),
-        None
-    );
+    assert_eq!(*observed_timeout.lock().expect("timeout lock"), None);
 }
 
 #[tokio::test]

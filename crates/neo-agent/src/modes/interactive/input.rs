@@ -207,12 +207,12 @@ impl InteractiveController {
             }
             return Ok(true);
         }
-        if let Some(result) = self
+        if let Some(response) = self
             .tui
             .chrome_mut()
             .handle_pending_approval_input(event.clone())
         {
-            self.resolve_approval(&result);
+            self.resolve_approval(response);
         } else {
             self.sync_inline_approval_selection();
         }
@@ -693,9 +693,11 @@ impl InteractiveController {
     pub(super) async fn handle_select_confirm_action(&mut self) -> Result<()> {
         if self.tui.chrome_mut().selected_command().is_some() {
             self.run_selected_command().await?;
-        } else if self.tui.chrome_mut().approval_choice().is_some() {
-            if let Some(result) = self.tui.chrome_mut().confirm_approval() {
-                self.resolve_approval(&result);
+        } else if self.tui.chrome().approval_is_pending() {
+            if let Some(response) = self.tui.chrome_mut().confirm_or_edit_selected_approval() {
+                self.resolve_approval(response);
+            } else {
+                self.sync_inline_approval_selection();
             }
         } else if self.tui.chrome_mut().selected_session().is_some() {
             self.load_selected_session().await?;

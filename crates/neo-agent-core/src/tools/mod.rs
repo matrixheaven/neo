@@ -17,10 +17,10 @@ pub mod plan_mode;
 mod process_supervisor;
 mod read;
 mod sessions;
-mod sleep;
 mod shell_env;
 mod shell_guard;
 mod skills_manager;
+mod sleep;
 mod terminal;
 mod todo;
 mod write;
@@ -139,7 +139,10 @@ pub use workflow::RunWorkflowTool;
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 // Re-export Goal tool types.
-pub use goal::{ExitGoalModeTool, GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool};
+pub use goal::{
+    ExitGoalModeArgs, ExitGoalModeTool, GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool,
+    prevalidate_exit_goal_mode,
+};
 // Re-export session tool types.
 pub use sessions::SummarizeSessionsTool;
 // Re-export Sleep tool.

@@ -17,12 +17,14 @@ mod stream;
 
 pub use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
-pub use approval::{
-    ApprovalChoice, ApprovalModal, ApprovalOption, ApprovalRequestModal, ApprovalResult,
-};
+pub use approval::ApprovalRequestModal;
 pub use command_palette::{CommandPaletteState, CommandSpec};
 pub use context::{ContextWindow, MainAgentTokenUsage};
 pub use image_cache::InlineImageRenderCache;
+pub use neo_agent_core::{
+    ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,
+    ApprovalResolution, ApprovalResponse,
+};
 pub use overlay::{Overlay, OverlayId, OverlayKind};
 pub use pending_input::PendingInputState;
 pub use pickers::{
@@ -118,28 +120,18 @@ impl NeoChromeState {
         question_ids
     }
 
-    pub fn request_approval(
-        &mut self,
-        request_id: impl Into<String>,
-        title: impl Into<String>,
-        body: impl Into<String>,
-    ) -> OverlayId {
+    /// Queue a canonical approval request. Stores the immutable request and
+    /// resets interaction state (selection index + feedback) to defaults.
+    pub fn push_approval(&mut self, request: ApprovalRequest) {
         self.pending_approvals
-            .push_back(ApprovalRequestModal::new(request_id, title, body));
+            .push_back(ApprovalRequestModal::new(request));
         self.focused_overlay = None;
         self.mode = ChromeMode::Approval;
-        OverlayId::default()
     }
 
     #[must_use]
-    pub fn approval_choice(&self) -> Option<ApprovalChoice> {
-        if let Some(approval) = self.pending_approvals.front() {
-            return approval.modal.selected_choice();
-        }
-        let OverlayKind::Approval(modal) = &self.focused_overlay()?.kind else {
-            return None;
-        };
-        modal.modal.selected_choice()
+    pub fn pending_approval(&self) -> Option<&ApprovalRequestModal> {
+        self.pending_approvals.front()
     }
 
     #[must_use]
@@ -147,140 +139,80 @@ impl NeoChromeState {
         !self.pending_approvals.is_empty()
     }
 
+    /// `(request_id, selected_index, feedback_input, collecting_feedback)`.
     #[must_use]
-    pub fn approval_selection(&self) -> Option<(&str, usize, &str, Option<usize>, bool)> {
+    pub fn approval_selection(&self) -> Option<(&str, usize, &str, bool)> {
         self.pending_approvals.front().map(|approval| {
-            let plan_option_count = approval.plan_option_labels.len();
-            let suggestion_index = approval.modal.selected.saturating_sub(plan_option_count);
-            let selected_suggestion = approval
-                .suggestions
-                .get(suggestion_index)
-                .map(|_| suggestion_index);
             (
-                approval.request_id.as_str(),
-                approval.modal.selected,
+                approval.request.id.as_str(),
+                approval.selected,
                 approval.feedback_input.as_str(),
-                selected_suggestion,
                 approval.is_collecting_feedback(),
             )
         })
     }
 
-    pub fn choose_approval_number(&mut self, number: usize) -> Option<ApprovalResult> {
+    #[must_use]
+    pub fn approval_selected_action(&self) -> Option<&ApprovalAction> {
+        self.pending_approvals
+            .front()
+            .and_then(ApprovalRequestModal::selected_action)
+    }
+
+    pub fn choose_approval_number(&mut self, number: usize) -> Option<ApprovalResponse> {
         let approval = self.pending_approvals.front_mut()?;
-        if number == 0 || number > approval.modal.options.len() {
+        // Number shortcuts are selection-only; while collecting feedback the
+        // digit path is `Insert` → `insert_feedback` (see input_dispatch).
+        if approval.is_collecting_feedback() {
             return None;
         }
-        approval.modal.selected = number - 1;
-        approval.apply_suggestion_feedback();
-        // Same two-step gate as the arrow-key + Enter path: pressing the
-        // number for Revise activates feedback collection but does not submit.
-        // The caller stays in the dialog until the user types and presses Enter.
-        if approval.begin_feedback_collection() {
+        if number == 0 || number > approval.request.options.len() {
             return None;
         }
-        self.confirm_approval()
+        approval.selected = number - 1;
+        self.confirm_or_edit_selected_approval()
     }
 
-    pub fn deny_approval(&mut self) -> Option<ApprovalResult> {
-        if let Some(approval) = self.pending_approvals.front_mut() {
-            if let Some(index) = approval
-                .modal
-                .options
-                .iter()
-                .position(|option| option.choice == ApprovalChoice::Deny)
-            {
-                approval.modal.selected = index;
-            }
-            return self.confirm_approval();
-        }
-
-        let id = self.focused_overlay;
-        let overlay = self.focused_overlay()?;
-        let OverlayKind::Approval(modal) = &overlay.kind else {
-            return None;
-        };
-        let result = ApprovalResult {
-            request_id: modal.request_id.clone(),
-            choice: ApprovalChoice::Deny,
-            feedback: None,
-            picked_prefix: false,
-            selected_option_label: None,
-        };
-        if let Some(id) = id {
-            let _ = self.close_overlay(id);
-        }
-        Some(result)
+    /// Escape / cancel: produce `ApprovalResponse::Cancelled { reason: Escape }`.
+    pub fn deny_approval(&mut self) -> Option<ApprovalResponse> {
+        let modal = self.pending_approvals.pop_front()?;
+        let response = modal.cancelled(ApprovalCancelReason::Escape);
+        self.mode = self.overlay_mode();
+        Some(response)
     }
 
-    pub fn cancel_all_approvals(&mut self) -> Vec<ApprovalResult> {
+    pub fn cancel_all_approvals(&mut self) -> Vec<ApprovalResponse> {
         let results = self
             .pending_approvals
             .drain(..)
-            .map(|modal| ApprovalResult {
-                request_id: modal.request_id,
-                choice: ApprovalChoice::Deny,
-                feedback: None,
-                picked_prefix: false,
-                selected_option_label: None,
-            })
+            .map(|modal| modal.cancelled(ApprovalCancelReason::Interrupt))
             .collect();
         self.mode = self.overlay_mode();
         results
     }
 
-    pub fn confirm_approval(&mut self) -> Option<ApprovalResult> {
-        if let Some(modal) = self.pending_approvals.pop_front() {
-            let selected = modal.modal.selected;
-            let selected_label = modal
-                .modal
-                .options
-                .get(selected)
-                .map(|opt| opt.label.clone());
-            let choice = modal.modal.selected_choice()?;
-            // The prefix option (Layer 2) is rendered as
-            // "Approve commands starting with …" and uses AlwaysApprove. Detect
-            // it by label so the controller persists a prefix rule instead of a
-            // session key.
-            let picked_prefix = choice == ApprovalChoice::AlwaysApprove
-                && selected_label
-                    .as_deref()
-                    .is_some_and(|label| label.starts_with("Approve commands starting with"));
-            // Plan-review approve choices occupy the leading indices, one per
-            // model-supplied label. Recover the chosen approach label only when
-            // the user actually picked one of those entries.
-            let selected_option_label = (choice == ApprovalChoice::Approve
-                && selected < modal.plan_option_labels.len())
-            .then(|| modal.plan_option_labels[selected].clone());
-            let result = ApprovalResult {
-                request_id: modal.request_id,
-                choice,
-                feedback: (choice == ApprovalChoice::Revise)
-                    .then_some(modal.feedback_input)
-                    .filter(|feedback| !feedback.is_empty()),
-                picked_prefix,
-                selected_option_label,
-            };
-            self.mode = self.overlay_mode();
-            return Some(result);
+    /// Confirm the selected option, or enter revision feedback editing when
+    /// a revise action is first confirmed.
+    pub fn confirm_or_edit_selected_approval(&mut self) -> Option<ApprovalResponse> {
+        let approval = self.pending_approvals.front_mut()?;
+        if approval.is_revision_selected() {
+            if !approval.is_collecting_feedback() {
+                approval.begin_feedback_collection();
+                return None;
+            }
+            if approval.feedback_input.trim().is_empty() {
+                return None;
+            }
         }
+        self.confirm_approval()
+    }
 
-        let id = self.focused_overlay;
-        let overlay = self.focused_overlay()?;
-        let OverlayKind::Approval(modal) = &overlay.kind else {
-            return None;
-        };
-        let result = ApprovalResult {
-            request_id: modal.request_id.clone(),
-            choice: modal.modal.selected_choice()?,
-            feedback: None,
-            picked_prefix: false,
-            selected_option_label: None,
-        };
-        if let Some(id) = id {
-            let _ = self.close_overlay(id);
-        }
-        Some(result)
+    pub fn confirm_approval(&mut self) -> Option<ApprovalResponse> {
+        let modal = self.pending_approvals.front()?;
+        let response = modal.response_for_selected()?;
+        let _ = self.pending_approvals.pop_front();
+        self.mode = self.overlay_mode();
+        Some(response)
     }
 
     // -- Question dialog overlay ---------------------------------------------
@@ -317,10 +249,7 @@ impl NeoChromeState {
             return ChromeMode::Approval;
         }
         if let Some(overlay) = self.focused_overlay() {
-            if matches!(
-                overlay.kind,
-                OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)
-            ) {
+            if matches!(overlay.kind, OverlayKind::QuestionDialog(_)) {
                 ChromeMode::Approval
             } else {
                 ChromeMode::Overlay
@@ -355,7 +284,6 @@ impl NeoChromeState {
                 | OverlayKind::CustomEndpointWizard(_)
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
-                | OverlayKind::Approval(_)
                 | OverlayKind::TrustDialog(_)
                 | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)

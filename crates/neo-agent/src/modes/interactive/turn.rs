@@ -64,7 +64,6 @@ impl InteractiveController {
             self.tui.chrome().development_mode(),
             DevelopmentMode::Goal(GoalModeStatus::Pending)
         );
-        request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
         request.mcp_manager.clone_from(&self.mcp_manager);
         request.base_config.clone_from(&self.local_config);
         request
@@ -109,7 +108,7 @@ impl InteractiveController {
             turn.cancel_token.cancel();
         }
         self.pending_approvals.clear();
-        self.resolved_approvals.clear();
+
         self.pending_questions.clear();
         self.pending_question_prompts.clear();
         self.pending_background_question_followups.clear();
@@ -270,7 +269,7 @@ impl InteractiveController {
             turn.task.abort();
         }
         self.pending_approvals.clear();
-        self.resolved_approvals.clear();
+
         self.pending_questions.clear();
         self.pending_question_prompts.clear();
         self.pending_background_question_followups.clear();

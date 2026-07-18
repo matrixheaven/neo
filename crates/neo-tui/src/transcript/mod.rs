@@ -37,8 +37,9 @@ pub use chrome_render::{
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
 pub use entry::{
-    ApprovalPromptData, BannerData, InlineImageRender, McpStartupPhase, McpStartupStatusData,
-    StatusSeverity, ThinkingPhase, TranscriptEntry, TranscriptImageAttachment,
+    ApprovalDisplayState, ApprovalPromptData, BannerData, InlineImageRender, McpStartupPhase,
+    McpStartupStatusData, StatusSeverity, ThinkingPhase, TranscriptEntry,
+    TranscriptImageAttachment,
 };
 pub use instruction_card::InstructionCardComponent;
 pub use pane::TranscriptPane;

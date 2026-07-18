@@ -236,12 +236,9 @@ fn render_full_screen_overlay_frame(
 fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> ChromeRender {
     let content_width = frame_content_width(width);
     if app.focused_overlay_blocks_prompt()
-        && app.focused_overlay().is_some_and(|overlay| {
-            !matches!(
-                overlay.kind,
-                OverlayKind::QuestionDialog(_) | OverlayKind::Approval(_)
-            )
-        })
+        && app
+            .focused_overlay()
+            .is_some_and(|overlay| !matches!(overlay.kind, OverlayKind::QuestionDialog(_)))
     {
         let overlay = app
             .render_focused_overlay(content_width)
