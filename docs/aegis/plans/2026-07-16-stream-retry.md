@@ -1,6 +1,6 @@
 # Neo Stream Retry and Reconnect Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** Add one runtime-owned, exact-replay retry loop for transient model request/stream failures with configurable retry count, inline reconnect UX, and transactional session persistence.
 

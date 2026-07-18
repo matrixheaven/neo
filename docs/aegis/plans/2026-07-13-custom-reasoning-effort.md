@@ -1,6 +1,6 @@
 # Custom Reasoning Effort Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Neo's closed reasoning-effort enum with a validated open string newtype that preserves provider-defined values end to end.
 
@@ -122,7 +122,7 @@ capability-validation test using exact target and test-name filters.
 **Files:**
 - Modify: `docs/en/configuration/providers.md`
 - Modify: `docs/zh/configuration/providers.md`
-- Review: `docs/superpowers/specs/2026-07-13-custom-reasoning-effort-design.md`
+- Review: `docs/aegis/specs/2026-07-13-custom-reasoning-effort-design.md`
 
 - [ ] **Step 1: Add concise bilingual user documentation**
 

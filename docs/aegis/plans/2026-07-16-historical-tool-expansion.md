@@ -1,6 +1,6 @@
 # Historical Tool Expansion Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Ctrl+O expand and collapse historical tool output without rewriting or duplicating native terminal scrollback, while preserving wheel-based history navigation and current live-tool behavior.
 
@@ -253,7 +253,7 @@ Files:
 - Modify crates/neo-tui/src/transcript/presentation.rs and streaming_prefix.rs only where the review surface needs a clean boundary
 - Modify crates/neo-tui/src/transcript/mod.rs, pane.rs, app.rs, and screen_output/inline_terminal.rs
 - Modify focused terminal/transcript/multi-agent tests
-- Modify docs/superpowers/specs/2026-07-13-immutable-terminal-scrollback-design.md
+- Modify docs/aegis/specs/2026-07-13-immutable-terminal-scrollback-design.md
 
 Interfaces:
 - Normal frames retain append-only history until the review surface is entered; review frames carry no history blocks, and the centralized acknowledge_history boundary ignores them without advancing the normal ledger.
@@ -288,7 +288,7 @@ Document why an already emitted native row cannot be addressed, the review-surfa
     cargo fmt --all --check
     git diff --check
 
-    git add crates/neo-tui/src/transcript crates/neo-tui/src/app.rs crates/neo-tui/src/screen_output crates/neo-tui/tests crates/neo-agent/src/modes/interactive docs/superpowers/specs/2026-07-13-immutable-terminal-scrollback-design.md
+    git add crates/neo-tui/src/transcript crates/neo-tui/src/app.rs crates/neo-tui/src/screen_output crates/neo-tui/tests crates/neo-agent/src/modes/interactive docs/aegis/specs/2026-07-13-immutable-terminal-scrollback-design.md
     git commit -m "refactor: make historical transcript review explicit"
 
 - [ ] Step 6: Whole-branch review and fix gate.

@@ -1,6 +1,6 @@
 # Neo Prompt Cache Hit Rate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Neo's Anthropic-compatible prompt-cache behavior measurable and more stable by fixing usage parsing, improving cache-control anchors, and surfacing conservative cache hit rate in the TUI.
 

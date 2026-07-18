@@ -1523,7 +1523,7 @@ amigo",
     #[test]
     fn skill_activation_preserves_source_at_narrow_width() {
         let entry = TranscriptEntry::skill_invocation(
-            vec!["using-superpowers".to_owned()],
+            vec!["using-aegis".to_owned()],
             SkillInvocationSource::Auto,
             SkillInvocationOutcome::Activated,
             "",

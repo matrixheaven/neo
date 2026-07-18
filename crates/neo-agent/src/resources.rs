@@ -483,10 +483,10 @@ mod tests {
 
         // Builtin skill
         let builtin_skill = LoadedSkill {
-            name: "using-superpowers".to_owned(),
-            root: temp.path().join("superpowers"),
+            name: "using-aegis".to_owned(),
+            root: temp.path().join("aegis"),
             manifest: SkillManifest {
-                name: "using-superpowers".to_owned(),
+                name: "using-aegis".to_owned(),
                 description: "Use at conversation start".to_owned(),
                 skill_type: SkillType::Prompt,
                 when_to_use: Some("When starting any conversation".to_owned()),

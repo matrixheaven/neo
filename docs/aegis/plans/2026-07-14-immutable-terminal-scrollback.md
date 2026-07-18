@@ -1,6 +1,6 @@
 # Immutable Terminal Scrollback Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Neo's destructive whole-transcript redraw with append-only committed terminal history, a bounded mutable live surface, and request-driven rendering.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, crossterm 0.29, pulldown-cmark, vt100 0.16 (test-only), Tokio, existing Neo terminal primitives.
 
-**Design:** `docs/superpowers/specs/2026-07-13-immutable-terminal-scrollback-design.md`
+**Design:** `docs/aegis/specs/2026-07-13-immutable-terminal-scrollback-design.md`
 
 **Git constraint:** Do not run `git add`, `git commit`, or any other Git mutation without explicit per-command user authorization. The checkpoints below stop at verified worktree changes.
 

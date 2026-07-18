@@ -1,6 +1,6 @@
 # Aegis Dual-Host Install and Neo Skill Discovery Design
 
-Status: Approved for written-spec review
+Status: Implemented
 
 ## Goal
 
@@ -16,10 +16,11 @@ root.
 - Neo keeps `extra_skill_dirs` and `skill_path` as explicit configuration.
 - Neo keeps `~/.neo/skills/` as its implicit user skill root.
 - Neo stops implicitly scanning `~/.neo/.agents/skills/`.
-- `docs/superpowers/**` is not modified because it contains active plans.
+- Feature specs and plans are canonical under `docs/aegis/specs/` and
+  `docs/aegis/plans/`.
 - One canonical Aegis checkout supplies both hosts so updates cannot drift.
 
-## Current State
+## Pre-Install State
 
 - Codex loads Superpowers from `~/.agents/skills/superpowers/`.
 - Neo loads Superpowers from `~/.neo/skills/superpowers/`.
@@ -147,11 +148,18 @@ Installation verification:
 - Codex and Neo can explicitly activate `using-aegis`
 - Aegis workspace helper passes an init/check smoke in a temporary target
 - updater status reports both `codex` and `neo`
-- `git diff -- docs/superpowers` is empty
+- Aegis workspace validation passes with every spec and plan indexed
+
+## Post-Install Documentation Migration
+
+After the host replacement completed, the user authorized a hard migration of
+all tracked feature specs and plans from the legacy Superpowers documentation
+tree into the Aegis workspace. The migration preserves document intent, updates
+executable skill/path references, and retains no compatibility directory.
 
 ## Non-Goals
 
-- Do not modify or migrate unfinished `docs/superpowers/**` plans.
+- Do not reinterpret or discard unfinished feature plans during path migration.
 - Do not copy Aegis into two editable checkouts.
 - Do not remove Neo's explicit extra skill directory configuration.
 - Do not add a general plugin framework or speculative Aegis runtime adapter.

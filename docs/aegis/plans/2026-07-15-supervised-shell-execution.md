@@ -1,6 +1,6 @@
 # Supervised Shell Execution Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace every direct Bash and Terminal spawn with a crash-resistant guardian that owns the complete process tree, enforces bounded runtime/resources/output, and cannot outlive Neo.
 
@@ -678,4 +678,4 @@ Run `git diff --check`, `git diff --stat`, and `git status --short`. Confirm no 
 
 - [ ] **Step 5: Request independent code review**
 
-Use `superpowers:requesting-code-review` with the design spec, this plan, the unchanged starting HEAD SHA, and a review package containing only the scoped working-tree diff plus every new untracked file. Label the reviewed head `WORKTREE`; a SHA range alone would be empty because git mutation is not authorized. Fix every Critical/Important finding, rerun its covering exact test, then request one re-review.
+Use `aegis:requesting-code-review` with the design spec, this plan, the unchanged starting HEAD SHA, and a review package containing only the scoped working-tree diff plus every new untracked file. Label the reviewed head `WORKTREE`; a SHA range alone would be empty because git mutation is not authorized. Fix every Critical/Important finding, rerun its covering exact test, then request one re-review.

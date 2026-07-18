@@ -1,6 +1,6 @@
 # Neo Daily Audit Remediation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix all 20 high-confidence findings from the 2026-07-10 read-only audit with one authoritative implementation per boundary and focused cross-platform regression coverage.
 
@@ -12,11 +12,11 @@
 
 ## Design And Policy Notes
 
-- Source design: `docs/superpowers/specs/2026-07-10-daily-audit-remediation-design.md`.
+- Source design: `docs/aegis/specs/2026-07-10-daily-audit-remediation-design.md`.
 - Do not modify `.references/`; reference code is evidence only.
 - Do not retain old helpers, fallback data paths, or dual event representations after migration.
 - Subagents must not run any Git mutation. Root may run the recorded checkpoint commands only after explicit authorization for that command.
-- Do not revert or overwrite the pre-existing Cargo manifest/lock changes or `docs/superpowers/specs/2026-07-08-google-cached-content-design.md`.
+- Do not revert or overwrite the pre-existing Cargo manifest/lock changes or `docs/aegis/specs/2026-07-08-google-cached-content-design.md`.
 - Every task uses TDD: add one behavior test, run it and observe the expected failure, implement the minimum repair, rerun the same narrow test, then refactor.
 - Verification evidence must name one package, one target selector, and at least one test filter. Do not run broad workspace/package tests.
 

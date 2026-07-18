@@ -1,6 +1,6 @@
 # Aegis Dual-Host Install Implementation Plan
 
-> **For agentic workers:** Execute inline. Do not dispatch subagents and do not touch `docs/superpowers/**`.
+> **For agentic workers:** Execute inline. Do not dispatch subagents. This install plan predates the later migration of feature specs and plans into the Aegis workspace.
 
 **Goal:** Make `$NEO_HOME/skills` Neo's only implicit user skill root and replace both Superpowers installations with one complete shared Aegis Method Pack.
 
@@ -12,7 +12,7 @@
 
 - Preserve `extra_skill_dirs`, `skill_path`, and `$NEO_HOME/skills`.
 - Delete implicit `$NEO_HOME/.agents/skills` and project `.agents/skills` trust handling.
-- Do not modify `docs/superpowers/**`.
+- Preserve existing feature spec and plan intent while updating canonical paths.
 - Do not retain Superpowers aliases, backups, or compatibility copies.
 - Keep one editable Aegis checkout and two generated host views.
 - Do not commit or perform unrelated git mutations.
@@ -123,7 +123,7 @@ then passes together with `load_skill_rejects_invalid_yaml` after the repair.
 ```bash
 cargo fmt --all --check
 git diff --check
-git diff --exit-code -- docs/superpowers
+python ~/.codex/aegis/scripts/aegis-workspace.py check --root .
 ```
 
 - [ ] Build and install:
@@ -199,7 +199,7 @@ python ~/.codex/aegis/scripts/aegis-workspace.py check --root <temp-dir>
 
 ```bash
 git diff --check
-git diff --exit-code -- docs/superpowers
+python ~/.codex/aegis/scripts/aegis-workspace.py check --root .
 python ~/.codex/aegis/scripts/aegis-doctor.py --write-config --json
 python ~/.codex/aegis/scripts/aegis-update.py status --json
 ```
@@ -211,4 +211,4 @@ python ~/.codex/aegis/scripts/aegis-update.py status --json
 - `.agents/skills` is removed from implicit discovery and unused trust UI.
 - Aegis validates before Superpowers is deleted.
 - Full method-pack scripts and workspace support use one canonical checkout.
-- No task modifies `docs/superpowers/**`.
+- No install task rewrites existing feature spec or plan intent.

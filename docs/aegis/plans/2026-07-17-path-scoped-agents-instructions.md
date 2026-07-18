@@ -1,6 +1,6 @@
 # Path-Scoped AGENTS.md Instructions Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `aegis:subagent-driven-development` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Neo's startup-only project context loading with one durable, session-scoped instruction runtime that discovers and applies trusted path-scoped `AGENTS.md` bundles before any applicable tool side effect.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, Tokio, Serde/serde_json, Schemars, SHA-256 via the existing `sha2` workspace dependency, Neo's `AgentRuntime`/JSONL/compaction/transcript infrastructure, no new dependencies.
 
-**Design specification:** `docs/superpowers/specs/2026-07-17-path-scoped-agents-instructions-design.md`
+**Design specification:** `docs/aegis/specs/2026-07-17-path-scoped-agents-instructions-design.md`
 
 ## Global Constraints
 
@@ -928,10 +928,10 @@ Expected: both locales describe one canonical behavior and repository `AGENTS.md
 
 ## Subagent-Driven Execution Protocol
 
-The executing coordinator must use `superpowers:subagent-driven-development` with these repository-specific adaptations:
+The executing coordinator must use `aegis:subagent-driven-development` with these repository-specific adaptations:
 
 1. Read this plan and the approved spec completely, then run the SDD pre-flight conflict scan before dispatching Task 1.
-2. Maintain `.superpowers/sdd/progress.md`; trust the ledger and Git history after compaction. Never redispatch a completed task.
+2. Maintain `docs/aegis/work/2026-07-17-path-scoped-agents-instructions/20-checkpoint.md`; trust the ledger and Git history after compaction. Never redispatch a completed task.
 3. Generate each task brief with the SDD `scripts/task-brief` helper. A fresh implementer reads only the brief, spec path, required earlier interfaces, and a report-file path.
 4. Explicitly select a model for every implementer and reviewer. Use the most capable model for Tasks 1, 6, 8, 9 and the final whole-branch review; use at least a standard model for all reviewers.
 5. Dispatch parallel waves only as shown in the DAG. Never parallelize tasks with overlapping write sets.
@@ -941,7 +941,7 @@ The executing coordinator must use `superpowers:subagent-driven-development` wit
 9. Resolve every reviewer `Cannot verify from diff` item using the spec and cross-task state. A real gap reopens the task.
 10. Do not stop between tasks or waves unless genuinely blocked or a plan/spec conflict requires the user's decision.
 11. After Task 10, run a final review package from branch merge-base to HEAD and dispatch the most capable whole-branch reviewer. One fixer receives the complete final findings list, runs focused covering tests, and is re-reviewed.
-12. Use `superpowers:verification-before-completion`, then `superpowers:finishing-a-development-branch`. Do not push, merge, tag, switch branches, or remove worktrees without explicit user authorization.
+12. Use `aegis:verification-before-completion`, then `aegis:finishing-a-development-branch`. Do not push, merge, tag, switch branches, or remove worktrees without explicit user authorization.
 
 ## Final Acceptance Review
 

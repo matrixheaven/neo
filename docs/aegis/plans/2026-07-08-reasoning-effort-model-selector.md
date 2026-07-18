@@ -1,6 +1,6 @@
 # Reasoning Effort Model Selector Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Neo's boolean `/model` thinking toggle with a model-aware Reasoning control that supports effort values, token budgets, toggle-only models, and unavailable reasoning.
 
@@ -1905,7 +1905,7 @@ Do not commit unless explicitly authorized. Record TOML output shape if assertio
 Run:
 
 ```bash
-rg -n "reasoning_effort|current_thinking|thinking_drafts|effective_thinking|toggle_thinking" crates docs/superpowers/specs/2026-07-08-reasoning-effort-model-selector-design.md
+rg -n "reasoning_effort|current_thinking|thinking_drafts|effective_thinking|toggle_thinking" crates docs/aegis/specs/2026-07-08-reasoning-effort-model-selector-design.md
 ```
 
 Expected before cleanup: matches in old code and possibly the design spec background.

@@ -10,7 +10,8 @@ ADR: `docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md`
 - Superpowers is absent from both active host discovery trees.
 - Neo has exactly one implicit user skill root: `$NEO_HOME/skills/`.
 - Neo continues to support `extra_skill_dirs` and `skill_path` as explicit roots.
-- `docs/superpowers/**` remains unchanged while its active plans are unfinished.
+- All tracked feature specs and plans are canonical under `docs/aegis/`; their
+  unfinished task state is preserved during migration.
 - Aegis workspace, doctor, updater, and host activation flows remain available.
 
 ## Architecture / Runtime Boundary Baseline
@@ -34,6 +35,8 @@ ADR: `docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md`
   skills, and other installed skill packs.
 - Retired: both Superpowers discovery trees, implicit
   `$NEO_HOME/.agents/skills/`, and project `.agents/skills/` trust handling.
+- Retired: the legacy Superpowers documentation directory; no compatibility
+  directory or duplicate document owner remains.
 - No Superpowers alias, backup, mixed-loading path, or second editable Aegis
   checkout remains.
 
@@ -44,7 +47,7 @@ ADR: `docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md`
   with `AEGIS_NEO_OK`.
 - Aegis doctor and updater status must verify both registered host views.
 - The workspace helper must pass `check` for this project.
-- `git diff --exit-code -- docs/superpowers` must remain clean.
+- The workspace helper must validate every migrated spec and plan as indexed.
 
 ## Residual Risk
 

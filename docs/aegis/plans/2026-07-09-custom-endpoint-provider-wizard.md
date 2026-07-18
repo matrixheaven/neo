@@ -1,6 +1,6 @@
 # Custom Endpoint Provider Wizard Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the Add Provider `Custom endpoint` wizard that writes Neo provider/model config, supports all current provider protocol types, discovers OpenAI-family model ids via `/models`, and routes fetched models through user review before saving.
 

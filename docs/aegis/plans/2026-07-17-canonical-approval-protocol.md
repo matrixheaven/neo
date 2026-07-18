@@ -1,6 +1,6 @@
 # Canonical Approval Protocol Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use a no-commit adaptation of `superpowers:subagent-driven-development`. Dispatch fresh implementers only in the dependency waves below, then run a spec-compliance review and a code-quality review for every task before unlocking dependents. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use a no-commit adaptation of `aegis:subagent-driven-development`. Dispatch fresh implementers only in the dependency waves below, then run a spec-compliance review and a code-quality review for every task before unlocking dependents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace every index-, label-, boolean-, and side-channel-based approval path with one runtime-owned typed request/response protocol covering ordinary tools, Shell, PlanMode, GoalMode, persistence, replay, and TUI interaction.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Follow `docs/superpowers/specs/2026-07-17-canonical-approval-protocol-design.md` exactly.
+- Follow `docs/aegis/specs/2026-07-17-canonical-approval-protocol-design.md` exactly.
 - Runtime construction is the only source of approval option availability, order, labels, action payloads, and presentation.
 - Labels are presentation-only; no semantic branch may inspect label text.
 - A selected index is UI state only; no runtime semantic branch may inspect or reconstruct meaning from it.
@@ -225,18 +225,18 @@ The standard subagent-driven workflow is modified as follows:
 2. Give each implementer only its task brief, global constraints, and exact
    owned file list.
 3. The implementer writes a report under
-   `.superpowers/approval/task-N-report.md` containing changed paths, exact test
+   `docs/aegis/work/2026-07-17-canonical-approval-protocol/task-N-report.md` containing changed paths, exact test
    commands, outputs, self-review, and concerns.
 4. Do not commit. Generate the review package with
    `git diff -U10 -- <task-owned-paths>` and save it under
-   `.superpowers/approval/task-N.diff`.
+   `docs/aegis/work/2026-07-17-canonical-approval-protocol/task-N.diff`.
 5. Dispatch a spec-compliance reviewer with the spec, task brief, report, and
    diff paths. Require an explicit PASS/FAIL verdict.
 6. After spec PASS, dispatch a different code-quality reviewer with the same
    artifacts. Require APPROVED or findings classified Critical/Important/Minor.
 7. Fix every Critical or Important finding, rerun the covering exact tests, and
    repeat both reviews if behavior changed.
-8. Mark the task complete in `.superpowers/approval/progress.md` only after both
+8. Mark the task complete in `docs/aegis/work/2026-07-17-canonical-approval-protocol/20-checkpoint.md` only after both
    reviews pass. Do not stage or commit.
 9. Minor findings remain in the progress ledger for the final whole-diff review.
 
@@ -1498,7 +1498,7 @@ Give the final reviewer:
 
 - the design spec;
 - this plan;
-- `.superpowers/approval/progress.md`;
+- `docs/aegis/work/2026-07-17-canonical-approval-protocol/20-checkpoint.md`;
 - every task report and unresolved Minor finding;
 - `git status --short`;
 - `git diff --stat`;
@@ -1519,8 +1519,8 @@ Implement Neo's canonical approval protocol in /Users/chenyuanhao/Workspace/neo.
 
 Read these files completely before changing code:
 1. /Users/chenyuanhao/Workspace/neo/AGENTS.md
-2. /Users/chenyuanhao/Workspace/neo/docs/superpowers/specs/2026-07-17-canonical-approval-protocol-design.md
-3. /Users/chenyuanhao/Workspace/neo/docs/superpowers/plans/2026-07-17-canonical-approval-protocol.md
+2. /Users/chenyuanhao/Workspace/neo/docs/aegis/specs/2026-07-17-canonical-approval-protocol-design.md
+3. /Users/chenyuanhao/Workspace/neo/docs/aegis/plans/2026-07-17-canonical-approval-protocol.md
 
 Use ICM recall before work. Use CodeGraph/cx before grep for code discovery. Follow the plan's frozen interfaces, global constraints, dependency DAG, exact tests, file ownership, and no-commit review protocol.
 

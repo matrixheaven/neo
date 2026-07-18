@@ -1,6 +1,6 @@
 # Init Slash Command Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a TUI-only `/init [instruction]` slash command that launches a guided AGENTS.md generation workflow with reusable Auto-mode preflight, strict structure guardrails, injection-origin prompt delivery, and focused validation.
 
@@ -12,7 +12,7 @@
 
 ## Scope Notes
 
-This plan implements the spec in `docs/superpowers/specs/2026-07-07-init-slash-command-design.md`.
+This plan implements the spec in `docs/aegis/specs/2026-07-07-init-slash-command-design.md`.
 
 `/init` is TUI-only. Do not add a CLI subcommand.
 
@@ -1703,8 +1703,8 @@ git add \
   crates/neo-agent/Cargo.toml \
   docs/en/reference/slash-commands.md \
   docs/zh/reference/slash-commands.md \
-  docs/superpowers/specs/2026-07-07-init-slash-command-design.md \
-  docs/superpowers/plans/2026-07-07-init-slash-command.md
+  docs/aegis/specs/2026-07-07-init-slash-command-design.md \
+  docs/aegis/plans/2026-07-07-init-slash-command.md
 ```
 
 Expected: command exits successfully.

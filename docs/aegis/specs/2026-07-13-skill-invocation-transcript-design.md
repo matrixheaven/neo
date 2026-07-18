@@ -57,7 +57,7 @@ The runtime continues emitting the ordinary tool lifecycle events for recording 
 No-body success:
 
 ```text
-✦ Skill activated: using-superpowers · auto
+✦ Skill activated: using-aegis · auto
 ```
 
 Success with details:
@@ -80,8 +80,8 @@ Design the skill transcript card
 Failure:
 
 ```text
-✕ Skill failed: using-superpowers · auto
-  Skill `using-superpowers` is not available
+✕ Skill failed: using-aegis · auto
+  Skill `using-aegis` is not available
 ```
 
 The source marker uses muted text. Skill names retain the brand color. Activated and failed labels use the existing warning and error colors respectively. Successful cards render a divider only when the body is non-empty. Failed cards omit the divider and indent the error body by two spaces. Bodies retain the current three-line collapsed preview and `ctrl+o` expansion behavior.

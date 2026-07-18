@@ -766,7 +766,7 @@ fn option_b_expanded_swarm_preserves_full_child_transcripts() {
         kind: AgentActivityKind::Tool {
             id: "read-plan".to_owned(),
             name: "Read".to_owned(),
-            summary: Some("docs/superpowers/plans/...".to_owned()),
+            summary: Some("docs/aegis/plans/...".to_owned()),
             phase: AgentToolActivityPhase::Done,
             output: None,
         },

@@ -1,6 +1,6 @@
 # Skill Resources Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend Neo skills into light local-first packages with optional `references/`, `scripts/`, and `assets/` resources created through `CreateSkill`.
 
@@ -1135,7 +1135,7 @@ Run:
 
 ```bash
 cargo fmt --all --check
-git diff --check -- crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/discovery.rs crates/neo-agent-core/tests/skills.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md docs/en/customization/skills.md docs/zh/customization/skills.md docs/superpowers/specs/2026-07-09-skill-resources-design.md docs/superpowers/plans/2026-07-09-skill-resources.md
+git diff --check -- crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/discovery.rs crates/neo-agent-core/tests/skills.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md docs/en/customization/skills.md docs/zh/customization/skills.md docs/aegis/specs/2026-07-09-skill-resources-design.md docs/aegis/plans/2026-07-09-skill-resources.md
 ```
 
 Expected: `cargo fmt --all --check` exits 0 and `git diff --check` prints no output.
@@ -1145,7 +1145,7 @@ Expected: `cargo fmt --all --check` exits 0 and `git diff --check` prints no out
 Run:
 
 ```bash
-git diff -- crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/discovery.rs crates/neo-agent-core/tests/skills.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md docs/en/customization/skills.md docs/zh/customization/skills.md docs/superpowers/specs/2026-07-09-skill-resources-design.md docs/superpowers/plans/2026-07-09-skill-resources.md
+git diff -- crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/discovery.rs crates/neo-agent-core/tests/skills.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md docs/en/customization/skills.md docs/zh/customization/skills.md docs/aegis/specs/2026-07-09-skill-resources-design.md docs/aegis/plans/2026-07-09-skill-resources.md
 ```
 
 Expected: diff contains only the resource contract implementation, built-in prompt updates, docs, spec, and this plan.

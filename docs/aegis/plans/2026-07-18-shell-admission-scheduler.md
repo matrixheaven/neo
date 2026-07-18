@@ -1,6 +1,6 @@
 # Shell Admission Scheduler Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use aegis:subagent-driven-development (recommended) or aegis:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace fail-fast shell capacity rejection with transparent, fair admission; remove default execution deadlines; expose truthful queue state in every transcript; and add a shell-free `Sleep` tool.
 
@@ -2125,11 +2125,11 @@ git diff --check
 git status --short
 ```
 
-Expected: removed names appear only in negative rejection/deletion tests, never in production fields, codecs, handlers, or user docs. Historical documents under `docs/superpowers` may retain them because the new spec explicitly supersedes those sections. The Bash inspection shows `timeout_secs` as its only schema field. `git diff --check` exits 0. Status contains no unplanned new file.
+Expected: removed names appear only in negative rejection/deletion tests, never in production fields, codecs, handlers, or user docs. Historical documents under `docs/aegis` may retain them because the new spec explicitly supersedes those sections. The Bash inspection shows `timeout_secs` as its only schema field. `git diff --check` exits 0. Status contains no unplanned new file.
 
 - [ ] **Step 5: Review spec coverage explicitly**
 
-Before handoff, map each acceptance criterion in `docs/superpowers/specs/2026-07-18-shell-admission-scheduler-design.md` to one passing exact test or one inspected deletion/config assertion. Confirm especially:
+Before handoff, map each acceptance criterion in `docs/aegis/specs/2026-07-18-shell-admission-scheduler-design.md` to one passing exact test or one inspected deletion/config assertion. Confirm especially:
 
 - no queue handle/result reaches the model;
 - position rank is class-local round-robin order;
@@ -2141,7 +2141,7 @@ Before handoff, map each acceptance criterion in `docs/superpowers/specs/2026-07
 
 - [ ] **Step 6: Request focused review and commit final test fixes when safe**
 
-Use `superpowers:requesting-code-review` with the spec, this plan, the pre-work HEAD, the scoped diff, and the exact verification output. Fix every Critical/Important finding and rerun its one covering exact test.
+Use `aegis:requesting-code-review` with the spec, this plan, the pre-work HEAD, the scoped diff, and the exact verification output. Fix every Critical/Important finding and rerun its one covering exact test.
 
 If Task 8 changed files and the execution worktree is safe to commit:
 

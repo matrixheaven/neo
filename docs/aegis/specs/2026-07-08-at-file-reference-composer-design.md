@@ -43,7 +43,7 @@ The interaction is inline and non-modal. When the cursor is in a composer token 
 │ › F  prompt_completion.rs        crates/neo-agent/src/... │
 │   F  prompt_templates.rs         crates/neo-agent/src/... │
 │   D  prompts/                    .neo/                    │
-│   F  skim-slash-fuzzy...md       docs/superpowers/specs/  │
+│   F  skim-slash-fuzzy...md       docs/aegis/specs/  │
 ╰─ ↑↓ select · Enter insert · Esc close ────────────────────╯
 > compare @prom▏
 ```
@@ -101,7 +101,7 @@ The candidate row has a stable shape:
 
 ```text
 › F  prompt_completion.rs        crates/neo-agent/src/...
-  D  specs/                      docs/superpowers/
+  D  specs/                      docs/aegis/
 ```
 
 `F` means file. `D` means directory. The basename is the primary visual target. The parent path is secondary context.
@@ -238,7 +238,7 @@ File expansion:
 Directory expansion:
 
 ```text
-<directory path="docs/superpowers/specs">
+<directory path="docs/aegis/specs">
 2026-07-07-skim-slash-fuzzy-completion-design.md
 2026-07-08-at-file-reference-composer-design.md
 </directory>
