@@ -35,8 +35,8 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEve
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
     ListSkillsTool, McpConnectionManager, MessageOrigin, MoveSkillTool, PendingQuestion,
-    PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool, mode::PlanMode,
-    skills::SkillStoreHandle,
+    PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool,
+    instructions::InstructionRegistry, mode::PlanMode, skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -67,15 +67,23 @@ pub async fn execute(
     match output {
         RunOutput::Json => output::stable_json_output(&turn, config),
         RunOutput::Text => Ok(format!("{}\n", turn.assistant_text)),
-        RunOutput::Events => {
-            let mut output = String::new();
-            for event in turn.events {
-                output.push_str(&serde_json::to_string(&event)?);
-                output.push('\n');
-            }
-            Ok(output)
-        }
+        RunOutput::Events => events_output(&turn, config),
     }
+}
+
+fn events_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
+    let mut rendered = String::new();
+    for event in &turn.events {
+        let value = match event {
+            AgentEvent::InstructionEpoch { epoch } => {
+                output::stable_instruction_epoch_event(epoch, config)
+            }
+            _ => serde_json::to_value(event)?,
+        };
+        rendered.push_str(&serde_json::to_string(&value)?);
+        rendered.push('\n');
+    }
+    Ok(rendered)
 }
 
 pub struct PromptTurn {
@@ -116,8 +124,7 @@ async fn run_prompt_with_retry_notices(
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) =
-        append_user_event(content, MessageOrigin::User, &mut writer).await?;
+    let user_message = user_message(content, MessageOrigin::User);
     record_session_activity(config, &session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -130,6 +137,7 @@ async fn run_prompt_with_retry_notices(
         SteerInputHandle::new(),
         None,
         Arc::new(Mutex::new(None)),
+        None,
     )
     .await?;
     let turn = finish_prompt_turn(
@@ -137,7 +145,7 @@ async fn run_prompt_with_retry_notices(
         AgentContext::new(),
         &mut writer,
         runtime,
-        events,
+        Vec::new(),
         session_id,
         show_retry_notices,
     )
@@ -154,8 +162,7 @@ async fn run_prompt_ephemeral(
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
     let mut writer = SessionEventWriter::memory();
-    let (user_message, events) =
-        append_user_event(content, MessageOrigin::User, &mut writer).await?;
+    let user_message = user_message(content, MessageOrigin::User);
     let runtime = runtime_for_config(
         config,
         None,
@@ -167,6 +174,7 @@ async fn run_prompt_ephemeral(
         SteerInputHandle::new(),
         None,
         Arc::new(Mutex::new(None)),
+        None,
     )
     .await?;
     finish_prompt_turn(
@@ -174,7 +182,7 @@ async fn run_prompt_ephemeral(
         AgentContext::new(),
         &mut writer,
         runtime,
-        events,
+        Vec::new(),
         "ephemeral".to_owned(),
         show_retry_notices,
     )
@@ -197,8 +205,7 @@ async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) =
-        append_user_event(user_content, MessageOrigin::User, &mut writer).await?;
+    let user_message = user_message(user_content, MessageOrigin::User);
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -211,6 +218,7 @@ async fn run_prompt_in_session(
         SteerInputHandle::new(),
         None,
         Arc::new(Mutex::new(None)),
+        None,
     )
     .await?;
     runtime.restore_plan_mode(&context);
@@ -219,7 +227,7 @@ async fn run_prompt_in_session(
         context,
         &mut writer,
         runtime,
-        events,
+        Vec::new(),
         session_id.to_owned(),
         show_retry_notices,
     )
@@ -243,6 +251,7 @@ pub async fn run_prompt_streaming(
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
     manual_compact_request: Arc<Mutex<Option<String>>>,
+    instruction_registry: Option<Arc<InstructionRegistry>>,
     compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
@@ -260,6 +269,7 @@ pub async fn run_prompt_streaming(
         steer_input,
         mcp_manager,
         manual_compact_request,
+        instruction_registry,
     )
     .await?;
     let turn =
@@ -287,6 +297,7 @@ pub async fn run_prompt_in_session_streaming(
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
     manual_compact_request: Arc<Mutex<Option<String>>>,
+    instruction_registry: Option<Arc<InstructionRegistry>>,
     compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_existing_streaming_turn(
@@ -309,6 +320,7 @@ pub async fn run_prompt_in_session_streaming(
         steer_input,
         mcp_manager,
         manual_compact_request,
+        instruction_registry,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
@@ -329,12 +341,11 @@ async fn prepare_new_streaming_turn(
         .join(" ");
     let session_path = create_session_path(config).await?;
     let session_id = session_id_from_path(&session_path)?;
-    let mut writer = JsonlSessionWriter::create(&session_path)
+    let writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, &session_id);
-    let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.to_vec(), prompt_origin, &mut writer).await?;
+    let user_message = user_message(prompt.to_vec(), prompt_origin);
     record_session_activity(config, &session_id, &prompt_text);
     let session_directory = session_root_from_wire_path(&session_path)?;
     Ok(PreparedStreamingTurn {
@@ -344,7 +355,7 @@ async fn prepare_new_streaming_turn(
         context: streaming_context(skill_context),
         writer,
         user_message,
-        initial_events,
+        initial_events: Vec::new(),
     })
 }
 
@@ -367,12 +378,11 @@ async fn prepare_existing_streaming_turn(
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
     apply_skill_context(&mut context, skill_context);
-    let mut writer = JsonlSessionWriter::open_append(&session_path)
+    let writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, session_id);
-    let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.to_vec(), prompt_origin, &mut writer).await?;
+    let user_message = user_message(prompt.to_vec(), prompt_origin);
     record_session_activity(config, session_id, &prompt_text);
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
@@ -381,7 +391,7 @@ async fn prepare_existing_streaming_turn(
         context,
         writer,
         user_message,
-        initial_events,
+        initial_events: Vec::new(),
     })
 }
 
@@ -455,6 +465,7 @@ async fn runtime_for_config(
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
     manual_compact_request: Arc<Mutex<Option<String>>>,
+    instruction_registry: Option<Arc<InstructionRegistry>>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = runtime::resolve_model(config)?;
     let client = runtime::resolve_model_client(config, &model)?;
@@ -464,7 +475,13 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let skill_store_handle = SkillStoreHandle::new(skill_store.clone());
-    let mut agent_config = runtime::agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    let mut agent_config = runtime::agent_config_for_app(
+        model,
+        config,
+        approval_tx,
+        &skill_store,
+        instruction_registry,
+    )?;
     if let Some(session_directory) = &session_directory {
         agent_config = agent_config.with_session_directory(session_directory.clone());
     }
@@ -550,45 +567,21 @@ async fn run_prompt_with_runtime(
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    let (user_message, events) = append_user_event(
-        vec![Content::text(prompt)],
-        MessageOrigin::User,
-        &mut writer,
-    )
-    .await?;
+    let user_message = user_message(vec![Content::text(prompt)], MessageOrigin::User);
     finish_prompt_turn(
         user_message,
         context,
         &mut writer,
         runtime,
-        events,
+        Vec::new(),
         "test-session".to_owned(),
         false,
     )
     .await
 }
 
-async fn append_user_event(
-    content: Vec<Content>,
-    origin: MessageOrigin,
-    writer: &mut SessionEventWriter<'_>,
-) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
-    let user_message = AgentMessage::User { content, origin };
-    let user_event = AgentEvent::MessageAppended {
-        message: user_message.clone(),
-    };
-    writer.append_event(&user_event).await?;
-    writer.flush().await?;
-    Ok((user_message, vec![user_event]))
-}
-
-async fn append_user_event_jsonl(
-    content: Vec<Content>,
-    origin: MessageOrigin,
-    writer: &mut JsonlSessionWriter,
-) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
-    let mut writer = SessionEventWriter::jsonl(writer);
-    append_user_event(content, origin, &mut writer).await
+fn user_message(content: Vec<Content>, origin: MessageOrigin) -> AgentMessage {
+    AgentMessage::User { content, origin }
 }
 
 async fn finish_prompt_turn(
@@ -608,14 +601,6 @@ async fn finish_prompt_turn(
         if show_retry_notices {
             let mut stderr = std::io::stderr();
             let _ = write_retry_notice(&event, &mut stderr);
-        }
-        let is_duplicate_user_message = matches!(
-            &event,
-            AgentEvent::MessageAppended { message } if message == &user_message
-        );
-        if is_duplicate_user_message {
-            events.push(event);
-            continue;
         }
         if let AgentEvent::MessageAppended { message } = &event
             && matches!(message, AgentMessage::Assistant { .. })
@@ -745,7 +730,6 @@ async fn finish_prompt_turn_streaming(
         let event = streaming_event_or_bail(event, &streaming.event_tx)?;
         append_streaming_event(
             &event,
-            &user_message,
             writer,
             &mut assistant_text,
             &streaming.event_tx,
@@ -811,14 +795,13 @@ fn streaming_event_or_bail<E: std::fmt::Display>(
 
 async fn append_streaming_event(
     event: &AgentEvent,
-    user_message: &AgentMessage,
     writer: &mut JsonlSessionWriter,
     assistant_text: &mut String,
     event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     events: &mut Vec<AgentEvent>,
     persistence: &mut SessionEventPersistence,
 ) -> anyhow::Result<()> {
-    let effect = streaming_event_effect(event, user_message);
+    let effect = streaming_event_effect(event);
     if let Some(text) = effect.assistant_text {
         assistant_text.push_str(&text);
     }
@@ -834,26 +817,12 @@ async fn append_streaming_event(
     Ok(())
 }
 
-fn streaming_event_effect(event: &AgentEvent, user_message: &AgentMessage) -> StreamingEventEffect {
-    if is_duplicate_user_message_event(event, user_message) {
-        return StreamingEventEffect {
-            persist: false,
-            forward: false,
-            assistant_text: None,
-        };
-    }
+fn streaming_event_effect(event: &AgentEvent) -> StreamingEventEffect {
     StreamingEventEffect {
         persist: true,
         forward: true,
         assistant_text: assistant_text_from_event(event),
     }
-}
-
-fn is_duplicate_user_message_event(event: &AgentEvent, user_message: &AgentMessage) -> bool {
-    matches!(
-        event,
-        AgentEvent::MessageAppended { message } if message == user_message
-    )
 }
 
 fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
@@ -869,13 +838,15 @@ fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+    use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
     use neo_agent_core::{
-        AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
-        McpConnectionManager, MessageOrigin, PermissionApprovalDecision, PermissionMode,
+        AgentConfig, AgentContext, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings,
+        Content, McpConnectionManager, MessageOrigin, PermissionApprovalDecision, PermissionMode,
         PermissionOperation, ProcessSupervisor, QueueMode, StopReason as AgentStopReason,
-        ToolExecutionMode,
+        ToolExecutionMode, ToolRegistry,
+        harness::FakeHarness,
         session::{JsonlSessionReader, JsonlSessionWriter},
         skills::SkillStore,
     };
@@ -894,10 +865,7 @@ mod tests {
     use super::session_mgmt::{
         create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
-    use super::{
-        PromptApprovalRequest, SessionEventWriter, append_user_event, run_prompt_with_runtime,
-        runtime_for_config,
-    };
+    use super::{PromptApprovalRequest, run_prompt_with_runtime, runtime_for_config, user_message};
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, RuntimeRetryConfig, TuiConfig,
@@ -975,7 +943,7 @@ mod tests {
 
         let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
+            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
@@ -1010,6 +978,10 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+        assert!(
+            agent_config.instruction_registry.is_some(),
+            "production agent config must enable path-scoped AGENTS instructions"
+        );
     }
 
     #[test]
@@ -1067,7 +1039,7 @@ mod tests {
 
         let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
+            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
 
         assert_eq!(agent_config.max_tokens, Some(64_000));
     }
@@ -1152,33 +1124,22 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn append_user_event_preserves_injection_origin() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("session.jsonl");
-        let mut writer = JsonlSessionWriter::create(&path)
-            .await
-            .expect("create jsonl writer");
-        let mut event_writer = SessionEventWriter::jsonl(&mut writer);
+    #[test]
+    fn user_message_preserves_injection_origin() {
         let origin = MessageOrigin::injection("init");
 
-        let (message, events) = append_user_event(
+        let message = user_message(
             vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
             origin.clone(),
-            &mut event_writer,
-        )
-        .await
-        .expect("append user event");
+        );
 
         assert!(message.is_injection());
         assert_eq!(
-            events,
-            vec![AgentEvent::MessageAppended {
-                message: AgentMessage::User {
-                    content: vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
-                    origin,
-                },
-            }]
+            message,
+            AgentMessage::User {
+                content: vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
+                origin,
+            }
         );
     }
 
@@ -1352,7 +1313,7 @@ mod tests {
 
         let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
+            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -1436,7 +1397,7 @@ mod tests {
 
         let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
+            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -1498,8 +1459,9 @@ mod tests {
         };
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
         let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
-        let agent_config = agent_config_for_app(model, &config, Some(approval_tx), &skill_store)
-            .expect("agent config");
+        let agent_config =
+            agent_config_for_app(model, &config, Some(approval_tx), &skill_store, None)
+                .expect("agent config");
         let handler = agent_config
             .async_approval_handler
             .expect("async approval handler");
@@ -1570,6 +1532,7 @@ mod tests {
             neo_agent_core::SteerInputHandle::new(),
             None,
             Arc::new(std::sync::Mutex::new(None)),
+            None,
         )
         .await
         .expect("runtime");
@@ -1708,6 +1671,752 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_builds_one_registry_and_baseline_before_first_provider_request() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("AGENTS.md"), "root rules\n").expect("AGENTS.md");
+        let session_dir = temp
+            .path()
+            .join("session_00000000-0000-4000-8000-000000000502");
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("wire dir");
+        let registry = Arc::new(
+            InstructionRegistry::new(InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: None,
+                project_trusted: true,
+            })
+            .expect("registry"),
+        );
+        let fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        config.instruction_registry = Some(registry);
+        let runtime = super::AgentRuntime::new(config, Arc::new(fake.clone()));
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+
+        run_prompt_with_runtime(
+            "first prompt".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+        )
+        .await
+        .expect("run prompt");
+
+        let events = JsonlSessionReader::read_all(&session_path)
+            .await
+            .expect("read events");
+        let epoch = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::InstructionEpoch { .. }))
+            .expect("instruction epoch");
+        let user = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageAppended {
+                        message: AgentMessage::User { .. }
+                    }
+                )
+            })
+            .expect("user event");
+        assert!(
+            epoch < user,
+            "persisted baseline must precede user: {events:?}"
+        );
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let request_text = requests[0]
+            .messages
+            .iter()
+            .map(chat_message_text)
+            .collect::<Vec<_>>();
+        let rules = request_text
+            .iter()
+            .position(|text| text.contains("root rules"))
+            .expect("baseline rules in first provider request");
+        let prompt = request_text
+            .iter()
+            .position(|text| text == "first prompt")
+            .expect("first prompt in provider request");
+        assert!(rules < prompt, "request order: {request_text:?}");
+    }
+
+    #[test]
+    fn stable_json_redacts_instruction_metadata_paths_and_failure_detail() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let neo_home = temp.path().join("neo-home");
+        let outside = temp.path().join("private/rules.md");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&neo_home).expect("neo home");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let neo_home = neo_home.canonicalize().expect("canonical neo home");
+        #[cfg(unix)]
+        let configured_neo_home = {
+            let link = temp.path().join("neo-home-link");
+            std::os::unix::fs::symlink(&neo_home, &link).expect("neo home symlink");
+            link
+        };
+        #[cfg(not(unix))]
+        let configured_neo_home = neo_home.clone();
+        let nested = workspace.join("crates/neo-tui");
+        let epoch = neo_agent_core::instructions::InstructionEpochData {
+            agent_id: "main".to_owned(),
+            generation: 7,
+            outcome: neo_agent_core::instructions::InstructionEpochOutcome::Blocked,
+            scopes: vec![neo_agent_core::instructions::InstructionScopeData {
+                display_path: nested.clone(),
+                kind: neo_agent_core::instructions::InstructionScopeKind::Nested,
+                revision: Some("7af13c2e".to_owned()),
+                token_estimate: 1_024,
+            }],
+            selected_bundles: vec![neo_agent_core::instructions::InstructionBundleMetadata {
+                display_path: nested,
+                revision: "7af13c2e".to_owned(),
+                token_estimate: 1_024,
+                byte_size: 4_096,
+                source_count: 2,
+                import_count: 2,
+                import_paths: vec![neo_home.join("CX.md"), outside.clone()],
+            }],
+            ignored_bundles: Vec::new(),
+            replacements: Vec::new(),
+            failure: Some(neo_agent_core::instructions::InstructionFailure {
+                fingerprint: "failure-fingerprint".to_owned(),
+                display_path: outside,
+                kind: neo_agent_core::instructions::InstructionFailureKind::MissingImport,
+                detail: "PRIVATE FAILURE DETAIL".to_owned(),
+            }),
+            deferred_tool_ids: vec!["call-1".to_owned()],
+            budget: neo_agent_core::instructions::InstructionBudget {
+                nominal: 65_536,
+                actual: 65_536,
+            },
+            model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
+        };
+        let turn = super::PromptTurn {
+            session_id: "session_00000000-0000-4000-8000-000000000607".to_owned(),
+            events: vec![AgentEvent::InstructionEpoch { epoch }],
+            assistant_text: String::new(),
+        };
+        let config = test_config(&workspace);
+
+        let output = temp_env::with_var("NEO_HOME", Some(configured_neo_home.as_os_str()), || {
+            super::output::stable_json_output(&turn, &config).expect("stable JSON")
+        });
+        let record = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+            .find(|value| value["type"] == "instruction_epoch")
+            .expect("instruction epoch record");
+        let encoded = record.to_string();
+
+        assert_eq!(
+            record["scopes"][0]["display_path"],
+            Path::new("crates").join("neo-tui").display().to_string()
+        );
+        assert_eq!(
+            record["selectedBundles"][0]["import_paths"],
+            serde_json::json!([
+                Path::new("$NEO_HOME").join("CX.md").display().to_string(),
+                "<outside-workspace>"
+            ])
+        );
+        assert_eq!(record["failure"]["display_path"], "<outside-workspace>");
+        assert!(record["failure"].get("detail").is_none(), "{record}");
+        for secret in [
+            temp.path().display().to_string(),
+            "PRIVATE FAILURE DETAIL".to_owned(),
+            "SECRET INSTRUCTION BODY".to_owned(),
+        ] {
+            assert!(!encoded.contains(&secret), "leaked {secret}: {encoded}");
+        }
+    }
+
+    #[test]
+    fn events_output_projects_instruction_epoch_to_display_safe_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("private/rules.md");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+        let epoch = neo_agent_core::instructions::InstructionEpochData {
+            agent_id: "main".to_owned(),
+            generation: 9,
+            outcome: neo_agent_core::instructions::InstructionEpochOutcome::Blocked,
+            scopes: vec![neo_agent_core::instructions::InstructionScopeData {
+                display_path: canonical_workspace.clone(),
+                kind: neo_agent_core::instructions::InstructionScopeKind::WorkspaceRoot,
+                revision: None,
+                token_estimate: 0,
+            }],
+            selected_bundles: Vec::new(),
+            ignored_bundles: Vec::new(),
+            replacements: Vec::new(),
+            failure: Some(neo_agent_core::instructions::InstructionFailure {
+                fingerprint: "failure-fingerprint".to_owned(),
+                display_path: outside,
+                kind: neo_agent_core::instructions::InstructionFailureKind::MissingImport,
+                detail: "PRIVATE FAILURE DETAIL".to_owned(),
+            }),
+            deferred_tool_ids: vec!["call-1".to_owned()],
+            budget: neo_agent_core::instructions::InstructionBudget {
+                nominal: 65_536,
+                actual: 65_536,
+            },
+            model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
+        };
+        let turn = super::PromptTurn {
+            session_id: "session_00000000-0000-4000-8000-000000000608".to_owned(),
+            events: vec![AgentEvent::InstructionEpoch { epoch }],
+            assistant_text: String::new(),
+        };
+        let config = test_config(&workspace);
+
+        let output = super::events_output(&turn, &config).expect("events output");
+        let record: serde_json::Value = serde_json::from_str(output.trim()).expect("event JSON");
+        let encoded = record.to_string();
+
+        assert_eq!(record["type"], "instruction_epoch");
+        assert_eq!(record["scopes"][0]["display_path"], ".");
+        assert_eq!(record["failure"]["display_path"], "<outside-workspace>");
+        assert!(record["failure"].get("detail").is_none(), "{record}");
+        assert!(!encoded.contains("PRIVATE FAILURE DETAIL"), "{encoded}");
+        assert!(!encoded.contains("SECRET INSTRUCTION BODY"), "{encoded}");
+        assert!(
+            !encoded.contains(&temp.path().display().to_string()),
+            "{encoded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_resume_replays_epoch_without_duplicate_message_or_card() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("AGENTS.md"), "rules v1\n").expect("AGENTS.md");
+        let session_dir = temp
+            .path()
+            .join("session_00000000-0000-4000-8000-000000000504");
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("wire dir");
+        let registry = Arc::new(
+            InstructionRegistry::new(InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: None,
+                project_trusted: true,
+            })
+            .expect("registry"),
+        );
+        let first_fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut first_config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        first_config.instruction_registry = Some(Arc::clone(&registry));
+        let first_runtime = super::AgentRuntime::new(first_config, Arc::new(first_fake));
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+        run_prompt_with_runtime(
+            "first prompt".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            first_runtime,
+        )
+        .await
+        .expect("first turn");
+        drop(writer);
+
+        let context = JsonlSessionReader::replay_context(&session_path)
+            .await
+            .expect("replay context");
+        let resumed_fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-2".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut resumed_config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        resumed_config.instruction_registry = Some(registry);
+        let resumed_runtime =
+            super::AgentRuntime::new(resumed_config, Arc::new(resumed_fake.clone()));
+        let mut writer = JsonlSessionWriter::open_append(&session_path)
+            .await
+            .expect("append session");
+
+        let turn = run_prompt_with_runtime(
+            "unchanged".to_owned(),
+            context,
+            &mut writer,
+            resumed_runtime,
+        )
+        .await
+        .expect("unchanged resumed turn");
+
+        assert!(
+            turn.events
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::InstructionEpoch { .. })),
+            "unchanged resume emitted duplicate epoch: {:?}",
+            turn.events,
+        );
+        let requests = resumed_fake.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .messages
+                .iter()
+                .map(chat_message_text)
+                .filter(|text| text.contains("rules v1"))
+                .count(),
+            1,
+            "unchanged resume must replay one instruction snapshot",
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_source_after_resume_appends_replacement_before_provider_call() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let agents_path = workspace.join("AGENTS.md");
+        std::fs::write(&agents_path, "rules v1\n").expect("AGENTS.md v1");
+        let session_dir = temp
+            .path()
+            .join("session_00000000-0000-4000-8000-000000000503");
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("wire dir");
+        let registry = Arc::new(
+            InstructionRegistry::new(InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: None,
+                project_trusted: true,
+            })
+            .expect("registry"),
+        );
+        let first_fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut first_config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        first_config.instruction_registry = Some(Arc::clone(&registry));
+        let first_runtime = super::AgentRuntime::new(first_config, Arc::new(first_fake));
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+        run_prompt_with_runtime(
+            "first prompt".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            first_runtime,
+        )
+        .await
+        .expect("first turn");
+        drop(writer);
+
+        std::fs::write(&agents_path, "rules v2\n").expect("AGENTS.md v2");
+        let context = JsonlSessionReader::replay_context(&session_path)
+            .await
+            .expect("replay updated context");
+        let resumed_fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-3".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut resumed_config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        resumed_config.instruction_registry = Some(Arc::clone(&registry));
+        let resumed_runtime =
+            super::AgentRuntime::new(resumed_config, Arc::new(resumed_fake.clone()));
+        let mut writer = JsonlSessionWriter::open_append(&session_path)
+            .await
+            .expect("append session");
+
+        let turn =
+            run_prompt_with_runtime("continue".to_owned(), context, &mut writer, resumed_runtime)
+                .await
+                .expect("resumed turn");
+
+        let updated = turn
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::InstructionEpoch { epoch }
+                        if epoch.outcome
+                            == neo_agent_core::instructions::InstructionEpochOutcome::Updated
+                )
+            })
+            .expect("updated instruction epoch");
+        let user = turn
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageAppended {
+                        message: AgentMessage::User { .. }
+                    }
+                )
+            })
+            .expect("resumed user event");
+        assert!(
+            updated < user,
+            "replacement must precede user: {:?}",
+            turn.events
+        );
+        let requests = resumed_fake.requests();
+        assert_eq!(requests.len(), 1);
+        let request_text = requests[0]
+            .messages
+            .iter()
+            .map(chat_message_text)
+            .collect::<Vec<_>>();
+        let v2 = request_text
+            .iter()
+            .position(|text| text.contains("rules v2"))
+            .expect("updated rules in first resumed request");
+        let prompt = request_text
+            .iter()
+            .position(|text| text == "continue")
+            .expect("resumed prompt");
+        assert!(v2 < prompt, "request order: {request_text:?}");
+        drop(writer);
+
+        std::fs::remove_file(&agents_path).expect("remove AGENTS.md");
+        let context = JsonlSessionReader::replay_context(&session_path)
+            .await
+            .expect("replay removed context");
+        let removed_fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-4".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut removed_config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        removed_config.instruction_registry = Some(registry);
+        let removed_runtime =
+            super::AgentRuntime::new(removed_config, Arc::new(removed_fake.clone()));
+        let mut writer = JsonlSessionWriter::open_append(&session_path)
+            .await
+            .expect("append removed session");
+
+        let turn = run_prompt_with_runtime(
+            "after removal".to_owned(),
+            context,
+            &mut writer,
+            removed_runtime,
+        )
+        .await
+        .expect("removed resumed turn");
+
+        let removed = turn
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::InstructionEpoch { epoch }
+                        if epoch.outcome
+                            == neo_agent_core::instructions::InstructionEpochOutcome::Removed
+                )
+            })
+            .expect("removed instruction epoch");
+        let user = turn
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageAppended {
+                        message: AgentMessage::User { .. }
+                    }
+                )
+            })
+            .expect("removed resume user event");
+        assert!(
+            removed < user,
+            "removal must precede user: {:?}",
+            turn.events
+        );
+        let requests = removed_fake.requests();
+        assert_eq!(requests.len(), 1);
+        let request_text = requests[0]
+            .messages
+            .iter()
+            .map(chat_message_text)
+            .collect::<Vec<_>>();
+        let v1 = request_text
+            .iter()
+            .position(|text| text.contains("rules v1"))
+            .expect("historical v1 instruction snapshot");
+        let v2 = request_text
+            .iter()
+            .position(|text| text.contains("rules v2"))
+            .expect("historical v2 instruction snapshot");
+        let empty_authority = request_text
+            .iter()
+            .rposition(|text| {
+                text.contains("No path-scoped instruction bundles are currently active.")
+            })
+            .expect("removed authority snapshot");
+        let prompt = request_text
+            .iter()
+            .position(|text| text == "after removal")
+            .expect("removed resume prompt");
+        assert!(
+            v1 < v2 && v2 < empty_authority && empty_authority < prompt,
+            "append-only authority order: {request_text:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_scope_import_and_over_budget_warning_replan_without_breaking_turn() {
+        const LOADED: &str = "NESTED-IMPORT-LOADED-7a31";
+        const IGNORED: &str = "ROOT-BUNDLE-IGNORED-8c42";
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested = workspace.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested workspace");
+        std::fs::write(
+            workspace.join("AGENTS.md"),
+            format!("{IGNORED}\n{}", "large root rules ".repeat(6_000)),
+        )
+        .expect("root AGENTS.md");
+        std::fs::write(nested.join("AGENTS.md"), "@./imported.md\n").expect("nested AGENTS.md");
+        std::fs::write(nested.join("imported.md"), format!("{LOADED}\n")).expect("nested import");
+        std::fs::write(nested.join("data.txt"), "nested data\n").expect("nested data");
+        let session_dir = temp
+            .path()
+            .join("session_00000000-0000-4000-8000-000000000505");
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        tokio::fs::create_dir_all(session_path.parent().expect("wire parent"))
+            .await
+            .expect("wire dir");
+        let registry = Arc::new(
+            InstructionRegistry::new(InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: None,
+                project_trusted: true,
+            })
+            .expect("registry"),
+        );
+        let read_arguments = serde_json::json!({ "path": "nested/data.txt" }).to_string();
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "msg-1".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "call-1".to_owned(),
+                    name: "Read".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "call-1".to_owned(),
+                    raw_arguments: read_arguments.clone(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "msg-2".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "call-2".to_owned(),
+                    name: "Read".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "call-2".to_owned(),
+                    raw_arguments: read_arguments,
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "msg-3".to_owned(),
+                },
+                AiStreamEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                },
+            ],
+        ]);
+        let mut model = harness.model();
+        model.capabilities.max_context_tokens = Some(32_768);
+        let mut config = AgentConfig::for_model(model)
+            .with_workspace_root(&workspace)
+            .expect("workspace root");
+        config.max_tokens = Some(1_024);
+        config.instruction_registry = Some(registry);
+        let runtime = super::AgentRuntime::with_tools(
+            config,
+            harness.client(),
+            ToolRegistry::with_builtin_tools(),
+        );
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+
+        let turn = run_prompt_with_runtime(
+            "read nested data".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+        )
+        .await
+        .expect("nested over-budget turn");
+
+        let requests = harness.requests();
+        assert_eq!(
+            turn.assistant_text,
+            "done",
+            "events: {:?}; provider requests: {}",
+            turn.events,
+            requests.len(),
+        );
+        let epoch = turn
+            .events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::InstructionEpoch { epoch }
+                    if epoch.deferred_tool_ids == ["call-1".to_owned()] =>
+                {
+                    Some(epoch)
+                }
+                _ => None,
+            })
+            .expect("nested partially-loaded epoch");
+        assert_eq!(
+            epoch.outcome,
+            neo_agent_core::instructions::InstructionEpochOutcome::PartiallyLoaded,
+        );
+        let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+        let canonical_nested = nested.canonicalize().expect("canonical nested");
+        assert!(
+            epoch
+                .selected_bundles
+                .iter()
+                .any(|bundle| bundle.display_path == canonical_nested
+                    && bundle.import_count == 1
+                    && bundle
+                        .import_paths
+                        .iter()
+                        .any(|path| path.ends_with("imported.md"))),
+            "loaded nested import metadata: {epoch:?}",
+        );
+        assert!(
+            epoch
+                .ignored_bundles
+                .iter()
+                .any(|bundle| bundle.display_path == canonical_workspace),
+            "ignored root metadata: {epoch:?}",
+        );
+        let authority = epoch.model_content.as_deref().expect("nested authority");
+        assert!(
+            authority.contains(LOADED),
+            "loaded import missing: {authority}"
+        );
+        assert!(
+            authority.contains("over budget"),
+            "warning missing: {authority}"
+        );
+        assert!(
+            !authority.contains(IGNORED),
+            "ignored body leaked: {authority}"
+        );
+
+        let deferred = turn.events.iter().find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, result, .. } if id == "call-1" => Some(result),
+            _ => None,
+        });
+        let deferred = deferred.expect("deferred tool result");
+        assert!(!deferred.is_error);
+        assert_eq!(
+            deferred.details.as_ref().expect("deferred details")["status"],
+            "deferred",
+        );
+        let retried = turn.events.iter().find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, result, .. } if id == "call-2" => Some(result),
+            _ => None,
+        });
+        assert!(retried.is_some_and(|result| !result.is_error));
+        assert_eq!(requests.len(), 3);
+        let after_defer = requests[1]
+            .messages
+            .iter()
+            .map(chat_message_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(after_defer.contains(LOADED));
+        assert!(!after_defer.contains(IGNORED));
+        assert!(after_defer.contains("Tool call deferred"));
+    }
+
+    #[tokio::test]
     async fn prepare_existing_streaming_turn_uses_session_root_for_main_wire_session() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = test_config(temp.path());
@@ -1742,16 +2451,16 @@ mod tests {
     }
 
     #[test]
-    fn streaming_event_effects_skip_duplicate_user_message() {
+    fn streaming_event_effects_persist_user_message() {
         let user_message = AgentMessage::user_text("hello");
         let event = AgentEvent::MessageAppended {
-            message: user_message.clone(),
+            message: user_message,
         };
 
-        let effect = super::streaming_event_effect(&event, &user_message);
+        let effect = super::streaming_event_effect(&event);
 
-        assert!(!effect.persist);
-        assert!(!effect.forward);
+        assert!(effect.persist);
+        assert!(effect.forward);
         assert_eq!(effect.assistant_text.as_deref(), None);
     }
 
@@ -1791,7 +2500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_streaming_event_suppresses_duplicate_user_message_externally() {
+    async fn append_streaming_event_persists_user_message_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
         let mut writer = JsonlSessionWriter::create(&session_path)
@@ -1808,7 +2517,6 @@ mod tests {
 
         super::append_streaming_event(
             &event,
-            &user_message,
             &mut writer,
             &mut assistant_text,
             &event_tx,
@@ -1819,20 +2527,23 @@ mod tests {
         .expect("append streaming event");
         writer.flush().await.expect("flush writer");
 
-        assert!(event_rx.try_recv().is_err());
-        assert!(events.is_empty());
+        let forwarded = event_rx
+            .try_recv()
+            .expect("forwarded event")
+            .expect("successful event");
+        assert_eq!(forwarded, event);
+        assert_eq!(events, vec![event]);
         assert!(assistant_text.is_empty());
-        assert!(
+        assert_eq!(
             JsonlSessionReader::replay_messages(&session_path)
                 .await
-                .expect("replay messages")
-                .is_empty()
+                .expect("replay messages"),
+            vec![user_message]
         );
     }
 
     #[test]
     fn streaming_event_effects_persist_assistant_text() {
-        let user_message = AgentMessage::user_text("hello");
         let event = AgentEvent::MessageAppended {
             message: AgentMessage::assistant(
                 [Content::text("answer")],
@@ -1841,7 +2552,7 @@ mod tests {
             ),
         };
 
-        let effect = super::streaming_event_effect(&event, &user_message);
+        let effect = super::streaming_event_effect(&event);
 
         assert!(effect.persist);
         assert!(effect.forward);
@@ -1850,10 +2561,9 @@ mod tests {
 
     #[test]
     fn streaming_event_effects_persist_non_message_events_without_text() {
-        let user_message = AgentMessage::user_text("hello");
         let event = AgentEvent::TurnStarted { turn: 1 };
 
-        let effect = super::streaming_event_effect(&event, &user_message);
+        let effect = super::streaming_event_effect(&event);
 
         assert!(effect.persist);
         assert!(effect.forward);

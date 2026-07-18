@@ -18,6 +18,7 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 ├── config.toml              # 主配置文件（单一来源）
 ├── SYSTEM.md                # 可选：替换 Neo 内置系统 prompt
 ├── APPEND_SYSTEM.md         # 可选：追加在基础系统 prompt 后的指令
+├── AGENTS.md                # 用户全局指令（始终受信）
 ├── approval_rules.json      # 持久化前缀审批规则（Layer 2）
 ├── trust.json               # 项目信任决策记录
 ├── sessions/                # 会话根目录
@@ -59,7 +60,7 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 | 文件 / 目录 | 说明 |
 | --- | --- |
 | `state.json` | 会话元数据（schema 版本、创建时间等） |
-| `agents/main/wire.jsonl` | 主 agent 的完整事件流（`neo.session.jsonl` 格式，schema v1） |
+| `agents/main/wire.jsonl` | 主 agent 的完整事件流（`neo.session.jsonl` 格式，schema v1），包含持久化指令 epoch |
 | `agents/main/plans/` | 主 agent 的计划文件 |
 | `agents/main/goals/` | 主 agent 的目标文件 |
 | `agents/main/tasks/` | 主 agent 的后台任务产物 |
@@ -72,8 +73,9 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 | `~/.neo/config.toml` | 主配置 | 见 [配置文件](config-files.md) |
 | `~/.neo/SYSTEM.md` | 系统 prompt | 可选；替换 Neo 内置基础系统 prompt |
 | `~/.neo/APPEND_SYSTEM.md` | 系统 prompt 追加 | 可选；追加在基础系统 prompt 后 |
+| `~/.neo/AGENTS.md` | 用户全局指令 | 始终受信；作为会话指令 epoch 加载（不改写系统 prompt），见 [AGENTS.md](../customization/agents.md#agentsmd) |
 | `~/.neo/approval_rules.json` | 前缀审批规则 | 见 [权限模式](permissions.md#前缀级layer-2) |
-| `~/.neo/trust.json` | 项目信任 | 记录每个 workspace 是否被用户信任（当存在 `AGENTS.md` 等输入时触发） |
+| `~/.neo/trust.json` | 项目信任 | 记录每个 workspace 是否被用户信任（当存在 `AGENTS.md` 等输入时触发）；门控项目 `AGENTS.md` 指令加载 |
 | `~/.neo/prompts/` | 全局 prompt 模板 | `global_prompts_dir()` 返回的目录 |
 | `~/.neo/skills/` | 技能目录 | 加上 `config.toml` 中 `skill_path` / `extra_skill_dirs` 声明的额外目录 |
 | `~/.neo/themes/*.json` | 主题 | 如 `magenta-dark.json`，TUI 启动时加载 |

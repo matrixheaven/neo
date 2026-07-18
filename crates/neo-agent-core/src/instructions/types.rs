@@ -8,10 +8,12 @@
 //! and in in-memory [`crate::instructions::InstructionBundle`] values.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Maximum recursive `@path` import depth below the root `AGENTS.md`.
 pub const MAX_IMPORT_DEPTH: u32 = 5;
@@ -58,6 +60,7 @@ pub struct InstructionEpochData {
     pub replacements: Vec<InstructionReplacement>,
     pub failure: Option<InstructionFailure>,
     pub deferred_tool_ids: Vec<String>,
+    pub budget: InstructionBudget,
     // Persisted once in this event and consumed only by model-context projection.
     pub model_content: Option<String>,
 }
@@ -70,6 +73,7 @@ pub struct InstructionEpochData {
 pub struct AgentInstructionState {
     pub visible_generation: u64,
     pub visible_revisions: BTreeMap<PathBuf, String>,
+    pub visited_revisions: BTreeMap<PathBuf, String>,
     pub active_scopes: Vec<PathBuf>,
     pub most_recent_scope: Option<PathBuf>,
     pub last_epoch_fingerprint: Option<String>,
@@ -88,10 +92,9 @@ impl AgentInstructionState {
         self.last_epoch_fingerprint = Some(fingerprint.hash.clone());
     }
 
-    /// Visibility-only epoch application. Replay rebuilds durable state from
-    /// epoch events and cannot reconstruct the preflight fingerprint, so it
-    /// updates only the model-visible fields; live callers use
-    /// [`Self::apply_epoch`] (or record the fingerprint separately).
+    /// Applies the durable, model-visible fields from one epoch. Replay also
+    /// reconstructs the canonical selection fingerprint from persisted epoch
+    /// metadata so an unchanged resume does not emit a duplicate epoch.
     pub fn apply_epoch_visibility(&mut self, epoch: &InstructionEpochData) {
         self.visible_generation = epoch.generation;
         self.active_scopes = epoch
@@ -102,13 +105,75 @@ impl AgentInstructionState {
         self.most_recent_scope = epoch.scopes.last().map(|scope| scope.display_path.clone());
         if epoch.outcome != InstructionEpochOutcome::Blocked {
             // Blocked content never becomes model-visible; keep prior revisions.
-            self.visible_revisions = epoch
+            let visible_revisions = epoch
                 .selected_bundles
                 .iter()
                 .map(|bundle| (bundle.display_path.clone(), bundle.revision.clone()))
-                .collect();
+                .collect::<BTreeMap<_, _>>();
+            if epoch.outcome == InstructionEpochOutcome::Removed {
+                let removed = self
+                    .visible_revisions
+                    .keys()
+                    .filter(|path| !visible_revisions.contains_key(*path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for path in removed {
+                    self.visited_revisions.remove(&path);
+                }
+            }
+            self.visited_revisions.extend(
+                visible_revisions
+                    .iter()
+                    .map(|(path, revision)| (path.clone(), revision.clone())),
+            );
+            self.visible_revisions = visible_revisions;
         }
+        self.last_epoch_fingerprint = Some(instruction_selection_fingerprint(
+            &epoch.selected_bundles,
+            &epoch.ignored_bundles,
+            epoch.failure.as_ref(),
+        ));
     }
+}
+
+pub(super) fn instruction_selection_fingerprint(
+    selected: &[InstructionBundleMetadata],
+    ignored: &[IgnoredInstructionBundle],
+    failure: Option<&InstructionFailure>,
+) -> String {
+    let mut canonical = String::new();
+    let mut selected = selected.iter().collect::<Vec<_>>();
+    selected.sort_by(|a, b| a.display_path.cmp(&b.display_path));
+    for bundle in selected {
+        writeln!(
+            canonical,
+            "A|{}|{}",
+            bundle.display_path.display(),
+            bundle.revision
+        )
+        .expect("write to string");
+    }
+    let mut ignored = ignored.iter().collect::<Vec<_>>();
+    ignored.sort_by(|a, b| a.display_path.cmp(&b.display_path));
+    for bundle in ignored {
+        writeln!(
+            canonical,
+            "I|{}|{}|over_budget",
+            bundle.display_path.display(),
+            bundle.revision
+        )
+        .expect("write to string");
+    }
+    if let Some(failure) = failure {
+        writeln!(canonical, "F|{}", failure.fingerprint).expect("write to string");
+    }
+
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hex, "{byte:02x}").expect("write to string");
+    }
+    hex
 }
 
 /// The single decision returned by preflight reconciliation.
@@ -187,6 +252,7 @@ pub struct InstructionBundleMetadata {
     pub byte_size: u64,
     pub source_count: u32,
     pub import_count: u32,
+    pub import_paths: Vec<PathBuf>,
 }
 
 /// A complete bundle omitted from the model context as a whole unit.
@@ -260,7 +326,7 @@ pub struct InstructionFailure {
 
 /// Dynamic instruction budget derived from the model window and the tokens
 /// safely available in the current request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionBudget {
     pub nominal: u64,
     pub actual: u64,
@@ -303,7 +369,10 @@ pub enum InstructionError {
     #[error("source `{path}` is unreadable: {reason}")]
     UnreadableSource { path: PathBuf, reason: String },
     #[error("source `{path}` is not valid UTF-8")]
-    InvalidEncoding { path: PathBuf },
+    InvalidEncoding {
+        path: PathBuf,
+        content_fingerprint: String,
+    },
     #[error("import cycle reaches `{path}`")]
     IncludeCycle { path: PathBuf },
     #[error("instruction limit exceeded: {0}")]
@@ -339,7 +408,7 @@ impl InstructionError {
             Self::AmbiguousAgentsFile { directory, .. } => directory.clone(),
             Self::MissingImport { path }
             | Self::UnreadableSource { path, .. }
-            | Self::InvalidEncoding { path }
+            | Self::InvalidEncoding { path, .. }
             | Self::IncludeCycle { path }
             | Self::UntrustedImport { path }
             | Self::UnstableSource { path } => path.clone(),
@@ -348,17 +417,26 @@ impl InstructionError {
     }
 
     /// Full distinguishing identity of one blocked state: display-safe path,
-    /// typed kind, and the error's display text (paths and limit numbers
-    /// only). Two blocked states of the same kind but with different
-    /// underlying sources or limits never share an identity, so fingerprint
-    /// comparisons always surface the changed state as a fresh epoch.
+    /// typed kind, error display text, and an internal content fingerprint
+    /// when display-safe fields alone cannot distinguish source revisions.
+    /// Two blocked states of the same kind but with different underlying
+    /// sources or limits never share an identity, so fingerprint comparisons
+    /// always surface the changed state as a fresh epoch.
     #[must_use]
     pub fn failure_identity(&self) -> String {
+        let content_fingerprint = match self {
+            Self::InvalidEncoding {
+                content_fingerprint,
+                ..
+            } => content_fingerprint.as_str(),
+            _ => "",
+        };
         format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             self.failure_path().display(),
             self.failure_kind().describe(),
-            self
+            self,
+            content_fingerprint
         )
     }
 }

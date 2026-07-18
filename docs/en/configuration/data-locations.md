@@ -18,6 +18,7 @@ Any path relative to `~/.neo/` in the documentation can be replaced with `$NEO_H
 ├── config.toml              # Main configuration file (single source)
 ├── SYSTEM.md                # Optional replacement for Neo's built-in system prompt
 ├── APPEND_SYSTEM.md         # Optional instructions appended after the base system prompt
+├── AGENTS.md                # User-global instructions (always trusted)
 ├── approval_rules.json      # Persisted prefix approval rules (Layer 2)
 ├── trust.json               # Project trust decision records
 ├── sessions/                # Session root directory
@@ -59,7 +60,7 @@ Fixed files inside each session directory:
 | File / Directory | Description |
 | --- | --- |
 | `state.json` | Session metadata (schema version, creation time, etc.) |
-| `agents/main/wire.jsonl` | Main agent's complete event stream (`neo.session.jsonl` format, schema v1) |
+| `agents/main/wire.jsonl` | Main agent's complete event stream (`neo.session.jsonl` format, schema v1), including durable instruction epochs |
 | `agents/main/plans/` | Main agent's plan files |
 | `agents/main/goals/` | Main agent's goal files |
 | `agents/main/tasks/` | Main agent's background task artifacts |
@@ -72,8 +73,9 @@ Fixed files inside each session directory:
 | `~/.neo/config.toml` | Main config | See [Configuration Files](config-files.md) |
 | `~/.neo/SYSTEM.md` | System prompt | Optional replacement for Neo's built-in base system prompt |
 | `~/.neo/APPEND_SYSTEM.md` | System prompt append | Optional instructions appended after the base system prompt |
+| `~/.neo/AGENTS.md` | User-global instructions | Always trusted; loaded as a session instruction epoch (never mutates the system prompt), see [AGENTS.md](../customization/agents.md#agentsmd) |
 | `~/.neo/approval_rules.json` | Prefix approval rules | See [Permission Modes](permissions.md#prefix-level-layer-2) |
-| `~/.neo/trust.json` | Project trust | Records whether each workspace is trusted by the user (triggered when inputs like `AGENTS.md` are present) |
+| `~/.neo/trust.json` | Project trust | Records whether each workspace is trusted by the user (triggered when inputs like `AGENTS.md` are present); gates project `AGENTS.md` instruction loading |
 | `~/.neo/prompts/` | Global prompt templates | Directory returned by `global_prompts_dir()` |
 | `~/.neo/skills/` | Skill directory | Plus extra directories declared via `skill_path` / `extra_skill_dirs` in `config.toml` |
 | `~/.neo/themes/*.json` | Themes | e.g. `magenta-dark.json`, loaded at TUI startup |

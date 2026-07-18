@@ -14,7 +14,7 @@
 | `/compact` | — | 请求手动压缩上下文；可附加指令 `/compact <instruction>`。 |
 | `/tasks` | — | 查看当前活跃的后台任务。 |
 | `/fork` | — | 为当前会话创建一个新的分支并跳转 |
-| `/init [instruction]` | — | 创建或刷新工作区 `AGENTS.md`；后续文本会作为自然语言指导传入 init 工作流。 |
+| `/init [instruction]` | — | 仅创建或刷新工作区根目录的 `AGENTS.md`；嵌套的 `AGENTS.md` 由用户自行编写，`/init` 绝不生成或修改。后续文本会作为自然语言指导传入 init 工作流。 |
 
 `/init` 仅支持 TUI 交互模式。`/init`、`/skill:self-evo`、`/skill:create-skill` 等交互型工作流在 Auto 模式下可能会在开始前打开本地预检。Neo 会根据已解析的 slash command 机械触发该预检；模型不能自行决定切换权限模式。
 

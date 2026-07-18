@@ -50,9 +50,10 @@ Neo builds the model system message in this order:
 1. Base system prompt: `system_prompt_file` when configured, otherwise `~/.neo/SYSTEM.md` when it exists, otherwise Neo's built-in prompt.
 2. `~/.neo/APPEND_SYSTEM.md` when it exists.
 3. Available skill metadata.
-4. Trusted project context files such as `AGENTS.md` / `CLAUDE.md`.
 
 `SYSTEM.md` and `system_prompt_file` replace the built-in base prompt. `APPEND_SYSTEM.md` is the append-only hook for keeping Neo's built-in prompt and adding user instructions after it.
+
+Project instructions (`AGENTS.md`) are no longer part of the system message. Neo loads the trust-gated, path-scoped instruction chain as durable, session-scoped instruction epochs stored in the session event stream, so they never mutate `system_prompt` or earlier request bytes. `CLAUDE.md` is no longer a fallback filename. See [AGENTS.md](../customization/agents.md#agentsmd).
 
 ## `[providers.<id>]` Table
 

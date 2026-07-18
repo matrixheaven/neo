@@ -365,6 +365,7 @@ fn format_message(message: &AgentMessage) -> String {
 fn message_role(message: &AgentMessage) -> &'static str {
     match message {
         AgentMessage::System { .. } => "system",
+        AgentMessage::Instruction { .. } => "instruction",
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",

@@ -4,7 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{estimate_message_tokens, estimate_messages_tokens};
-use crate::instructions::{AgentInstructionState, InstructionEpochData, InstructionRegistry};
+use crate::instructions::{
+    AgentInstructionState, InstructionEpochData, InstructionEpochOutcome, InstructionRegistry,
+};
 use crate::{
     AgentEvent, AgentMessage, CompactionSummary, Content, QueueKind, TodoEventData,
     sanitize_tool_exchange_messages, trim_trailing_incomplete_tool_turn,
@@ -84,6 +86,20 @@ pub struct AgentContext {
     /// baseline.
     #[serde(default)]
     pub(super) instruction_state: AgentInstructionState,
+    /// Generation of the newest complete authority snapshot. Blocked notices
+    /// are instruction messages too, but never update this typed identity.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(super) instruction_authority_generation: Option<u64>,
+    /// Exact content paired with `instruction_authority_generation`.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(super) instruction_authority_content: Option<String>,
+    /// Exact current Blocked notice, retained beside a rehydrated authority
+    /// snapshot. A successful epoch clears the failure notice.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(super) current_blocked_notice: Option<(u64, String)>,
     /// Host-only shared instruction registry; skipped for serialization and
     /// schema generation.
     #[serde(skip)]
@@ -211,10 +227,80 @@ impl AgentContext {
 
     /// Mutable access to the agent-local instruction state. Live preflight
     /// callers use this to record the decision fingerprint
-    /// (`last_epoch_fingerprint`) after applying an epoch; replay cannot
-    /// reconstruct fingerprints and leaves them unset.
+    /// (`last_epoch_fingerprint`) after a silent `Proceed`; persisted epochs
+    /// reconstruct their fingerprint during replay.
     pub fn instruction_state_mut(&mut self) -> &mut AgentInstructionState {
         &mut self.instruction_state
+    }
+
+    #[must_use]
+    pub(crate) fn instruction_authority_is_pinned(&self) -> bool {
+        let authority_pinned = match (
+            self.instruction_authority_generation,
+            self.instruction_authority_content.as_deref(),
+        ) {
+            (Some(authority_generation), Some(authority_content)) => {
+                self.messages.iter().any(|message| {
+                    matches!(
+                        message, AgentMessage::Instruction { generation, content }
+                            if *generation == authority_generation
+                                && content.len() == 1
+                                && content[0].as_text() == Some(authority_content)
+                    )
+                })
+            }
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        let blocked_pinned = self.current_blocked_notice.as_ref().is_none_or(
+            |(blocked_generation, blocked_content)| {
+                self.messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        AgentMessage::Instruction {
+                            generation,
+                            content,
+                        } if generation == blocked_generation
+                            && content.len() == 1
+                            && content[0].as_text() == Some(blocked_content.as_str())
+                    )
+                })
+            },
+        );
+        authority_pinned && blocked_pinned
+    }
+
+    #[must_use]
+    pub(crate) const fn instruction_authority_generation(&self) -> Option<u64> {
+        self.instruction_authority_generation
+    }
+
+    pub(crate) fn instruction_authority_snapshot(&self) -> Option<(u64, String)> {
+        self.instruction_authority_generation
+            .zip(self.instruction_authority_content.clone())
+    }
+
+    pub(crate) fn replace_instruction_context(&mut self, authority: Option<(u64, String)>) {
+        self.messages
+            .retain(|message| !matches!(message, AgentMessage::Instruction { .. }));
+        self.estimated_tokens = estimate_messages_tokens(&self.messages);
+        if let Some((generation, content)) = authority {
+            self.append_message(AgentMessage::Instruction {
+                generation,
+                content: vec![Content::text(content.clone())],
+            });
+            self.instruction_authority_generation = Some(generation);
+            self.instruction_authority_content = Some(content);
+        } else {
+            self.instruction_authority_generation = None;
+            self.instruction_authority_content = None;
+        }
+        if let Some((blocked_generation, blocked_content)) = self.current_blocked_notice.clone() {
+            self.append_message(AgentMessage::Instruction {
+                generation: blocked_generation,
+                content: vec![Content::text(blocked_content)],
+            });
+        }
     }
 
     /// Attach the session-shared instruction registry (host-only; never
@@ -234,9 +320,9 @@ impl AgentContext {
     /// and update agent-local visibility. Never synthesizes a
     /// `MessageAppended` event — the epoch itself is the persisted record.
     ///
-    /// Replay cannot reconstruct the preflight fingerprint, so this updates
-    /// visibility only; live callers record `fingerprint.hash` afterwards via
-    /// [`Self::instruction_state_mut`].
+    /// Replay reconstructs the canonical selection fingerprint from the epoch
+    /// metadata; live callers may replace it with the frozen preflight value
+    /// afterwards via [`Self::instruction_state_mut`].
     pub fn apply_instruction_epoch(&mut self, epoch: &InstructionEpochData) {
         self.instruction_state.apply_epoch_visibility(epoch);
         if let Some(model_content) = &epoch.model_content {
@@ -244,6 +330,18 @@ impl AgentContext {
                 generation: epoch.generation,
                 content: vec![Content::text(model_content.clone())],
             });
+            if epoch.outcome != InstructionEpochOutcome::Blocked {
+                self.instruction_authority_generation = Some(epoch.generation);
+                self.instruction_authority_content = Some(model_content.clone());
+            }
+        }
+        if epoch.outcome == InstructionEpochOutcome::Blocked {
+            self.current_blocked_notice = epoch
+                .model_content
+                .as_ref()
+                .map(|content| (epoch.generation, content.clone()));
+        } else {
+            self.current_blocked_notice = None;
         }
     }
 
@@ -370,11 +468,16 @@ mod tests {
                 byte_size: 64,
                 source_count: 1,
                 import_count: 0,
+                import_paths: Vec::new(),
             }],
             ignored_bundles: Vec::new(),
             replacements,
             failure: None,
             deferred_tool_ids: Vec::new(),
+            budget: crate::instructions::InstructionBudget {
+                nominal: 65_536,
+                actual: 65_536,
+            },
             model_content: model_content.map(str::to_owned),
         }
     }

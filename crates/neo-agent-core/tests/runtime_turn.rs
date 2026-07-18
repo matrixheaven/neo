@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
-    AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, Content,
+    AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, CompactionSummary, Content,
     PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, SessionApprovalKey,
     SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, SkillInvocationOutcome,
     SkillInvocationSource, StopReason, TodoEventData, Tool, ToolContext, ToolError,
@@ -1423,7 +1423,7 @@ async fn runtime_compacts_before_model_call_when_resume_exceeds_window() {
     ));
     let mut config =
         AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(1, 1));
-    config.model.capabilities.max_context_tokens = Some(8_000);
+    config.model.capabilities.max_context_tokens = Some(32_000);
 
     let events = collect_turn_events(
         &harness,
@@ -8659,6 +8659,31 @@ fn chat_request_text(request: &ChatRequest) -> String {
         .join("\n")
 }
 
+fn request_contains_exact_text(request: &ChatRequest, expected: &str) -> bool {
+    request_exact_text_count(request, expected) > 0
+}
+
+fn request_exact_text_count(request: &ChatRequest, expected: &str) -> usize {
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let content = match message {
+                neo_ai::ChatMessage::System { content }
+                | neo_ai::ChatMessage::User { content }
+                | neo_ai::ChatMessage::Assistant { content, .. }
+                | neo_ai::ChatMessage::ToolResult { content, .. } => content,
+            };
+            content
+                .iter()
+                .filter(
+                    |part| matches!(part, neo_ai::ContentPart::Text { text } if text == expected),
+                )
+                .count()
+        })
+        .sum()
+}
+
 fn end_turn_events(text: &str) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::TextDelta {
@@ -8683,6 +8708,299 @@ async fn run_turn_collect(
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed")
+}
+
+async fn apply_preflight_baseline(
+    fixture: &PreflightFixture,
+    config: &AgentConfig,
+    context: &mut AgentContext,
+) -> String {
+    let (epoch, fingerprint) = match fixture
+        .registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::Baseline,
+                target_directories: Vec::new(),
+                budget: InstructionContextBridge::budget(config, context),
+                deferred_tool_ids: Vec::new(),
+            },
+            context.instruction_state(),
+        )
+        .await
+    {
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
+        _ => panic!("expected baseline Defer"),
+    };
+    let authority = epoch.model_content.clone().expect("baseline authority");
+    InstructionContextBridge::apply_epoch(context, &epoch, &fingerprint);
+    authority
+}
+
+#[tokio::test]
+async fn threshold_compaction_rehydrates_exact_authority_before_same_request() {
+    let fixture = preflight_fixture(&[], "# exact threshold authority\n");
+    let harness = FakeHarness::from_turns([
+        end_turn_events("summary output"),
+        end_turn_events("continued"),
+    ]);
+    let baseline_config = preflight_config(&fixture, &harness);
+    let mut context = preflight_context(&fixture);
+    let authority = apply_preflight_baseline(&fixture, &baseline_config, &mut context).await;
+    let mut config = baseline_config.with_compaction(CompactionSettings {
+        trigger_ratio: 0.05,
+        reserved_context_tokens: 1_000,
+        ..CompactionSettings::new(usize::MAX, 1)
+    });
+    config.model.capabilities.max_context_tokens = Some(200_000);
+    context.append_message(AgentMessage::user_text("history ".repeat(40_000)));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("previous answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let events = run_turn_collect(
+        &AgentRuntime::new(config, harness.client()),
+        &mut context,
+        "go",
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+    );
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2, "summary then continued request");
+    assert!(
+        request_contains_exact_text(&requests[1], &authority),
+        "the first provider request after threshold compaction must contain the exact authority"
+    );
+}
+
+#[tokio::test]
+async fn history_pressure_compacts_before_baseline_selection_and_user_append() {
+    let root_rules = format!("# exact resumed authority\n{}\n", "r".repeat(64_000));
+    let fixture = preflight_fixture(&[], &root_rules);
+    let harness = FakeHarness::from_turns([
+        end_turn_events("summary output"),
+        end_turn_events("continued"),
+    ]);
+    let mut config = preflight_config(&fixture, &harness).with_compaction(CompactionSettings {
+        reserved_context_tokens: 1_000,
+        ..CompactionSettings::new(usize::MAX, 3)
+    });
+    config.model.capabilities.max_context_tokens = Some(32_000);
+    let mut context = preflight_context(&fixture);
+    context.append_message(AgentMessage::user_text(format!(
+        "old history {}",
+        "x".repeat(40_000)
+    )));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("old answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let events = run_turn_collect(
+        &AgentRuntime::new(config, harness.client()),
+        &mut context,
+        "next prompt",
+    )
+    .await;
+
+    let compaction_index = event_index(&events, |event| {
+        matches!(event, AgentEvent::CompactionApplied { .. })
+    })
+    .expect("history compaction");
+    let epoch_index = event_index(&events, |event| {
+        matches!(event, AgentEvent::InstructionEpoch { .. })
+    })
+    .expect("baseline epoch");
+    let user_index = event_index(&events, |event| {
+        matches!(
+            event,
+            AgentEvent::MessageAppended { message }
+                if message.text() == "next prompt"
+        )
+    })
+    .expect("new user message");
+    assert!(compaction_index < epoch_index && epoch_index < user_index);
+    let epoch = instruction_epochs(&events)[0];
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::Ready);
+    assert!(epoch.ignored_bundles.is_empty());
+    let authority = epoch
+        .model_content
+        .as_deref()
+        .expect("full baseline authority");
+    assert!(request_contains_exact_text(
+        &harness.requests()[1],
+        authority
+    ));
+}
+
+#[tokio::test]
+async fn history_pressure_compacts_before_blocked_baseline_notice_and_user_append() {
+    let fixture = preflight_fixture(&[], "@./missing.md\n");
+    let harness = FakeHarness::from_turns([
+        end_turn_events("summary output"),
+        end_turn_events("continued"),
+    ]);
+    let mut config = preflight_config(&fixture, &harness).with_compaction(CompactionSettings {
+        trigger_ratio: 0.3,
+        reserved_context_tokens: 1_000,
+        ..CompactionSettings::new(usize::MAX, 3)
+    });
+    config.model.capabilities.max_context_tokens = Some(32_000);
+    let mut context = preflight_context(&fixture);
+    context.append_message(AgentMessage::user_text("old history ".repeat(40_000)));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("old answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let events = run_turn_collect(
+        &AgentRuntime::new(config, harness.client()),
+        &mut context,
+        "next prompt",
+    )
+    .await;
+
+    let compaction_index = event_index(&events, |event| {
+        matches!(event, AgentEvent::CompactionApplied { .. })
+    })
+    .expect("history compaction");
+    let epoch_index = event_index(&events, |event| {
+        matches!(
+            event,
+            AgentEvent::InstructionEpoch { epoch }
+                if epoch.outcome == InstructionEpochOutcome::Blocked
+        )
+    })
+    .expect("Blocked baseline epoch");
+    let user_index = event_index(&events, |event| {
+        matches!(
+            event,
+            AgentEvent::MessageAppended { message }
+                if message.text() == "next prompt"
+        )
+    })
+    .expect("new user message");
+    assert!(compaction_index < epoch_index && epoch_index < user_index);
+    let blocked = instruction_epochs(&events)[0]
+        .model_content
+        .as_deref()
+        .expect("Blocked notice");
+    assert!(request_contains_exact_text(&harness.requests()[1], blocked));
+}
+
+#[tokio::test]
+async fn overflow_recovery_rehydrates_exact_authority_before_retry_request() {
+    let fixture = preflight_fixture(&[], "# exact overflow authority\n");
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::ContextOverflow {
+            message: "too many tokens".to_owned(),
+        })],
+        end_turn_events("summary output")
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>(),
+        end_turn_events("recovered")
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>(),
+    ]);
+    let mut config = preflight_config(&fixture, &harness)
+        .with_compaction(CompactionSettings::new(usize::MAX, 1));
+    config.model.capabilities.max_context_tokens = Some(200_000);
+    let mut context = preflight_context(&fixture);
+    let authority = apply_preflight_baseline(&fixture, &config, &mut context).await;
+    context.append_message(AgentMessage::user_text("old history"));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("old answer")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let events = run_turn_collect(
+        &AgentRuntime::new(config, harness.client()),
+        &mut context,
+        "go",
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. }))
+    );
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 3, "initial, summary, retry");
+    assert!(
+        request_contains_exact_text(&requests[2], &authority),
+        "the overflow retry request must contain the exact authority"
+    );
+}
+
+#[tokio::test]
+async fn retained_blocked_notice_does_not_replace_compacted_authority() {
+    let fixture = preflight_fixture(&[], "# exact prior authority\n");
+    let harness = FakeHarness::from_turns([end_turn_events("continued")]);
+    let config = preflight_config(&fixture, &harness);
+    let mut context = preflight_context(&fixture);
+    let authority = apply_preflight_baseline(&fixture, &config, &mut context).await;
+    context.append_message(AgentMessage::user_text("ordinary history"));
+    std::fs::write(fixture.workspace.join("AGENTS.md"), "@./missing.md\n")
+        .expect("break root bundle");
+    let (blocked, blocked_fingerprint) = match fixture
+        .registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::ToolPreflight,
+                target_directories: vec![fixture.workspace.clone()],
+                budget: InstructionContextBridge::budget(&config, &context),
+                deferred_tool_ids: vec!["blocked-call".to_owned()],
+            },
+            context.instruction_state(),
+        )
+        .await
+    {
+        InstructionPreflightDecision::Block { epoch, fingerprint } => (epoch, fingerprint),
+        _ => panic!("expected Block"),
+    };
+    let blocked_notice = blocked.model_content.clone().expect("blocked notice");
+    InstructionContextBridge::apply_epoch(&mut context, &blocked, &blocked_fingerprint);
+    let blocked_index = context.messages().len() - 1;
+    context.apply_compaction(CompactionSummary {
+        summary: "summary".to_owned(),
+        tokens_before: 100,
+        tokens_after: 10,
+        first_kept_message_index: blocked_index,
+    });
+
+    run_turn_collect(
+        &AgentRuntime::new(config, harness.client()),
+        &mut context,
+        "continue",
+    )
+    .await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        request_exact_text_count(&requests[0], &authority),
+        1,
+        "the complete authority snapshot must be present exactly once"
+    );
+    assert_eq!(
+        request_exact_text_count(&requests[0], &blocked_notice),
+        1,
+        "rehydration must preserve exactly one current Blocked notice"
+    );
 }
 
 async fn run_manual_compaction_collect(runtime: &AgentRuntime, context: &mut AgentContext) {
@@ -8882,6 +9200,81 @@ async fn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes() {
 }
 
 #[tokio::test]
+async fn compaction_rehydration_never_admits_previously_ignored_bundle() {
+    const ROOT: &str = "ROOT-ADMITTED-41b7";
+    const IGNORED: &str = "NESTED-IGNORED-e230";
+    let nested_rules = format!("{IGNORED} {}\n", "large ".repeat(2_000));
+    let fixture = instruction_fixture(&[("nested", &nested_rules)], &format!("{ROOT}\n"));
+    let nested = fixture.workspace.join("nested");
+    let request = InstructionReconcileRequest {
+        agent_id: "main".to_owned(),
+        kind: InstructionReconcileKind::ToolPreflight,
+        target_directories: vec![nested],
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 512,
+        },
+        deferred_tool_ids: vec!["call-1".to_owned()],
+    };
+    let context = &mut AgentContext::new();
+    let (epoch, fingerprint) = match fixture
+        .registry
+        .reconcile(request, context.instruction_state())
+        .await
+    {
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
+        InstructionPreflightDecision::Proceed { .. } => {
+            panic!("expected partially loaded epoch, got Proceed")
+        }
+        InstructionPreflightDecision::Block { epoch, .. } => {
+            panic!(
+                "expected partially loaded epoch, got Block: {:?}",
+                epoch.failure
+            )
+        }
+    };
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::PartiallyLoaded);
+    assert!(
+        epoch
+            .model_content
+            .as_deref()
+            .is_some_and(|body| body.contains(ROOT)),
+        "{epoch:?}"
+    );
+    assert!(
+        epoch
+            .model_content
+            .as_deref()
+            .is_some_and(|body| !body.contains(IGNORED))
+    );
+    InstructionContextBridge::apply_epoch(context, &epoch, &fingerprint);
+
+    InstructionContextBridge::rehydrate_after_compaction(&fixture.registry, context)
+        .await
+        .expect("rehydration succeeds");
+
+    let pinned = context
+        .messages()
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::Instruction { .. }))
+        .map(AgentMessage::text)
+        .collect::<String>();
+    assert!(
+        pinned.contains(ROOT),
+        "admitted root must remain pinned: {pinned}"
+    );
+    assert!(
+        !pinned.contains(IGNORED),
+        "ignored nested bundle must remain unpinned: {pinned}"
+    );
+    assert_eq!(
+        context.instruction_state().visited_revisions,
+        context.instruction_state().visible_revisions,
+        "ignored bundles must never enter agent-local visited history"
+    );
+}
+
+#[tokio::test]
 async fn compacted_sibling_scope_reactivates_when_reentered() {
     let fixture = instruction_fixture(
         &[("a", "ALPHA-RULES-a11\n"), ("b", "BETA-RULES-b22\n")],
@@ -8938,10 +9331,18 @@ async fn compacted_sibling_scope_reactivates_when_reentered() {
     let state = context.instruction_state();
     assert_eq!(state.active_scopes, vec![fixture.workspace.clone()]);
     assert_eq!(state.most_recent_scope.as_deref(), Some(scope_b.as_path()));
-    for scope in [&fixture.workspace, &scope_a, &scope_b] {
+    for scope in [&fixture.workspace, &scope_b] {
         assert!(
             state.visible_revisions.contains_key(scope),
-            "metadata retained for {}",
+            "current authority retained for {}",
+            scope.display()
+        );
+    }
+    assert!(!state.visible_revisions.contains_key(&scope_a));
+    for scope in [&fixture.workspace, &scope_a, &scope_b] {
+        assert!(
+            state.visited_revisions.contains_key(scope),
+            "visited metadata retained for {}",
             scope.display()
         );
     }
@@ -8976,6 +9377,116 @@ async fn compacted_sibling_scope_reactivates_when_reentered() {
     assert!(
         matches!(decision, InstructionPreflightDecision::Proceed { .. }),
         "an unchanged scope must not emit a second epoch"
+    );
+}
+
+#[tokio::test]
+async fn replayed_compacted_sibling_reactivates_with_fresh_registry() {
+    let fixture = instruction_fixture(
+        &[("a", "ALPHA-RULES-a11\n"), ("b", "BETA-RULES-b22\n")],
+        "ROOT-RULES-c01\n",
+    );
+    let scope_a = fixture.workspace.join("a");
+    let scope_b = fixture.workspace.join("b");
+    let harness = FakeHarness::from_turns([end_turn_events("summary output")]);
+    let mut config = AgentConfig::for_model(harness.model())
+        .with_compaction(CompactionSettings::new(usize::MAX, 4));
+    config.manual_compact_request = Arc::new(Mutex::new(Some(String::new())));
+    let runtime = AgentRuntime::new(config.clone(), harness.client());
+
+    let mut live = AgentContext::new();
+    let (epoch_a, fingerprint_a) =
+        reconcile_defer_epoch(&fixture, &config, &live, vec![scope_a.clone()]).await;
+    InstructionContextBridge::apply_epoch(&mut live, &epoch_a, &fingerprint_a);
+    let (epoch_b, _fingerprint_b) =
+        reconcile_defer_epoch(&fixture, &config, &live, vec![scope_b.clone()]).await;
+
+    let replay_events = [
+        AgentEvent::InstructionEpoch { epoch: epoch_a },
+        AgentEvent::InstructionEpoch {
+            epoch: epoch_b.clone(),
+        },
+    ];
+    let mut replayed = AgentContext::from_replay(replay_events.iter());
+    for scope in [&fixture.workspace, &scope_a, &scope_b] {
+        assert!(
+            replayed
+                .instruction_state()
+                .visited_revisions
+                .contains_key(scope),
+            "replay retained {}",
+            scope.display()
+        );
+    }
+
+    let fresh_registry = InstructionRegistry::new(InstructionRegistryConfig {
+        primary_workspace: fixture.workspace.clone(),
+        neo_home: None,
+        project_trusted: true,
+    })
+    .expect("fresh registry");
+    fresh_registry.restore_epoch(&epoch_b);
+    replayed.append_message(AgentMessage::user_text("working in b after replay"));
+    run_manual_compaction_collect(&runtime, &mut replayed).await;
+    InstructionContextBridge::rehydrate_after_compaction(&fresh_registry, &mut replayed)
+        .await
+        .expect("fresh-registry rehydration");
+
+    assert!(
+        replayed
+            .instruction_state()
+            .visited_revisions
+            .contains_key(&scope_a),
+        "rehydration must preserve replayed agent-local history"
+    );
+    let decision = fresh_registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::ToolPreflight,
+                target_directories: vec![scope_a],
+                budget: InstructionContextBridge::budget(&config, &replayed),
+                deferred_tool_ids: vec!["call-1".to_owned()],
+            },
+            replayed.instruction_state(),
+        )
+        .await;
+    let InstructionPreflightDecision::Defer { epoch, .. } = decision else {
+        panic!("re-entering replayed sibling must defer")
+    };
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::Reactivated);
+}
+
+#[tokio::test]
+async fn compacted_current_nested_scope_removal_emits_removed_epoch() {
+    let fixture = instruction_fixture(&[("nested", "NESTED-RULES\n")], "ROOT-RULES\n");
+    let nested = fixture.workspace.join("nested");
+    let config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
+    let mut context = AgentContext::new();
+    let (epoch, fingerprint) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![nested.clone()]).await;
+    InstructionContextBridge::apply_epoch(&mut context, &epoch, &fingerprint);
+    InstructionContextBridge::rehydrate_after_compaction(&fixture.registry, &mut context)
+        .await
+        .expect("rehydration");
+    assert_eq!(
+        context.instruction_state().most_recent_scope.as_deref(),
+        Some(nested.as_path())
+    );
+    assert!(!context.instruction_state().active_scopes.contains(&nested));
+    std::fs::remove_file(nested.join("AGENTS.md")).expect("remove nested AGENTS.md");
+
+    let (removed, fingerprint) =
+        reconcile_defer_epoch(&fixture, &config, &context, vec![nested.clone()]).await;
+
+    assert_eq!(removed.outcome, InstructionEpochOutcome::Removed);
+    InstructionContextBridge::apply_epoch(&mut context, &removed, &fingerprint);
+    assert!(
+        !context
+            .instruction_state()
+            .visited_revisions
+            .contains_key(&nested),
+        "{removed:?}"
     );
 }
 
@@ -9023,10 +9534,12 @@ fn preflight_context(fixture: &PreflightFixture) -> AgentContext {
 }
 
 fn preflight_config(fixture: &PreflightFixture, harness: &FakeHarness) -> AgentConfig {
-    AgentConfig::for_model(harness.model())
+    let mut config = AgentConfig::for_model(harness.model())
         .with_workspace_root(&fixture.workspace)
         .expect("workspace root")
-        .with_permission_mode(PermissionMode::Auto)
+        .with_permission_mode(PermissionMode::Auto);
+    config.instruction_registry = Some(Arc::clone(&fixture.registry));
+    config
 }
 
 fn preflight_runtime(fixture: &PreflightFixture, harness: &FakeHarness) -> AgentRuntime {
@@ -9110,7 +9623,7 @@ async fn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_
         end_turn_events("edited"),
     ]);
     let runtime = preflight_runtime(&fixture, &harness);
-    let mut context = preflight_context(&fixture);
+    let mut context = AgentContext::new();
 
     let events = run_turn_collect(&runtime, &mut context, "edit the file").await;
 
@@ -9624,8 +10137,6 @@ async fn baseline_epoch_precedes_first_user_message_for_new_and_legacy_sessions(
         .iter(),
     );
     assert_eq!(legacy.instruction_state().visible_generation, 0);
-    legacy.attach_instruction_registry(Arc::clone(&legacy_fixture.registry));
-
     let legacy_events = run_turn_collect(&legacy_runtime, &mut legacy, "next prompt").await;
 
     let legacy_epochs = instruction_epochs(&legacy_events);
@@ -9834,5 +10345,142 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     assert!(
         post_admission.contains(&nested_rules),
         "the nested AGENTS.md body is preserved byte-for-byte: {post_admission}"
+    );
+}
+
+#[tokio::test]
+async fn history_pressure_compacts_before_whole_bundle_omission() {
+    let nested_rules = format!("# exact nested authority\n{}\n", "n".repeat(96_000));
+    let fixture = preflight_fixture(&[("nested", &nested_rules)], "# root authority\n");
+    let target = fixture.workspace.join("nested/target.txt");
+    std::fs::write(&target, "alpha").expect("target file");
+    let edit_arguments = json!({
+        "path": target.to_string_lossy(),
+        "old": "alpha",
+        "new": "beta",
+    });
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
+        end_turn_events("summary output"),
+        tool_call_turn(&[("call_2", "Edit", edit_arguments)]),
+        end_turn_events("edited"),
+    ]);
+    let mut config = preflight_config(&fixture, &harness).with_compaction(CompactionSettings {
+        trigger_ratio: 0.99,
+        reserved_context_tokens: 1_000,
+        ..CompactionSettings::new(usize::MAX, 3)
+    });
+    config.model.capabilities.max_context_tokens = Some(32_000);
+    let mut context = preflight_context(&fixture);
+    apply_preflight_baseline(&fixture, &config, &mut context).await;
+    context.append_message(AgentMessage::user_text(format!(
+        "ordinary history {}",
+        "x".repeat(40_000)
+    )));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("noted")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+
+    let events = run_turn_collect(&runtime, &mut context, "edit the nested file").await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. })),
+        "ordinary history must compact before an applicable bundle is omitted: {events:?}"
+    );
+    let epoch = instruction_epochs(&events)
+        .into_iter()
+        .find(|epoch| epoch.outcome == InstructionEpochOutcome::Activated)
+        .expect("nested authority activates after fresh admission");
+    assert!(epoch.ignored_bundles.is_empty());
+    let authority = epoch.model_content.as_deref().expect("nested authority");
+    let requests = harness.requests();
+    assert!(
+        request_contains_exact_text(&requests[2], authority),
+        "post-compaction admission must use the fresh byte-exact authority"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionStarted { id, .. } if id == "call_2"
+        )),
+        "retried edit never started; requests={}, epochs={:?}",
+        requests.len(),
+        instruction_epochs(&events)
+            .iter()
+            .map(|epoch| epoch.outcome)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        std::fs::read_to_string(target).expect("target contents"),
+        "beta",
+        "same-turn replan must execute the retried edit: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn post_tool_instruction_update_compacts_before_fresh_admission() {
+    const UPDATED_SENTINEL: &str = "POST-TOOL-UPDATED-AUTHORITY";
+    let fixture = preflight_fixture(&[], "old root rules\n");
+    let updated_rules = format!("{UPDATED_SENTINEL}\n{}\n", "r".repeat(120_000));
+    let agents_path = fixture.workspace.join("AGENTS.md");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "write_agents",
+            "Write",
+            json!({
+                "path": agents_path.to_string_lossy(),
+                "content": updated_rules,
+            }),
+        )]),
+        end_turn_events("summary output"),
+        end_turn_events("continued with updated rules"),
+    ]);
+    let mut config = preflight_config(&fixture, &harness).with_compaction(CompactionSettings {
+        trigger_ratio: 0.99,
+        reserved_context_tokens: 1_000,
+        ..CompactionSettings::new(usize::MAX, 3)
+    });
+    config.model.capabilities.max_context_tokens = Some(100_000);
+    let mut context = preflight_context(&fixture);
+    apply_preflight_baseline(&fixture, &config, &mut context).await;
+    context.append_message(AgentMessage::user_text(format!(
+        "ordinary history {}",
+        "h".repeat(160_000)
+    )));
+    context.append_message(AgentMessage::assistant(
+        [Content::text("history acknowledged")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+
+    let events = run_turn_collect(&runtime, &mut context, "replace the root instructions").await;
+
+    let compaction_index = event_index(&events, |event| {
+        matches!(event, AgentEvent::CompactionApplied { .. })
+    })
+    .expect("post-tool update must compact ordinary history");
+    let updated_index = event_index(&events, |event| {
+        matches!(
+            event,
+            AgentEvent::InstructionEpoch { epoch }
+                if epoch.outcome == InstructionEpochOutcome::Updated
+                    && epoch.ignored_bundles.is_empty()
+                    && epoch.model_content.as_deref().is_some_and(|content| content.contains(UPDATED_SENTINEL))
+        )
+    })
+    .expect("fresh post-compaction Updated epoch");
+    assert!(compaction_index < updated_index, "events: {events:#?}");
+    assert_eq!(
+        harness.requests().len(),
+        3,
+        "tool request, compaction summary, continued request"
     );
 }

@@ -79,6 +79,7 @@ Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substr
 7. Skills: project/user/extra/built-in tiers; `<available_skills>` injected into system prompt; activation injects skill body before user message.
 8. Goals: autonomous across turns via `update_goal_status`; no turn cap. Stored under `<session_dir>/goals/`.
 9. Queue & steer: `Enter` while busy → follow-up (FIFO). `Ctrl+S` → steer at next break point. See `docs/queue-and-steer.md`.
+10. Instructions: session-scoped `AGENTS.md` runtime (the only instruction filename, case-insensitive). Trust-gated baseline (`$NEO_HOME` global + trusted ancestor chain + workspace root) plus nested scopes discovered from typed tool paths (`Bash`/`Terminal` need explicit `cwd`; shell strings never parsed). Standalone `@path` imports canonicalize inside the workspace or `$NEO_HOME` (depth 5, 32 sources/graph, 1 MiB/source, 8 MiB/graph). Preflight defers the whole tool batch on new/changed scopes and the model replans in-turn; blocked scopes allow read-only diagnosis but block mutations. Budget `max(65_536, effective_max_tokens / 8)` clamped to safe capacity; over-budget → deterministic whole-bundle omission with a `⚠ Instructions partially loaded` transcript warning. Epochs are durable JSONL events, append-only (never mutate `system_prompt`), rehydrated byte-for-byte across compaction; transcript cards show metadata only.
 
 ### Built-in tools
 
@@ -101,7 +102,7 @@ Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substr
 
 ### Config sections
 
-`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, fetch_remote_images, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates `AGENTS.md`/`CLAUDE.md` loading.
+`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, fetch_remote_images, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates project instruction loading (`AGENTS.md` only).
 
 ## Security
 

@@ -100,15 +100,17 @@ fn instruction_bundle(
     revision: &str,
     tokens: u64,
     sources: u32,
-    imports: u32,
+    import_paths: Vec<std::path::PathBuf>,
 ) -> InstructionBundleMetadata {
+    let import_count = u32::try_from(import_paths.len()).unwrap_or(u32::MAX);
     InstructionBundleMetadata {
         display_path: path.to_path_buf(),
         revision: revision.to_owned(),
         token_estimate: tokens,
         byte_size: tokens * 4,
         source_count: sources,
-        import_count: imports,
+        import_count,
+        import_paths,
     }
 }
 
@@ -127,9 +129,21 @@ fn base_instruction_epoch(outcome: InstructionEpochOutcome) -> InstructionEpochD
             instruction_scope(&nested_dir, InstructionScopeKind::Nested),
         ],
         selected_bundles: vec![
-            instruction_bundle(&global_dir, "a1b2c3d4", 8_200, 1, 0),
-            instruction_bundle(&workspace, "e5f60718", 17_400, 2, 1),
-            instruction_bundle(&nested_dir, "7af13c2e", 31_800, 3, 2),
+            instruction_bundle(&global_dir, "a1b2c3d4", 8_200, 1, Vec::new()),
+            instruction_bundle(
+                &workspace,
+                "e5f60718",
+                17_400,
+                2,
+                vec![workspace.join("docs/testing.md")],
+            ),
+            instruction_bundle(
+                &nested_dir,
+                "7af13c2e",
+                31_800,
+                3,
+                vec![global_dir.join("CX.md"), nested_dir.join("docs/testing.md")],
+            ),
         ],
         ignored_bundles: vec![
             IgnoredInstructionBundle {
@@ -148,6 +162,10 @@ fn base_instruction_epoch(outcome: InstructionEpochOutcome) -> InstructionEpochD
         replacements: vec![],
         failure: None,
         deferred_tool_ids: vec!["tool-1".to_owned()],
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
         model_content: Some(format!(
             "system rules {INSTRUCTION_SENTINEL} with absolute path /home/user/.neo/AGENTS.md"
         )),
@@ -155,7 +173,11 @@ fn base_instruction_epoch(outcome: InstructionEpochOutcome) -> InstructionEpochD
 }
 
 fn instruction_card(epoch: InstructionEpochData) -> InstructionCardComponent {
-    InstructionCardComponent::new(epoch, instruction_workspace(), Some(instruction_home()))
+    InstructionCardComponent::new(
+        epoch,
+        instruction_workspace(),
+        Some(instruction_home().join(".neo")),
+    )
 }
 
 fn rendered_text(lines: &[neo_tui::primitive::Line]) -> String {
@@ -164,6 +186,97 @@ fn rendered_text(lines: &[neo_tui::primitive::Line]) -> String {
         .map(neo_tui::primitive::Line::text)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn instruction_card_does_not_retain_model_content() {
+    let component = instruction_card(base_instruction_epoch(InstructionEpochOutcome::Activated));
+
+    assert!(!format!("{component:?}").contains(INSTRUCTION_SENTINEL));
+}
+
+#[test]
+fn instruction_card_redacts_custom_neo_home() {
+    let custom_neo_home = std::path::PathBuf::from("/custom/neo-home");
+    let mut epoch = base_instruction_epoch(InstructionEpochOutcome::Activated);
+    epoch.scopes[0].display_path.clone_from(&custom_neo_home);
+    epoch.selected_bundles[0]
+        .display_path
+        .clone_from(&custom_neo_home);
+    let mut component = InstructionCardComponent::new(
+        epoch,
+        instruction_workspace(),
+        Some(custom_neo_home.clone()),
+    );
+    component.set_expanded(true);
+
+    let text = rendered_text(&component.render_with_theme(100, &TuiTheme::default()));
+    assert!(text.contains("$NEO_HOME/AGENTS.md"), "{text}");
+    assert!(
+        !text.contains(&custom_neo_home.display().to_string()),
+        "{text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn instruction_card_redacts_canonical_paths_under_symlinked_neo_home() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let neo_home = temp.path().join("neo-home");
+    let neo_home_link = temp.path().join("neo-home-link");
+    std::fs::create_dir_all(&neo_home).expect("neo home");
+    std::os::unix::fs::symlink(&neo_home, &neo_home_link).expect("neo home symlink");
+    let mut epoch = base_instruction_epoch(InstructionEpochOutcome::Activated);
+    epoch.scopes[0].display_path.clone_from(&neo_home);
+    epoch.selected_bundles[0].display_path.clone_from(&neo_home);
+    let component =
+        InstructionCardComponent::new(epoch, instruction_workspace(), Some(neo_home_link));
+    let text = rendered_text(&component.render_with_theme(100, &TuiTheme::default()));
+
+    assert!(text.contains("$NEO_HOME/AGENTS.md"), "{text}");
+    assert!(!text.contains("<outside-workspace>"), "{text}");
+    assert!(!text.contains(&neo_home.display().to_string()), "{text}");
+}
+
+#[test]
+fn instruction_card_never_renders_unknown_absolute_paths_or_failure_detail() {
+    let secret_path = std::path::PathBuf::from("/private/secret/instructions.md");
+    let detail_sentinel = "FREE-FORM-FAILURE-DETAIL-SECRET";
+    let mut epoch = base_instruction_epoch(InstructionEpochOutcome::Blocked);
+    epoch.scopes.clear();
+    epoch.selected_bundles.clear();
+
+    for display_path in [secret_path.clone(), std::path::PathBuf::new()] {
+        epoch.failure = Some(InstructionFailure {
+            display_path,
+            kind: InstructionFailureKind::MissingImport,
+            fingerprint: "fp".to_owned(),
+            detail: format!("missing {} {detail_sentinel}", secret_path.display()),
+        });
+        let component = instruction_card(epoch.clone());
+        let text = rendered_text(&component.render_with_theme(100, &TuiTheme::default()));
+        let debug = format!("{component:?}");
+
+        assert!(!text.contains(&secret_path.display().to_string()), "{text}");
+        assert!(!text.contains(detail_sentinel), "{text}");
+        assert!(!debug.contains(detail_sentinel), "{debug}");
+        assert!(text.contains("Missing import"), "{text}");
+    }
+}
+
+#[test]
+fn instruction_card_with_unset_roots_never_exposes_absolute_paths() {
+    let mut epoch = base_instruction_epoch(InstructionEpochOutcome::Activated);
+    epoch.scopes = vec![instruction_scope(
+        std::path::Path::new("/private/secret"),
+        InstructionScopeKind::Nested,
+    )];
+    epoch.selected_bundles[0].display_path = "/private/secret".into();
+    let component = InstructionCardComponent::new(epoch, std::path::PathBuf::new(), None);
+    let text = rendered_text(&component.render_with_theme(100, &TuiTheme::default()));
+
+    assert!(text.contains("<outside-workspace>"), "{text}");
+    assert!(!text.contains("/private/secret"), "{text}");
 }
 
 #[test]
@@ -272,14 +385,14 @@ fn instruction_card_renders_outcome_metadata_without_model_content() {
                 assert!(text.contains("revision 7af13c2e"), "{text}");
             }
             InstructionEpochOutcome::PartiallyLoaded => {
-                // needed 92K (selected 57.4K + ignored 34.6K), admitted 57.4K.
+                // Needed 92K against the 64K effective instruction budget.
                 assert!(
-                    text.contains("92K of 57.4K tokens · 2 bundles ignored"),
+                    text.contains("92K of 64K tokens · 2 bundles ignored"),
                     "{text}"
                 );
             }
             InstructionEpochOutcome::Blocked => {
-                assert!(text.contains("Missing import: ~/.neo/CX.md"), "{text}");
+                assert!(text.contains("Missing import: $NEO_HOME/CX.md"), "{text}");
                 assert!(!text.contains("/home/user"), "{text}");
             }
             InstructionEpochOutcome::Reactivated | InstructionEpochOutcome::Removed => {}
@@ -313,11 +426,11 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
 
     // Sections: scope, loaded, ignored, imports, revision.
     assert!(text.contains("Scope"), "{text}");
-    assert!(text.contains("~/.neo/**"), "{text}");
+    assert!(text.contains("$NEO_HOME/**"), "{text}");
     assert!(text.contains("\n  workspace\n"), "{text}");
     assert!(text.contains("crates/neo-tui/**"), "{text}");
     assert!(text.contains("Loaded"), "{text}");
-    assert!(text.contains("~/.neo/AGENTS.md"), "{text}");
+    assert!(text.contains("$NEO_HOME/AGENTS.md"), "{text}");
     assert!(text.contains("./AGENTS.md"), "{text}");
     assert!(text.contains("crates/neo-tui/AGENTS.md"), "{text}");
     assert!(text.contains("8.2K"), "{text}");
@@ -330,11 +443,10 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
     assert!(text.contains("crates/neo-tui/src/AGENTS.md"), "{text}");
     assert!(text.contains("12.5K"), "{text}");
     assert!(text.contains("Imports"), "{text}");
-    assert!(text.contains("./AGENTS.md · 1 import"), "{text}");
-    assert!(
-        text.contains("crates/neo-tui/AGENTS.md · 2 imports"),
-        "{text}"
-    );
+    assert!(text.contains("docs/testing.md"), "{text}");
+    assert!(text.contains("$NEO_HOME/CX.md"), "{text}");
+    assert!(text.contains("crates/neo-tui/docs/testing.md"), "{text}");
+    assert!(!text.contains("AGENTS.md · 1 import"), "{text}");
     assert!(text.contains("Revision"), "{text}");
     assert!(text.contains("a1b2c3d4"), "{text}");
     assert!(text.contains("e5f60718"), "{text}");
@@ -348,7 +460,7 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
 
     let copied = component.copy_text();
     assert!(copied.contains("crates/neo-tui/AGENTS.md"), "{copied}");
-    assert!(copied.contains("~/.neo/AGENTS.md"), "{copied}");
+    assert!(copied.contains("$NEO_HOME/AGENTS.md"), "{copied}");
     assert!(!copied.contains("/home/user"), "{copied}");
     assert!(!copied.contains(INSTRUCTION_SENTINEL), "{copied}");
 }

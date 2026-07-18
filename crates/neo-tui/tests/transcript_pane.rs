@@ -2392,6 +2392,7 @@ fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> Instru
             byte_size: 127_200,
             source_count: 3,
             import_count: 2,
+            import_paths: Vec::new(),
         }],
         ignored_bundles: Vec::new(),
         replacements: Vec::new(),
@@ -2400,6 +2401,10 @@ fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> Instru
             .iter()
             .map(|id| (*id).to_owned())
             .collect(),
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
         model_content: Some("scoped rules".to_owned()),
     }
 }
@@ -2435,12 +2440,9 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
                 name: name.to_owned(),
             });
         }
-        pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
-            epoch: epoch.clone(),
-        });
         // Deferred calls receive provider-valid non-error results without
-        // executing; on replay those results arrive through the normal
-        // finish path and must stay absorbed behind the card.
+        // executing. The runtime emits those results before the instruction
+        // epoch, so already-finalized placeholders must still be absorbed.
         for (id, name) in DEFERRED {
             pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
                 turn: 1,
@@ -2449,6 +2451,9 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
                 result: neo_agent_core::ToolResult::ok("deferred by instruction epoch"),
             });
         }
+        pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
+            epoch: epoch.clone(),
+        });
         // The model replans and re-issues the batch under fresh ids.
         for (id, name) in RETRIED {
             pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
@@ -2509,6 +2514,32 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
     assert_eq!(
         card_rows, 1,
         "identical epochs never produce duplicate cards: {frame:?}"
+    );
+}
+
+#[test]
+fn instruction_epoch_uses_injected_neo_home_for_redaction() {
+    let custom_neo_home = std::path::PathBuf::from("/custom/neo-home");
+    let mut epoch = instruction_test_epoch(4, &[]);
+    epoch.scopes[0].display_path.clone_from(&custom_neo_home);
+    epoch.scopes[0].kind = InstructionScopeKind::Global;
+    epoch.selected_bundles[0]
+        .display_path
+        .clone_from(&custom_neo_home);
+
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.set_workspace_root("/workspace/neo");
+    pane.set_neo_home(Some(custom_neo_home.clone()));
+    pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch { epoch });
+
+    let TranscriptEntry::InstructionEpoch { component } = &pane.transcript().entries()[0] else {
+        panic!("expected instruction epoch card");
+    };
+    let text = component.copy_text();
+    assert!(text.contains("$NEO_HOME/**"), "{text}");
+    assert!(
+        !text.contains(&custom_neo_home.display().to_string()),
+        "{text}"
     );
 }
 

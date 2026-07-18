@@ -50,9 +50,10 @@ Neo 按以下顺序构造模型系统消息：
 1. 基础系统 prompt：优先使用 `system_prompt_file`，未配置时使用存在的 `~/.neo/SYSTEM.md`，两者都没有时使用 Neo 内置 prompt。
 2. 存在时追加 `~/.neo/APPEND_SYSTEM.md`。
 3. 可用 skill 元数据。
-4. 已信任项目的 `AGENTS.md` / `CLAUDE.md` 等上下文文件。
 
 `SYSTEM.md` 和 `system_prompt_file` 会替换内置基础 prompt。`APPEND_SYSTEM.md` 是只追加的入口，适合保留 Neo 内置 prompt 并在其后补充用户指令。
+
+项目指令（`AGENTS.md`）不再是系统消息的一部分。Neo 把受信任门控、按路径发现作用域的指令链加载为持久化的会话级指令 epoch，存入会话事件流，因此它们绝不改写 `system_prompt` 或此前的请求字节。`CLAUDE.md` 不再是回退文件名。详见 [AGENTS.md](../customization/agents.md#agentsmd)。
 
 ## `[providers.<id>]` 表
 

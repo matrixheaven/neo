@@ -31,7 +31,8 @@ use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
 use crate::compaction::summary::run_full_compaction;
 use crate::goal::GoalManager;
 use crate::instructions::{
-    InstructionEpochData, InstructionReconcileKind, InstructionReconcileRequest,
+    InstructionEpochData, InstructionFingerprint, InstructionPreflightDecision,
+    InstructionReconcileKind, InstructionReconcileRequest,
 };
 use crate::skills::SkillStoreHandle;
 use crate::{
@@ -193,6 +194,8 @@ async fn recover_from_overflow(
         emitter.emit(event);
     }
 
+    rehydrate_instruction_context_after_compaction(emitter, true).await;
+
     // Rebuild request with compacted context and retry once.
     let retry_request = chat_request(config, &emitter.context, &ProjectionPlan::disabled()).await;
     run_model_request_with_retries(
@@ -231,7 +234,7 @@ pub(super) async fn run_agent_turn(
         }
 
         append_runtime_reminders(&config, emitter);
-        rehydrate_instruction_context_after_compaction(emitter).await;
+        rehydrate_instruction_context_after_compaction(emitter, false).await;
 
         if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
             final_turn = turn;
@@ -384,31 +387,38 @@ pub(super) async fn run_agent_turn(
         // bodies excluded) and rehydrated BEFORE the epoch lands — never
         // inject a large epoch and immediately summarize it.
         if let Some(pending) = pending_epoch {
-            let fingerprint = pending.fingerprint;
-            if let Err(error) = admit_pending_epoch_compact_first(
+            let admitted = admit_pending_epoch_compact_first(
                 &model,
                 &config,
                 emitter,
                 &cancel_token,
+                InstructionReconcileKind::ToolPreflight,
                 pending.epoch,
+                pending.fingerprint,
             )
-            .await
-            {
-                emitter.emit(AgentEvent::Error {
-                    turn,
-                    message: error.to_string(),
-                    code: error.code().map(str::to_owned),
-                    retry_after: None,
-                });
-                emitter.emit(AgentEvent::TurnFinished {
-                    turn,
-                    stop_reason: StopReason::Error,
-                });
-                final_turn = turn;
-                final_stop_reason = StopReason::Error;
-                break;
+            .await;
+            match admitted {
+                Ok(Some(fingerprint)) => super::tool_dispatch::record_decision_fingerprint(
+                    &mut emitter.context,
+                    &fingerprint,
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    emitter.emit(AgentEvent::Error {
+                        turn,
+                        message: error.to_string(),
+                        code: error.code().map(str::to_owned),
+                        retry_after: None,
+                    });
+                    emitter.emit(AgentEvent::TurnFinished {
+                        turn,
+                        stop_reason: StopReason::Error,
+                    });
+                    final_turn = turn;
+                    final_stop_reason = StopReason::Error;
+                    break;
+                }
             }
-            super::tool_dispatch::record_decision_fingerprint(&mut emitter.context, &fingerprint);
         }
         pending_compaction_debt =
             observe_tool_group_debt(&config, emitter, turn, tool_results.len());
@@ -422,7 +432,14 @@ pub(super) async fn run_agent_turn(
         // instruction source produces an Updated/Removed epoch, and a newly
         // created nested AGENTS.md is picked up before any later batch.
         if executed_any {
-            reconcile_after_tool_execution(&config, emitter, preflight_targets).await;
+            reconcile_after_tool_execution(
+                &model,
+                &config,
+                emitter,
+                &cancel_token,
+                preflight_targets,
+            )
+            .await?;
         }
         if terminates_tool_batch(&tool_results) {
             if continues_after_terminating_batch(&tool_results) {
@@ -452,59 +469,90 @@ fn next_pending_after_assistant(
     }
 }
 
-/// Establish the baseline instruction epoch for contexts that have never
-/// seen one (new sessions and pre-feature resumes with
-/// `visible_generation == 0`). Emitted before the first user message so the
-/// baseline is durable and instruction-before-request ordering is
-/// unambiguous. No-op without an attached registry or after any epoch.
+/// Reconcile durable instruction state before each live user message.
+///
+/// New and pre-feature sessions establish the plain baseline. Replayed
+/// sessions reconcile the most recently visible scope against current disk,
+/// so updates and removals become model-visible before the first resumed
+/// provider request while unchanged sessions remain silent.
 pub(super) async fn establish_instruction_baseline(
+    model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     emitter: &mut EventEmitter,
-) {
+    cancel_token: &CancellationToken,
+) -> Result<(), AgentRuntimeError> {
     let Some(registry) = emitter.context.instruction_registry() else {
-        return;
+        return Ok(());
     };
-    if emitter.context.instruction_state().visible_generation != 0 {
-        return;
-    }
+    let state = emitter.context.instruction_state();
+    let is_initial = state.visible_generation == 0;
+    let target_directories = if is_initial {
+        Vec::new()
+    } else {
+        state.most_recent_scope.iter().cloned().collect()
+    };
+    let reconcile_kind = if is_initial {
+        InstructionReconcileKind::Baseline
+    } else {
+        InstructionReconcileKind::ToolPreflight
+    };
     let request = InstructionReconcileRequest {
         agent_id: config
             .agent_id
             .clone()
             .unwrap_or_else(|| crate::session::MAIN_AGENT_ID.to_owned()),
-        kind: InstructionReconcileKind::Baseline,
-        target_directories: Vec::new(),
+        kind: reconcile_kind,
+        target_directories: target_directories.clone(),
         budget: InstructionContextBridge::budget(config, &emitter.context),
         deferred_tool_ids: Vec::new(),
     };
     let decision = registry
         .reconcile(request, emitter.context.instruction_state())
         .await;
-    apply_reconciliation_decision(config, emitter, decision, &[]);
+    match decision {
+        InstructionPreflightDecision::Proceed { fingerprint } => {
+            super::tool_dispatch::record_decision_fingerprint(&mut emitter.context, &fingerprint);
+        }
+        InstructionPreflightDecision::Defer { epoch, fingerprint }
+        | InstructionPreflightDecision::Block { epoch, fingerprint } => {
+            if let Some(fingerprint) = admit_pending_epoch_compact_first(
+                model,
+                config,
+                emitter,
+                cancel_token,
+                reconcile_kind,
+                epoch,
+                fingerprint,
+            )
+            .await?
+            {
+                super::tool_dispatch::record_decision_fingerprint(
+                    &mut emitter.context,
+                    &fingerprint,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Repair pinned instruction content at a live provider boundary when it is
 /// missing: after a replayed or live full compaction, replay drops pinned
 /// instruction messages without reconstructing the context-only rehydration,
 /// so the first live boundary re-runs rehydration against current disk. The
-/// guard (epoch admitted, visible revisions, no pinned instruction message)
-/// keeps an already-intact context untouched.
-async fn rehydrate_instruction_context_after_compaction(emitter: &mut EventEmitter) {
+/// typed authority generation keeps an already-intact context untouched while
+/// ensuring a retained Blocked notice cannot impersonate the full snapshot.
+async fn rehydrate_instruction_context_after_compaction(emitter: &mut EventEmitter, force: bool) {
     let Some(registry) = emitter.context.instruction_registry() else {
         return;
     };
     {
         let state = emitter.context.instruction_state();
-        if state.visible_generation == 0 || state.visible_revisions.is_empty() {
+        if state.visible_generation == 0 {
             return;
         }
     }
-    if emitter
-        .context
-        .messages()
-        .iter()
-        .any(|message| matches!(message, AgentMessage::Instruction { .. }))
-    {
+    if !force && emitter.context.instruction_authority_is_pinned() {
         return;
     }
     match InstructionContextBridge::rehydrate_after_compaction(&registry, &mut emitter.context)
@@ -525,18 +573,20 @@ async fn rehydrate_instruction_context_after_compaction(emitter: &mut EventEmitt
 /// snapshot — never inject a large epoch and immediately summarize it.
 ///
 /// When even compaction cannot create enough safe capacity, this returns the
-/// typed context-overflow error instead of admitting: the epoch's own budget
-/// clamp already applied deterministic whole-bundle omission at reconcile
-/// time, so what remains cannot fit without overflowing the request. The
-/// decision fingerprint is left unrecorded, so a later turn re-preflights and
-/// re-derives the epoch.
+/// typed context-overflow error instead of admitting. An omission caused by
+/// current history pressure is never reused: reconciliation runs again with
+/// the fresh post-compaction budget and its fresh fingerprint.
 async fn admit_pending_epoch_compact_first(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
-    epoch: InstructionEpochData,
-) -> Result<(), AgentRuntimeError> {
+    reconcile_kind: InstructionReconcileKind,
+    mut epoch: InstructionEpochData,
+    mut fingerprint: InstructionFingerprint,
+) -> Result<Option<InstructionFingerprint>, AgentRuntimeError> {
+    let refresh_after_compaction =
+        !epoch.ignored_bundles.is_empty() && epoch.budget.actual < epoch.budget.nominal;
     if InstructionContextBridge::prepare_pending_epoch(config, &emitter.context, &epoch)
         == PendingEpochAdmission::CompactFirst
     {
@@ -571,9 +621,50 @@ async fn admit_pending_epoch_compact_first(
         // instruction chain dropped by compaction before the pending bundle
         // lands. Failure is non-fatal; the next preflight re-derives it as a
         // typed Blocked epoch.
-        rehydrate_instruction_context_after_compaction(emitter).await;
-        if InstructionContextBridge::prepare_pending_epoch(config, &emitter.context, &epoch)
-            == PendingEpochAdmission::CompactFirst
+        rehydrate_instruction_context_after_compaction(emitter, true).await;
+        if refresh_after_compaction {
+            let registry = emitter
+                .context
+                .instruction_registry()
+                .expect("an instruction epoch implies an attached registry");
+            let targets = fingerprint.target_directories.clone();
+            match registry
+                .reconcile(
+                    InstructionReconcileRequest {
+                        agent_id: fingerprint.agent_id.clone(),
+                        kind: reconcile_kind,
+                        target_directories: targets.clone(),
+                        budget: InstructionContextBridge::budget(config, &emitter.context),
+                        deferred_tool_ids: fingerprint.deferred_tool_ids.clone(),
+                    },
+                    emitter.context.instruction_state(),
+                )
+                .await
+            {
+                InstructionPreflightDecision::Proceed { fingerprint: fresh } => {
+                    return Ok(Some(fresh));
+                }
+                InstructionPreflightDecision::Defer {
+                    epoch: fresh_epoch,
+                    fingerprint: fresh,
+                } => {
+                    epoch = fresh_epoch;
+                    fingerprint = fresh;
+                }
+                InstructionPreflightDecision::Block {
+                    epoch: fresh_epoch,
+                    fingerprint: fresh,
+                } => {
+                    epoch = fresh_epoch;
+                    fingerprint = fresh;
+                }
+            }
+        }
+        if InstructionContextBridge::prepare_pending_epoch_after_compaction(
+            config,
+            &emitter.context,
+            &epoch,
+        ) == PendingEpochAdmission::CompactFirst
         {
             return Err(AgentRuntimeError::Model(AiError::ContextOverflow {
                 message: format!(
@@ -584,8 +675,26 @@ async fn admit_pending_epoch_compact_first(
             }));
         }
     }
+    if !epoch.ignored_bundles.is_empty() && epoch.model_content.is_none() {
+        return Err(AgentRuntimeError::Model(AiError::ContextOverflow {
+            message: format!(
+                "instruction omission notice for generation {} does not fit the context budget",
+                epoch.generation
+            ),
+        }));
+    }
+    if epoch.failure.is_some() {
+        let targets = fingerprint.target_directories.clone();
+        apply_reconciliation_decision(
+            config,
+            emitter,
+            InstructionPreflightDecision::Block { epoch, fingerprint },
+            &targets,
+        );
+        return Ok(None);
+    }
     emitter.emit(AgentEvent::InstructionEpoch { epoch });
-    Ok(())
+    Ok(Some(fingerprint))
 }
 
 /// Reconcile the scopes a just-executed batch touched, before the next
@@ -594,15 +703,17 @@ async fn admit_pending_epoch_compact_first(
 /// `Updated`/`Removed` epoch. A newly created nested `AGENTS.md` is picked
 /// up here before any later batch in its scope.
 async fn reconcile_after_tool_execution(
+    model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
     preflight_targets: Option<Vec<std::path::PathBuf>>,
-) {
+) -> Result<(), AgentRuntimeError> {
     let Some(targets) = preflight_targets else {
-        return;
+        return Ok(());
     };
     let Some(registry) = emitter.context.instruction_registry() else {
-        return;
+        return Ok(());
     };
     let request = InstructionReconcileRequest {
         agent_id: config
@@ -617,7 +728,31 @@ async fn reconcile_after_tool_execution(
     let decision = registry
         .reconcile(request, emitter.context.instruction_state())
         .await;
-    apply_reconciliation_decision(config, emitter, decision, &targets);
+    match decision {
+        proceed @ InstructionPreflightDecision::Proceed { .. } => {
+            apply_reconciliation_decision(config, emitter, proceed, &targets);
+        }
+        InstructionPreflightDecision::Defer { epoch, fingerprint }
+        | InstructionPreflightDecision::Block { epoch, fingerprint } => {
+            if let Some(fingerprint) = admit_pending_epoch_compact_first(
+                model,
+                config,
+                emitter,
+                cancel_token,
+                InstructionReconcileKind::ToolPreflight,
+                epoch,
+                fingerprint,
+            )
+            .await?
+            {
+                super::tool_dispatch::record_decision_fingerprint(
+                    &mut emitter.context,
+                    &fingerprint,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_runtime_reminders(config: &AgentConfig, emitter: &mut EventEmitter) {
@@ -818,6 +953,7 @@ async fn prepare_model_request(
                 for event in compaction_events {
                     emitter.emit(event);
                 }
+                rehydrate_instruction_context_after_compaction(emitter, true).await;
                 snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
                     config,
                     &emitter.context,
@@ -844,6 +980,7 @@ async fn prepare_model_request(
             for event in compaction_events {
                 emitter.emit(event);
             }
+            rehydrate_instruction_context_after_compaction(emitter, true).await;
             snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
                 config,
                 &emitter.context,

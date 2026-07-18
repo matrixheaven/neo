@@ -110,7 +110,7 @@ impl BtwRunner {
 
         let skill_store = self.load_skill_store()?;
         let agent_config =
-            agent_config_for_app(self.model.clone(), &self.config, None, &skill_store)
+            agent_config_for_app(self.model.clone(), &self.config, None, &skill_store, None)
                 .context("failed to build agent config for sidecar")?
                 .with_before_tool_call(deny_sidecar_tool_call);
         let tools = tool_registry_for_config(&self.config, Arc::clone(&agent_config.todos), None)

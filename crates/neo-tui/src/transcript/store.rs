@@ -590,7 +590,7 @@ impl TranscriptStore {
     ///
     /// When any of `epoch.deferred_tool_ids` matches a tool-run entry, the
     /// card takes the earliest matching entry's index and every matched
-    /// unexecuted placeholder is suppressed — the model replans and
+    /// placeholder is suppressed — the model replans and
     /// re-issues those tools under fresh ids after the epoch, so the stale
     /// placeholders would otherwise render as an internal duplicate
     /// sequence. Without a matching placeholder the card appends normally.
@@ -604,7 +604,7 @@ impl TranscriptStore {
         &mut self,
         epoch: &InstructionEpochData,
         primary_workspace: PathBuf,
-        home_dir: Option<PathBuf>,
+        neo_home: Option<PathBuf>,
         expanded: bool,
     ) -> TranscriptEntryId {
         let fingerprint = instruction_epoch_fingerprint(epoch);
@@ -623,19 +623,11 @@ impl TranscriptStore {
             .filter_map(|id| self.tool_run_index(id))
             .min();
         for id in &epoch.deferred_tool_ids {
-            let unexecuted = self.tool(id).is_some_and(|tool| {
-                matches!(
-                    tool.status(),
-                    ToolStatusKind::Pending | ToolStatusKind::Running
-                )
-            });
-            if unexecuted {
-                self.suppress_tool_run(id);
-            }
+            self.suppress_tool_run(id);
         }
 
         let mut component =
-            InstructionCardComponent::new(epoch.clone(), primary_workspace, home_dir);
+            InstructionCardComponent::new(epoch.clone(), primary_workspace, neo_home);
         component.set_expanded(expanded);
         let index = match insertion_index {
             Some(index) => {

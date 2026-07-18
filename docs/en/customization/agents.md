@@ -76,14 +76,124 @@ A sub-agent has its own independent conversation history; only the result summar
 
 ## AGENTS.md
 
-`AGENTS.md` in the project root (case-insensitive; `CLAUDE.md` is accepted as a compatibility fallback) is a project-level context file that Neo auto-reads and injects into the main agent's context inside trusted directories. Key points:
+`AGENTS.md` is Neo's only project instruction filename. Matching is case-insensitive for cross-platform behavior, but multiple case-folded variants in one directory are a blocking ambiguity (`Blocked: ambiguous AGENTS.md`). There is no `CLAUDE.md` fallback anywhere. Project instructions are session-scoped state: Neo delivers them as durable instruction epochs recorded in the session's JSONL event stream, and they never mutate the system prompt or earlier request bytes.
 
-- Priority: `AGENTS.md` takes precedence over `CLAUDE.md`;
-- Scan scope: the current working directory and its trusted ancestor directories; only the first match is used;
-- Recommended content: stable information such as project conventions, standards, and build commands — not details that change frequently;
-- Complementary to skills: `AGENTS.md` is "the project's global statement to all agents"; skills are "reusable task flows".
+Recommended content: stable information such as project conventions, standards, and build commands — not details that change frequently. `AGENTS.md` is complementary to skills: it is "the project's global statement to all agents", while skills are "reusable task flows".
 
-Sub-agents do not read `AGENTS.md` directly by default, but the parent context (`inherit` / `summary`) carries it along as project background.
+### Baseline: Global, Trusted Ancestors, Workspace Root
+
+At new-session initialization, before the first user message, Neo resolves one baseline instruction epoch from:
+
+1. `$NEO_HOME/AGENTS.md` (user-global, always trusted); and
+2. the trusted `AGENTS.md` files on the filesystem ancestor chain of the primary workspace, ordered outermost-first and ending at the workspace root.
+
+Project instructions load only when the project is trusted (`~/.neo/trust.json`). A session resumed from before this feature establishes a fresh baseline from current disk state on its next live turn; Neo does not reconstruct legacy behavior.
+
+### Nested Scopes Discovered from Tool Paths
+
+Neo discovers nested `AGENTS.md` files from typed tool arguments before tools run — never by parsing shell command strings:
+
+| Tool class | Scope probe |
+| --- | --- |
+| `Read`, `Write`, `Edit` | Parent directory of the target file |
+| `List`, `Grep`, `Find`, `Glob` | Explicit root or path directory |
+| `Bash`, `Terminal` | Explicit `cwd`, otherwise the primary workspace |
+| Other tools | No instruction scope probe |
+
+A shell command that intends to work inside a nested subtree must set the tool's `cwd` field; Neo never infers paths from the command string. For each target directory inside the primary workspace, Neo scans only the directory chain from the workspace root to the target — not siblings or descendants:
+
+```text
+workspace/
+|-- AGENTS.md
+|-- crates/
+|   |-- AGENTS.md
+|   `-- neo-tui/
+|       |-- AGENTS.md
+|       `-- src/lib.rs
+`-- docs/AGENTS.md   # not loaded for crates/neo-tui/src/lib.rs
+```
+
+When a batch touches new or changed scopes, preflight defers the entire tool batch — it never partially executes — appends one instruction epoch, and the model replans within the same turn. Rules render general-to-specific: global first, then trusted ancestors outermost-to-nearest, then the workspace root, then nested scopes shallowest-to-deepest, so deeper files override broader guidance. A missing `AGENTS.md` in a directory is not an error, and absence is not cached across turns, so a newly created file is discovered before the next tool runs in its scope. A tool that modifies an active source is still governed by the old revision; after that tool completes, Neo appends an update or removal epoch. Rewriting identical content creates no epoch.
+
+### Standalone `@path` Imports
+
+Only a standalone line with one leading `@` outside fenced code is an import:
+
+```md
+@./docs/rust-rules.md
+@~/.neo/CX.md
+```
+
+The following remain ordinary text: `@@./rules.md`; inline mentions such as `See @docs/rules.md`; import-looking text inside fenced code; URLs; and environment-variable expressions.
+
+Resolution rules:
+
+- Relative paths resolve from the directory containing the importing file; `~` uses the platform home directory.
+- The final canonical path must remain inside the primary workspace or `$NEO_HOME`; anything else is rejected (`Blocked: untrusted import`).
+- Imported sources must be regular UTF-8 `.md` files; directories, devices, sockets, URLs, and other special files are rejected.
+- Canonical paths drive cycle detection and deduplication; a source imported more than once expands only at its first occurrence.
+- Imported content replaces the directive at its original position, wrapped in an `<included_instructions path="...">` provenance element; source bodies remain exact UTF-8 text.
+
+Structural safety limits (maximum recursive import depth 5, at most 32 sources per import graph, 1 MiB per source, 8 MiB per complete graph) are host safety limits, not the model-context budget:
+
+| Limit | Value |
+| --- | ---: |
+| Maximum recursive import depth | 5 |
+| Maximum sources in one import graph | 32 |
+| Maximum bytes in one source | 1 MiB |
+| Maximum bytes in one complete graph | 8 MiB |
+
+One `AGENTS.md` plus its complete recursive import graph forms one atomic bundle: it activates whole or not at all, and Neo never presents a partially parsed import graph as complete.
+
+### Trust and Filesystem Boundary
+
+- `$NEO_HOME/AGENTS.md` and imports under `$NEO_HOME` are user-global and always trusted.
+- Project `AGENTS.md` files and their workspace-local imports load only when the primary project is trusted.
+- Downward discovery never crosses the primary workspace boundary; workspace-external absolute `Read` paths and additional workspace roots do not trigger scoped discovery.
+- Canonical containment uses `Path`/`PathBuf` semantics, not string prefix tests.
+
+### Failure Semantics and Blocked Scopes
+
+| Condition | Outcome |
+| --- | --- |
+| No `AGENTS.md` in a directory | No scope in that directory; not an error |
+| Missing import | `Blocked: missing import` |
+| Permission or I/O failure | `Blocked: unreadable source` |
+| Invalid UTF-8 | `Blocked: invalid encoding` |
+| Import cycle | `Blocked: include cycle` |
+| Structural limit exceeded | `Blocked: instruction limit exceeded` |
+| Canonical path leaves allowed roots | `Blocked: untrusted import` |
+| Multiple case-folded `AGENTS.md` variants | `Blocked: ambiguous AGENTS.md` |
+| Source changes repeatedly while read | `Blocked: unstable source` |
+
+A failed bundle never injects its successfully read subset; the model receives one compact failure notice containing paths and reasons. While a scope is blocked, read-only `Read`, `List`, `Grep`, `Find`, and `Glob` operations may proceed for diagnosis, but `Write`, `Edit`, `Bash`, and `Terminal` remain blocked, and a mixed batch containing any of them is blocked as a whole. When the source fingerprint changes, Neo retries resolution automatically; a complete successful bundle replaces the failure state through the ordinary activation path.
+
+### Dynamic Instruction Budget
+
+Instruction content is pinned request context, counted by the existing context estimator:
+
+```text
+nominal_instruction_budget = max(65_536, effective_max_tokens / 8)
+actual_instruction_budget  = min(nominal_instruction_budget, tokens safely available in the request)
+```
+
+`effective_max_tokens` is Neo's effective model limit, including observed provider-overflow correction. Admission priority reserves budget for the global bundle first, then the workspace root, then nested bundles deepest-to-shallowest, then trusted ancestors nearest-first; rendering still places deeper scopes last so they win project-scope conflicts.
+
+If the complete selection does not fit safely, Neo compacts ordinary history first and then applies deterministic whole-bundle omission: the bundles that fit activate, the rest are ignored as whole units, and the workflow continues after one instruction-aware model replan. The transcript shows a `⚠ Instructions partially loaded` warning naming the loaded and ignored bundles with token estimates, and the model must not claim compliance with omitted rules. The same selection and source hashes do not warn twice; a later model-window, source, or scope change can make an ignored bundle admissible, in which case Neo emits a new activation epoch.
+
+### Prefix-Cache Stability and Compaction
+
+Instruction changes are append-only epochs; they never rewrite earlier request bytes, so the previous provider request remains an exact prefix of the next one until full compaction. Compaction summaries exclude instruction bodies, and afterwards Neo rehydrates the current rules byte-for-byte from the registry: the global instructions, the workspace baseline, and the current nested scope chain. Re-entering a previously dropped sibling scope emits a `Reactivated` epoch. Transcript cards (`◆ ready/loaded`, `↻ updated`, `− removed`, `⚠ partially loaded`, `✕ blocked`) show metadata only — never instruction bodies and never absolute home paths.
+
+### Resume and Multi-Agent Visibility
+
+Instruction epochs are durable JSONL events. On resume, Neo replays historical events and rebuilds the registry and per-agent visibility state before reconciling current disk state at the first live boundary; an unchanged session produces no duplicate epoch or card, while a changed source appends a replacement or removal epoch.
+
+Source bytes and revision graphs are shared per session, but visibility is agent-local: the main agent and each Delegate sub-agent independently record which revisions their model has seen. Spawning a child materializes a child-owned baseline epoch (global, workspace, and applicable parent scopes) before the child's first model request; one agent's activation never implies another agent's visibility, and instruction cards stay in their own agent's transcript.
+
+### `/init` and the Removed `CLAUDE.md` Fallback
+
+`/init` creates or refreshes only the workspace-root `AGENTS.md`; nested `AGENTS.md` files are user-authored, and `/init` never generates or modifies them. The old startup-only loader and the `CLAUDE.md` compatibility candidate have been removed — `AGENTS.md` is the single canonical instruction filename.
 
 ## Next Steps
 

@@ -3192,6 +3192,53 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         .cloned()
         .expect("parent sees the nested revision");
 
+    let mut compacted_parent = AgentContext::new();
+    neo_agent_core::runtime::InstructionContextBridge::apply_epoch(
+        &mut compacted_parent,
+        &epoch,
+        &fingerprint,
+    );
+    neo_agent_core::runtime::InstructionContextBridge::rehydrate_after_compaction(
+        &registry,
+        &mut compacted_parent,
+    )
+    .await
+    .expect("parent rehydration");
+    assert_eq!(
+        compacted_parent
+            .instruction_state()
+            .most_recent_scope
+            .as_deref(),
+        Some(nested.as_path())
+    );
+    assert!(
+        !compacted_parent
+            .instruction_state()
+            .active_scopes
+            .contains(&nested)
+    );
+
+    let mut compacted_inherit_config =
+        AgentConfig::for_model(neo_agent_core::harness::fake_model());
+    compacted_inherit_config.instruction_registry = Some(Arc::clone(&registry));
+    compacted_inherit_config.instruction_inheritance = InstructionInheritance::FullContext;
+    let mut compacted_inherit_child = AgentContext::new();
+    seed_child_instruction_baseline(
+        &mut compacted_inherit_child,
+        &compacted_inherit_config,
+        Some(compacted_parent.instruction_state()),
+        "agent_after_parent_compaction",
+    )
+    .await
+    .expect("compacted-parent inherit baseline");
+    assert!(
+        compacted_inherit_child
+            .instruction_state()
+            .visible_revisions
+            .contains_key(&nested),
+        "full-context child must inherit the parent's most-recent pinned nested scope"
+    );
+
     // Build an inherit child and a summary child.
     let mut inherit_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
     inherit_config.instruction_registry = Some(Arc::clone(&registry));
@@ -3264,6 +3311,27 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
     let summary_text = instruction_message_text(&summary_child);
     assert!(!summary_text.contains("nested rules"), "{summary_text}");
     assert!(summary_text.contains("root rules"), "{summary_text}");
+
+    neo_agent_core::runtime::InstructionContextBridge::rehydrate_after_compaction(
+        &registry,
+        &mut summary_child,
+    )
+    .await
+    .expect("summary child rehydration");
+    assert!(
+        !summary_child
+            .instruction_state()
+            .visible_revisions
+            .contains_key(&nested),
+        "session-shared cache metadata must not become summary-child visibility"
+    );
+    assert!(
+        !summary_child
+            .instruction_state()
+            .visited_revisions
+            .contains_key(&nested),
+        "session-shared cache metadata must not become summary-child visited history"
+    );
 
     // End to end: a foreground delegate child inherits through the runtime
     // wiring, the pinned baseline reaches the child's first model request,

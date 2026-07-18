@@ -34,6 +34,13 @@ impl InteractiveController {
         let (question_tx, question_rx) = tokio::sync::mpsc::unbounded_channel::<PendingQuestion>();
         let cancel_token = CancellationToken::new();
         let steer_input = neo_agent_core::SteerInputHandle::new();
+        let instruction_registry = match self.instruction_registry_for_turn() {
+            Ok(registry) => registry,
+            Err(error) => {
+                self.push_status(format!("Failed to load project instructions: {error}"));
+                return;
+            }
+        };
         let channels = TurnChannels {
             events: event_tx.clone(),
             approvals: approval_tx,
@@ -60,6 +67,9 @@ impl InteractiveController {
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
         request.mcp_manager.clone_from(&self.mcp_manager);
         request.base_config.clone_from(&self.local_config);
+        request
+            .instruction_registry
+            .clone_from(&instruction_registry);
         request.manual_compact_request = std::sync::Arc::clone(&self.manual_compact_request);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
@@ -82,6 +92,7 @@ impl InteractiveController {
             cancel_token,
             questions: question_rx,
             steer_input,
+            instruction_registry,
         });
     }
 
@@ -121,6 +132,10 @@ impl InteractiveController {
         let mut frame_request = FrameRequest::None;
 
         while let Ok(session_id) = turn.session_ids.try_recv() {
+            self.bind_instruction_registry_to_session(
+                &session_id,
+                turn.instruction_registry.as_ref(),
+            );
             self.set_active_session_id(session_id);
             frame_request = frame_request.merge(FrameRequest::Coalesced);
         }
@@ -154,6 +169,10 @@ impl InteractiveController {
                 .await
                 .map_err(|error| anyhow::anyhow!("interactive turn task failed: {error}"))?;
             while let Ok(session_id) = turn.session_ids.try_recv() {
+                self.bind_instruction_registry_to_session(
+                    &session_id,
+                    turn.instruction_registry.as_ref(),
+                );
                 self.set_active_session_id(session_id);
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
             }
@@ -185,6 +204,10 @@ impl InteractiveController {
             match turn_result {
                 Ok(outcome) => {
                     if let Some(session_id) = outcome.session_id {
+                        self.bind_instruction_registry_to_session(
+                            &session_id,
+                            turn.instruction_registry.as_ref(),
+                        );
                         self.set_active_session_id(session_id.clone());
                         self.refresh_terminal_title_for_session(&session_id);
                     }

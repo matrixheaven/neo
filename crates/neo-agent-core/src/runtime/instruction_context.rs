@@ -10,7 +10,7 @@
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::context_budget::{ContextBudgetEstimator, ContextBudgetSnapshot};
-use super::{estimate_message_tokens, estimate_messages_tokens};
+use super::estimate_message_tokens;
 use crate::compaction::projection::ProjectionPlan;
 use crate::instructions::{
     InstructionBudget, InstructionEpochData, InstructionError, InstructionFingerprint,
@@ -72,6 +72,25 @@ impl InstructionContextBridge {
         context: &AgentContext,
         epoch: &InstructionEpochData,
     ) -> PendingEpochAdmission {
+        if !epoch.ignored_bundles.is_empty() && epoch.budget.actual < epoch.budget.nominal {
+            return PendingEpochAdmission::CompactFirst;
+        }
+        Self::prepare_rendered_epoch(config, context, epoch)
+    }
+
+    pub(crate) fn prepare_pending_epoch_after_compaction(
+        config: &AgentConfig,
+        context: &AgentContext,
+        epoch: &InstructionEpochData,
+    ) -> PendingEpochAdmission {
+        Self::prepare_rendered_epoch(config, context, epoch)
+    }
+
+    fn prepare_rendered_epoch(
+        config: &AgentConfig,
+        context: &AgentContext,
+        epoch: &InstructionEpochData,
+    ) -> PendingEpochAdmission {
         let snapshot = Self::snapshot(config, context);
         let pending_tokens = epoch.model_content.as_deref().map_or(0, |content| {
             estimate_message_tokens(&AgentMessage::Instruction {
@@ -121,10 +140,11 @@ impl InstructionContextBridge {
     }
 
     /// Rehydrates pinned instruction content after a full compaction:
-    /// strips every pinned instruction message, re-pins the exact current
-    /// global + initial workspace baseline + current/most-recent nested
-    /// scope chain from registry state, and retains visited sibling metadata
-    /// without pinning their bodies.
+    /// leaves an intact typed authority snapshot untouched; otherwise strips
+    /// stale instruction messages, re-pins the exact current global + initial
+    /// workspace baseline + current/most-recent nested scope chain from
+    /// registry state, and retains visited sibling metadata without pinning
+    /// their bodies.
     ///
     /// Full compaction already establishes a new provider prefix, so exact
     /// rehydration creates no additional cache regression. The
@@ -144,38 +164,35 @@ impl InstructionContextBridge {
         registry: &InstructionRegistry,
         context: &mut AgentContext,
     ) -> Result<bool, InstructionError> {
-        // Drop every pinned instruction body (stale revisions included)
-        // before re-pinning the exact current chain.
-        context
-            .messages
-            .retain(|message| !matches!(message, AgentMessage::Instruction { .. }));
-        context.estimated_tokens = estimate_messages_tokens(&context.messages);
-
         if context.instruction_state().visible_generation == 0 {
             // No instruction state was ever admitted; baseline establishment
             // owns the first epoch, not rehydration.
             return Ok(false);
         }
         let most_recent_scope = context.instruction_state().most_recent_scope.clone();
+        let admitted_revisions = context.instruction_state().visible_revisions.clone();
         let snapshot = registry
-            .rehydration_snapshot(most_recent_scope.as_deref())
+            .rehydration_snapshot(most_recent_scope.as_deref(), &admitted_revisions)
             .await?;
 
-        let repinned = snapshot.model_content.is_some();
-        if let Some(model_content) = snapshot.model_content {
-            let generation = context.instruction_state().visible_generation;
-            context.append_message(AgentMessage::Instruction {
-                generation,
-                content: vec![Content::text(model_content)],
-            });
-        }
+        let authority = snapshot
+            .model_content
+            .map(|model_content| {
+                let generation = context
+                    .instruction_authority_generation()
+                    .unwrap_or(context.instruction_state().visible_generation);
+                (generation, model_content)
+            })
+            .or_else(|| context.instruction_authority_snapshot());
+        let repinned = authority.is_some();
+        context.replace_instruction_context(authority);
 
         // The rehydrated baseline (global, ancestors, workspace root) stays
         // active. The nested chain is pinned for continuity and kept in
         // `most_recent_scope` with its fingerprint, but contracts out of the
         // active set so re-entering a visited sibling is a visible
-        // `Reactivated` epoch. Sibling bodies stay unpinned; their revisions
-        // survive in `visible_revisions` as metadata.
+        // `Reactivated` epoch. Sibling bodies stay unpinned; durable
+        // agent-local visited history remains unchanged.
         let state = context.instruction_state_mut();
         state.active_scopes = snapshot
             .chain
@@ -184,9 +201,14 @@ impl InstructionContextBridge {
             .map(|candidate| candidate.scope_dir.clone())
             .collect();
         state.visible_revisions = snapshot
-            .visited
+            .chain
             .iter()
-            .map(|metadata| (metadata.display_path.clone(), metadata.revision.clone()))
+            .map(|candidate| {
+                (
+                    candidate.scope_dir.clone(),
+                    candidate.metadata.revision.clone(),
+                )
+            })
             .collect();
         Ok(repinned)
     }
@@ -201,7 +223,8 @@ mod tests {
     use super::*;
     use crate::harness::fake_model;
     use crate::instructions::{
-        InstructionEpochOutcome, InstructionScopeData, InstructionScopeKind,
+        IgnoredInstructionBundle, InstructionEpochOutcome, InstructionOmissionReason,
+        InstructionScopeData, InstructionScopeKind,
     };
     use crate::{AgentMessage, CompactionSettings};
 
@@ -221,6 +244,10 @@ mod tests {
             replacements: Vec::new(),
             failure: None,
             deferred_tool_ids: Vec::new(),
+            budget: InstructionBudget {
+                nominal: 65_536,
+                actual: 65_536,
+            },
             model_content,
         }
     }
@@ -257,6 +284,27 @@ mod tests {
         assert_eq!(
             InstructionContextBridge::prepare_pending_epoch(&config, &context, &empty),
             PendingEpochAdmission::Admit
+        );
+    }
+
+    #[test]
+    fn omitted_epoch_with_exhausted_actual_budget_compacts_before_admission() {
+        let mut epoch = epoch_with_content(None);
+        epoch.budget.actual = 0;
+        epoch.ignored_bundles.push(IgnoredInstructionBundle {
+            display_path: std::path::PathBuf::from("/workspace"),
+            revision: "rev".to_owned(),
+            token_estimate: 12,
+            reason: InstructionOmissionReason::OverBudget,
+        });
+
+        assert_eq!(
+            InstructionContextBridge::prepare_pending_epoch(
+                &AgentConfig::for_model(fake_model()),
+                &AgentContext::new(),
+                &epoch,
+            ),
+            PendingEpochAdmission::CompactFirst
         );
     }
 }

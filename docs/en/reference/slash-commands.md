@@ -14,7 +14,7 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | View currently active background tasks. |
 | `/fork` | — | Create a new branch from the current session and switch to it. |
-| `/init [instruction]` | — | Create or refresh the workspace `AGENTS.md`. Extra text is passed to the init workflow as natural-language guidance. |
+| `/init [instruction]` | — | Create or refresh the workspace-root `AGENTS.md` only; nested `AGENTS.md` files are user-authored and never generated or modified by `/init`. Extra text is passed to the init workflow as natural-language guidance. |
 
 `/init` is TUI-only. Interactive workflows such as `/init`, `/skill:self-evo`, and `/skill:create-skill` may open a local preflight in Auto mode before starting. Neo does this mechanically from the parsed slash command; the model does not decide to switch permission modes.
 

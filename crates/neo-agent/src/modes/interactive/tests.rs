@@ -3334,6 +3334,14 @@ fn init_command_prompt_includes_instruction_and_structure_guardrails() {
             .contains("ask the user where reference projects or reference documents live")
     );
     assert!(prompt.contains("Do not treat this guide as a Neo product specification"));
+    assert!(
+        !prompt.contains("CLAUDE.md"),
+        "legacy guide leaked: {prompt}"
+    );
+    assert!(
+        !prompt.contains("GEMINI.md"),
+        "legacy guide leaked: {prompt}"
+    );
 }
 
 #[test]
@@ -6744,6 +6752,67 @@ fn replay_session_into_transcript_does_not_duplicate_text_delta_aggregate_withou
 }
 
 #[test]
+fn rebuild_transcript_sets_workspace_root_before_replaying_instruction_cards() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let workspace = workspace.canonicalize().expect("canonical workspace");
+    let config = test_config(&workspace, temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    let nested = workspace.join("crates/neo-tui");
+    let epoch = neo_agent_core::instructions::InstructionEpochData {
+        agent_id: "main".to_owned(),
+        generation: 1,
+        outcome: neo_agent_core::instructions::InstructionEpochOutcome::Activated,
+        scopes: vec![neo_agent_core::instructions::InstructionScopeData {
+            display_path: nested.clone(),
+            kind: neo_agent_core::instructions::InstructionScopeKind::Nested,
+            revision: Some("7af13c2e".to_owned()),
+            token_estimate: 1_024,
+        }],
+        selected_bundles: vec![neo_agent_core::instructions::InstructionBundleMetadata {
+            display_path: nested,
+            revision: "7af13c2e".to_owned(),
+            token_estimate: 1_024,
+            byte_size: 4_096,
+            source_count: 1,
+            import_count: 0,
+            import_paths: Vec::new(),
+        }],
+        ignored_bundles: Vec::new(),
+        replacements: Vec::new(),
+        failure: None,
+        deferred_tool_ids: Vec::new(),
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
+        model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
+    };
+    let loaded = LoadedSessionTranscript::new(SESSION_A, Vec::new(), Vec::new())
+        .with_events([AgentEvent::InstructionEpoch { epoch }]);
+
+    controller.rebuild_transcript_from_session(&loaded);
+
+    let card = controller
+        .tui
+        .transcript()
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::InstructionEpoch { component } => Some(component.copy_text()),
+            _ => None,
+        })
+        .expect("instruction card");
+    let nested_label = format!("{}/**", Path::new("crates").join("neo-tui").display());
+    assert!(card.contains(&nested_label), "{card}");
+    assert!(!card.contains("<outside-workspace>"), "{card}");
+    assert!(!card.contains(&temp.path().display().to_string()), "{card}");
+    assert!(!card.contains("SECRET INSTRUCTION BODY"), "{card}");
+}
+
+#[test]
 fn replay_session_into_transcript_restores_only_retry_exhaustion() {
     let mut transcript = TranscriptPane::new(100, 20);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
@@ -7564,6 +7633,7 @@ async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
 
 #[tokio::test]
 async fn event_loop_keeps_new_session_active_for_followup_prompt() {
+    let workspace_root = test_workspace_root();
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let run_turn: TurnDriver = Arc::new(move |request, channels| {
@@ -7597,12 +7667,16 @@ async fn event_loop_keeps_new_session_active_for_followup_prompt() {
         "neo",
         "new",
         "openai/gpt-4.1",
-        test_workspace_root(),
+        workspace_root.clone(),
         run_turn,
         PickerCatalogs::default(),
         Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
         Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
     );
+    controller.local_config = Some(test_config(
+        &workspace_root,
+        workspace_root.join(".neo/sessions"),
+    ));
 
     controller.type_text("read project");
     controller
@@ -7630,6 +7704,15 @@ async fn event_loop_keeps_new_session_active_for_followup_prompt() {
     assert_eq!(requests[0].session_id, None);
     assert_eq!(requests[1].prompt, vec![Content::text("continue")]);
     assert_eq!(requests[1].session_id.as_deref(), Some(SESSION_NEW));
+    let first_registry = requests[0]
+        .instruction_registry
+        .as_ref()
+        .expect("first turn registry");
+    let followup_registry = requests[1]
+        .instruction_registry
+        .as_ref()
+        .expect("followup turn registry");
+    assert!(Arc::ptr_eq(first_registry, followup_registry));
     assert_eq!(controller.chrome().session_label(), SESSION_NEW);
 }
 
@@ -9379,6 +9462,49 @@ fn test_config_with_models(
     let mut config = test_config(project_dir, sessions_dir);
     config.models = models;
     config
+}
+
+#[test]
+fn instruction_registry_cache_is_scoped_by_session_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let session_a = controller
+        .instruction_registry_for_turn()
+        .expect("session A registry")
+        .expect("configured controller registry");
+    let session_a_again = controller
+        .instruction_registry_for_turn()
+        .expect("session A registry")
+        .expect("configured controller registry");
+    assert!(Arc::ptr_eq(&session_a, &session_a_again));
+
+    controller.set_active_session_id(SESSION_B.to_owned());
+    let session_b = controller
+        .instruction_registry_for_turn()
+        .expect("session B registry")
+        .expect("configured controller registry");
+    assert!(!Arc::ptr_eq(&session_a, &session_b));
+
+    controller.active_session_id = None;
+    let new_session = controller
+        .instruction_registry_for_turn()
+        .expect("new session registry")
+        .expect("configured controller registry");
+    let another_new_session = controller
+        .instruction_registry_for_turn()
+        .expect("another new session registry")
+        .expect("configured controller registry");
+    assert!(!Arc::ptr_eq(&new_session, &another_new_session));
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let session_a_after_switch = controller
+        .instruction_registry_for_turn()
+        .expect("session A registry after switch")
+        .expect("configured controller registry");
+    assert!(Arc::ptr_eq(&session_a, &session_a_after_switch));
 }
 
 /// Regression: the turn driver must receive the controller's *live*

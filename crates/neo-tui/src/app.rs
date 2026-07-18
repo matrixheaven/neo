@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::screen_output::{CursorPos, TerminalFrame};
@@ -26,8 +27,10 @@ impl NeoTui {
         width: usize,
         height: usize,
         version: &str,
+        neo_home: Option<PathBuf>,
     ) -> Self {
         let mut transcript = TranscriptPane::new(width, height);
+        transcript.set_neo_home(neo_home);
         transcript.set_theme(chrome.theme());
         transcript.push_welcome_banner(
             chrome.title(),

@@ -139,7 +139,7 @@ User instruction after /init: {instruction}
 
 Mission:
 - Research the current repository before writing.
-- Inherit the spirit of existing AGENTS.md, CLAUDE.md, and GEMINI.md files when present.
+- Inherit the spirit of the existing AGENTS.md file when present.
 - Ask the user where reference projects or reference documents live. Do not assume .references/ is the reference location.
 - Create or update the root AGENTS.md in place. If it already exists, overwrite same-purpose sections instead of appending duplicates.
 - Do not treat this guide as a Neo product specification. It constrains AI collaborators.

@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env,
     fmt::Write as _,
     future::Future,
@@ -27,6 +27,7 @@ use neo_agent_core::{
     McpOAuthServiceConfig, McpServerStatus, MessageOrigin, PendingQuestion,
     PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
     ShellCommandOrigin, ShellCommandOutcome,
+    instructions::{InstructionRegistry, InstructionRegistryConfig},
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
@@ -346,6 +347,7 @@ pub(crate) struct InteractiveController {
     load_session: SessionLoader,
     fork_session: SessionForker,
     active_session_id: Option<String>,
+    instruction_registries: HashMap<String, Arc<InstructionRegistry>>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
     current_reasoning: neo_ai::ReasoningSelection,
@@ -471,6 +473,7 @@ pub(super) struct RunningTurn {
     /// Shared handle kept so the controller can push steer/follow-up input
     /// while the turn runs.
     pub(super) steer_input: neo_agent_core::SteerInputHandle,
+    pub(super) instruction_registry: Option<Arc<InstructionRegistry>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -509,6 +512,7 @@ pub(crate) struct TurnRequest {
     /// stale snapshot captured when the controller was built. `None` for test
     /// drivers that don't depend on config.
     pub base_config: Option<crate::config::AppConfig>,
+    pub instruction_registry: Option<Arc<InstructionRegistry>>,
     /// Shared manual-compaction request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by `/compact`, taken by the runtime.
@@ -541,6 +545,7 @@ impl TurnRequest {
             plan_review_feedback: BTreeMap::new(),
             mcp_manager: None,
             base_config: None,
+            instruction_registry: None,
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             compaction_only: false,
         }
@@ -735,7 +740,13 @@ impl InteractiveController {
             })
         });
         Self {
-            tui: neo_tui::NeoTui::with_welcome_banner(chrome, 80, 24, env!("CARGO_PKG_VERSION")),
+            tui: neo_tui::NeoTui::with_welcome_banner(
+                chrome,
+                80,
+                24,
+                env!("CARGO_PKG_VERSION"),
+                neo_home(),
+            ),
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,
@@ -744,6 +755,7 @@ impl InteractiveController {
             load_session,
             fork_session,
             active_session_id: None,
+            instruction_registries: HashMap::new(),
             local_config: None,
             active_model: None,
             current_reasoning: neo_ai::ReasoningSelection::Off,
@@ -1697,6 +1709,38 @@ impl InteractiveController {
         self.tui.chrome_mut().set_session_label(session_id);
     }
 
+    fn instruction_registry_for_turn(&mut self) -> Result<Option<Arc<InstructionRegistry>>> {
+        let Some(config) = self.local_config.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(session_id) = self.active_session_id.as_ref()
+            && let Some(registry) = self.instruction_registries.get(session_id)
+        {
+            return Ok(Some(Arc::clone(registry)));
+        }
+        let registry = Arc::new(InstructionRegistry::new(InstructionRegistryConfig {
+            primary_workspace: config.project_dir.clone(),
+            neo_home: neo_home(),
+            project_trusted: config.project_trusted,
+        })?);
+        if let Some(session_id) = self.active_session_id.as_ref() {
+            self.instruction_registries
+                .insert(session_id.clone(), Arc::clone(&registry));
+        }
+        Ok(Some(registry))
+    }
+
+    fn bind_instruction_registry_to_session(
+        &mut self,
+        session_id: &str,
+        registry: Option<&Arc<InstructionRegistry>>,
+    ) {
+        if let Some(registry) = registry {
+            self.instruction_registries
+                .insert(session_id.to_owned(), Arc::clone(registry));
+        }
+    }
+
     fn set_terminal_title_from_loaded_session(&mut self, loaded: &LoadedSessionTranscript) {
         let title = loaded
             .terminal_title
@@ -1958,6 +2002,13 @@ impl InteractiveController {
             let (question_tx, question_rx) = mpsc::unbounded_channel::<PendingQuestion>();
             let cancel_token = CancellationToken::new();
             let steer_input = neo_agent_core::SteerInputHandle::new();
+            let instruction_registry = match self.instruction_registry_for_turn() {
+                Ok(registry) => registry,
+                Err(error) => {
+                    self.push_status(format!("Failed to load project instructions: {error}"));
+                    return;
+                }
+            };
             let channels = TurnChannels {
                 events: event_tx.clone(),
                 approvals: approval_tx,
@@ -1977,6 +2028,9 @@ impl InteractiveController {
             request.workspace_policy = Arc::clone(&self.workspace_policy);
             request.plan_mode = Arc::clone(&self.plan_mode);
             request.base_config.clone_from(&self.local_config);
+            request
+                .instruction_registry
+                .clone_from(&instruction_registry);
             request.manual_compact_request = Arc::clone(&self.manual_compact_request);
             request.compaction_only = true;
             let future = (self.run_turn)(request, channels);
@@ -1995,6 +2049,7 @@ impl InteractiveController {
                 cancel_token,
                 questions: question_rx,
                 steer_input,
+                instruction_registry,
             });
         }
     }
@@ -2179,6 +2234,9 @@ fn replay_session_into_transcript(
                             transcript.replay_message(message);
                         }
                     }
+                    // Instruction content is replayed from the owning
+                    // InstructionEpoch event, never as ordinary transcript prose.
+                    AgentMessage::Instruction { .. } => {}
                 },
                 AgentEvent::ApprovalRequested { .. }
                 | AgentEvent::RetryScheduled { .. }

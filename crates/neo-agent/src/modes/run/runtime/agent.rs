@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, CompactionSettings, HttpConfig, HttpOAuthConfig, McpClient, McpConnectionManager,
@@ -19,6 +20,7 @@ pub(crate) fn agent_config_for_app(
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
     skill_store: &SkillStore,
+    instruction_registry: Option<Arc<InstructionRegistry>>,
 ) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
         .with_permission_mode(config.permission_mode)
@@ -33,6 +35,14 @@ pub(crate) fn agent_config_for_app(
         .with_shell_runtime(config.runtime.shell_runtime.clone())
         .with_multi_agent(config.multi_agent.clone())
         .with_workspace_root(&config.project_dir)?;
+    agent_config.instruction_registry = Some(match instruction_registry {
+        Some(registry) => registry,
+        None => Arc::new(InstructionRegistry::new(InstructionRegistryConfig {
+            primary_workspace: config.project_dir.clone(),
+            neo_home: neo_home(),
+            project_trusted: config.project_trusted,
+        })?),
+    });
     if let Some(home) = neo_home() {
         agent_config = agent_config.with_home_dir(home);
         // Layer 2: load persistent prefix-approval rules from disk so they

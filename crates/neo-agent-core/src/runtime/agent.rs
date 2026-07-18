@@ -182,12 +182,20 @@ impl AgentRuntime {
             todos.clone_from(&context.todos);
         }
 
+        let instruction_registry = context
+            .instruction_registry()
+            .or_else(|| self.config.instruction_registry.clone());
+        if let Some(registry) = &instruction_registry {
+            registry.restore_generation(context.instruction_state().visible_generation);
+            context.attach_instruction_registry(Arc::clone(registry));
+        }
         let live_context = context.clone();
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let skills = self.skills.clone();
         let goal_manager = self.goal_manager.clone();
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.instruction_registry = instruction_registry;
         let steer_input = self.steer_input.clone();
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -206,7 +214,18 @@ impl AgentRuntime {
             // Baseline-before-user: new sessions and pre-feature resumes
             // (visible_generation == 0) establish one durable instruction
             // epoch before the first user message is appended.
-            establish_instruction_baseline(&config, &mut emitter).await;
+            if let Err(err) =
+                establish_instruction_baseline(&model, &config, &mut emitter, &cancel_token).await
+            {
+                process_supervisor.cleanup_all().await;
+                emitter.emit(AgentEvent::RunFinished {
+                    turn: emitter.context.turns.saturating_add(1),
+                    stop_reason: StopReason::Error,
+                });
+                let _ = emitter.send_error(err);
+                let _ = final_sender.send(emitter.context);
+                return;
+            }
             emitter.emit(AgentEvent::MessageAppended { message });
             if let Err(err) = run_agent_turn(
                 model,

@@ -74,6 +74,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.steer_input,
                     request.mcp_manager.clone(),
                     Arc::clone(&request.manual_compact_request),
+                    request.instruction_registry,
                     request.compaction_only,
                 )
                 .await?;
@@ -95,6 +96,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.steer_input,
                     request.mcp_manager.clone(),
                     Arc::clone(&request.manual_compact_request),
+                    request.instruction_registry,
                     request.compaction_only,
                 )
                 .await?;

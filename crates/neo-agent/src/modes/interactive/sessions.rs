@@ -129,7 +129,10 @@ impl InteractiveController {
             .set_main_agent_token_usage(loaded.main_agent_token_usage);
 
         let (cols, rows) = size().unwrap_or((80, 24));
+        let neo_home = self.tui.transcript().neo_home().map(ToOwned::to_owned);
         let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
+        transcript.set_neo_home(neo_home);
+        transcript.set_workspace_root(self.workspace_root.clone());
         transcript.set_theme(self.tui.chrome().theme());
         transcript.push_welcome_banner(
             self.tui.chrome().title(),
@@ -149,7 +152,10 @@ impl InteractiveController {
     /// previous JSONL session.
     fn rebuild_empty_welcome_transcript(&mut self) {
         let (cols, rows) = size().unwrap_or((80, 24));
+        let neo_home = self.tui.transcript().neo_home().map(ToOwned::to_owned);
         let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
+        transcript.set_neo_home(neo_home);
+        transcript.set_workspace_root(self.workspace_root.clone());
         transcript.set_theme(self.tui.chrome().theme());
         transcript.push_welcome_banner(
             self.tui.chrome().title(),

@@ -1,7 +1,9 @@
-use neo_agent_core::{AgentEvent, AgentMessage, Content};
+use std::path::{Path, PathBuf};
+
+use neo_agent_core::{AgentEvent, AgentMessage, Content, instructions::InstructionEpochData};
 use serde_json::{Value, json};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, neo_home};
 use crate::modes::run::PromptTurn;
 
 pub(crate) fn stable_json_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
@@ -17,13 +19,21 @@ pub(crate) fn stable_json_output(turn: &PromptTurn, config: &AppConfig) -> anyho
         }),
     )?;
 
-    let mut state = StableJsonState::default();
+    let mut state = StableJsonState::with_instruction_roots(config.project_dir.clone(), neo_home());
     for event in &turn.events {
         for value in state.map_event(event) {
             write_json_line(&mut output, &value)?;
         }
     }
     Ok(output)
+}
+
+pub(crate) fn stable_instruction_epoch_event(
+    epoch: &InstructionEpochData,
+    config: &AppConfig,
+) -> Value {
+    let state = StableJsonState::with_instruction_roots(config.project_dir.clone(), neo_home());
+    instruction_epoch_json(epoch, &state.primary_workspace, state.neo_home.as_deref())
 }
 
 fn write_json_line(output: &mut String, value: &Value) -> anyhow::Result<()> {
@@ -41,6 +51,8 @@ struct StableJsonState {
     assistant_stop_reason: Option<neo_agent_core::StopReason>,
     messages: Vec<Value>,
     tool_results: Vec<Value>,
+    primary_workspace: PathBuf,
+    neo_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +68,18 @@ enum AssistantContentState {
 }
 
 impl StableJsonState {
+    fn with_instruction_roots(primary_workspace: PathBuf, neo_home: Option<PathBuf>) -> Self {
+        let primary_workspace = primary_workspace
+            .canonicalize()
+            .unwrap_or(primary_workspace);
+        let neo_home = neo_home.map(|path| path.canonicalize().unwrap_or(path));
+        Self {
+            primary_workspace,
+            neo_home,
+            ..Self::default()
+        }
+    }
+
     fn map_event(&mut self, event: &AgentEvent) -> Vec<Value> {
         if let Some(value) = self.map_lifecycle_event(event) {
             return vec![value];
@@ -223,6 +247,11 @@ impl StableJsonState {
                 push_unique(&mut self.messages, stable_message(message));
                 Vec::new()
             }
+            AgentEvent::InstructionEpoch { epoch } => vec![instruction_epoch_json(
+                epoch,
+                &self.primary_workspace,
+                self.neo_home.as_deref(),
+            )],
             AgentEvent::Error { turn, message, .. } => {
                 self.reset_assistant_attempt();
                 vec![json!({
@@ -470,11 +499,123 @@ fn push_unique(values: &mut Vec<Value>, value: Value) {
     }
 }
 
+fn instruction_epoch_json(
+    epoch: &InstructionEpochData,
+    primary_workspace: &Path,
+    neo_home: Option<&Path>,
+) -> Value {
+    let display_path = |path: &Path| display_instruction_path(path, primary_workspace, neo_home);
+    let scopes = epoch
+        .scopes
+        .iter()
+        .map(|scope| {
+            json!({
+                "display_path": display_path(&scope.display_path),
+                "kind": scope.kind,
+                "revision": scope.revision,
+                "token_estimate": scope.token_estimate,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_bundles = epoch
+        .selected_bundles
+        .iter()
+        .map(|bundle| {
+            json!({
+                "display_path": display_path(&bundle.display_path),
+                "revision": bundle.revision,
+                "token_estimate": bundle.token_estimate,
+                "byte_size": bundle.byte_size,
+                "source_count": bundle.source_count,
+                "import_count": bundle.import_count,
+                "import_paths": bundle.import_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let ignored_bundles = epoch
+        .ignored_bundles
+        .iter()
+        .map(|bundle| {
+            json!({
+                "display_path": display_path(&bundle.display_path),
+                "revision": bundle.revision,
+                "token_estimate": bundle.token_estimate,
+                "reason": bundle.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let replacements = epoch
+        .replacements
+        .iter()
+        .map(|replacement| {
+            json!({
+                "display_path": display_path(&replacement.display_path),
+                "previous_revision": replacement.previous_revision,
+                "new_revision": replacement.new_revision,
+            })
+        })
+        .collect::<Vec<_>>();
+    let failure = epoch.failure.as_ref().map(|failure| {
+        json!({
+            "fingerprint": failure.fingerprint,
+            "display_path": display_path(&failure.display_path),
+            "kind": failure.kind,
+        })
+    });
+
+    json!({
+        "type": "instruction_epoch",
+        "agentId": epoch.agent_id,
+        "generation": epoch.generation,
+        "outcome": epoch.outcome,
+        "scopes": scopes,
+        "selectedBundles": selected_bundles,
+        "ignoredBundles": ignored_bundles,
+        "replacements": replacements,
+        "failure": failure,
+        "deferredToolIds": epoch.deferred_tool_ids,
+        "budget": epoch.budget,
+    })
+}
+
+fn display_instruction_path(
+    path: &Path,
+    primary_workspace: &Path,
+    neo_home: Option<&Path>,
+) -> String {
+    if !primary_workspace.as_os_str().is_empty() {
+        if path == primary_workspace {
+            return ".".to_owned();
+        }
+        if let Ok(relative) = path.strip_prefix(primary_workspace) {
+            return relative.display().to_string();
+        }
+    }
+    if let Some(neo_home) = neo_home
+        && !neo_home.as_os_str().is_empty()
+    {
+        if path == neo_home {
+            return "$NEO_HOME".to_owned();
+        }
+        if let Ok(relative) = path.strip_prefix(neo_home) {
+            return Path::new("$NEO_HOME").join(relative).display().to_string();
+        }
+    }
+    if path.is_absolute() {
+        return "<outside-workspace>".to_owned();
+    }
+    path.display().to_string()
+}
+
 fn stable_message(message: &AgentMessage) -> Value {
     match message {
         AgentMessage::System { content } => json!({
             "role": "system",
             "content": stable_content(content),
+        }),
+        AgentMessage::Instruction { generation, .. } => json!({
+            "role": "instruction",
+            "generation": generation,
         }),
         AgentMessage::User {
             content, origin, ..
@@ -591,9 +732,73 @@ pub(crate) fn current_unix_timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use neo_agent_core::AgentEvent;
+    use std::path::Path;
 
-    use super::StableJsonState;
+    use neo_agent_core::instructions::{InstructionEpochData, InstructionEpochOutcome};
+    use neo_agent_core::{AgentEvent, AgentMessage, Content};
+
+    use super::{StableJsonState, display_instruction_path, stable_message};
+
+    fn instruction_epoch_with_body(body: &str) -> InstructionEpochData {
+        InstructionEpochData {
+            agent_id: "main".to_owned(),
+            generation: 7,
+            outcome: InstructionEpochOutcome::Updated,
+            scopes: Vec::new(),
+            selected_bundles: Vec::new(),
+            ignored_bundles: Vec::new(),
+            replacements: Vec::new(),
+            failure: None,
+            deferred_tool_ids: vec!["call-1".to_owned()],
+            budget: neo_agent_core::instructions::InstructionBudget {
+                nominal: 65_536,
+                actual: 65_536,
+            },
+            model_content: Some(body.to_owned()),
+        }
+    }
+
+    #[test]
+    fn instruction_epoch_is_stable_metadata_without_model_content() {
+        let mut state = StableJsonState::default();
+        let records = state.map_event(&AgentEvent::InstructionEpoch {
+            epoch: instruction_epoch_with_body("SECRET INSTRUCTION BODY"),
+        });
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["type"], "instruction_epoch");
+        assert_eq!(records[0]["agentId"], "main");
+        assert_eq!(records[0]["generation"], 7);
+        assert_eq!(records[0]["outcome"], "updated");
+        assert_eq!(records[0]["deferredToolIds"], serde_json::json!(["call-1"]));
+        let encoded = serde_json::to_string(&records[0]).expect("stable JSON");
+        assert!(!encoded.contains("SECRET INSTRUCTION BODY"));
+        assert!(!encoded.contains("model_content"));
+        assert!(!encoded.contains("modelContent"));
+    }
+
+    #[test]
+    fn instruction_message_is_stable_metadata_without_body() {
+        let record = stable_message(&AgentMessage::Instruction {
+            generation: 7,
+            content: vec![Content::text("SECRET INSTRUCTION BODY")],
+        });
+
+        assert_eq!(record["role"], "instruction");
+        assert_eq!(record["generation"], 7);
+        assert!(record.get("content").is_none());
+        assert!(!record.to_string().contains("SECRET INSTRUCTION BODY"));
+    }
+
+    #[test]
+    fn instruction_path_projection_treats_empty_roots_as_untrusted() {
+        let path = Path::new("/private/secret/AGENTS.md");
+
+        assert_eq!(
+            display_instruction_path(path, Path::new(""), Some(Path::new(""))),
+            "<outside-workspace>"
+        );
+    }
 
     #[test]
     fn retry_events_are_stable_json_records() {

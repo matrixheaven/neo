@@ -1060,11 +1060,16 @@ fn instruction_epoch(
             byte_size: 64,
             source_count: 1,
             import_count: 0,
+            import_paths: Vec::new(),
         }],
         ignored_bundles: Vec::new(),
         replacements: Vec::new(),
         failure: None,
         deferred_tool_ids: Vec::new(),
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
         model_content: model_content.map(str::to_owned),
     }
 }

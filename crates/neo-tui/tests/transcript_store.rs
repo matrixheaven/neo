@@ -595,6 +595,7 @@ fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> Instru
             byte_size: 127_200,
             source_count: 3,
             import_count: 2,
+            import_paths: Vec::new(),
         }],
         ignored_bundles: Vec::new(),
         replacements: Vec::new(),
@@ -603,6 +604,10 @@ fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> Instru
             .iter()
             .map(|id| (*id).to_owned())
             .collect(),
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
         model_content: Some("scoped rules".to_owned()),
     }
 }

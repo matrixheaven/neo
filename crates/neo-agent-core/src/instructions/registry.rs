@@ -10,7 +10,7 @@
 //! concurrent reads of one source; positive bundle caches live behind a
 //! standard mutex and missing results are never cached across calls.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -27,7 +27,15 @@ use super::types::{
     InstructionFingerprint, InstructionInheritance, InstructionOmissionReason,
     InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
     InstructionRegistryConfig, InstructionReplacement, InstructionScopeData, InstructionScopeKind,
+    instruction_selection_fingerprint,
 };
+use crate::runtime::estimate_text_tokens;
+
+const AUTHORITY_PREFIX: &str = "<instruction_authority mode=\"replace_all\">\n\
+This epoch is the complete current path-scoped instruction snapshot. Earlier \
+path-scoped instruction epochs are historical and no longer authoritative.\n";
+const AUTHORITY_EMPTY: &str = "No path-scoped instruction bundles are currently active.\n";
+const AUTHORITY_SUFFIX: &str = "</instruction_authority>\n";
 
 /// One complete bundle offered for budget admission.
 #[derive(Debug, Clone)]
@@ -49,18 +57,13 @@ pub struct AdmissionSelection {
     pub ignored: Vec<IgnoredInstructionBundle>,
 }
 
-/// Exact post-compaction rehydration data: the refreshed current scope
+/// Exact post-compaction rehydration data for the refreshed current scope
 /// chain (global, trusted ancestors, workspace root, and the chain to the
-/// most recently used nested scope) plus metadata of every session-cached
-/// bundle.
+/// most recently used nested scope).
 #[derive(Debug, Clone)]
 pub struct RehydrationSnapshot {
     /// Current chain bundles in model rendering order, refreshed from disk.
     pub chain: Vec<AdmissionCandidate>,
-    /// Metadata of every session-cached bundle, sorted by scope path.
-    /// Visited sibling scopes keep their metadata here even though their
-    /// bodies stay unpinned after compaction.
-    pub visited: Vec<InstructionBundleMetadata>,
     /// Rendered model content for `chain`, byte-identical to epoch rendering.
     pub model_content: Option<String>,
 }
@@ -150,10 +153,16 @@ fn rendering_cmp(a: &AdmissionCandidate, b: &AdmissionCandidate) -> std::cmp::Or
 
 #[derive(Debug, Clone)]
 struct CachedBundle {
-    /// `(path, modified, len)` for every source; only a fast path, the
-    /// content hash inside `bundle` remains the final identity.
-    stamps: Vec<(PathBuf, Option<SystemTime>, u64)>,
+    stamps: Vec<SourceStamp>,
     bundle: InstructionBundle,
+}
+
+#[derive(Debug, Clone)]
+struct SourceStamp {
+    source_path: PathBuf,
+    canonical_path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
 }
 
 /// Session-scoped instruction registry.
@@ -268,8 +277,13 @@ impl InstructionRegistry {
     /// Absorbs one persisted epoch during replay so freshly emitted
     /// generations never collide with restored history.
     pub fn restore_epoch(&self, epoch: &InstructionEpochData) {
+        self.restore_generation(epoch.generation);
+    }
+
+    /// Advances the session generation counter from replayed agent state.
+    pub fn restore_generation(&self, generation: u64) {
         self.generation
-            .fetch_max(epoch.generation, AtomicOrdering::SeqCst);
+            .fetch_max(generation, AtomicOrdering::SeqCst);
     }
 
     /// Builds the child agent's baseline request. Full-context inheritance
@@ -284,12 +298,23 @@ impl InstructionRegistry {
         budget: InstructionBudget,
     ) -> InstructionReconcileRequest {
         let target_directories = match inheritance {
-            InstructionInheritance::FullContext => parent
-                .active_scopes
-                .iter()
-                .filter(|dir| dir.starts_with(&self.config.primary_workspace))
-                .cloned()
-                .collect(),
+            InstructionInheritance::FullContext => {
+                let mut targets = parent
+                    .active_scopes
+                    .iter()
+                    .filter(|dir| dir.starts_with(&self.config.primary_workspace))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if let Some(scope) = parent
+                    .most_recent_scope
+                    .as_ref()
+                    .filter(|scope| scope.starts_with(&self.config.primary_workspace))
+                    && !targets.contains(scope)
+                {
+                    targets.push(scope.clone());
+                }
+                targets
+            }
             InstructionInheritance::Summary => Vec::new(),
         };
         InstructionReconcileRequest {
@@ -330,15 +355,59 @@ impl InstructionRegistry {
             }
         }
 
+        if failure.is_none() {
+            let selected_bundles = candidates
+                .iter()
+                .map(|candidate| candidate.metadata.clone())
+                .collect::<Vec<_>>();
+            let hash = instruction_selection_fingerprint(&selected_bundles, &[], None);
+            if state.last_epoch_fingerprint.as_deref() == Some(hash.as_str()) {
+                return (
+                    InstructionFingerprint {
+                        hash,
+                        agent_id: request.agent_id.clone(),
+                        target_directories: request.target_directories.clone(),
+                        budget: request.budget,
+                        deferred_tool_ids: request.deferred_tool_ids.clone(),
+                    },
+                    None,
+                );
+            }
+        }
+
         let selection = if failure.is_none() {
-            InstructionAdmission::select(candidates, request.budget)
+            self.select_for_rendered_budget(candidates, request.budget)
         } else {
             // A blocked scope injects nothing, not even other scopes'
             // readable subsets.
             AdmissionSelection::default()
         };
-
-        let hash = fingerprint_hash(failure.as_ref(), &selection);
+        let failure_data = failure.as_ref().map(|error| InstructionFailure {
+            fingerprint: sha256_hex(error.failure_identity().as_bytes()),
+            display_path: error.failure_path(),
+            kind: error.failure_kind(),
+            detail: error.to_string(),
+        });
+        let model_content = if let Some(failure) = &failure_data {
+            Some(format!(
+                "Instruction scope blocked: {}. No instructions from this scope were \
+                 injected; resolve the issue to load them.",
+                failure.detail
+            ))
+        } else {
+            self.render_selection_within_budget(&selection, request.budget.actual)
+        };
+        self.drop_ignored_bodies(&selection.ignored);
+        let selected_bundles = selection
+            .admitted
+            .iter()
+            .map(|candidate| candidate.metadata.clone())
+            .collect::<Vec<_>>();
+        let hash = instruction_selection_fingerprint(
+            &selected_bundles,
+            &selection.ignored,
+            failure_data.as_ref(),
+        );
         let fingerprint = InstructionFingerprint {
             hash: hash.clone(),
             agent_id: request.agent_id.clone(),
@@ -394,21 +463,27 @@ impl InstructionRegistry {
             }
         }
 
+        let current_scope_removed = state.visible_revisions.keys().any(|scope| {
+            request
+                .target_directories
+                .iter()
+                .any(|target| target.starts_with(scope))
+                && !selection
+                    .admitted
+                    .iter()
+                    .any(|candidate| &candidate.scope_dir == scope)
+        });
+
         let outcome = if failure.is_some() {
             InstructionEpochOutcome::Blocked
         } else if !selection.ignored.is_empty() {
             InstructionEpochOutcome::PartiallyLoaded
         } else if !replacements.is_empty() {
             InstructionEpochOutcome::Updated
-        } else if state.active_scopes.iter().any(|dir| {
-            !selection
-                .admitted
-                .iter()
-                .any(|candidate| &candidate.scope_dir == dir)
-        }) {
+        } else if current_scope_removed {
             InstructionEpochOutcome::Removed
         } else if selection.admitted.iter().any(|candidate| {
-            state.visible_revisions.contains_key(&candidate.scope_dir)
+            state.visited_revisions.contains_key(&candidate.scope_dir)
                 && !state.active_scopes.contains(&candidate.scope_dir)
         }) {
             InstructionEpochOutcome::Reactivated
@@ -421,63 +496,18 @@ impl InstructionRegistry {
             InstructionEpochOutcome::Activated
         };
 
-        let failure_data = failure.as_ref().map(|error| InstructionFailure {
-            fingerprint: sha256_hex(error.failure_identity().as_bytes()),
-            display_path: error.failure_path(),
-            kind: error.failure_kind(),
-            detail: error.to_string(),
-        });
-
-        let model_content = if let Some(failure) = &failure_data {
-            Some(format!(
-                "Instruction scope blocked: {}. No instructions from this scope were \
-                 injected; resolve the issue to load them.",
-                failure.detail
-            ))
-        } else {
-            let mut rendered = self.render_admitted_bundles(&selection.admitted);
-            if !selection.ignored.is_empty() {
-                let ignored: Vec<String> = selection
-                    .ignored
-                    .iter()
-                    .map(|bundle| {
-                        format!(
-                            "`{}` ({} tokens, over budget)",
-                            bundle.display_path.display(),
-                            bundle.token_estimate
-                        )
-                    })
-                    .collect();
-                write!(
-                    rendered,
-                    "\u{26a0} Ignored instruction bundles: {}. The model must not claim \
-                     compliance with omitted rules.",
-                    ignored.join(", ")
-                )
-                .expect("write to string");
-            }
-            if rendered.is_empty() {
-                None
-            } else {
-                Some(rendered)
-            }
-        };
-
         let generation = self.generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         let epoch = InstructionEpochData {
             agent_id: request.agent_id.clone(),
             generation,
             outcome,
             scopes: scope_data,
-            selected_bundles: selection
-                .admitted
-                .iter()
-                .map(|candidate| candidate.metadata.clone())
-                .collect(),
+            selected_bundles,
             ignored_bundles: selection.ignored,
             replacements,
             failure: failure_data,
             deferred_tool_ids: request.deferred_tool_ids.clone(),
+            budget: request.budget,
             model_content,
         };
         (fingerprint, Some(epoch))
@@ -505,12 +535,145 @@ impl InstructionRegistry {
         rendered
     }
 
-    /// Loads the exact post-compaction rehydration state: refreshes the scope
-    /// chain for `most_recent_scope` (or the plain global/workspace baseline
-    /// when no nested scope was ever active) from disk and snapshots the
-    /// metadata of every bundle cached this session. Visited sibling scopes
-    /// keep their metadata in `visited` even though their bodies stay
-    /// unpinned.
+    fn render_authoritative_content(
+        &self,
+        admitted: &[AdmissionCandidate],
+        ignored: &[IgnoredInstructionBundle],
+        include_omission_notice: bool,
+    ) -> String {
+        let mut rendered = String::from(AUTHORITY_PREFIX);
+        if admitted.is_empty() {
+            rendered.push_str(AUTHORITY_EMPTY);
+        } else {
+            rendered.push_str(&self.render_admitted_bundles(admitted));
+        }
+        if include_omission_notice && !ignored.is_empty() {
+            let ignored = ignored
+                .iter()
+                .map(|bundle| {
+                    format!(
+                        "`{}` ({} tokens, over budget)",
+                        bundle.display_path.display(),
+                        bundle.token_estimate
+                    )
+                })
+                .collect::<Vec<_>>();
+            writeln!(
+                rendered,
+                "Ignored instruction bundles: {}. The model must not claim compliance with \
+                 omitted rules.",
+                ignored.join(", ")
+            )
+            .expect("write to string");
+        }
+        rendered.push_str(AUTHORITY_SUFFIX);
+        rendered
+    }
+
+    fn select_for_rendered_budget(
+        &self,
+        mut candidates: Vec<AdmissionCandidate>,
+        budget: InstructionBudget,
+    ) -> AdmissionSelection {
+        let base_tokens = estimate_text_tokens(AUTHORITY_PREFIX)
+            .saturating_add(estimate_text_tokens(AUTHORITY_SUFFIX));
+        let available = budget
+            .actual
+            .saturating_sub(u64::try_from(base_tokens).unwrap_or(u64::MAX));
+        let original_estimates = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.scope_dir.clone(),
+                    candidate.metadata.token_estimate,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        candidates.sort_by(admission_cmp);
+        let admission_priority = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.scope_dir.clone(), index))
+            .collect::<HashMap<_, _>>();
+        for candidate in &mut candidates {
+            let rendered = self.render_admitted_bundles(std::slice::from_ref(candidate));
+            candidate.metadata.token_estimate =
+                u64::try_from(estimate_text_tokens(&rendered)).unwrap_or(u64::MAX);
+        }
+        let mut selection = InstructionAdmission::select(
+            candidates,
+            InstructionBudget {
+                actual: available,
+                ..budget
+            },
+        );
+        for candidate in &mut selection.admitted {
+            candidate.metadata.token_estimate = original_estimates[&candidate.scope_dir];
+        }
+        for bundle in &mut selection.ignored {
+            bundle.token_estimate = original_estimates[&bundle.display_path];
+        }
+        while !selection.ignored.is_empty()
+            && self
+                .render_selection_within_budget(&selection, budget.actual)
+                .is_none()
+        {
+            let Some(candidate) = selection.admitted.pop() else {
+                break;
+            };
+            selection.ignored.push(IgnoredInstructionBundle {
+                display_path: candidate.metadata.display_path,
+                revision: candidate.metadata.revision,
+                token_estimate: candidate.metadata.token_estimate,
+                reason: InstructionOmissionReason::OverBudget,
+            });
+            selection.ignored.sort_by_key(|bundle| {
+                admission_priority
+                    .get(&bundle.display_path)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        selection
+    }
+
+    fn render_selection_within_budget(
+        &self,
+        selection: &AdmissionSelection,
+        actual: u64,
+    ) -> Option<String> {
+        let without_notice =
+            self.render_authoritative_content(&selection.admitted, &selection.ignored, false);
+        let without_notice_tokens =
+            u64::try_from(estimate_text_tokens(&without_notice)).unwrap_or(u64::MAX);
+        if without_notice_tokens > actual {
+            return None;
+        }
+        let with_notice =
+            self.render_authoritative_content(&selection.admitted, &selection.ignored, true);
+        let with_notice_tokens =
+            u64::try_from(estimate_text_tokens(&with_notice)).unwrap_or(u64::MAX);
+        if selection.ignored.is_empty() {
+            Some(without_notice)
+        } else if with_notice_tokens <= actual {
+            Some(with_notice)
+        } else {
+            None
+        }
+    }
+
+    fn drop_ignored_bodies(&self, ignored: &[IgnoredInstructionBundle]) {
+        let mut cache = self.cache();
+        for bundle in ignored {
+            cache.remove(&bundle.display_path);
+        }
+    }
+
+    /// Loads the exact post-compaction rehydration state for the last admitted
+    /// revisions. Cached bytes win so disk changes cannot silently alter
+    /// authority; disk is read only when the admitted revision is absent from
+    /// cache. Agent-local visited history is durable state and remains
+    /// unchanged by rehydration.
     ///
     /// # Errors
     /// Returns the typed [`InstructionError`] when scope discovery or a
@@ -519,6 +682,7 @@ impl InstructionRegistry {
     pub async fn rehydration_snapshot(
         &self,
         most_recent_scope: Option<&Path>,
+        admitted_revisions: &BTreeMap<PathBuf, String>,
     ) -> Result<RehydrationSnapshot, InstructionError> {
         let _guard = self.sync.lock().await;
         let targets: Vec<PathBuf> =
@@ -526,25 +690,56 @@ impl InstructionRegistry {
         let resolved = self.resolver.discover_scopes(&targets)?;
         let mut chain = Vec::new();
         for (kind, dir) in resolved.rendering_order() {
-            if let Some(candidate) = self.load_cached(&dir, kind)? {
+            let Some(expected_revision) = admitted_revisions.get(&dir) else {
+                continue;
+            };
+            let canonical_dir =
+                dir.canonicalize()
+                    .map_err(|error| InstructionError::UnreadableSource {
+                        path: dir.clone(),
+                        reason: error.to_string(),
+                    })?;
+            if let Some(candidate) = self
+                .cache()
+                .get(&canonical_dir)
+                .filter(|cached| cached.bundle.revision == *expected_revision)
+                .map(|cached| candidate_from_bundle(kind, &cached.bundle))
+            {
                 chain.push(candidate);
+                continue;
             }
+            let Some(bundle) = self.resolver.load_bundle(&canonical_dir)? else {
+                return Err(InstructionError::UnreadableSource {
+                    path: canonical_dir,
+                    reason: "previously admitted instruction revision is no longer available"
+                        .to_owned(),
+                });
+            };
+            if bundle.revision != *expected_revision {
+                return Err(InstructionError::UnreadableSource {
+                    path: canonical_dir,
+                    reason: "instruction source changed before its replacement epoch was admitted"
+                        .to_owned(),
+                });
+            }
+            let candidate = candidate_from_bundle(kind, &bundle);
+            self.cache().insert(
+                canonical_dir,
+                CachedBundle {
+                    stamps: source_stamps(&bundle),
+                    bundle,
+                },
+            );
+            chain.push(candidate);
         }
-        let mut visited: Vec<InstructionBundleMetadata> = self
-            .cache()
-            .values()
-            .map(|cached| metadata_from_bundle(&cached.bundle))
-            .collect();
-        visited.sort_by(|a, b| a.display_path.cmp(&b.display_path));
-        let rendered = self.render_admitted_bundles(&chain);
-        let model_content = if rendered.is_empty() {
+        let rendered = self.render_authoritative_content(&chain, &[], false);
+        let model_content = if chain.is_empty() {
             None
         } else {
             Some(rendered)
         };
         Ok(RehydrationSnapshot {
             chain,
-            visited,
             model_content,
         })
     }
@@ -581,18 +776,7 @@ impl InstructionRegistry {
             self.cache().remove(&canonical_dir);
             return Ok(None);
         };
-        let stamps = bundle
-            .sources
-            .iter()
-            .map(|path| {
-                let metadata = std::fs::metadata(path).ok();
-                (
-                    path.clone(),
-                    metadata.as_ref().and_then(|m| m.modified().ok()),
-                    metadata.map_or(0, |m| m.len()),
-                )
-            })
-            .collect();
+        let stamps = source_stamps(&bundle);
         let candidate = candidate_from_bundle(kind, &bundle);
         self.cache()
             .insert(canonical_dir, CachedBundle { stamps, bundle });
@@ -602,6 +786,24 @@ impl InstructionRegistry {
     fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, CachedBundle>> {
         self.bundles.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+fn source_stamps(bundle: &InstructionBundle) -> Vec<SourceStamp> {
+    bundle
+        .source_identities
+        .iter()
+        .map(|(source_path, canonical_path)| {
+            let metadata = std::fs::metadata(canonical_path).ok();
+            SourceStamp {
+                source_path: source_path.clone(),
+                canonical_path: canonical_path.clone(),
+                modified: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok()),
+                len: metadata.map_or(0, |metadata| metadata.len()),
+            }
+        })
+        .collect()
 }
 
 fn candidate_from_bundle(
@@ -624,50 +826,22 @@ fn metadata_from_bundle(bundle: &InstructionBundle) -> InstructionBundleMetadata
         byte_size: bundle.byte_size,
         source_count: bundle.source_count(),
         import_count: bundle.import_count(),
+        import_paths: bundle.sources.iter().skip(1).cloned().collect(),
     }
 }
 
-fn stamps_current(stamps: &[(PathBuf, Option<SystemTime>, u64)]) -> bool {
-    stamps.iter().all(|(path, modified, len)| {
-        let Ok(metadata) = std::fs::metadata(path) else {
+fn stamps_current(stamps: &[SourceStamp]) -> bool {
+    stamps.iter().all(|stamp| {
+        if stamp.source_path.canonicalize().ok().as_ref() != Some(&stamp.canonical_path) {
+            return false;
+        }
+        let Ok(metadata) = std::fs::metadata(&stamp.canonical_path) else {
             return false;
         };
         // Without a modification time there is no reliable fast path:
         // force a reread; the content hash still deduplicates revisions.
-        metadata.len() == *len && modified.is_some() && metadata.modified().ok() == *modified
+        metadata.len() == stamp.len
+            && stamp.modified.is_some()
+            && metadata.modified().ok() == stamp.modified
     })
-}
-
-/// Stable fingerprint over the frozen selection: admitted scope/revision
-/// pairs, ignored bundles, and the failure identity, all in canonical
-/// order. Budget inputs are deliberately excluded — they are carried by
-/// [`InstructionFingerprint`] for recheck instead.
-fn fingerprint_hash(failure: Option<&InstructionError>, selection: &AdmissionSelection) -> String {
-    let mut canonical = String::new();
-    let mut admitted: Vec<&AdmissionCandidate> = selection.admitted.iter().collect();
-    admitted.sort_by(|a, b| a.scope_dir.cmp(&b.scope_dir));
-    for candidate in admitted {
-        writeln!(
-            canonical,
-            "A|{}|{}",
-            candidate.scope_dir.display(),
-            candidate.metadata.revision
-        )
-        .expect("write to string");
-    }
-    let mut ignored: Vec<&IgnoredInstructionBundle> = selection.ignored.iter().collect();
-    ignored.sort_by(|a, b| a.display_path.cmp(&b.display_path));
-    for bundle in ignored {
-        writeln!(
-            canonical,
-            "I|{}|{}|over_budget",
-            bundle.display_path.display(),
-            bundle.revision
-        )
-        .expect("write to string");
-    }
-    if let Some(error) = failure {
-        writeln!(canonical, "F|{}", error.failure_identity()).expect("write to string");
-    }
-    sha256_hex(canonical.as_bytes())
 }

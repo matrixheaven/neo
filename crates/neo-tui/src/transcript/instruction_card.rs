@@ -3,9 +3,8 @@
 //! The card is a finalized semantic entry (never a live spinner). Every
 //! display string is built from epoch metadata — display-safe paths,
 //! revisions, token/source/import counts, and typed reasons — and the card
-//! never reads [`InstructionEpochData::model_content`]. Absolute paths are
-//! redacted to workspace-relative or `~/`-relative forms before rendering
-//! or copying.
+//! never reads [`InstructionEpochData::model_content`]. Paths are rendered
+//! workspace-relative, `$NEO_HOME`-relative, or as a stable safe placeholder.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +22,7 @@ use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, S
 pub struct InstructionCardComponent {
     epoch: InstructionEpochData,
     primary_workspace: PathBuf,
-    home_dir: Option<PathBuf>,
+    neo_home: Option<PathBuf>,
     expanded: bool,
     id: String,
 }
@@ -31,15 +30,23 @@ pub struct InstructionCardComponent {
 impl InstructionCardComponent {
     #[must_use]
     pub fn new(
-        epoch: InstructionEpochData,
+        mut epoch: InstructionEpochData,
         primary_workspace: PathBuf,
-        home_dir: Option<PathBuf>,
+        neo_home: Option<PathBuf>,
     ) -> Self {
         let id = format!("instruction-epoch-{}-{}", epoch.agent_id, epoch.generation);
+        epoch.model_content = None;
+        if let Some(failure) = &mut epoch.failure {
+            failure.detail.clear();
+        }
+        let primary_workspace = primary_workspace
+            .canonicalize()
+            .unwrap_or(primary_workspace);
+        let neo_home = neo_home.map(|path| path.canonicalize().unwrap_or(path));
         Self {
             epoch,
             primary_workspace,
-            home_dir,
+            neo_home,
             expanded: false,
             id,
         }
@@ -133,8 +140,7 @@ impl InstructionCardComponent {
             }
             InstructionEpochOutcome::Removed | InstructionEpochOutcome::Reactivated => None,
             InstructionEpochOutcome::PartiallyLoaded => {
-                let admitted = self.total_selected_tokens();
-                let needed = admitted
+                let needed = self.total_selected_tokens()
                     + self
                         .epoch
                         .ignored_bundles
@@ -144,7 +150,7 @@ impl InstructionCardComponent {
                 Some(format!(
                     "{} of {} tokens · {} ignored",
                     format_tokens(needed),
-                    format_tokens(admitted),
+                    format_budget_tokens(self.epoch.budget.actual),
                     count_label(self.epoch.ignored_bundles.len() as u64, "bundle"),
                 ))
             }
@@ -152,7 +158,7 @@ impl InstructionCardComponent {
                 let failure = self.epoch.failure.as_ref()?;
                 let kind = title_case(failure.kind.describe());
                 if failure.display_path.as_os_str().is_empty() {
-                    Some(format!("{kind}: {}", self.redact_text(&failure.detail)))
+                    Some(kind)
                 } else {
                     Some(format!(
                         "{kind}: {}",
@@ -214,24 +220,14 @@ impl InstructionCardComponent {
         );
         push_section(lines, width, theme, "Ignored", ignored_rows);
 
-        // Import counts per loaded bundle (the epoch carries counts only,
-        // never import source bodies).
+        // Imported source paths in resolver expansion order. The epoch carries
+        // metadata only, never import source bodies.
         let import_rows: Vec<Line> = self
             .epoch
             .selected_bundles
             .iter()
-            .filter(|bundle| bundle.import_count > 0)
-            .map(|bundle| {
-                section_row(
-                    &format!(
-                        "{} · {}",
-                        self.bundle_file_label(bundle),
-                        count_label(u64::from(bundle.import_count), "import"),
-                    ),
-                    width,
-                    muted,
-                )
-            })
+            .flat_map(|bundle| bundle.import_paths.iter())
+            .map(|path| section_row(&self.display_path(path), width, muted))
             .collect();
         push_section(lines, width, theme, "Imports", import_rows);
 
@@ -386,44 +382,32 @@ impl InstructionCardComponent {
             .sum()
     }
 
-    /// Redacts an absolute path for display: workspace-relative for paths
-    /// inside the primary workspace, `~/`-relative for paths inside the
-    /// platform home, otherwise the path unchanged.
+    /// Redacts a path for display: workspace-relative inside the primary
+    /// workspace, `$NEO_HOME`-relative inside Neo's home, and a stable safe
+    /// placeholder for every other absolute path.
     fn display_path(&self, path: &Path) -> String {
-        if path == self.primary_workspace {
-            return ".".to_owned();
-        }
-        if let Ok(relative) = path.strip_prefix(&self.primary_workspace) {
-            return relative.display().to_string();
-        }
-        if let Some(home) = &self.home_dir {
-            if path == home {
-                return "~".to_owned();
+        if !self.primary_workspace.as_os_str().is_empty() {
+            if path == self.primary_workspace {
+                return ".".to_owned();
             }
-            if let Ok(relative) = path.strip_prefix(home) {
-                return Path::new("~").join(relative).display().to_string();
+            if let Ok(relative) = path.strip_prefix(&self.primary_workspace) {
+                return relative.display().to_string();
             }
+        }
+        if let Some(neo_home) = &self.neo_home
+            && !neo_home.as_os_str().is_empty()
+        {
+            if path == neo_home {
+                return "$NEO_HOME".to_owned();
+            }
+            if let Ok(relative) = path.strip_prefix(neo_home) {
+                return Path::new("$NEO_HOME").join(relative).display().to_string();
+            }
+        }
+        if path.is_absolute() {
+            return "<outside-workspace>".to_owned();
         }
         path.display().to_string()
-    }
-
-    /// Redacts absolute path prefixes embedded in free-form metadata text
-    /// (failure details name failing sources with absolute paths).
-    fn redact_text(&self, text: &str) -> String {
-        let workspace = self.primary_workspace.display().to_string();
-        let home = self
-            .home_dir
-            .as_ref()
-            .map(|home| home.display().to_string());
-        match home {
-            // Replace the longer prefix first so a workspace inside the home
-            // directory still relativizes to the workspace.
-            Some(home) if workspace.len() >= home.len() => {
-                text.replace(&workspace, ".").replace(&home, "~")
-            }
-            Some(home) => text.replace(&home, "~").replace(&workspace, "."),
-            None => text.replace(&workspace, "."),
-        }
     }
 }
 
@@ -507,6 +491,19 @@ fn format_tokens(tokens: u64) -> String {
         format_scaled(tokens, 1_000_000, "M")
     } else if tokens >= 1_000 {
         format_scaled(tokens, 1_000, "K")
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Compact instruction-budget capacity using binary token units: `64K`, `1.5M`.
+fn format_budget_tokens(tokens: u64) -> String {
+    const KIB: u64 = 1_024;
+    const MIB: u64 = KIB * KIB;
+    if tokens >= MIB {
+        format_scaled(tokens, MIB, "M")
+    } else if tokens >= KIB {
+        format_scaled(tokens, KIB, "K")
     } else {
         tokens.to_string()
     }

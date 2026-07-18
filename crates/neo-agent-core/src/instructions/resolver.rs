@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -43,6 +43,18 @@ pub trait SourceIo: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// Returns the underlying I/O error.
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// Reads at most `max_bytes` from `path`.
+    ///
+    /// Custom test/source implementations may rely on this default adapter;
+    /// production filesystem I/O overrides it to avoid an unbounded allocation.
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error.
+    fn read_bytes_bounded(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = self.read_bytes(path)?;
+        bytes.truncate(max_bytes);
+        Ok(bytes)
+    }
 }
 
 /// Default [`SourceIo`] backed by `std::fs`.
@@ -62,6 +74,14 @@ impl SourceIo for FilesystemSourceIo {
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
+
+    fn read_bytes_bounded(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let file = std::fs::File::open(path)?;
+        let mut reader = file.take(u64::try_from(max_bytes).unwrap_or(u64::MAX));
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
 }
 
 /// Reads a source with the bounded stability check:
@@ -78,20 +98,40 @@ pub fn read_source_stable(io: &dyn SourceIo, path: &Path) -> Result<Vec<u8>, Ins
             reason: error.to_string(),
         }
     }
+    let limit_error = || {
+        InstructionError::LimitExceeded(format!(
+            "source `{}` exceeds {MAX_SOURCE_BYTES} bytes",
+            path.display()
+        ))
+    };
+    let read_limit = usize::try_from(MAX_SOURCE_BYTES.saturating_add(1)).unwrap_or(usize::MAX);
     let attempt =
         |io: &dyn SourceIo| -> Result<(SourceMetadata, Vec<u8>, SourceMetadata), InstructionError> {
             let before = io.read_metadata(path).map_err(unreadable(path))?;
-            let bytes = io.read_bytes(path).map_err(unreadable(path))?;
+            if before.len > MAX_SOURCE_BYTES {
+                return Err(limit_error());
+            }
+            let bytes = io
+                .read_bytes_bounded(path, read_limit)
+                .map_err(unreadable(path))?;
             let after = io.read_metadata(path).map_err(unreadable(path))?;
             Ok((before, bytes, after))
         };
     let (before, bytes, after) = attempt(io)?;
     if before == after {
-        return Ok(bytes);
+        return if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SOURCE_BYTES {
+            Err(limit_error())
+        } else {
+            Ok(bytes)
+        };
     }
     let (retry_before, retry_bytes, retry_after) = attempt(io)?;
     if retry_before == retry_after {
-        Ok(retry_bytes)
+        if u64::try_from(retry_bytes.len()).unwrap_or(u64::MAX) > MAX_SOURCE_BYTES {
+            Err(limit_error())
+        } else {
+            Ok(retry_bytes)
+        }
     } else {
         Err(InstructionError::UnstableSource {
             path: path.to_path_buf(),
@@ -246,6 +286,9 @@ pub struct InstructionBundle {
     pub expanded: String,
     /// Canonical paths of every source in first-expansion order.
     pub sources: Vec<PathBuf>,
+    /// Logical source paths paired with their canonical targets. Cache
+    /// validation uses these identities to detect symlink retargeting.
+    pub(crate) source_identities: Vec<(PathBuf, PathBuf)>,
     /// Combined raw byte size of all sources in the graph.
     pub byte_size: u64,
     /// Token estimate of the expanded content.
@@ -472,6 +515,28 @@ impl InstructionResolver {
                     path: agents_file.clone(),
                     reason: error.to_string(),
                 })?;
+        let untrusted_global_source_leaves_home = !self.project_trusted
+            && self.canonical_neo_home.as_ref().is_some_and(|home| {
+                canonical_dir.starts_with(home) && !canonical_file.starts_with(home)
+            });
+        let source_is_allowed = !untrusted_global_source_leaves_home
+            && if canonical_dir.starts_with(&self.canonical_workspace)
+                || self
+                    .canonical_neo_home
+                    .as_ref()
+                    .is_some_and(|home| canonical_dir.starts_with(home))
+            {
+                self.is_contained(&canonical_file)
+            } else {
+                // Trusted ancestor roots are outside the ordinary import roots,
+                // but their AGENTS.md source must still stay inside that ancestor.
+                canonical_file.starts_with(&canonical_dir)
+            };
+        if !source_is_allowed {
+            return Err(InstructionError::UntrustedImport {
+                path: canonical_file,
+            });
+        }
         let root_metadata = self
             .source_io
             .read_metadata(&canonical_file)
@@ -490,9 +555,10 @@ impl InstructionResolver {
             visited: HashSet::new(),
             stack: Vec::new(),
             sources: Vec::new(),
+            source_identities: Vec::new(),
             total_bytes: 0,
         };
-        let expanded_text = expander.expand_canonical(&canonical_file, 0)?;
+        let expanded_text = expander.expand_canonical(&agents_file, &canonical_file, 0)?;
         let revision = sha256_hex(expanded_text.as_bytes());
         let token_estimate =
             u64::try_from(estimate_text_tokens(&expanded_text)).unwrap_or(u64::MAX);
@@ -502,6 +568,7 @@ impl InstructionResolver {
             revision,
             expanded: expanded_text,
             sources: expander.sources,
+            source_identities: expander.source_identities,
             byte_size: expander.total_bytes,
             token_estimate,
         }))
@@ -513,12 +580,14 @@ struct ImportExpander<'a> {
     visited: HashSet<PathBuf>,
     stack: Vec<PathBuf>,
     sources: Vec<PathBuf>,
+    source_identities: Vec<(PathBuf, PathBuf)>,
     total_bytes: u64,
 }
 
 impl ImportExpander<'_> {
     fn expand_canonical(
         &mut self,
+        source_path: &Path,
         canonical: &Path,
         depth: u32,
     ) -> Result<String, InstructionError> {
@@ -533,6 +602,8 @@ impl ImportExpander<'_> {
                 path: canonical.to_path_buf(),
             });
         }
+        self.source_identities
+            .push((source_path.to_path_buf(), canonical.to_path_buf()));
         if !self.visited.insert(canonical.to_path_buf()) {
             // A source imported more than once expands only at its first
             // occurrence; the repeated directive collapses to nothing.
@@ -560,8 +631,9 @@ impl ImportExpander<'_> {
                 "import graph exceeds {MAX_GRAPH_BYTES} bytes"
             )));
         }
-        let text = String::from_utf8(bytes).map_err(|_| InstructionError::InvalidEncoding {
+        let text = String::from_utf8(bytes).map_err(|error| InstructionError::InvalidEncoding {
             path: canonical.to_path_buf(),
+            content_fingerprint: sha256_hex(error.as_bytes()),
         })?;
         self.sources.push(canonical.to_path_buf());
         self.stack.push(canonical.to_path_buf());
@@ -606,8 +678,9 @@ impl ImportExpander<'_> {
             if fence.is_none()
                 && let Some(raw_target) = import_directive(trimmed)
             {
-                let canonical = self.resolve_import(importer_dir, raw_target, depth)?;
-                let included = self.expand_canonical(&canonical, depth + 1)?;
+                let (source_path, canonical) =
+                    self.resolve_import(importer_dir, raw_target, depth)?;
+                let included = self.expand_canonical(&source_path, &canonical, depth + 1)?;
                 if included.is_empty() {
                     // Repeated import: the directive collapses entirely.
                     output.push_str(ending);
@@ -641,27 +714,25 @@ impl ImportExpander<'_> {
         importer_dir: &Path,
         raw_target: &str,
         depth: u32,
-    ) -> Result<PathBuf, InstructionError> {
+    ) -> Result<(PathBuf, PathBuf), InstructionError> {
         if depth + 1 > MAX_IMPORT_DEPTH {
             return Err(InstructionError::LimitExceeded(format!(
                 "import depth exceeds {MAX_IMPORT_DEPTH} at `{raw_target}`"
             )));
         }
+        let candidate = Path::new(raw_target);
         let joined =
-            if raw_target == "~" || raw_target.starts_with("~/") {
+            if let Ok(relative) = candidate.strip_prefix(Path::new("~")) {
                 let home = self.resolver.home_dir.clone().ok_or_else(|| {
                     InstructionError::MissingImport {
                         path: PathBuf::from(raw_target),
                     }
                 })?;
-                home.join(raw_target.trim_start_matches('~').trim_start_matches('/'))
+                home.join(relative)
+            } else if candidate.is_absolute() {
+                candidate.to_path_buf()
             } else {
-                let candidate = Path::new(raw_target);
-                if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    importer_dir.join(candidate)
-                }
+                importer_dir.join(candidate)
             };
         let canonical = joined.canonicalize().map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -675,7 +746,13 @@ impl ImportExpander<'_> {
                 }
             }
         })?;
-        if !self.resolver.is_contained(&canonical) {
+        let untrusted_global_import_leaves_home = !self.resolver.project_trusted
+            && self
+                .resolver
+                .canonical_neo_home
+                .as_ref()
+                .is_some_and(|home| importer_dir.starts_with(home) && !canonical.starts_with(home));
+        if !self.resolver.is_contained(&canonical) || untrusted_global_import_leaves_home {
             return Err(InstructionError::UntrustedImport { path: canonical });
         }
         let metadata = self
@@ -701,7 +778,7 @@ impl ImportExpander<'_> {
                 reason: "not a Markdown (.md) source".to_owned(),
             });
         }
-        Ok(canonical)
+        Ok((joined, canonical))
     }
 }
 
@@ -754,4 +831,179 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         write!(hex, "{byte:02x}").expect("write to string");
     }
     hex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instructions::InstructionFailureKind;
+
+    fn global_import_fixture(project_trusted: bool) -> (tempfile::TempDir, InstructionResolver) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let neo_home = temp.path().join("neo-home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&neo_home).expect("neo home");
+        let workspace_rule = workspace.join("workspace-rule.md");
+        std::fs::write(&workspace_rule, "WORKSPACE SECRET\n").expect("workspace rule");
+        std::fs::write(
+            neo_home.join("AGENTS.md"),
+            format!("@{}\n", workspace_rule.display()),
+        )
+        .expect("global agents");
+        let resolver = InstructionResolver::with_home(
+            &InstructionRegistryConfig {
+                primary_workspace: workspace,
+                neo_home: Some(neo_home),
+                project_trusted,
+            },
+            temp.path().to_path_buf(),
+        )
+        .expect("resolver");
+        (temp, resolver)
+    }
+
+    #[test]
+    fn untrusted_global_agents_cannot_import_workspace_markdown() {
+        let (_temp, resolver) = global_import_fixture(false);
+        let neo_home = resolver
+            .canonical_neo_home()
+            .expect("canonical neo home")
+            .to_path_buf();
+
+        let error = resolver
+            .load_bundle(&neo_home)
+            .expect_err("untrusted global instructions must not read workspace files");
+
+        assert_eq!(
+            error.failure_kind(),
+            InstructionFailureKind::UntrustedImport
+        );
+    }
+
+    #[test]
+    fn trusted_global_agents_can_import_workspace_markdown() {
+        let (_temp, resolver) = global_import_fixture(true);
+        let neo_home = resolver
+            .canonical_neo_home()
+            .expect("canonical neo home")
+            .to_path_buf();
+
+        let bundle = resolver
+            .load_bundle(&neo_home)
+            .expect("trusted global import")
+            .expect("global bundle");
+
+        assert!(bundle.expanded.contains("WORKSPACE SECRET"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_home_import_separator_resolves_under_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join("rules.md"), "WINDOWS HOME RULES\n").expect("rules");
+        std::fs::write(workspace.join("AGENTS.md"), "@~\\rules.md\n").expect("agents");
+        let resolver = InstructionResolver::with_home(
+            &InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: Some(home.clone()),
+                project_trusted: true,
+            },
+            home,
+        )
+        .expect("resolver");
+
+        let bundle = resolver
+            .load_bundle(&workspace)
+            .expect("load")
+            .expect("bundle");
+
+        assert!(bundle.expanded.contains("WINDOWS HOME RULES"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_backslash_home_like_import_remains_a_relative_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(workspace.join("~\\rules.md"), "UNIX LOCAL RULES\n").expect("rules");
+        std::fs::write(workspace.join("AGENTS.md"), "@~\\rules.md\n").expect("agents");
+        let resolver = InstructionResolver::with_home(
+            &InstructionRegistryConfig {
+                primary_workspace: workspace.clone(),
+                neo_home: Some(home.clone()),
+                project_trusted: true,
+            },
+            home,
+        )
+        .expect("resolver");
+
+        let bundle = resolver
+            .load_bundle(&workspace)
+            .expect("load")
+            .expect("bundle");
+
+        assert!(bundle.expanded.contains("UNIX LOCAL RULES"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_global_agents_root_symlink_cannot_target_workspace_markdown() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, resolver) = global_import_fixture(false);
+        let neo_home = resolver
+            .canonical_neo_home()
+            .expect("canonical neo home")
+            .to_path_buf();
+        let agents_file = neo_home.join("AGENTS.md");
+        std::fs::remove_file(&agents_file).expect("remove regular global agents");
+        symlink(
+            resolver.canonical_workspace().join("workspace-rule.md"),
+            &agents_file,
+        )
+        .expect("symlink global agents to workspace");
+
+        let error = resolver
+            .load_bundle(&neo_home)
+            .expect_err("untrusted global root must stay inside neo home");
+
+        assert_eq!(
+            error.failure_kind(),
+            InstructionFailureKind::UntrustedImport
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_global_agents_root_symlink_can_target_workspace_markdown() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, resolver) = global_import_fixture(true);
+        let neo_home = resolver
+            .canonical_neo_home()
+            .expect("canonical neo home")
+            .to_path_buf();
+        let agents_file = neo_home.join("AGENTS.md");
+        std::fs::remove_file(&agents_file).expect("remove regular global agents");
+        symlink(
+            resolver.canonical_workspace().join("workspace-rule.md"),
+            &agents_file,
+        )
+        .expect("symlink global agents to workspace");
+
+        let bundle = resolver
+            .load_bundle(&neo_home)
+            .expect("trusted global root symlink")
+            .expect("global bundle");
+
+        assert!(bundle.expanded.contains("WORKSPACE SECRET"));
+    }
 }

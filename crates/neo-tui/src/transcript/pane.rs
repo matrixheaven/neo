@@ -111,6 +111,7 @@ pub struct TranscriptPane {
     next_image_id: u64,
     activity_frame: usize,
     workspace_root: Option<PathBuf>,
+    neo_home: Option<PathBuf>,
     /// Cache of the last composed body frame (ANSI strings, no chrome), so
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
@@ -149,6 +150,7 @@ impl TranscriptPane {
             next_image_id: 0,
             activity_frame: 0,
             workspace_root: None,
+            neo_home: None,
             last_frame: Vec::new(),
             body_cache: None,
             #[cfg(test)]
@@ -220,6 +222,15 @@ impl TranscriptPane {
             });
         }
         self.mark_dirty();
+    }
+
+    pub fn set_neo_home(&mut self, neo_home: Option<PathBuf>) {
+        self.neo_home = neo_home;
+    }
+
+    #[must_use]
+    pub fn neo_home(&self) -> Option<&Path> {
+        self.neo_home.as_deref()
     }
 
     #[must_use]
@@ -908,7 +919,7 @@ impl TranscriptPane {
         let id = self.transcript.insert_instruction_epoch(
             epoch,
             self.workspace_root.clone().unwrap_or_default(),
-            std::env::home_dir(),
+            self.neo_home.clone(),
             self.tool_output_expanded,
         );
         self.mark_dirty();

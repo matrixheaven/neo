@@ -18,8 +18,8 @@ use neo_agent_core::instructions::{
     InstructionBudget, InstructionEpochData, InstructionEpochOutcome, InstructionFailureKind,
     InstructionFingerprint, InstructionOmissionReason, InstructionPreflightDecision,
     InstructionReconcileKind, InstructionReconcileRequest, InstructionRegistry,
-    InstructionRegistryConfig, InstructionResolver, InstructionScopeKind, SourceIo, SourceMetadata,
-    find_agents_file, select_agents_file_name,
+    InstructionRegistryConfig, InstructionResolver, InstructionScopeKind, MAX_SOURCE_BYTES,
+    SourceIo, SourceMetadata, find_agents_file, select_agents_file_name,
 };
 
 /// Creates a canonicalized tempdir root plus a `workspace` directory.
@@ -206,6 +206,146 @@ fn resolver_rejects_casefold_collision_and_canonical_escape() {
     assert_eq!(err.failure_kind(), InstructionFailureKind::UntrustedImport);
 }
 
+#[tokio::test]
+async fn epoch_metadata_preserves_import_paths_in_expansion_order() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::create_dir_all(workspace.join("docs")).expect("docs dir");
+    fs::write(
+        workspace.join("AGENTS.md"),
+        "@./first.md\n@./docs/second.md\n",
+    )
+    .expect("agents file");
+    fs::write(workspace.join("first.md"), "FIRST\n").expect("first import");
+    fs::write(workspace.join("docs/second.md"), "SECOND\n").expect("second import");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+
+    let (epoch, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &AgentInstructionState::default(),
+            )
+            .await,
+    );
+
+    assert_eq!(
+        epoch.selected_bundles[0].import_paths,
+        [workspace.join("first.md"), workspace.join("docs/second.md")]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolver_rejects_root_agents_symlink_outside_allowed_roots() {
+    use std::os::unix::fs::symlink;
+
+    let (_temp, workspace) = workspace_fixture();
+    let outside = workspace.parent().expect("root").join("outside.md");
+    fs::write(&outside, "EXTERNAL RULES\n").expect("outside file");
+    symlink(&outside, workspace.join("AGENTS.md")).expect("root agents symlink");
+
+    let resolver = InstructionResolver::new(&config_for(&workspace, None)).expect("resolver");
+    let err = resolver
+        .load_bundle(&workspace)
+        .expect_err("root AGENTS.md must not canonicalize outside allowed roots");
+
+    assert_eq!(err.failure_kind(), InstructionFailureKind::UntrustedImport);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cached_bundle_invalidates_when_root_agents_symlink_is_retargeted() {
+    use std::os::unix::fs::symlink;
+
+    let (_temp, workspace) = workspace_fixture();
+    let first = workspace.join("first.md");
+    let second = workspace.join("second.md");
+    let agents = workspace.join("AGENTS.md");
+    fs::write(&first, "FIRST ROOT RULES\n").expect("first rules");
+    fs::write(&second, "SECOND ROOT RULES\n").expect("second rules");
+    symlink(&first, &agents).expect("initial root symlink");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (initial, fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    state.apply_epoch(&initial, &fingerprint);
+    fs::remove_file(&agents).expect("remove first symlink");
+    symlink(&second, &agents).expect("retarget root symlink");
+
+    let (updated, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace]),
+                &state,
+            )
+            .await,
+    );
+
+    assert_eq!(updated.outcome, InstructionEpochOutcome::Updated);
+    let content = updated.model_content.as_deref().expect("updated authority");
+    assert!(content.contains("SECOND ROOT RULES"), "{content}");
+    assert!(!content.contains("FIRST ROOT RULES"), "{content}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cached_bundle_invalidates_when_import_symlink_is_retargeted() {
+    use std::os::unix::fs::symlink;
+
+    let (_temp, workspace) = workspace_fixture();
+    let first = workspace.join("first.md");
+    let second = workspace.join("second.md");
+    let active = workspace.join("active.md");
+    fs::write(workspace.join("AGENTS.md"), "@./active.md\n").expect("agents file");
+    fs::write(&first, "FIRST IMPORT RULES\n").expect("first rules");
+    fs::write(&second, "SECOND IMPORT RULES\n").expect("second rules");
+    symlink(&first, &active).expect("initial import symlink");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (initial, fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    state.apply_epoch(&initial, &fingerprint);
+    fs::remove_file(&active).expect("remove first symlink");
+    symlink(&second, &active).expect("retarget import symlink");
+
+    let (updated, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace]),
+                &state,
+            )
+            .await,
+    );
+
+    assert_eq!(updated.outcome, InstructionEpochOutcome::Updated);
+    let content = updated.model_content.as_deref().expect("updated authority");
+    assert!(content.contains("SECOND IMPORT RULES"), "{content}");
+    assert!(!content.contains("FIRST IMPORT RULES"), "{content}");
+}
+
 fn admission_candidate(
     kind: InstructionScopeKind,
     scope_dir: &str,
@@ -221,6 +361,7 @@ fn admission_candidate(
             byte_size: 0,
             source_count: 1,
             import_count: 0,
+            import_paths: Vec::new(),
         },
         content: format!("content-{scope_dir}"),
     }
@@ -494,6 +635,293 @@ async fn identical_content_and_failure_fingerprints_do_not_create_new_epochs() {
         .await;
 }
 
+#[tokio::test]
+async fn same_active_chain_ignores_capacity_already_consumed_by_its_authority() {
+    let (_temp, workspace) = workspace_fixture();
+    let nested = workspace.join("nested");
+    fs::create_dir_all(&nested).expect("nested dir");
+    fs::write(workspace.join("AGENTS.md"), "ROOT\n").expect("root rules");
+    fs::write(nested.join("AGENTS.md"), "NESTED\n").expect("nested rules");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (epoch, fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![nested.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    assert!(epoch.ignored_bundles.is_empty());
+    state.apply_epoch(&epoch, &fingerprint);
+
+    let request = InstructionReconcileRequest {
+        budget: InstructionBudget {
+            nominal: 65_536,
+            actual: 0,
+        },
+        ..reconcile_request(InstructionReconcileKind::ToolPreflight, vec![nested])
+    };
+    expect_proceed(registry.reconcile(request, &state).await, &mut state);
+}
+
+#[tokio::test]
+async fn changed_invalid_utf8_bytes_emit_new_blocked_epoch() {
+    let (_temp, workspace) = workspace_fixture();
+    let source = workspace.join("AGENTS.md");
+    fs::write(&source, [0xFF, b'A']).expect("invalid bytes A");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (first_epoch, first_fingerprint) = expect_block(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    let first_failure = first_epoch.failure.as_ref().expect("first failure");
+    assert_eq!(first_failure.kind, InstructionFailureKind::InvalidEncoding);
+    let first_failure_fingerprint = first_failure.fingerprint.clone();
+    let first_detail = first_failure.detail.clone();
+    state.apply_epoch(&first_epoch, &first_fingerprint);
+
+    fs::write(&source, [0xFF, b'B']).expect("invalid bytes B");
+    let (second_epoch, second_fingerprint) = expect_block(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    let second_failure = second_epoch.failure.as_ref().expect("second failure");
+    assert_eq!(second_failure.kind, InstructionFailureKind::InvalidEncoding);
+    assert_ne!(second_failure.fingerprint, first_failure_fingerprint);
+    assert_ne!(second_fingerprint.hash, first_fingerprint.hash);
+    assert_eq!(second_failure.detail, first_detail);
+    assert_eq!(
+        second_failure.detail,
+        format!("source `{}` is not valid UTF-8", source.display())
+    );
+    state.apply_epoch(&second_epoch, &second_fingerprint);
+
+    expect_proceed(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace]),
+                &state,
+            )
+            .await,
+        &mut state,
+    );
+}
+
+#[tokio::test]
+async fn removed_epoch_revokes_prior_instruction_authority() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "OLD AUTHORITY\n").expect("agents file");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (activated, fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    state.apply_epoch(&activated, &fingerprint);
+    fs::remove_file(workspace.join("AGENTS.md")).expect("remove agents file");
+
+    let (removed, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+
+    assert_eq!(removed.outcome, InstructionEpochOutcome::Removed);
+    let authority = removed
+        .model_content
+        .as_deref()
+        .expect("removal must carry model-visible authority");
+    assert!(authority.contains("complete current path-scoped instruction snapshot"));
+    assert!(authority.contains("No path-scoped instruction bundles are currently active"));
+    assert!(!authority.contains("OLD AUTHORITY"));
+}
+
+#[tokio::test]
+async fn replayed_epoch_fingerprint_prevents_unchanged_duplicate() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "stable rules\n").expect("agents file");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+
+    let (epoch, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &AgentInstructionState::default(),
+            )
+            .await,
+    );
+    let mut replayed = AgentInstructionState::default();
+    replayed.apply_epoch_visibility(&epoch);
+
+    assert!(replayed.last_epoch_fingerprint.is_some());
+    assert!(matches!(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace],),
+                &replayed,
+            )
+            .await,
+        InstructionPreflightDecision::Proceed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn zero_instruction_budget_does_not_inject_omission_notice() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "rules\n").expect("agents file");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let request = InstructionReconcileRequest {
+        budget: InstructionBudget {
+            nominal: 65_536,
+            actual: 0,
+        },
+        ..reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace])
+    };
+
+    let (epoch, _) = expect_defer(
+        registry
+            .reconcile(request, &AgentInstructionState::default())
+            .await,
+    );
+
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::PartiallyLoaded);
+    assert_eq!(epoch.selected_bundles.len(), 0);
+    assert_eq!(epoch.ignored_bundles.len(), 1);
+    assert_eq!(epoch.model_content, None);
+}
+
+#[tokio::test]
+async fn rendered_cost_admission_can_skip_unfittable_high_priority_bundle() {
+    let (_temp, workspace) = workspace_fixture();
+    let nested = workspace.join("nested");
+    fs::create_dir_all(&nested).expect("nested dir");
+    fs::write(
+        workspace.join("AGENTS.md"),
+        format!("HIGH-PRIORITY {}\n", "x".repeat(360)),
+    )
+    .expect("root agents");
+    fs::write(nested.join("AGENTS.md"), "LOW-FITS\n").expect("nested agents");
+    let resolver = InstructionResolver::new(&config_for(&workspace, None)).expect("resolver");
+    let root_body_tokens = resolver
+        .load_bundle(&workspace)
+        .expect("root bundle")
+        .expect("root present")
+        .token_estimate;
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let request = InstructionReconcileRequest {
+        budget: InstructionBudget {
+            nominal: 65_536,
+            actual: root_body_tokens,
+        },
+        ..reconcile_request(
+            InstructionReconcileKind::ToolPreflight,
+            vec![nested.clone()],
+        )
+    };
+
+    let (epoch, _) = expect_defer(
+        registry
+            .reconcile(request, &AgentInstructionState::default())
+            .await,
+    );
+
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::PartiallyLoaded);
+    assert_eq!(epoch.selected_bundles.len(), 1);
+    assert_eq!(epoch.selected_bundles[0].display_path, nested);
+    let content = epoch.model_content.as_deref().expect("low bundle fits");
+    assert!(content.contains("LOW-FITS"), "content: {content}");
+    assert!(!content.contains("HIGH-PRIORITY"), "content: {content}");
+}
+
+#[tokio::test]
+async fn omission_notice_demotes_admitted_bundles_until_the_notice_fits() {
+    let (_temp, workspace) = workspace_fixture();
+    let nested = workspace.join("nested");
+    fs::create_dir_all(&nested).expect("nested dir");
+    fs::write(workspace.join("AGENTS.md"), "ROOT-FITS\n").expect("root agents");
+    fs::write(
+        nested.join("AGENTS.md"),
+        format!("NESTED-IGNORED {}\n", "x".repeat(2_000)),
+    )
+    .expect("nested agents");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut observed_partial_notice = false;
+
+    for actual in 1..=512 {
+        let request = InstructionReconcileRequest {
+            budget: InstructionBudget {
+                nominal: 65_536,
+                actual,
+            },
+            ..reconcile_request(
+                InstructionReconcileKind::ToolPreflight,
+                vec![nested.clone()],
+            )
+        };
+        let (epoch, _) = expect_defer(
+            registry
+                .reconcile(request, &AgentInstructionState::default())
+                .await,
+        );
+        if !epoch.selected_bundles.is_empty() && !epoch.ignored_bundles.is_empty() {
+            let content = epoch.model_content.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "selected authority without its omission notice at budget {actual}: {epoch:#?}"
+                )
+            });
+            assert!(
+                content.contains("Ignored instruction bundles:"),
+                "{content}"
+            );
+            observed_partial_notice = true;
+            break;
+        }
+    }
+
+    assert!(
+        observed_partial_notice,
+        "fixture must reach a whole-bundle partial selection with a visible notice"
+    );
+}
+
 /// Two different blocked states of the SAME kind (`LimitExceeded` carries no
 /// single failure path, so only display-safe detail distinguishes them) must
 /// produce different fingerprints and a fresh Block, while a truly identical
@@ -698,6 +1126,89 @@ impl SourceIo for UnstableIo {
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
         FilesystemSourceIo.read_bytes(path)
     }
+}
+
+#[derive(Debug)]
+struct RecordingBoundedIo {
+    reported_len: u64,
+    full_reads: AtomicU64,
+    bounded_reads: AtomicU64,
+    requested_limit: AtomicU64,
+}
+
+impl RecordingBoundedIo {
+    fn new(reported_len: u64) -> Self {
+        Self {
+            reported_len,
+            full_reads: AtomicU64::new(0),
+            bounded_reads: AtomicU64::new(0),
+            requested_limit: AtomicU64::new(0),
+        }
+    }
+}
+
+impl SourceIo for RecordingBoundedIo {
+    fn read_metadata(&self, _path: &Path) -> io::Result<SourceMetadata> {
+        Ok(SourceMetadata {
+            len: self.reported_len,
+            modified: Some(SystemTime::UNIX_EPOCH),
+            is_file: true,
+        })
+    }
+
+    fn read_bytes(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        self.full_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(b"unbounded read must not run".to_vec())
+    }
+
+    fn read_bytes_bounded(&self, _path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        self.bounded_reads.fetch_add(1, Ordering::SeqCst);
+        self.requested_limit.store(
+            u64::try_from(max_bytes).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+        Ok(vec![b'x'; max_bytes])
+    }
+}
+
+#[test]
+fn resolver_rejects_oversized_metadata_before_reading_source() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "small fixture\n").expect("agents file");
+    let source_io = Arc::new(RecordingBoundedIo::new(MAX_SOURCE_BYTES + 1));
+    let resolver =
+        InstructionResolver::with_source_io(&config_for(&workspace, None), None, source_io.clone())
+            .expect("resolver");
+
+    let err = resolver
+        .load_bundle(&workspace)
+        .expect_err("oversized metadata must block before reading bytes");
+
+    assert_eq!(err.failure_kind(), InstructionFailureKind::LimitExceeded);
+    assert_eq!(source_io.full_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source_io.bounded_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn resolver_bounds_source_reads_at_limit_plus_one() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "small fixture\n").expect("agents file");
+    let source_io = Arc::new(RecordingBoundedIo::new(MAX_SOURCE_BYTES));
+    let resolver =
+        InstructionResolver::with_source_io(&config_for(&workspace, None), None, source_io.clone())
+            .expect("resolver");
+
+    let err = resolver
+        .load_bundle(&workspace)
+        .expect_err("limit-plus-one sentinel must block oversized source");
+
+    assert_eq!(err.failure_kind(), InstructionFailureKind::LimitExceeded);
+    assert_eq!(source_io.full_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source_io.bounded_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        source_io.requested_limit.load(Ordering::SeqCst),
+        MAX_SOURCE_BYTES + 1,
+    );
 }
 
 struct BundleCase {

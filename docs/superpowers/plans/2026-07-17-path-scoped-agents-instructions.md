@@ -238,9 +238,9 @@ fn resolver_rejects_casefold_collision_and_canonical_escape() {
 - [ ] **Step 2: Run the three exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-agent-core --test instruction_registry resolver_merges_target_chains_general_to_specific_without_siblings --exact --nocapture
-cargo test --package neo-agent-core --test instruction_registry resolver_expands_only_standalone_imports_outside_fences_in_place --exact --nocapture
-cargo test --package neo-agent-core --test instruction_registry resolver_rejects_casefold_collision_and_canonical_escape --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry resolver_merges_target_chains_general_to_specific_without_siblings -- --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry resolver_expands_only_standalone_imports_outside_fences_in_place -- --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry resolver_rejects_casefold_collision_and_canonical_escape -- --exact --nocapture
 ```
 
 Expected: compilation fails because `neo_agent_core::instructions` and its types do not exist.
@@ -295,10 +295,10 @@ Keep shared source/bundle caches and in-flight keyed reads behind `Arc` + Tokio 
 - [ ] **Step 6: Run focused engine verification.**
 
 ```bash
-cargo test --package neo-agent-core --test instruction_registry admission_uses_dynamic_cap_and_keeps_atomic_bundles_in_priority_order --exact --nocapture
-cargo test --package neo-agent-core --test instruction_registry identical_content_and_failure_fingerprints_do_not_create_new_epochs --exact --nocapture
-cargo test --package neo-agent-core --test instruction_registry missing_results_are_not_cached_across_reconcile_calls --exact --nocapture
-cargo test --package neo-agent-core --test instruction_registry resolver_reports_every_atomic_structural_and_integrity_failure --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry admission_uses_dynamic_cap_and_keeps_atomic_bundles_in_priority_order -- --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry identical_content_and_failure_fingerprints_do_not_create_new_epochs -- --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry missing_results_are_not_cached_across_reconcile_calls -- --exact --nocapture
+cargo test --package neo-agent-core --test instruction_registry resolver_reports_every_atomic_structural_and_integrity_failure -- --exact --nocapture
 ```
 
 Expected: all seven named Task 1 tests pass. Subagent reports changed files and test output; coordinator performs spec/quality review and commits only this task's files.
@@ -343,7 +343,7 @@ fn instruction_message_converts_to_provider_system_message_and_counts_tokens() {
 - [ ] **Step 2: Run exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-agent-core --test session_jsonl instruction_epoch_persists_once_and_replays_model_context --exact --nocapture
+cargo test --package neo-agent-core --test session_jsonl instruction_epoch_persists_once_and_replays_model_context -- --exact --nocapture
 cargo test --package neo-agent-core --lib -- messages::tests::instruction_message_converts_to_provider_system_message_and_counts_tokens --exact --nocapture
 ```
 
@@ -360,7 +360,7 @@ Add the frozen variants. `AgentContext::apply_instruction_epoch` must append an 
 - [ ] **Step 5: Verify single-source persistence and replay ordering.**
 
 ```bash
-cargo test --package neo-agent-core --test session_jsonl instruction_epoch_persists_once_and_replays_model_context --exact --nocapture
+cargo test --package neo-agent-core --test session_jsonl instruction_epoch_persists_once_and_replays_model_context -- --exact --nocapture
 cargo test --package neo-agent-core --lib -- messages::tests::instruction_message_converts_to_provider_system_message_and_counts_tokens --exact --nocapture
 cargo test --package neo-agent-core --lib -- runtime::context::tests::replay_instruction_replacement_preserves_historical_messages_and_updates_authority --exact --nocapture
 ```
@@ -401,8 +401,8 @@ async fn concurrent_children_singleflight_the_same_source_read() {
 - [ ] **Step 2: Run both exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-agent-core --test multi_agent_runtime child_runtime_shares_registry_but_not_parent_visibility --exact --nocapture
-cargo test --package neo-agent-core --test multi_agent_runtime concurrent_children_singleflight_the_same_source_read --exact --nocapture
+cargo test --package neo-agent-core --test multi_agent_runtime child_runtime_shares_registry_but_not_parent_visibility -- --exact --nocapture
+cargo test --package neo-agent-core --test multi_agent_runtime concurrent_children_singleflight_the_same_source_read -- --exact --nocapture
 ```
 
 - [ ] **Step 3: Wire the session seed through `AgentConfig` and child creation.**
@@ -412,8 +412,8 @@ Clone only the registry handle and immutable configuration into `child_config`. 
 - [ ] **Step 4: Verify lifetime and per-agent behavior.**
 
 ```bash
-cargo test --package neo-agent-core --test multi_agent_runtime child_runtime_shares_registry_but_not_parent_visibility --exact --nocapture
-cargo test --package neo-agent-core --test multi_agent_runtime concurrent_children_singleflight_the_same_source_read --exact --nocapture
+cargo test --package neo-agent-core --test multi_agent_runtime child_runtime_shares_registry_but_not_parent_visibility -- --exact --nocapture
+cargo test --package neo-agent-core --test multi_agent_runtime concurrent_children_singleflight_the_same_source_read -- --exact --nocapture
 ```
 
 Expected: both tests pass and no process-global registry is introduced.
@@ -453,8 +453,8 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
 - [ ] **Step 2: Run the exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-tui --test transcript instruction_card_renders_outcome_metadata_without_model_content --exact --nocapture
-cargo test --package neo-tui --test transcript expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths --exact --nocapture
+cargo test --package neo-tui --test transcript instruction_card_renders_outcome_metadata_without_model_content -- --exact --nocapture
+cargo test --package neo-tui --test transcript expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths -- --exact --nocapture
 ```
 
 - [ ] **Step 3: Implement a finalized semantic card.**
@@ -464,8 +464,8 @@ Map `Ready`, `Activated`, `Reactivated` to brand/muted styles; `Updated` and `Pa
 - [ ] **Step 4: Verify rendering and expansion.**
 
 ```bash
-cargo test --package neo-tui --test transcript instruction_card_renders_outcome_metadata_without_model_content --exact --nocapture
-cargo test --package neo-tui --test transcript expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths --exact --nocapture
+cargo test --package neo-tui --test transcript instruction_card_renders_outcome_metadata_without_model_content -- --exact --nocapture
+cargo test --package neo-tui --test transcript expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths -- --exact --nocapture
 ```
 
 Expected: both tests pass and the entry reports finalized semantics rather than a live spinner.
@@ -588,10 +588,10 @@ async fn compacted_sibling_scope_reactivates_when_reentered() {
 
 ```bash
 cargo test --package neo-agent-core --lib -- runtime::context_budget::tests::instruction_budget_is_max_64k_or_one_eighth_then_safely_clamped --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn adjacent_requests_keep_the_complete_previous_message_prefix --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn adjacent_requests_keep_the_complete_previous_message_prefix -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes -- --exact --nocapture
 cargo test --package neo-agent-core --lib -- compaction::projection::tests::micro_projection_never_changes_instruction_messages --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn compacted_sibling_scope_reactivates_when_reentered --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn compacted_sibling_scope_reactivates_when_reentered -- --exact --nocapture
 ```
 
 - [ ] **Step 4: Implement the context bridge and safe capacity calculation.**
@@ -606,10 +606,10 @@ Full compaction summary input filters `AgentMessage::Instruction`; after applyin
 
 ```bash
 cargo test --package neo-agent-core --lib -- runtime::context_budget::tests::instruction_budget_is_max_64k_or_one_eighth_then_safely_clamped --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn adjacent_requests_keep_the_complete_previous_message_prefix --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn adjacent_requests_keep_the_complete_previous_message_prefix -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn compaction_excludes_instruction_bodies_and_rehydrates_exact_bytes -- --exact --nocapture
 cargo test --package neo-agent-core --lib -- compaction::projection::tests::micro_projection_never_changes_instruction_messages --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn compacted_sibling_scope_reactivates_when_reentered --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn compacted_sibling_scope_reactivates_when_reentered -- --exact --nocapture
 ```
 
 Expected: all five tests pass; no test relies on string markers to recognize instruction content.
@@ -651,8 +651,8 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
 - [ ] **Step 2: Run exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-tui --test transcript_store instruction_epoch_replaces_deferred_placeholders_at_earliest_position --exact --nocapture
-cargo test --package neo-tui --test transcript_pane replayed_instruction_epoch_has_identical_order_and_no_duplicate_card --exact --nocapture
+cargo test --package neo-tui --test transcript_store instruction_epoch_replaces_deferred_placeholders_at_earliest_position -- --exact --nocapture
+cargo test --package neo-tui --test transcript_pane replayed_instruction_epoch_has_identical_order_and_no_duplicate_card -- --exact --nocapture
 ```
 
 - [ ] **Step 3: Route epochs and perform canonical insertion.**
@@ -662,9 +662,9 @@ On `AgentEvent::InstructionEpoch`, find the minimum current index among `deferre
 - [ ] **Step 4: Verify placement and card stability.**
 
 ```bash
-cargo test --package neo-tui --test transcript_store instruction_epoch_replaces_deferred_placeholders_at_earliest_position --exact --nocapture
-cargo test --package neo-tui --test transcript_pane replayed_instruction_epoch_has_identical_order_and_no_duplicate_card --exact --nocapture
-cargo test --package neo-tui --test transcript_pane finalized_instruction_card_does_not_drift_after_later_updates --exact --nocapture
+cargo test --package neo-tui --test transcript_store instruction_epoch_replaces_deferred_placeholders_at_earliest_position -- --exact --nocapture
+cargo test --package neo-tui --test transcript_pane replayed_instruction_epoch_has_identical_order_and_no_duplicate_card -- --exact --nocapture
+cargo test --package neo-tui --test transcript_pane finalized_instruction_card_does_not_drift_after_later_updates -- --exact --nocapture
 ```
 
 Expected: all three tests pass without modifying `crates/neo-tui/src/transcript/presentation.rs`.
@@ -722,9 +722,9 @@ fn typed_scope_probes_cover_files_roots_and_explicit_shell_cwds_only() {
 - [ ] **Step 2: Run exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-agent-core --test runtime_turn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_once --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn one_new_scope_defers_every_call_in_a_parallel_mixed_batch --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn first_read_write_and_nested_cwd_shell_each_defer_before_execution --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_once -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn one_new_scope_defers_every_call_in_a_parallel_mixed_batch -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn first_read_write_and_nested_cwd_shell_each_defer_before_execution -- --exact --nocapture
 cargo test --package neo-agent-core --lib -- runtime::tool_arguments::tests::typed_scope_probes_cover_files_roots_and_explicit_shell_cwds_only --exact --nocapture
 ```
 
@@ -772,13 +772,13 @@ Add `cwd: Option<String>` to `TerminalInput`; reject it for non-`start` modes, r
 - [ ] **Step 8: Run the enforcement boundary tests.**
 
 ```bash
-cargo test --package neo-agent-core --test runtime_turn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_once --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn one_new_scope_defers_every_call_in_a_parallel_mixed_batch --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn first_read_write_and_nested_cwd_shell_each_defer_before_execution --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn approval_wait_rechecks_instruction_fingerprint_before_execution --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn blocked_scope_allows_read_only_diagnosis_but_blocks_mixed_mutation_batch --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn baseline_epoch_precedes_first_user_message_for_new_and_legacy_sessions --exact --nocapture
-cargo test --package neo-agent-core --test tool_schema_descriptions terminal_start_exposes_cwd_and_requires_it_for_nested_scope --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_once -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn one_new_scope_defers_every_call_in_a_parallel_mixed_batch -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn first_read_write_and_nested_cwd_shell_each_defer_before_execution -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn approval_wait_rechecks_instruction_fingerprint_before_execution -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn blocked_scope_allows_read_only_diagnosis_but_blocks_mixed_mutation_batch -- --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn baseline_epoch_precedes_first_user_message_for_new_and_legacy_sessions -- --exact --nocapture
+cargo test --package neo-agent-core --test tool_schema_descriptions terminal_start_exposes_cwd_and_requires_it_for_nested_scope -- --exact --nocapture
 ```
 
 Expected: all seven tests pass; captured event order proves no permission prompt or tool-start event precedes instruction preflight.
@@ -824,9 +824,9 @@ async fn changed_source_after_resume_appends_replacement_before_provider_call() 
 - [ ] **Step 2: Run exact tests and confirm RED.**
 
 ```bash
-cargo test --package neo-agent --test mock_provider_e2e startup_builds_one_registry_and_baseline_before_first_provider_request --exact --nocapture
-cargo test --package neo-agent --bin neo -- modes::interactive::tests::unchanged_resume_replays_epoch_without_duplicate_message_or_card --exact --nocapture --include-ignored
-cargo test --package neo-agent --bin neo -- modes::interactive::tests::changed_source_after_resume_appends_replacement_before_provider_call --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::startup_builds_one_registry_and_baseline_before_first_provider_request --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::unchanged_resume_replays_epoch_without_duplicate_message_or_card --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::changed_source_after_resume_appends_replacement_before_provider_call --exact --nocapture --include-ignored
 ```
 
 - [ ] **Step 3: Build and restore the session registry.**
@@ -842,7 +842,7 @@ Persist the event through the existing event writer, map it in JSON output as me
 ```rust
 #[tokio::test]
 async fn nested_scope_import_and_over_budget_warning_replan_without_breaking_turn() {
-    // Mock provider enters nested cwd; fixture has an imported rule and one oversized bundle.
+    // Mock provider issues a nested Read; fixture has an imported rule and one oversized bundle.
     // Assert defer -> PartiallyLoaded epoch -> fresh call -> success in same turn.
     // Assert warning names loaded/ignored bundles and contains no ignored body sentinel.
 }
@@ -851,13 +851,17 @@ async fn nested_scope_import_and_over_budget_warning_replan_without_breaking_tur
 - [ ] **Step 6: Run focused integration verification.**
 
 ```bash
-cargo test --package neo-agent --test mock_provider_e2e startup_builds_one_registry_and_baseline_before_first_provider_request --exact --nocapture
-cargo test --package neo-agent --bin neo -- modes::interactive::tests::unchanged_resume_replays_epoch_without_duplicate_message_or_card --exact --nocapture --include-ignored
-cargo test --package neo-agent --bin neo -- modes::interactive::tests::changed_source_after_resume_appends_replacement_before_provider_call --exact --nocapture --include-ignored
-cargo test --package neo-agent --test mock_provider_e2e nested_scope_import_and_over_budget_warning_replan_without_breaking_turn --exact --nocapture
+cargo test --package neo-agent --bin neo -- modes::run::tests::startup_builds_one_registry_and_baseline_before_first_provider_request --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::unchanged_resume_replays_epoch_without_duplicate_message_or_card --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::changed_source_after_resume_appends_replacement_before_provider_call --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::nested_scope_import_and_over_budget_warning_replan_without_breaking_turn --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::run::tests::stable_json_redacts_instruction_metadata_paths_and_failure_detail --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::interactive::tests::instruction_registry_cache_is_scoped_by_session_id --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::interactive::tests::event_loop_keeps_new_session_active_for_followup_prompt --exact --nocapture --include-ignored
+cargo test --package neo-agent --bin neo -- modes::interactive::tests::rebuild_transcript_sets_workspace_root_before_replaying_instruction_cards --exact --nocapture --include-ignored
 ```
 
-Expected: all four tests pass and one continuous run contains both preflight replan and final answer.
+Expected: all eight tests pass and one continuous run contains both preflight replan and final answer.
 
 ---
 
@@ -902,11 +906,17 @@ Remove every `AGENTS.md / CLAUDE.md` compatibility statement. Explain that proje
 - [ ] **Step 3: Run canonical residue scans.**
 
 ```bash
-rg -n "CLAUDE\.md|load_context_files|format_project_context|startup-only|project root.*auto-reads|project-root.*auto-reads" crates README.md AGENTS.md docs/en docs/zh
+status=0
+rg -n "CLAUDE\.md|load_context_files|format_project_context" crates README.md AGENTS.md \
+  --glob '!crates/neo-agent/src/modes/interactive/tests.rs' || status=$?
+test "$status" -eq 1
+status=0
+rg -n "AGENTS\.md / CLAUDE\.md|CLAUDE\.md as a compatibility fallback|CLAUDE\.md 作为兼容候选|startup-only loader remains|仍保留仅启动时加载器|project root.*auto-reads|project-root.*auto-reads" docs/en docs/zh || status=$?
+test "$status" -eq 1
 rg -n "max\(65_536, effective_max_tokens / 8\)|maximum recursive import depth.*5|最大递归导入深度.*5|PartiallyLoaded|partially loaded|部分加载" docs/en docs/zh AGENTS.md crates/neo-agent-core/src
 ```
 
-Expected: the first command has zero stale fallback/startup-only matches; the second finds the paired formula/limit/warning contract and implementation symbols.
+Expected: the first two commands have zero stale source references or positive fallback/startup-only claims; the third finds the paired formula/limit/warning contract and implementation symbols. Documentation may explicitly state that the old fallback was removed.
 
 - [ ] **Step 4: Verify paired documentation coverage manually.**
 
