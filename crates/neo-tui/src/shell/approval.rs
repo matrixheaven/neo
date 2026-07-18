@@ -1,6 +1,5 @@
 use neo_agent_core::{
-    ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,
-    ApprovalResponse,
+    ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalRequest, ApprovalResponse,
 };
 
 /// Live chrome state for one canonical approval request.
@@ -137,46 +136,6 @@ impl ApprovalRequestModal {
             reason,
         }
     }
-
-    /// Presentation-only title for chrome / transcript headers.
-    #[must_use]
-    pub fn title(&self) -> &str {
-        presentation_title(&self.request.presentation)
-    }
-
-    /// Presentation-only body lines (command, details, plan summary, etc.).
-    #[must_use]
-    pub fn body_lines(&self) -> Vec<String> {
-        presentation_body_lines(&self.request.presentation)
-    }
-
-    /// Render the live modal for chrome (presentation + numbered options).
-    #[must_use]
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
-        let _ = width;
-        let mut lines = Vec::new();
-        lines.push(format!("▶ {}", self.title()));
-        for detail in self.body_lines() {
-            lines.push(detail);
-        }
-        lines.push(String::new());
-        for (index, option) in self.request.options.iter().enumerate() {
-            let marker = if index == self.selected { "▶" } else { " " };
-            lines.push(format!("{marker} {}. {}", index + 1, option.label));
-            if let Some(description) = &option.description {
-                lines.push(format!("    {description}"));
-            }
-        }
-        if self.collecting_feedback && self.is_revision_selected() {
-            lines.push(String::new());
-            if self.feedback_input.is_empty() {
-                lines.push("feedback: ▌".to_owned());
-            } else {
-                lines.push(format!("feedback: {}▌", self.feedback_input));
-            }
-        }
-        lines
-    }
 }
 
 #[must_use]
@@ -204,67 +163,12 @@ pub(super) fn response_for_selected(modal: &ApprovalRequestModal) -> Option<Appr
     })
 }
 
-#[must_use]
-pub(crate) fn presentation_title(presentation: &ApprovalPresentation) -> &str {
-    match presentation {
-        ApprovalPresentation::Command { title, .. }
-        | ApprovalPresentation::Tool { title, .. }
-        | ApprovalPresentation::Plan { title, .. }
-        | ApprovalPresentation::Goal { title, .. } => title.as_str(),
-    }
-}
-
-#[must_use]
-pub(crate) fn presentation_body_lines(presentation: &ApprovalPresentation) -> Vec<String> {
-    match presentation {
-        ApprovalPresentation::Command { command, cwd, .. } => {
-            let mut lines = Vec::new();
-            if let Some(cwd) = cwd {
-                lines.push(format!("cwd: {}", cwd.display()));
-            }
-            lines.push(format!("$ {command}"));
-            lines
-        }
-        ApprovalPresentation::Tool { details, .. } => details.clone(),
-        ApprovalPresentation::Plan {
-            path,
-            markdown,
-            summary,
-            ..
-        } => {
-            let mut lines = Vec::new();
-            if let Some(path) = path {
-                lines.push(path.display().to_string());
-            }
-            if let Some(summary) = summary {
-                if !summary.trim().is_empty() {
-                    lines.push(summary.clone());
-                }
-            } else if !markdown.trim().is_empty() {
-                lines.push(markdown.clone());
-            }
-            lines
-        }
-        ApprovalPresentation::Goal {
-            objective,
-            completion_criterion,
-            phases,
-            ..
-        } => {
-            let mut lines = vec![objective.clone()];
-            if let Some(criterion) = completion_criterion {
-                lines.push(criterion.clone());
-            }
-            lines.extend(phases.iter().cloned());
-            lines
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neo_agent_core::{ApprovalAction, ApprovalOption, PermissionOperation};
+    use neo_agent_core::{
+        ApprovalAction, ApprovalOption, ApprovalPresentation, PermissionOperation,
+    };
 
     fn revise_request() -> ApprovalRequest {
         ApprovalRequest {

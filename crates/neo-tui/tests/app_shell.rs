@@ -900,6 +900,37 @@ fn pending_approval_hides_composer_prompt() {
 }
 
 #[test]
+fn pending_approval_has_one_width_bounded_presentation() {
+    let mut request = background_request();
+    request.presentation = ApprovalPresentation::Command {
+        title: "Run this command?".to_owned(),
+        command: "rtk git status ".repeat(20),
+        cwd: Some(PathBuf::from("/Users/chenyuanhao/Workspace/neo")),
+    };
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.push_approval(request.clone());
+    let mut transcript = TranscriptPane::new(80, 20);
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested { request });
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let plain = strip_lines(lines.clone()).join("\n");
+
+    assert_eq!(
+        plain.matches("Run this command?").count(),
+        1,
+        "approval must have one visible presentation owner: {plain}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| neo_tui::primitive::visible_width(line) <= 80),
+        "approval frame must fit terminal width: {lines:#?}"
+    );
+    assert!(cursor.is_none(), "approval must keep composer blocked");
+}
+
+#[test]
 fn prompt_completion_keeps_composer_prompt_visible() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut()
