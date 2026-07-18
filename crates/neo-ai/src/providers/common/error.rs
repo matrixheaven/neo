@@ -130,28 +130,29 @@ pub(crate) enum ProviderError {
 /// Classify an error reported inside an otherwise successful provider stream.
 pub(crate) fn stream_failure(code: Option<&str>, message: impl Into<String>) -> ProviderError {
     let message = message.into();
-    let normalized = code
-        .unwrap_or_default()
-        .trim()
-        .replace('-', "_")
-        .replace(' ', "_")
-        .to_lowercase();
-    let status = match normalized.as_str() {
-        value if PERMANENT_QUOTA_CODES.contains(&value) => Some(402),
-        "408" => Some(408),
-        "429"
-        | "rate_limit"
-        | "rate_limit_error"
-        | "rate_limit_exceeded"
-        | "too_many_requests"
-        | "resource_exhausted"
-        | "quota_exceeded" => Some(429),
-        "overload" | "overloaded" | "overloaded_error" => Some(529),
-        "unavailable" | "service_unavailable" => Some(503),
-        "server_error" | "internal" | "internal_server_error" | "api_error" | "5xx" => Some(500),
-        "deadline_exceeded" => Some(504),
-        value if value.len() == 3 => value.parse::<u16>().ok(),
-        _ => None,
+    let raw_code = code.unwrap_or_default().trim().to_lowercase();
+    let normalized = raw_code.replace('-', "_").replace(' ', "_");
+    let status = if PERMANENT_QUOTA_CODES.contains(&raw_code.as_str()) {
+        Some(402)
+    } else {
+        match normalized.as_str() {
+            "408" => Some(408),
+            "429"
+            | "rate_limit"
+            | "rate_limit_error"
+            | "rate_limit_exceeded"
+            | "too_many_requests"
+            | "resource_exhausted"
+            | "quota_exceeded" => Some(429),
+            "overload" | "overloaded" | "overloaded_error" => Some(529),
+            "unavailable" | "service_unavailable" => Some(503),
+            "server_error" | "internal" | "internal_server_error" | "api_error" | "5xx" => {
+                Some(500)
+            }
+            "deadline_exceeded" => Some(504),
+            value if value.len() == 3 => value.parse::<u16>().ok(),
+            _ => None,
+        }
     };
 
     match status {
@@ -280,6 +281,12 @@ mod tests {
             assert!(matches!(
                 stream_failure(Some(code), "try later").into_ai_error(),
                 AiError::RateLimit { .. }
+            ));
+        }
+        for code in ["insufficient-quota", "payment required"] {
+            assert!(matches!(
+                stream_failure(Some(code), "try later").into_ai_error(),
+                AiError::Protocol { .. }
             ));
         }
     }
