@@ -3,7 +3,7 @@ target
 .references/
 .DS_Store
 .worktrees/
-.superpowers
+docs/aegis/work
 .mimocode
 .codegraph/
 docs/node_modules/
