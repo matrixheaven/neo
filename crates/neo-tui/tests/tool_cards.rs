@@ -1,16 +1,63 @@
-use neo_agent_core::{AgentMessage, AgentToolCall, Content, StopReason};
+use neo_agent_core::{AgentEvent, AgentMessage, AgentToolCall, Content, StopReason};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Component, Expandable, Finalization, Line};
 use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};
+use serde_json::json;
 use std::fmt::Write as _;
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
         .map(|row| neo_tui::primitive::strip_ansi(&row.to_ansi()))
         .collect()
+}
+
+fn rendered(pane: &mut TranscriptPane) -> String {
+    let lines = pane
+        .render_frame(80, 20)
+        .unwrap_or_else(|| pane.frame_ansi_lines());
+    lines
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn apply_queued_bash(
+    pane: &mut TranscriptPane,
+    id: &str,
+    command: &str,
+    position: usize,
+    waiting_ms: u64,
+) {
+    let arguments = json!({"command": command});
+    pane.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: id.to_owned(),
+        name: "Bash".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolCallFinished {
+        turn: 1,
+        tool_call: AgentToolCall {
+            id: id.into(),
+            name: "Bash".into(),
+            raw_arguments: arguments.to_string().into(),
+        },
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionQueued {
+        turn: 1,
+        id: id.to_owned(),
+        name: "Bash".to_owned(),
+        arguments,
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionQueueUpdated {
+        turn: 1,
+        id: id.to_owned(),
+        position,
+        waiting_ms,
+    });
 }
 
 #[test]
@@ -351,7 +398,7 @@ fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
 
     assert!(
         rows.iter()
-            .any(|line| line.contains("Queued Write (/workspace/sample_service.go)")),
+            .any(|line| line.contains("Preparing Write (/workspace/sample_service.go)")),
         "header should show the path, not raw JSON: {rows:?}"
     );
     assert!(
@@ -757,7 +804,7 @@ fn ask_user_question_header_does_not_exceed_terminal_width_after_gutter() {
     assert!(
         frame
             .iter()
-            .any(|line| line.contains("Queued AskUserQuestion")),
+            .any(|line| line.contains("Preparing AskUserQuestion")),
         "tool header present: {frame:?}"
     );
     for line in &frame {
@@ -1195,4 +1242,68 @@ fn write_streaming_uses_preview_format() {
         body_text.contains("Title"),
         "streaming content should be rendered"
     );
+}
+
+#[test]
+fn bash_queue_event_renders_position_and_wait_in_original_card() {
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "call-1".to_owned(),
+        name: "Bash".to_owned(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolCallFinished {
+        turn: 1,
+        tool_call: AgentToolCall {
+            id: "call-1".into(),
+            name: "Bash".into(),
+            raw_arguments: r#"{"command":"cargo test"}"#.into(),
+        },
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionQueued {
+        turn: 1,
+        id: "call-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: json!({"command": "cargo test"}),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionQueueUpdated {
+        turn: 1,
+        id: "call-1".to_owned(),
+        position: 2,
+        waiting_ms: 18_000,
+    });
+    let rendered = rendered(&mut pane);
+    assert!(rendered.contains("Queued Bash (cargo test) · #2 · waiting 18s"));
+    assert_eq!(rendered.matches("Queued Bash").count(), 1);
+}
+
+#[test]
+fn generic_pending_tool_is_not_called_queued() {
+    let mut component = ToolCallComponent::new(ToolCallState {
+        id: "call-1".to_owned(),
+        name: "Read".to_owned(),
+        arguments: None,
+        result: None,
+        details: None,
+        status: ToolStatusKind::Pending,
+        exit_code: None,
+    });
+    assert!(plain(component.render(80)).join("\n").contains("Preparing Read"));
+}
+
+#[test]
+fn queued_shell_card_keeps_relative_position_across_later_entries() {
+    let mut pane = TranscriptPane::new(80, 20);
+    apply_queued_bash(&mut pane, "call-1", "cargo test", 1, 4_000);
+    pane.push_assistant_message("later assistant text");
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "call-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: json!({"command": "cargo test"}),
+    });
+    let rendered = rendered(&mut pane);
+    let tool = rendered.find("Bash (cargo test)").expect("tool row");
+    let later = rendered.find("later assistant text").expect("later row");
+    assert!(tool < later, "living tool card drifted after later content");
 }

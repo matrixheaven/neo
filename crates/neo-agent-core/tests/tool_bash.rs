@@ -24,7 +24,7 @@ fn bash_model_schema_matches_kimi_style_shape() {
     for field in [
         "command",
         "cwd",
-        "timeout",
+        "timeout_secs",
         "run_in_background",
         "description",
         "max_output_bytes",
@@ -67,6 +67,7 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
             "MessageDelegate",
             "Read",
             "RunWorkflow",
+            "Sleep",
             "TaskList",
             "TaskOutput",
             "TaskStop",
@@ -132,8 +133,8 @@ async fn model_bash_timeout_without_output_returns_visible_failure_text() {
     let result = execute_model_bash_for_runtime(
         &context,
         json!({
-            "command": "sleep 1",
-            "timeout": 0,
+            "command": "sleep 30",
+            "timeout_secs": 1,
         }),
     )
     .await
@@ -144,6 +145,23 @@ async fn model_bash_timeout_without_output_returns_visible_failure_text() {
         result.content.contains("Timed out."),
         "timeout with no shell output must still be visible to the model: {result:?}"
     );
+}
+
+#[test]
+fn bash_schema_uses_optional_timeout_secs_without_legacy_timeout() {
+    let bash = ToolRegistry::with_builtin_tools()
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "Bash")
+        .expect("Bash spec");
+    let schema = bash.input_schema.get("schema").unwrap_or(&bash.input_schema);
+    let properties = schema["properties"].as_object().expect("properties");
+    assert!(properties.contains_key("timeout_secs"));
+    assert!(!properties.contains_key("timeout"));
+    let text = properties["timeout_secs"].to_string();
+    assert!(text.contains("7200"));
+    assert!(!text.to_lowercase().contains("rust"));
+    assert!(!text.to_lowercase().contains("cargo"));
 }
 
 #[tokio::test]

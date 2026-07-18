@@ -17,7 +17,6 @@ use tokio::{
     process::{Child, Command},
     sync::{Mutex, mpsc},
     task::JoinHandle,
-    time::{Instant, Sleep},
 };
 
 #[cfg(windows)]
@@ -285,8 +284,7 @@ async fn run_supervision_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_millis(start.limits.timeout_ms));
-    tokio::pin!(deadline);
+    let mut deadline = super::command_deadline(start.limits.timeout_ms);
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
     let mut response_open = true;
@@ -307,8 +305,6 @@ where
                         if let Some(tuple) = handle_request(
                             &request,
                             response_tx,
-                            start,
-                            deadline.as_mut(),
                             &mut response_open,
                         ) {
                             break tuple;
@@ -317,7 +313,9 @@ where
                     Err(error) => break handle_request_error(&error, process)?,
                 }
             }
-            () = &mut deadline => break (GuardStatusKind::TimedOut, None, None, None),
+            () = super::wait_for_deadline(&mut deadline) => {
+                break (GuardStatusKind::TimedOut, None, None, None)
+            }
             _ = poll.tick() => {
                 if let Some(status) = process.child.try_wait()? {
                     break (status_kind_for_exit(status), Some(status), None, None);
@@ -351,8 +349,6 @@ where
 fn handle_request(
     request: &GuardRequest,
     response_tx: &mpsc::Sender<GuardResponse>,
-    start: &StartRequest,
-    mut deadline: std::pin::Pin<&mut Sleep>,
     response_open: &mut bool,
 ) -> Option<SupervisionBreak> {
     match request {
@@ -370,19 +366,6 @@ fn handle_request(
                 GuardStatusKind::Cancelled
             };
             Some((status_kind, None, None, error))
-        }
-        GuardRequest::SetBackgroundDeadline { request_id } => {
-            deadline
-                .as_mut()
-                .reset(Instant::now() + Duration::from_millis(start.limits.background_timeout_ms));
-            send_response_or_close(
-                response_tx,
-                GuardResponse::Ack {
-                    request_id: *request_id,
-                },
-                response_open,
-            )
-            .map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
         }
         _ => {
             let error = send_response_or_close(
@@ -575,7 +558,7 @@ impl GuardedBashProcess {
             "RAYON_NUM_THREADS",
         ] {
             if std::env::var_os(name).is_none() {
-                command_builder.env(name, start.limits.max_parallelism.to_string());
+                command_builder.env(name, start.limits.max_command_parallelism.to_string());
             }
         }
         if let Some(cwd) = effective_cwd {
@@ -1043,21 +1026,25 @@ fn resource_limit_for_sample(
             observed: None,
         });
     }
-    if sample.descendants > limits.max_descendant_processes {
+    if sample.descendants > limits.max_command_descendant_processes {
         return Some(ResourceLimitDetail {
             cause: ResourceLimitCause::ProcessCount,
-            configured: Some(u64::try_from(limits.max_descendant_processes).unwrap_or(u64::MAX)),
+            configured: Some(
+                u64::try_from(limits.max_command_descendant_processes).unwrap_or(u64::MAX),
+            ),
             observed: Some(u64::try_from(sample.descendants).unwrap_or(u64::MAX)),
         });
     }
     let memory_percent =
         u64::try_from((u128::from(sample.resident_memory) * 100) / u128::from(sample.total_memory))
             .unwrap_or(u64::MAX);
-    (memory_percent > u64::from(limits.max_tree_memory_percent)).then_some(ResourceLimitDetail {
-        cause: ResourceLimitCause::TreeMemory,
-        configured: Some(u64::from(limits.max_tree_memory_percent)),
-        observed: Some(memory_percent),
-    })
+    (memory_percent > u64::from(limits.max_command_memory_percent)).then_some(
+        ResourceLimitDetail {
+            cause: ResourceLimitCause::TreeMemory,
+            configured: Some(u64::from(limits.max_command_memory_percent)),
+            observed: Some(memory_percent),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1158,7 +1145,7 @@ mod tests {
             kind: GuardTaskKind::Bash,
             command: "sleep 30".to_owned(),
             limits: super::super::ShellRuntime::default()
-                .guard_limits(Duration::from_secs(30), 1024),
+                .guard_limits(Some(Duration::from_secs(30)), 1024),
             status_dir: workspace.path().to_path_buf(),
             cols: None,
             rows: None,
@@ -1231,7 +1218,8 @@ mod tests {
 
     #[test]
     fn sampler_snapshot_root_and_memory_unavailable_are_fail_closed() {
-        let limits = super::super::ShellRuntime::default().guard_limits(Duration::from_secs(1), 1);
+        let limits =
+            super::super::ShellRuntime::default().guard_limits(Some(Duration::from_secs(1)), 1);
         let unavailable = Some(ResourceLimitDetail {
             cause: ResourceLimitCause::SamplerUnavailable,
             configured: None,

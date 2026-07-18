@@ -118,7 +118,7 @@ impl DelegateCardComponent {
 
         let activity = child_activity_view(&self.snapshot, MAX_CHILD_TOOL_ROWS);
         for tool in &activity.tools {
-            lines.extend(render_child_tool_row(tool, width, "  ", theme));
+            lines.extend(render_child_tool_row(tool, width, "  ", theme, self.now_ms));
         }
         if let Some(thinking) = activity.thinking.as_deref() {
             lines.extend(render_child_thinking(thinking, width, "  ", theme));

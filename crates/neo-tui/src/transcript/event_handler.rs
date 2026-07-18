@@ -314,6 +314,29 @@ impl TranscriptPane {
                 self.start_tool_execution(*turn, id, name.clone(), arguments);
                 true
             }
+            AgentEvent::ToolExecutionQueued {
+                turn,
+                id,
+                name,
+                arguments,
+            } => {
+                self.queue_tool_execution(*turn, id, name.clone(), arguments);
+                true
+            }
+            AgentEvent::ToolExecutionQueueUpdated {
+                id,
+                position,
+                waiting_ms,
+                ..
+            } => {
+                if self
+                    .transcript
+                    .mutate_tool(id, |tool| tool.set_queued(*position, *waiting_ms))
+                {
+                    self.mark_dirty();
+                }
+                true
+            }
             AgentEvent::ApprovalRequested {
                 id,
                 operation,
@@ -386,6 +409,34 @@ impl TranscriptPane {
                 match origin {
                     ShellCommandOrigin::ModelBashTool => self.start_shell_command(id, command, cwd),
                     ShellCommandOrigin::UserShellMode => self.start_user_shell_command(id, command),
+                }
+                true
+            }
+            AgentEvent::ShellCommandQueued {
+                id,
+                command,
+                origin,
+                ..
+            } => {
+                match origin {
+                    ShellCommandOrigin::UserShellMode => {
+                        self.queue_user_shell_command(id, command);
+                    }
+                    // Model bash/terminal queue through ToolExecutionQueued.
+                    ShellCommandOrigin::ModelBashTool => {}
+                }
+                true
+            }
+            AgentEvent::ShellCommandQueueUpdated {
+                id,
+                position,
+                waiting_ms,
+                ..
+            } => {
+                if self.transcript.mutate_shell_run(id, |shell_run| {
+                    shell_run.update_queue(*position, *waiting_ms)
+                }) {
+                    self.mark_dirty();
                 }
                 true
             }
@@ -682,6 +733,28 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    fn queue_tool_execution(
+        &mut self,
+        turn: u32,
+        id: &str,
+        name: String,
+        arguments: &serde_json::Value,
+    ) {
+        let arguments = self
+            .streaming_tool_args
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| arguments.to_string());
+        self.streaming_tool_args
+            .insert(id.to_owned(), arguments.clone());
+        self.remember_tool_call(turn, id, &name);
+        if is_skill_tool(&name) {
+            return;
+        }
+        self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Queued);
+        self.mark_dirty();
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn request_approval(
         &mut self,
@@ -775,8 +848,20 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn start_user_shell_command(&mut self, id: &str, command: &str) {
+    fn queue_user_shell_command(&mut self, id: &str, command: &str) {
         if !self.transcript.has_shell_run(id) {
+            self.transcript
+                .push_shell_run(ShellRunComponent::queued(id, command));
+        }
+        self.mark_dirty();
+    }
+
+    fn start_user_shell_command(&mut self, id: &str, command: &str) {
+        if self.transcript.has_shell_run(id) {
+            let _ = self
+                .transcript
+                .mutate_shell_run(id, ShellRunComponent::start);
+        } else {
             self.transcript
                 .push_shell_run(ShellRunComponent::running(id, command));
         }

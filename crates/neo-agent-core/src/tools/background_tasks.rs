@@ -512,7 +512,7 @@ impl BackgroundTaskManager {
     }
 
     pub async fn detach(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
-        let client = {
+        {
             let mut tasks = self.inner.lock().await;
             let Some(record) = tasks.get_mut(task_id) else {
                 return Err(ToolError::InvalidInput {
@@ -520,16 +520,14 @@ impl BackgroundTaskManager {
                     message: format!("unknown background task `{task_id}`"),
                 });
             };
-            let BackgroundTaskState::BashRunning(command) = &record.state else {
+            if !matches!(record.state, BackgroundTaskState::BashRunning(_)) {
                 return Err(ToolError::InvalidInput {
                     tool: "TaskDetach".to_owned(),
                     message: format!("background task `{task_id}` is not running"),
                 });
-            };
+            }
             record.detached = true;
-            command.client.clone()
-        };
-        client.set_background_deadline().await?;
+        }
         self.snapshot(task_id).await
     }
 
@@ -1535,7 +1533,9 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         if output.exit_code != Some(0) && !matches!(snapshot.status, BackgroundTaskStatus::Running)
         {
             let failure_msg = match snapshot.status {
-                BackgroundTaskStatus::ResourceLimited => "Resource limit exceeded.".to_owned(),
+                BackgroundTaskStatus::ResourceLimited => {
+                    crate::tools::format_resource_limit(output.resource_limit.as_ref())
+                }
                 BackgroundTaskStatus::ParentExited => "Owner process exited.".to_owned(),
                 _ => crate::tools::format_shell_failure(output.exit_code, output.signal),
             };

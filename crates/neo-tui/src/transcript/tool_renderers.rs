@@ -167,8 +167,11 @@ pub fn exit_plan_mode_header_spans(state: &ToolCallState, theme: &TuiTheme) -> V
 fn tool_symbol(status: ToolStatusKind) -> &'static str {
     match status {
         // Running and succeeded both use ● and the ok status color, matching
-        // the grouped tool card.
-        ToolStatusKind::Pending | ToolStatusKind::Running | ToolStatusKind::Succeeded => "●",
+        // the grouped tool card. Queued keeps the same living-entry marker.
+        ToolStatusKind::Pending
+        | ToolStatusKind::Queued
+        | ToolStatusKind::Running
+        | ToolStatusKind::Succeeded => "●",
         ToolStatusKind::Failed => "✗",
         ToolStatusKind::Cancelled => "⊘",
     }
@@ -176,7 +179,8 @@ fn tool_symbol(status: ToolStatusKind) -> &'static str {
 
 fn tool_verb(status: ToolStatusKind) -> &'static str {
     match status {
-        ToolStatusKind::Pending => "Queued",
+        ToolStatusKind::Pending => "Preparing",
+        ToolStatusKind::Queued => "Queued",
         ToolStatusKind::Running => "Using",
         ToolStatusKind::Succeeded => "Used",
         ToolStatusKind::Failed => "Failed",
@@ -186,7 +190,7 @@ fn tool_verb(status: ToolStatusKind) -> &'static str {
 
 fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
     match status {
-        ToolStatusKind::Pending => theme.status_pending,
+        ToolStatusKind::Pending | ToolStatusKind::Queued => theme.status_pending,
         ToolStatusKind::Running | ToolStatusKind::Succeeded => theme.status_ok,
         ToolStatusKind::Failed => theme.status_error,
         ToolStatusKind::Cancelled => theme.status_cancelled,

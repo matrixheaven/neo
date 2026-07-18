@@ -204,7 +204,7 @@ impl DelegateGroupComponent {
         let indent = format!("  {continuation}    ");
         let view = child_activity_view(agent, MAX_CHILD_TOOL_ROWS);
         for row in &view.tools {
-            lines.extend(render_child_tool_row(row, width, &indent, theme));
+            lines.extend(render_child_tool_row(row, width, &indent, theme, self.now_ms));
         }
         if let Some(thinking) = view.thinking.as_deref() {
             lines.extend(render_child_thinking(thinking, width, &indent, theme));

@@ -20,8 +20,8 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 
 | Tool | Purpose |
 | --- | --- |
-| `Bash` | Execute `bash` (Git Bash on Windows) commands in the workspace; supports pipes, background tasks, timeouts, and cancellation. |
-| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. |
+| `Bash` | Execute `bash` (Git Bash on Windows) commands in the workspace; supports pipes, background tasks, optional `timeout_secs`, and cancellation. Omit `timeout_secs` for no timeout. |
+| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. `timeout_secs` is valid only for `mode=start`; omit it for no timeout. |
 
 ## Network
 
@@ -65,8 +65,14 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | Tool | Purpose |
 | --- | --- |
 | `TaskList` | List background tasks and their status. |
-| `TaskOutput` | Retrieve the output of a running or completed background task. |
+| `TaskOutput` | Retrieve the output of a running or completed background task. Prefer `block=true` when waiting for a known task to finish. |
 | `TaskStop` | Stop a running background task. |
+
+## Timing
+
+| Tool | Purpose |
+| --- | --- |
+| `Sleep` | Pause this agent for a genuine time-based wait (`duration_seconds` 1..=3600) without starting a shell command or consuming shell admission. Prefer `WaitDelegate` for a known agent/swarm and `TaskOutput` with `block=true` for a known background task. |
 
 ## Other
 
@@ -85,7 +91,7 @@ Registered by `GoalManager`; available when goal mode is enabled.
 
 Derived agents (`Delegate` / `DelegateSwarm`) register only a subset by default, built via `ToolRegistry::with_builtin_child_tools()`:
 
-`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow`
+`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow` · `Sleep`
 
 In addition, `AgentProfile::for_role` filters by a role-specific whitelist, and any custom tools explicitly registered by the caller are always passed through.
 

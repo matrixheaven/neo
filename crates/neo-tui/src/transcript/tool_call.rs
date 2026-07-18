@@ -3,6 +3,7 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Component, Expandable, Finalization, Line, Span};
 use crate::shell::ToolStatusKind;
+use crate::token_estimate::format_elapsed;
 
 use super::plan_box::PlanBoxComponent;
 use super::tool_renderers::{
@@ -11,6 +12,7 @@ use super::tool_renderers::{
 };
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallState {
@@ -24,6 +26,21 @@ pub struct ToolCallState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueDisplayState {
+    position: usize,
+    waiting_ms: u64,
+    observed_at: Instant,
+}
+
+impl QueueDisplayState {
+    fn elapsed_ms(&self) -> u64 {
+        self.waiting_ms.saturating_add(
+            u64::try_from(self.observed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallComponent {
     state: ToolCallState,
     expanded: bool,
@@ -31,7 +48,8 @@ pub struct ToolCallComponent {
     dropped_live_output_lines: usize,
     live_output_chars: usize,
     workspace_dir: Option<PathBuf>,
-    streaming_started_at: Option<std::time::Instant>,
+    streaming_started_at: Option<Instant>,
+    queue: Option<QueueDisplayState>,
 }
 
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
@@ -48,6 +66,7 @@ impl ToolCallComponent {
             live_output_chars: 0,
             workspace_dir: None,
             streaming_started_at: None,
+            queue: None,
         }
     }
 
@@ -57,7 +76,7 @@ impl ToolCallComponent {
             && !args.is_empty()
             && self.streaming_started_at.is_none()
         {
-            self.streaming_started_at = Some(std::time::Instant::now());
+            self.streaming_started_at = Some(Instant::now());
             changed = true;
         }
         if !changed {
@@ -80,6 +99,9 @@ impl ToolCallComponent {
         if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
             changed = true;
         }
+        if status != ToolStatusKind::Queued && self.queue.is_some() {
+            changed = true;
+        }
         if !changed {
             return false;
         }
@@ -88,9 +110,32 @@ impl ToolCallComponent {
             self.state.arguments = arguments;
         }
         self.state.status = status;
-        if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
-            self.streaming_started_at = Some(std::time::Instant::now());
+        if status != ToolStatusKind::Queued {
+            self.queue = None;
         }
+        if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
+            self.streaming_started_at = Some(Instant::now());
+        }
+        true
+    }
+
+    /// Mark this tool as admission-queued and refresh its live wait baseline.
+    ///
+    /// Queue updates after the tool has left `Queued` (Started/Finished) are ignored.
+    pub fn set_queued(&mut self, position: usize, waiting_ms: u64) -> bool {
+        if self.state.status != ToolStatusKind::Queued {
+            return false;
+        }
+        if self.queue.as_ref().is_some_and(|current| {
+            current.position == position && current.waiting_ms == waiting_ms
+        }) {
+            return false;
+        }
+        self.queue = Some(QueueDisplayState {
+            position,
+            waiting_ms,
+            observed_at: Instant::now(),
+        });
         true
     }
 
@@ -140,7 +185,8 @@ impl ToolCallComponent {
             || !self.live_output.is_empty()
             || self.dropped_live_output_lines != 0
             || self.live_output_chars != 0
-            || self.streaming_started_at.is_some();
+            || self.streaming_started_at.is_some()
+            || self.queue.is_some();
         if !changed {
             return false;
         }
@@ -152,6 +198,7 @@ impl ToolCallComponent {
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
         self.streaming_started_at = None;
+        self.queue = None;
         true
     }
 
@@ -163,7 +210,8 @@ impl ToolCallComponent {
             || !self.live_output.is_empty()
             || self.dropped_live_output_lines != 0
             || self.live_output_chars != 0
-            || self.streaming_started_at.is_some();
+            || self.streaming_started_at.is_some()
+            || self.queue.is_some();
         if !changed {
             return false;
         }
@@ -175,6 +223,7 @@ impl ToolCallComponent {
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
         self.streaming_started_at = None;
+        self.queue = None;
         true
     }
 
@@ -235,12 +284,17 @@ impl ToolCallComponent {
             ToolStatusKind::Succeeded | ToolStatusKind::Failed | ToolStatusKind::Cancelled => {
                 Finalization::Finalized
             }
-            ToolStatusKind::Pending | ToolStatusKind::Running => Finalization::Live,
+            ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running => {
+                Finalization::Live
+            }
         }
     }
 
     #[must_use]
     pub fn has_visible_animation(&self) -> bool {
+        if self.state.status == ToolStatusKind::Queued {
+            return true;
+        }
         is_pending_or_running(self.state.status)
             && is_file_write_tool(&self.state.name)
             && self.streaming_started_at.is_some()
@@ -263,7 +317,9 @@ impl Component for ToolCallComponent {
             ToolStatusKind::Succeeded | ToolStatusKind::Failed | ToolStatusKind::Cancelled => {
                 Finalization::Finalized
             }
-            ToolStatusKind::Pending | ToolStatusKind::Running => Finalization::Live,
+            ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running => {
+                Finalization::Live
+            }
         }
     }
 }
@@ -298,6 +354,16 @@ impl ToolCallComponent {
                 " · ~{} tok · {}m",
                 crate::transcript::tool_renderers::format_tool_token_count(tokens),
                 elapsed
+            );
+            header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));
+        }
+        if self.state.status == ToolStatusKind::Queued
+            && let Some(queue) = &self.queue
+        {
+            let chip = format!(
+                " · #{} · waiting {}",
+                queue.position,
+                format_elapsed(queue.elapsed_ms() / 1000)
             );
             header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));
         }

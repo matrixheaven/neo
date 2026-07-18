@@ -211,9 +211,9 @@ fn start_bash_frame(status_dir: &std::path::Path, task_id: &str, command: &str) 
         "limits": {
             "timeout_ms": 30_000,
             "background_timeout_ms": 1_800_000,
-            "max_parallelism": 4,
-            "max_descendant_processes": 32,
-            "max_tree_memory_percent": 25,
+            "max_command_parallelism": 4,
+            "max_command_descendant_processes": 32,
+            "max_command_memory_percent": 25,
             "max_output_bytes": 65_536,
             "max_background_log_bytes": 10_485_760
         },

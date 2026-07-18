@@ -82,7 +82,7 @@ From tool call initiation to execution, Neo short-circuits in the following orde
 4. **Session cache (Layer 1)**: matches an exact key already approved this session → approved.
 5. **State-transition tools**: `ExitPlanMode` / `ExitGoalMode` require separate approval (even in Auto mode).
 6. **Yolo mode**: approves all remaining calls.
-7. **Safety classification**: safe commands are approved; dangerous commands force a dialog; default-approved tools (`Read`/`List`/`Grep`/`Find`/`Glob`/`TodoList`/`TaskList`/`TaskOutput`/`Skill`/`AskUserQuestion`) are approved.
+7. **Safety classification**: safe commands are approved; dangerous commands force a dialog; default-approved tools (`Read`/`List`/`Grep`/`Find`/`Glob`/`TodoList`/`TaskList`/`TaskOutput`/`Skill`/`AskUserQuestion`/`Sleep`) are approved.
 8. **Fallback**: pops the approval dialog, waiting for the user to choose Allow once / Allow for session / Allow for prefix / Reject.
 
 > Real-time: modes switched via `/ask`, `/auto`, `/yolo`, `/permissions` take effect immediately — there is no need to cancel the current turn; the next tool call will be evaluated against the new mode.

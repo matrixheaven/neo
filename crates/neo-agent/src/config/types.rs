@@ -221,19 +221,16 @@ pub(crate) struct FileRuntimeRetryConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FileRuntimeShellConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) foreground_timeout_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) background_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_active_commands: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_parallelism: Option<usize>,
+    pub(crate) max_command_parallelism: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_descendant_processes: Option<usize>,
+    pub(crate) max_command_descendant_processes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_tree_memory_percent: Option<u8>,
+    pub(crate) max_command_memory_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

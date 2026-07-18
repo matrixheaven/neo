@@ -82,7 +82,7 @@ neo --yolo
 4. **会话缓存（Layer 1）**：命中本会话已批准的精确键 → 放行。
 5. **状态转换工具**：`ExitPlanMode` / `ExitGoalMode` 需要独立审批（即使是 Auto 模式）。
 6. **Yolo 模式**：放行所有剩余调用。
-7. **安全分级**：安全命令放行；危险命令强制弹窗；默认审批工具（`Read`/`List`/`Grep`/`Find`/`Glob`/`TodoList`/`TaskList`/`TaskOutput`/`Skill`/`AskUserQuestion`）放行。
+7. **安全分级**：安全命令放行；危险命令强制弹窗；默认审批工具（`Read`/`List`/`Grep`/`Find`/`Glob`/`TodoList`/`TaskList`/`TaskOutput`/`Skill`/`AskUserQuestion`/`Sleep`）放行。
 8. **兜底**：弹出审批对话框，等待用户选择 Allow once / Allow for session / Allow for prefix / Reject。
 
 > 实时性：`/ask`、`/auto`、`/yolo`、`/permissions` 切换的模式会立刻生效——不需要取消当前 turn，下一次工具调用就会按新模式评估。

@@ -4775,7 +4775,7 @@ async fn runtime_emits_shell_finished_when_model_bash_times_out() {
             id: "tool_1".to_owned(),
             raw_arguments: json!({
                 "command": "printf before-timeout; sleep 5",
-                "timeout": 0
+                "timeout_secs": 1
             })
             .to_string(),
         },

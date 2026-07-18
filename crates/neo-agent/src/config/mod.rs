@@ -342,9 +342,12 @@ mod tests {
     fn config_defaults_shell_limits() {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
-        assert_eq!(config.runtime.shell.max_active_commands, 2);
-        assert_eq!(config.runtime.shell.background_timeout_secs, 1_800);
+        assert_eq!(config.runtime.shell.max_active_commands, 4);
+        assert_eq!(config.runtime.shell.max_command_parallelism, 4);
+        assert_eq!(config.runtime.shell.max_command_descendant_processes, 32);
+        assert_eq!(config.runtime.shell.max_command_memory_percent, 25);
         assert_eq!(config.runtime.shell.max_output_bytes, 65_536);
+        assert_eq!(config.runtime.shell.max_background_log_bytes, 10_485_760);
         let task_suffix = std::path::Path::new("agents").join("main").join("tasks");
         assert!(
             config
@@ -373,36 +376,81 @@ mod tests {
             r"
 [runtime.shell]
 max_active_commands = 1
-max_parallelism = 2
+max_command_parallelism = 2
 ",
         );
         let config = load_config(config_path, project_dir);
         assert_eq!(config.runtime.shell.max_active_commands, 1);
-        assert_eq!(config.runtime.shell.max_parallelism, 2);
-        assert_eq!(config.runtime.shell.background_timeout_secs, 1_800);
+        assert_eq!(config.runtime.shell.max_command_parallelism, 2);
     }
 
     #[test]
-    fn config_rejects_shell_limits_that_round_static_memory_to_zero() {
+    fn runtime_shell_uses_canonical_per_command_limits() {
         let (_temp, config_path, project_dir) = temp_project_config(
-            r"
-[runtime.shell]
-max_active_commands = 51
-",
+            "[runtime.shell]\n\
+             max_active_commands = 6\n\
+             max_command_parallelism = 8\n\
+             max_command_descendant_processes = 40\n\
+             max_command_memory_percent = 30\n",
         );
-        let error = AppConfig::load(ConfigOverrides {
-            config_path: Some(config_path),
-            yolo: false,
-            auto: false,
-            trust_store: None,
-            project_dir: Some(project_dir),
-        })
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("runtime.shell.max_tree_memory_percent")
-        );
+        let config = load_config(config_path, project_dir);
+        assert_eq!(config.runtime.shell.max_active_commands, 6);
+        assert_eq!(config.runtime.shell.max_command_parallelism, 8);
+        assert_eq!(config.runtime.shell.max_command_descendant_processes, 40);
+        assert_eq!(config.runtime.shell.max_command_memory_percent, 30);
+    }
+
+    #[test]
+    fn runtime_shell_rejects_removed_limit_names() {
+        for key in [
+            "max_parallelism",
+            "max_descendant_processes",
+            "max_tree_memory_percent",
+        ] {
+            let input = format!("[runtime.shell]\n{key} = 1\n");
+            let (_temp, config_path, project_dir) = temp_project_config(&input);
+            let error = AppConfig::load(ConfigOverrides {
+                config_path: Some(config_path),
+                yolo: false,
+                auto: false,
+                trust_store: None,
+                project_dir: Some(project_dir),
+            })
+            .expect_err("removed key was accepted");
+            let message = format!("{error:#}");
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains("max_active_commands"), "{message}");
+            assert!(message.contains("max_command_parallelism"), "{message}");
+        }
+    }
+
+    #[test]
+    fn runtime_shell_rejects_removed_timeout_keys() {
+        for key in ["foreground_timeout_secs", "background_timeout_secs"] {
+            let input = format!("[runtime.shell]\n{key} = 1\n");
+            let (_temp, config_path, project_dir) = temp_project_config(&input);
+            let error = AppConfig::load(ConfigOverrides {
+                config_path: Some(config_path),
+                yolo: false,
+                auto: false,
+                trust_store: None,
+                project_dir: Some(project_dir),
+            })
+            .expect_err("removed timeout key was accepted");
+            let message = format!("{error:#}");
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains("max_active_commands"), "{message}");
+            assert!(message.contains("max_command_parallelism"), "{message}");
+        }
+    }
+
+    #[test]
+    fn config_allows_capacity_larger_than_per_command_memory_percent() {
+        let (_temp, config_path, project_dir) =
+            temp_project_config("[runtime.shell]\nmax_active_commands = 51\n");
+        let config = load_config(config_path, project_dir);
+        assert_eq!(config.runtime.shell.max_active_commands, 51);
+        assert_eq!(config.runtime.shell.max_command_memory_percent, 25);
     }
 
     #[test]

@@ -372,6 +372,7 @@ fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
             | "TaskOutput"
             | "Skill"
             | "AskUserQuestion"
+            | "Sleep"
     )
 }
 
@@ -1020,5 +1021,15 @@ mod tests {
         let preparation = permission_preparation_for_mode(&config, &call, &arguments);
 
         assert!(matches!(preparation, PermissionPreparation::Deny(_)));
+    }
+
+    #[test]
+    fn sleep_is_default_approved() {
+        let call = AgentToolCall {
+            id: "call-sleep".into(),
+            name: "Sleep".into(),
+            raw_arguments: r#"{"duration_seconds":1,"reason":"wait"}"#.into(),
+        };
+        assert!(is_default_approved_tool(&call));
     }
 }

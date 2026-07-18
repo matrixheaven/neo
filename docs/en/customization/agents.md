@@ -48,10 +48,10 @@ The four built-in roles are defined by `AgentProfile::for_role`, each with its o
 
 | Role | String | Tool set | Permission policy | When to use |
 | --- | --- | --- | --- | --- |
-| **Coder** | `coder` | Read/List/Grep/Find/Glob/Bash/Write/Edit/TodoList | Full access (shell + file write) | Implementation tasks; the default choice |
-| **Explorer** | `explorer` | Read/List/Grep/Find/Glob/Bash (read-only) | Read-only shell, no writes | Read-only code exploration; can spawn multiple |
-| **Planner** | `planner` | Read/List/Grep/Find/Glob | No shell, no writes | Implementation planning before writing code |
-| **Reviewer** | `reviewer` | Read/List/Grep/Find/Glob/Bash (read-only) | Read-only shell, no writes | Read-only review after changes |
+| **Coder** | `coder` | Read/List/Grep/Find/Glob/Bash/Write/Edit/TodoList/Sleep | Full access (shell + file write) | Implementation tasks; the default choice |
+| **Explorer** | `explorer` | Read/List/Grep/Find/Glob/Bash (read-only)/Sleep | Read-only shell, no writes | Read-only code exploration; can spawn multiple |
+| **Planner** | `planner` | Read/List/Grep/Find/Glob/Sleep | No shell, no writes | Implementation planning before writing code |
+| **Reviewer** | `reviewer` | Read/List/Grep/Find/Glob/Bash (read-only)/Sleep | Read-only shell, no writes | Read-only review after changes |
 
 Bash for Explorer / Reviewer only permits read-only commands (`ls`, `rg`, `git status/diff/log/show`, etc.); file-writing tools are unavailable. Each role's "when to use" hint is embedded into the tool schema to guide the model in choosing correctly.
 

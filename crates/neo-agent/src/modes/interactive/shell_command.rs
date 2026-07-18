@@ -13,8 +13,7 @@ pub(super) struct ShellRunRequest {
     pub(super) id: String,
     pub(super) command: String,
     pub(super) cwd: PathBuf,
-    pub(super) foreground_timeout: Duration,
-    pub(super) background_timeout: Duration,
+    pub(super) timeout: Option<Duration>,
     pub(super) max_output_bytes: usize,
     pub(super) cancel_token: CancellationToken,
     pub(super) background_tasks: neo_agent_core::tools::BackgroundTaskManager,
@@ -106,8 +105,7 @@ impl InteractiveController {
             id: id.clone(),
             command: command.clone(),
             cwd: self.workspace_root.clone(),
-            foreground_timeout: Duration::from_secs(shell_limits.foreground_timeout_secs),
-            background_timeout: Duration::from_secs(shell_limits.background_timeout_secs),
+            timeout: None,
             max_output_bytes: shell_limits.max_output_bytes,
             cancel_token: cancel_token.clone(),
             background_tasks: background_tasks.clone(),
@@ -116,13 +114,9 @@ impl InteractiveController {
         };
         let task = tokio::spawn((self.shell_driver)(request));
         self.tui.chrome_mut().set_shell_running(true);
-        self.apply_turn_event(AgentEvent::ShellCommandStarted {
-            turn: 0,
-            id: id.clone(),
-            command: command.clone(),
-            cwd: self.workspace_root.clone(),
-            origin: ShellCommandOrigin::UserShellMode,
-        });
+        // ShellCommandStarted is owned by the admission callback inside the shell
+        // driver so immediate grants never emit a synthetic Queued first, and
+        // waiters emit Queued/Updated before Started.
         self.active_shell_command = Some(RunningShellCommand {
             id,
             command,

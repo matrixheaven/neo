@@ -162,6 +162,18 @@ pub enum AgentEvent {
         name: String,
         arguments: serde_json::Value,
     },
+    ToolExecutionQueued {
+        turn: u32,
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecutionQueueUpdated {
+        turn: u32,
+        id: String,
+        position: usize,
+        waiting_ms: u64,
+    },
     ToolExecutionFinished {
         turn: u32,
         id: String,
@@ -226,6 +238,19 @@ pub enum AgentEvent {
         command: String,
         cwd: PathBuf,
         origin: ShellCommandOrigin,
+    },
+    ShellCommandQueued {
+        turn: u32,
+        id: String,
+        command: String,
+        cwd: PathBuf,
+        origin: ShellCommandOrigin,
+    },
+    ShellCommandQueueUpdated {
+        turn: u32,
+        id: String,
+        position: usize,
+        waiting_ms: u64,
     },
     ShellCommandFinished {
         turn: u32,

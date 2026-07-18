@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use neo_agent_core::{BackgroundTaskManager, ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
@@ -86,7 +84,7 @@ async fn read_allows_symlink_to_external_file() {
 }
 
 #[tokio::test]
-async fn bash_requires_permission_and_honors_timeout() {
+async fn bash_requires_permission_and_rejects_zero_timeout_secs() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let denied_context = ToolContext::new(workspace.path())
@@ -107,8 +105,7 @@ async fn bash_requires_permission_and_honors_timeout() {
 
     let allowed_context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_access(ToolAccess::all())
-        .with_bash_timeout(Duration::from_secs(5));
+        .with_access(ToolAccess::all());
 
     let capped = registry
         .run(
@@ -118,18 +115,28 @@ async fn bash_requires_permission_and_honors_timeout() {
         )
         .await
         .expect("bash should run");
-    assert!(capped.content.contains("1234"));
-    assert!(capped.content.contains("[output truncated]"));
+    assert!(
+        capped.content.contains("[output truncated]"),
+        "unexpected bash content: {capped:?}"
+    );
+    assert!(
+        capped
+            .details
+            .as_ref()
+            .and_then(|details| details["truncated"].as_bool())
+            .unwrap_or(false),
+        "expected truncated output details: {capped:?}"
+    );
 
-    let timed_out = registry
+    let invalid = registry
         .run(
             "Bash",
             &allowed_context,
-            json!({ "command": "sleep 1", "timeout": 0 }),
+            json!({ "command": "sleep 1", "timeout_secs": 0 }),
         )
         .await
-        .expect_err("bash should time out");
-    assert!(matches!(timed_out, ToolError::CommandTimedOut { .. }));
+        .expect_err("zero timeout_secs should be rejected");
+    assert!(matches!(invalid, ToolError::InvalidInput { .. }));
 }
 
 #[tokio::test]

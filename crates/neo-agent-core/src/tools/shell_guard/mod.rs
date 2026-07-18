@@ -3,16 +3,15 @@ mod guardian;
 mod output;
 mod process_tree;
 mod protocol;
+mod scheduler;
 mod status;
 mod terminal_guard;
 
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -25,6 +24,10 @@ pub(crate) use client::{
 };
 pub use guardian::run_process_guard;
 pub(crate) use output::TaggedOutput;
+pub use scheduler::{
+    ShellAdmissionCallback, ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest,
+};
+pub(crate) use scheduler::{ShellCommandPermit, ShellScheduler};
 pub(crate) use status::{GuardStatus, GuardStatusKind};
 
 /// Removes prior Neo runtime instances only after every running task has a
@@ -83,7 +86,6 @@ fn runtime_instance_is_terminal(path: &Path) -> std::io::Result<bool> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceLimitCause {
-    ActiveCommands,
     ProcessCount,
     TreeMemory,
     SamplerUnavailable,
@@ -93,7 +95,6 @@ impl ResourceLimitCause {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ActiveCommands => "active_commands",
             Self::ProcessCount => "process_count",
             Self::TreeMemory => "tree_memory",
             Self::SamplerUnavailable => "sampler_unavailable",
@@ -110,23 +111,20 @@ pub struct ResourceLimitDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuardLimits {
-    pub timeout_ms: u64,
-    pub background_timeout_ms: u64,
-    pub max_parallelism: usize,
-    pub max_descendant_processes: usize,
-    pub max_tree_memory_percent: u8,
+    pub timeout_ms: Option<u64>,
+    pub max_command_parallelism: usize,
+    pub max_command_descendant_processes: usize,
+    pub max_command_memory_percent: u8,
     pub max_output_bytes: usize,
     pub max_background_log_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellLimits {
-    pub foreground_timeout_secs: u64,
-    pub background_timeout_secs: u64,
     pub max_active_commands: usize,
-    pub max_parallelism: usize,
-    pub max_descendant_processes: usize,
-    pub max_tree_memory_percent: u8,
+    pub max_command_parallelism: usize,
+    pub max_command_descendant_processes: usize,
+    pub max_command_memory_percent: u8,
     pub max_output_bytes: usize,
     pub max_background_log_bytes: u64,
 }
@@ -134,12 +132,10 @@ pub struct ShellLimits {
 impl Default for ShellLimits {
     fn default() -> Self {
         Self {
-            foreground_timeout_secs: 600,
-            background_timeout_secs: 1_800,
-            max_active_commands: 2,
-            max_parallelism: 4,
-            max_descendant_processes: 64,
-            max_tree_memory_percent: 50,
+            max_active_commands: 4,
+            max_command_parallelism: 4,
+            max_command_descendant_processes: 32,
+            max_command_memory_percent: 25,
             max_output_bytes: 65_536,
             max_background_log_bytes: 10_485_760,
         }
@@ -162,20 +158,10 @@ impl ShellLimitsError {
 
 impl ShellLimits {
     pub fn validate(self) -> Result<(), ShellLimitsError> {
-        for (key, value) in [
-            (
-                "runtime.shell.foreground_timeout_secs",
-                self.foreground_timeout_secs,
-            ),
-            (
-                "runtime.shell.background_timeout_secs",
-                self.background_timeout_secs,
-            ),
-            (
-                "runtime.shell.max_background_log_bytes",
-                self.max_background_log_bytes,
-            ),
-        ] {
+        for (key, value) in [(
+            "runtime.shell.max_background_log_bytes",
+            self.max_background_log_bytes,
+        )] {
             if value == 0 {
                 return Err(ShellLimitsError {
                     key,
@@ -189,10 +175,13 @@ impl ShellLimits {
                 "runtime.shell.max_active_commands",
                 self.max_active_commands,
             ),
-            ("runtime.shell.max_parallelism", self.max_parallelism),
             (
-                "runtime.shell.max_descendant_processes",
-                self.max_descendant_processes,
+                "runtime.shell.max_command_parallelism",
+                self.max_command_parallelism,
+            ),
+            (
+                "runtime.shell.max_command_descendant_processes",
+                self.max_command_descendant_processes,
             ),
             ("runtime.shell.max_output_bytes", self.max_output_bytes),
         ] {
@@ -204,22 +193,10 @@ impl ShellLimits {
             }
         }
 
-        if self.max_tree_memory_percent == 0 || self.max_tree_memory_percent > 100 {
+        if self.max_command_memory_percent == 0 || self.max_command_memory_percent > 100 {
             return Err(ShellLimitsError {
-                key: "runtime.shell.max_tree_memory_percent",
+                key: "runtime.shell.max_command_memory_percent",
                 message: "must be between 1 and 100",
-            });
-        }
-        if self.max_descendant_processes < self.max_active_commands {
-            return Err(ShellLimitsError {
-                key: "runtime.shell.max_descendant_processes",
-                message: "must be at least max_active_commands",
-            });
-        }
-        if usize::from(self.max_tree_memory_percent) < self.max_active_commands {
-            return Err(ShellLimitsError {
-                key: "runtime.shell.max_tree_memory_percent",
-                message: "must be at least max_active_commands",
             });
         }
         if u64::try_from(self.max_output_bytes).unwrap_or(u64::MAX) > u64::from(u32::MAX) {
@@ -232,24 +209,6 @@ impl ShellLimits {
     }
 
     #[must_use]
-    pub const fn per_command_descendants(self) -> usize {
-        self.max_descendant_processes / self.max_active_commands
-    }
-
-    #[must_use]
-    pub fn per_command_memory_percent(self) -> u8 {
-        u8::try_from(usize::from(self.max_tree_memory_percent) / self.max_active_commands)
-            .unwrap_or(1)
-    }
-
-    #[must_use]
-    pub fn clamp_foreground_timeout(self, requested: Option<Duration>) -> Duration {
-        requested
-            .unwrap_or_else(|| Duration::from_secs(self.foreground_timeout_secs))
-            .min(Duration::from_secs(self.foreground_timeout_secs))
-    }
-
-    #[must_use]
     pub fn clamp_output_bytes(self, requested: Option<usize>) -> usize {
         requested
             .unwrap_or(self.max_output_bytes)
@@ -257,10 +216,40 @@ impl ShellLimits {
     }
 }
 
+#[must_use]
+pub fn format_resource_limit(detail: Option<&ResourceLimitDetail>) -> String {
+    match detail {
+        Some(ResourceLimitDetail {
+            cause: ResourceLimitCause::ProcessCount,
+            configured: Some(limit),
+            observed: Some(observed),
+        }) => format!(
+            "Resource limit exceeded: command descendants {observed} > {limit}. \
+             Reduce per-command parallelism or raise \
+             runtime.shell.max_command_descendant_processes."
+        ),
+        Some(ResourceLimitDetail {
+            cause: ResourceLimitCause::TreeMemory,
+            configured: Some(limit),
+            observed: Some(observed),
+        }) => format!(
+            "Resource limit exceeded: command tree memory {observed}% > {limit}%. \
+             Reduce the workload or raise runtime.shell.max_command_memory_percent."
+        ),
+        Some(ResourceLimitDetail {
+            cause: ResourceLimitCause::SamplerUnavailable,
+            ..
+        }) => "Resource monitoring unavailable; the command was stopped because Neo \
+               could not enforce shell limits. Check platform process monitoring and retry."
+            .to_owned(),
+        _ => "Resource limit exceeded.".to_owned(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShellRuntime {
     limits: ShellLimits,
-    active: Arc<AtomicUsize>,
+    pub(crate) scheduler: Arc<ShellScheduler>,
     guardian_executable: Arc<PathBuf>,
     runtime_root: Arc<PathBuf>,
     terminal_sessions: Arc<tokio::sync::Mutex<HashMap<String, TerminalClientSession>>>,
@@ -336,7 +325,7 @@ impl ShellRuntime {
     pub fn new(limits: ShellLimits, guardian_executable: PathBuf, runtime_root: PathBuf) -> Self {
         Self {
             limits,
-            active: Arc::new(AtomicUsize::new(0)),
+            scheduler: ShellScheduler::new(limits.max_active_commands),
             guardian_executable: Arc::new(guardian_executable),
             runtime_root: Arc::new(runtime_root),
             terminal_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -344,30 +333,16 @@ impl ShellRuntime {
     }
 
     #[cfg(test)]
-    fn for_tests(limits: ShellLimits) -> Self {
+    pub(crate) fn for_tests(limits: ShellLimits) -> Self {
         Self::new(limits, PathBuf::from("neo"), PathBuf::from("runtime"))
     }
 
-    pub fn try_acquire(&self) -> Result<ShellCommandPermit, ResourceLimitCause> {
-        let mut active = self.active.load(Ordering::Acquire);
-        loop {
-            if active >= self.limits.max_active_commands {
-                return Err(ResourceLimitCause::ActiveCommands);
-            }
-            match self.active.compare_exchange_weak(
-                active,
-                active + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Ok(ShellCommandPermit {
-                        active: Arc::clone(&self.active),
-                    });
-                }
-                Err(current) => active = current,
-            }
-        }
+    pub(crate) async fn acquire(
+        &self,
+        request: ShellAdmissionRequest,
+        callback: Option<ShellAdmissionCallback>,
+    ) -> ShellCommandPermit {
+        self.scheduler.acquire(request, callback).await
     }
 
     #[must_use]
@@ -386,13 +361,13 @@ impl ShellRuntime {
     }
 
     #[must_use]
-    pub fn guard_limits(&self, timeout: Duration, max_output_bytes: usize) -> GuardLimits {
+    pub fn guard_limits(&self, timeout: Option<Duration>, max_output_bytes: usize) -> GuardLimits {
         GuardLimits {
-            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            background_timeout_ms: self.limits.background_timeout_secs.saturating_mul(1_000),
-            max_parallelism: self.limits.max_parallelism,
-            max_descendant_processes: self.limits.per_command_descendants(),
-            max_tree_memory_percent: self.limits.per_command_memory_percent(),
+            timeout_ms: timeout
+                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+            max_command_parallelism: self.limits.max_command_parallelism,
+            max_command_descendant_processes: self.limits.max_command_descendant_processes,
+            max_command_memory_percent: self.limits.max_command_memory_percent,
             max_output_bytes: max_output_bytes.min(self.limits.max_output_bytes),
             max_background_log_bytes: self.limits.max_background_log_bytes,
         }
@@ -411,15 +386,14 @@ impl ShellRuntime {
     }
 }
 
-#[derive(Debug)]
-pub struct ShellCommandPermit {
-    active: Arc<AtomicUsize>,
+fn command_deadline(timeout_ms: Option<u64>) -> Option<Pin<Box<tokio::time::Sleep>>> {
+    timeout_ms.map(|millis| Box::pin(tokio::time::sleep(Duration::from_millis(millis))))
 }
 
-impl Drop for ShellCommandPermit {
-    fn drop(&mut self) {
-        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "shell command permit count underflow");
+async fn wait_for_deadline(deadline: &mut Option<Pin<Box<tokio::time::Sleep>>>) {
+    match deadline {
+        Some(deadline) => deadline.as_mut().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -489,23 +463,18 @@ mod tests {
     }
 
     #[test]
-    fn limits_allocate_static_forest_budget() {
-        let limits = ShellLimits::default();
-        assert_eq!(limits.per_command_descendants(), 32);
-        assert_eq!(limits.per_command_memory_percent(), 25);
+    fn limits_are_direct_per_command_budgets() {
+        let limits = ShellLimits {
+            max_active_commands: 8,
+            max_command_descendant_processes: 32,
+            max_command_memory_percent: 25,
+            ..ShellLimits::default()
+        };
+        let runtime = ShellRuntime::for_tests(limits);
+        let guard = runtime.guard_limits(Some(Duration::from_secs(60)), limits.max_output_bytes);
+        assert_eq!(guard.max_command_descendant_processes, 32);
+        assert_eq!(guard.max_command_memory_percent, 25);
+        assert_eq!(guard.timeout_ms, Some(60_000));
     }
 
-    #[test]
-    fn third_command_is_rejected_without_queueing() {
-        let runtime = ShellRuntime::for_tests(ShellLimits::default());
-        let first = runtime.try_acquire().unwrap();
-        let second = runtime.try_acquire().unwrap();
-        assert_eq!(
-            runtime.try_acquire().unwrap_err(),
-            ResourceLimitCause::ActiveCommands
-        );
-        drop(first);
-        assert!(runtime.try_acquire().is_ok());
-        drop(second);
     }
-}

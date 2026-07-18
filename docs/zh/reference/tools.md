@@ -20,8 +20,8 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 | 工具 | 用途 |
 | --- | --- |
-| `Bash` | 在工作区执行 `bash`（Windows 上为 Git Bash）命令，支持管道、后台任务、超时与取消。 |
-| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。 |
+| `Bash` | 在工作区执行 `bash`（Windows 上为 Git Bash）命令，支持管道、后台任务、可选 `timeout_secs` 与取消。省略 `timeout_secs` 表示不设超时。 |
+| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。`timeout_secs` 仅对 `mode=start` 有效；省略表示不设超时。 |
 
 ## 网络
 
@@ -65,8 +65,14 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | 工具 | 用途 |
 | --- | --- |
 | `TaskList` | 列出后台任务及其状态。 |
-| `TaskOutput` | 取回一个运行中或已完成后台任务的输出。 |
+| `TaskOutput` | 取回一个运行中或已完成后台任务的输出。等待已知任务完成时优先使用 `block=true`。 |
 | `TaskStop` | 停止运行中的后台任务。 |
+
+## 计时
+
+| 工具 | 用途 |
+| --- | --- |
+| `Sleep` | 仅用于真正的时间等待（`duration_seconds` 1..=3600），不启动 shell 命令、不占用 shell 准入。已知 agent/swarm 优先 `WaitDelegate`；已知后台任务优先 `TaskOutput` 且 `block=true`。 |
 
 ## 其他
 
@@ -85,7 +91,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 派生 agent（`Delegate` / `DelegateSwarm`）默认仅注册子集，由 `ToolRegistry::with_builtin_child_tools()` 构建：
 
-`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow`
+`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow` · `Sleep`
 
 外加 `AgentProfile::for_role` 按角色白名单过滤，调用方显式注册的自定义工具始终透传。
 

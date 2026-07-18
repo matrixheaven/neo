@@ -46,10 +46,12 @@ pub fn render_tool_group(
 ) -> Vec<Line> {
     let n = group.states.len();
     let unit = group_unit(&group.tool);
-    let any_running = group
-        .states
-        .iter()
-        .any(|s| matches!(s.status, ToolStatusKind::Pending | ToolStatusKind::Running));
+    let any_running = group.states.iter().any(|s| {
+        matches!(
+            s.status,
+            ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running
+        )
+    });
     let failed_count = group
         .states
         .iter()
@@ -173,7 +175,9 @@ fn group_verb_progressive(lower: &str) -> &'static str {
 /// status.
 fn per_file_tail(state: &ToolCallState, lower: &str) -> String {
     match state.status {
-        ToolStatusKind::Pending | ToolStatusKind::Running => " · reading…".to_owned(),
+        ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running => {
+            " · reading…".to_owned()
+        }
         ToolStatusKind::Failed => " · failed".to_owned(),
         ToolStatusKind::Cancelled => " · cancelled".to_owned(),
         ToolStatusKind::Succeeded => {

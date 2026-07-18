@@ -7077,6 +7077,42 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
 }
 
 #[test]
+fn replay_finalizes_dangling_shell_queue_without_restart() {
+    let mut transcript = TranscriptPane::new(80, 12);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: "call-1".to_owned(),
+            name: "Bash".to_owned(),
+        },
+        AgentEvent::ToolCallFinished {
+            turn: 1,
+            tool_call: neo_agent_core::AgentToolCall {
+                id: "call-1".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"cargo test"}"#.into(),
+            },
+        },
+        AgentEvent::ToolExecutionQueued {
+            turn: 1,
+            id: "call-1".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+        },
+    ]);
+    replay_session_into_transcript(&mut transcript, &loaded);
+    let rendered = transcript
+        .render_frame(80, 12)
+        .expect("render replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Interrupted when terminal exited"), "{rendered}");
+    assert!(!rendered.contains("Queued Bash"), "{rendered}");
+}
+
+#[test]
 fn replay_session_into_transcript_discards_historical_pending_approvals() {
     let mut transcript = TranscriptPane::new(80, 12);
     let approval = |id: &str| AgentEvent::ApprovalRequested {
@@ -8227,16 +8263,8 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
         .start_foreground_delegate_for_test("preserve delegate");
     let live_permission_mode = Arc::clone(&config.live_permission_mode);
     let workspace_policy = Arc::clone(&config.workspace_policy);
-    let first_shell_permit = config
-        .runtime
-        .shell_runtime
-        .try_acquire()
-        .expect("first shell permit");
-    let second_shell_permit = config
-        .runtime
-        .shell_runtime
-        .try_acquire()
-        .expect("second shell permit");
+    let original_shell = config.runtime.shell;
+    let original_runtime_root = config.runtime.shell_runtime.runtime_root().to_path_buf();
     fs::write(
         &config.config_path,
         "[runtime.shell]\nmax_active_commands = 3\n",
@@ -8266,10 +8294,12 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
     ));
     assert!(Arc::ptr_eq(&reloaded.workspace_policy, &workspace_policy));
     assert_eq!(reloaded.permission_mode, PermissionMode::Yolo);
-    assert_eq!(reloaded.runtime.shell.max_active_commands, 2);
+    // Live config refresh preserves the running ShellRuntime; shell-limit file
+    // changes take effect on the next Neo process start.
+    assert_eq!(reloaded.runtime.shell, original_shell);
     assert_eq!(
-        reloaded.runtime.shell_runtime.try_acquire().unwrap_err(),
-        neo_agent_core::tools::ResourceLimitCause::ActiveCommands
+        reloaded.runtime.shell_runtime.runtime_root(),
+        original_runtime_root.as_path()
     );
     assert_eq!(
         *reloaded
@@ -8283,7 +8313,6 @@ async fn refresh_config_preserves_live_task_and_multi_agent_state() {
         reloaded.project_trust,
         crate::trust::ProjectTrustState::NotRequired
     );
-    drop((first_shell_permit, second_shell_permit));
 }
 
 #[test]
@@ -13022,10 +13051,9 @@ async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
 }
 
 #[tokio::test]
-#[allow(clippy::duration_suboptimal_units)]
-async fn shell_mode_uses_spec_timeouts_for_user_commands() {
-    let observed_timeouts = Arc::new(std::sync::Mutex::new(None));
-    let captured_timeouts = Arc::clone(&observed_timeouts);
+async fn shell_mode_omits_execution_timeout_for_user_commands() {
+    let observed_timeout = Arc::new(std::sync::Mutex::new(Some(Duration::from_secs(1))));
+    let captured_timeout = Arc::clone(&observed_timeout);
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -13035,27 +13063,12 @@ async fn shell_mode_uses_spec_timeouts_for_user_commands() {
     );
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
-    let mut config = test_config(temp.path(), sessions_dir);
-    config.runtime.shell = ShellLimits {
-        foreground_timeout_secs: 120,
-        background_timeout_secs: 600,
-        ..ShellLimits::default()
-    };
-    config.runtime.shell_runtime = ShellRuntime::new(
-        config.runtime.shell,
-        config
-            .runtime
-            .shell_runtime
-            .guardian_executable()
-            .to_path_buf(),
-        config.runtime.shell_runtime.runtime_root().to_path_buf(),
-    );
+    let config = test_config(temp.path(), sessions_dir);
     controller.local_config = Some(config);
     controller.set_shell_driver(Arc::new(move |request| {
-        let captured_timeouts = Arc::clone(&captured_timeouts);
+        let captured_timeout = Arc::clone(&captured_timeout);
         Box::pin(async move {
-            *captured_timeouts.lock().expect("timeouts lock") =
-                Some((request.foreground_timeout, request.background_timeout));
+            *captured_timeout.lock().expect("timeout lock") = request.timeout;
             Ok(completed_shell_result(""))
         })
     }));
@@ -13071,8 +13084,8 @@ async fn shell_mode_uses_spec_timeouts_for_user_commands() {
         .expect("shell completes");
 
     assert_eq!(
-        *observed_timeouts.lock().expect("timeouts lock"),
-        Some((Duration::from_secs(120), Duration::from_secs(600)))
+        *observed_timeout.lock().expect("timeout lock"),
+        None
     );
 }
 

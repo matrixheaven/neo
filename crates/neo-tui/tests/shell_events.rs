@@ -86,3 +86,34 @@ fn replay_shell_command_message_preserves_truncated_marker() {
     let rendered = rendered(&mut pane);
     assert!(rendered.contains("[output truncated]"));
 }
+
+#[test]
+fn user_shell_queue_transitions_to_running_in_place() {
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.apply_agent_event(AgentEvent::ShellCommandQueued {
+        turn: 0,
+        id: "shell-1".to_owned(),
+        command: "whoami".to_owned(),
+        cwd: "/tmp".into(),
+        origin: ShellCommandOrigin::UserShellMode,
+    });
+    pane.apply_agent_event(AgentEvent::ShellCommandQueueUpdated {
+        turn: 0,
+        id: "shell-1".to_owned(),
+        position: 1,
+        waiting_ms: 3_000,
+    });
+    let queued = rendered(&mut pane);
+    assert!(queued.contains("#1 · waiting 3s"));
+    assert!(!queued.contains("ctrl+b to background"));
+    pane.apply_agent_event(AgentEvent::ShellCommandStarted {
+        turn: 0,
+        id: "shell-1".to_owned(),
+        command: "whoami".to_owned(),
+        cwd: "/tmp".into(),
+        origin: ShellCommandOrigin::UserShellMode,
+    });
+    let running = rendered(&mut pane);
+    assert_eq!(running.matches("$ whoami").count(), 1);
+    assert!(running.contains("ctrl+b to background"));
+}

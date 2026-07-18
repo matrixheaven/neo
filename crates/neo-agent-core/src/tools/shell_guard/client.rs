@@ -112,9 +112,10 @@ impl GuardianClient {
         command_text: String,
         cwd: &Path,
         status_dir: &Path,
-        timeout: Duration,
+        timeout: Option<Duration>,
         max_output_bytes: usize,
         stream_update: Option<ToolUpdateCallback>,
+        permit: ShellCommandPermit,
     ) -> Result<Self, ToolError> {
         Self::start(
             runtime,
@@ -128,10 +129,12 @@ impl GuardianClient {
             None,
             None,
             stream_update,
+            permit,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_terminal(
         runtime: &ShellRuntime,
         task_id: String,
@@ -140,6 +143,8 @@ impl GuardianClient {
         status_dir: &Path,
         cols: u16,
         rows: u16,
+        timeout: Option<Duration>,
+        permit: ShellCommandPermit,
     ) -> Result<Self, ToolError> {
         Self::start(
             runtime,
@@ -148,11 +153,12 @@ impl GuardianClient {
             command_text,
             cwd,
             status_dir,
-            Duration::from_secs(runtime.limits().background_timeout_secs),
+            timeout,
             runtime.limits().max_output_bytes,
             Some(cols),
             Some(rows),
             None,
+            permit,
         )
         .await
     }
@@ -165,11 +171,12 @@ impl GuardianClient {
         command_text: String,
         cwd: &Path,
         status_dir: &Path,
-        timeout: Duration,
+        timeout: Option<Duration>,
         max_output_bytes: usize,
         cols: Option<u16>,
         rows: Option<u16>,
         stream_update: Option<ToolUpdateCallback>,
+        permit: ShellCommandPermit,
     ) -> Result<Self, ToolError> {
         let stream_limit = max_output_bytes.min(runtime.limits().max_output_bytes);
         let (control, response, child, permit, guardian_pid, command_pid, command_start_id) =
@@ -185,6 +192,7 @@ impl GuardianClient {
                 cols,
                 rows,
                 stream_limit,
+                permit,
             })
             .await?;
 
@@ -221,11 +229,6 @@ impl GuardianClient {
             .send_control(|request_id| GuardRequest::Stop { request_id })
             .await;
         self.wait().await
-    }
-
-    pub(crate) async fn set_background_deadline(&self) -> Result<(), ToolError> {
-        self.send_control(|request_id| GuardRequest::SetBackgroundDeadline { request_id })
-            .await
     }
 
     pub(crate) async fn write_terminal(&self, data: &[u8]) -> Result<(), ToolError> {
@@ -368,11 +371,12 @@ struct GuardianStartArgs<'a> {
     command_text: String,
     cwd: &'a Path,
     status_dir: &'a Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
     max_output_bytes: usize,
     cols: Option<u16>,
     rows: Option<u16>,
     stream_limit: usize,
+    permit: ShellCommandPermit,
 }
 
 async fn spawn_guardian_and_handshake(
@@ -389,10 +393,7 @@ async fn spawn_guardian_and_handshake(
     ),
     ToolError,
 > {
-    let permit = args
-        .runtime
-        .try_acquire()
-        .map_err(|cause| ToolError::ResourceLimited { cause })?;
+    let permit = args.permit;
     std::fs::create_dir_all(args.status_dir)?;
     let mut child = Command::new(args.runtime.guardian_executable())
         .arg("__process-guard")

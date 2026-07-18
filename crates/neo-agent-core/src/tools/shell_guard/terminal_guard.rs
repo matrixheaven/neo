@@ -10,7 +10,6 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
     task::JoinHandle,
-    time::{Instant, Sleep},
 };
 
 #[cfg(windows)]
@@ -150,8 +149,7 @@ async fn run_terminal_supervision_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let deadline = tokio::time::sleep(Duration::from_millis(start.limits.timeout_ms));
-    tokio::pin!(deadline);
+    let mut deadline = super::command_deadline(start.limits.timeout_ms);
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
     let mut writer_poll = tokio::time::interval(Duration::from_millis(10));
@@ -175,7 +173,6 @@ where
                             terminal,
                             response_tx,
                             start,
-                            deadline.as_mut(),
                             &mut response_open,
                         ) {
                             break tuple;
@@ -184,7 +181,9 @@ where
                     Err(error) => break handle_terminal_request_error(&error, terminal)?,
                 }
             }
-            () = &mut deadline => break (GuardStatusKind::TimedOut, None, None, None),
+            () = super::wait_for_deadline(&mut deadline) => {
+                break (GuardStatusKind::TimedOut, None, None, None)
+            }
             _ = poll.tick() => {
                 if let Some(code) = terminal.try_wait()? {
                     break (status_kind_for_exit_code(code), Some(code), None, None);
@@ -228,7 +227,6 @@ fn handle_terminal_request(
     terminal: &mut GuardedTerminal,
     response_tx: &mpsc::Sender<GuardResponse>,
     start: &StartRequest,
-    mut deadline: std::pin::Pin<&mut Sleep>,
     response_open: &mut bool,
 ) -> Option<TerminalSupervisionBreak> {
     match request {
@@ -294,19 +292,6 @@ fn handle_terminal_request(
                 GuardStatusKind::Cancelled
             };
             Some((status, None, None, error))
-        }
-        GuardRequest::SetBackgroundDeadline { request_id } => {
-            deadline
-                .as_mut()
-                .reset(Instant::now() + Duration::from_millis(start.limits.background_timeout_ms));
-            send_response_or_close(
-                response_tx,
-                GuardResponse::Ack {
-                    request_id: *request_id,
-                },
-                response_open,
-            )
-            .map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
         }
         GuardRequest::Start { .. } => None,
     }
@@ -490,7 +475,7 @@ impl GuardedTerminal {
             "RAYON_NUM_THREADS",
         ] {
             if std::env::var_os(name).is_none() {
-                builder.env(name, start.limits.max_parallelism.to_string());
+                builder.env(name, start.limits.max_command_parallelism.to_string());
             }
         }
         builder.arg(command);

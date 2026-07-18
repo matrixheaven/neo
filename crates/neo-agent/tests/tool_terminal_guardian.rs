@@ -1,8 +1,8 @@
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use neo_agent_core::{
-    ResourceLimitCause, ShellLimits, ShellRuntime, ToolAccess, ToolContext, ToolError,
-    ToolRegistry, execute_model_bash_for_runtime,
+    ShellLimits, ShellRuntime, ToolAccess, ToolContext, ToolError, ToolRegistry,
+    execute_model_bash_for_runtime,
 };
 use serde_json::json;
 
@@ -15,6 +15,45 @@ fn guarded_context(workspace: &tempfile::TempDir, limits: ShellLimits) -> ToolCo
             PathBuf::from(env!("CARGO_BIN_EXE_neo")),
             workspace.path().join("runtime"),
         ))
+}
+
+#[tokio::test]
+async fn terminal_start_accepts_no_execution_deadline() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc",
+                "cols": 40,
+                "rows": 8
+            }),
+        )
+        .await
+        .expect("terminal start without timeout_secs");
+    let handle = started
+        .details
+        .as_ref()
+        .and_then(|details| details["handle"].as_str())
+        .expect("terminal handle")
+        .to_owned();
+    assert_eq!(
+        started.details.as_ref().unwrap()["status"],
+        "running",
+        "start without deadline should remain running"
+    );
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("stop no-deadline terminal");
 }
 
 #[tokio::test]
@@ -276,11 +315,22 @@ async fn bash_and_terminal_share_the_active_command_limit() {
         .expect("terminal start");
     let handle = started.details.as_ref().unwrap()["handle"]
         .as_str()
-        .unwrap();
+        .unwrap()
+        .to_owned();
 
-    let error = execute_model_bash_for_runtime(&context, json!({ "command": "printf second" }))
-        .await
-        .expect_err("Bash must share Terminal admission");
+    let queued = tokio::spawn({
+        let context = context.clone();
+        async move {
+            execute_model_bash_for_runtime(&context, json!({ "command": "printf second" })).await
+        }
+    });
+    for _ in 0..20 {
+        assert!(
+            !queued.is_finished(),
+            "bash must wait for terminal capacity"
+        );
+        tokio::task::yield_now().await;
+    }
     registry
         .run(
             "Terminal",
@@ -289,12 +339,119 @@ async fn bash_and_terminal_share_the_active_command_limit() {
         )
         .await
         .expect("terminal stop");
-    assert!(matches!(
-        error,
-        ToolError::ResourceLimited {
-            cause: ResourceLimitCause::ActiveCommands
+    let result = queued
+        .await
+        .expect("join queued bash")
+        .expect("queued bash after terminal release");
+    assert!(!result.is_error);
+    assert!(result.content.contains("second"));
+}
+
+#[tokio::test]
+async fn terminal_session_holds_background_permit_until_process_exit() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let limits = ShellLimits {
+        max_active_commands: 1,
+        ..ShellLimits::default()
+    };
+    let context = guarded_context(&workspace, limits);
+    let runtime_root = context.shell_runtime.runtime_root().to_path_buf();
+    let registry = ToolRegistry::with_builtin_tools();
+    // Finite process: Start returns immediately, but the session keeps its
+    // background permit until the process exits (not until Start returns).
+    let command = if cfg!(windows) {
+        "ping -n 4 127.0.0.1 >nul".to_owned()
+    } else {
+        "sleep 3".to_owned()
+    };
+
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": command,
+                "cols": 40,
+                "rows": 8
+            }),
+        )
+        .await
+        .expect("terminal start");
+    assert_eq!(
+        started.details.as_ref().unwrap()["status"],
+        "running",
+        "terminal start returns while the process still owns the permit"
+    );
+
+    for _ in 0..500 {
+        if count_running_markers(&runtime_root) >= 1 {
+            break;
         }
-    ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        count_running_markers(&runtime_root),
+        1,
+        "terminal process must occupy the only capacity slot after Start returns"
+    );
+
+    let queued = tokio::spawn({
+        let context = context.clone();
+        async move {
+            execute_model_bash_for_runtime(&context, json!({ "command": "printf after-exit" }))
+                .await
+        }
+    });
+
+    // While the Terminal process is still running, Bash must wait even though
+    // Terminal Start already returned its handle. Sample for ~1s of sustained hold.
+    for _ in 0..20 {
+        assert_eq!(
+            count_running_markers(&runtime_root),
+            1,
+            "terminal must keep its running marker (and permit) after Start returns"
+        );
+        assert!(
+            !queued.is_finished(),
+            "bash must wait until the terminal process exits and drops its permit"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(10), queued)
+        .await
+        .expect("bash should start after terminal process exit")
+        .expect("join queued bash")
+        .expect("queued bash after natural terminal exit");
+    assert!(!result.is_error);
+    assert!(
+        result.content.contains("after-exit"),
+        "bash should run only after terminal process release: {}",
+        result.content
+    );
+}
+
+fn count_running_markers(runtime_root: &std::path::Path) -> usize {
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(runtime_root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            count += count_running_markers(&path);
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".running.json"))
+        {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

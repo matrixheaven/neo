@@ -6,7 +6,7 @@ use neo_agent_core::multi_agent::{
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed,
+    MAX_CHILD_TOOL_ROWS, child_activity_view, child_tool_status_text, compact_chars, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
     render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
@@ -218,7 +218,12 @@ impl SwarmCardComponent {
                             child.agent.tool_count,
                             format_elapsed(elapsed.as_secs()),
                             child_token_stats(&child.agent),
-                            child_activity_summary(&child.agent, &child.item, waiting),
+                            child_activity_summary(
+                                &child.agent,
+                                &child.item,
+                                waiting,
+                                self.now_ms,
+                            ),
                         ),
                         primary,
                     ),
@@ -332,7 +337,13 @@ impl SwarmCardComponent {
                 let indent = format!("  {continuation} ");
                 let view = child_activity_view(&child.agent, MAX_CHILD_TOOL_ROWS);
                 for tool in &view.tools {
-                    lines.extend(render_child_tool_row(tool, width, &indent, theme));
+                    lines.extend(render_child_tool_row(
+                        tool,
+                        width,
+                        &indent,
+                        theme,
+                        self.now_ms,
+                    ));
                 }
                 if let Some(thinking) = view.thinking.as_deref() {
                     lines.extend(render_child_thinking(thinking, width, &indent, theme));
@@ -522,14 +533,20 @@ fn child_token_stats(agent: &AgentSnapshot) -> String {
     parts.join(" · ")
 }
 
-fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: bool) -> String {
+fn child_activity_summary(
+    agent: &AgentSnapshot,
+    fallback_item: &str,
+    waiting: bool,
+    now_ms: Option<u64>,
+) -> String {
     if agent.state == AgentLifecycleState::Queued {
         if !agent.task_title.is_empty() {
             return compact_chars(&one_line(&agent.task_title), 96);
         }
         return compact_chars(&one_line(fallback_item), 96);
     }
-    if let Some((name, summary)) = agent
+    let now = now_ms.unwrap_or_else(|| child_activity_time_ms(agent));
+    if let Some((name, summary, phase)) = agent
         .activity
         .iter()
         .rev()
@@ -539,14 +556,20 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: b
                 summary,
                 phase,
                 ..
-            } if *phase == AgentToolActivityPhase::Ongoing => {
-                Some((name.as_str(), summary.as_deref()))
+            } if matches!(
+                phase,
+                AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
+            ) =>
+            {
+                Some((name.as_str(), summary.as_deref(), *phase))
             }
             AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
         })
     {
-        let verb = if waiting { "waiting on" } else { "Using" };
-        return compact_chars(&format_tool_summary(verb, name, summary), 96);
+        if matches!(phase, AgentToolActivityPhase::Ongoing) && waiting {
+            return compact_chars(&format_tool_summary("waiting on", name, summary), 96);
+        }
+        return compact_chars(&child_tool_status_text(name, summary, phase, now), 96);
     }
     if waiting {
         return "waiting for activity".to_owned();
@@ -566,27 +589,28 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str, waiting: b
             return compact_chars(&one_line(text), 96);
         }
     }
-    if let Some((name, summary)) = agent
+    if let Some((name, summary, phase)) = agent
         .activity
         .iter()
         .rev()
         .find_map(|entry| match &entry.kind {
-            AgentActivityKind::Tool { name, summary, .. } => {
-                Some((name.as_str(), summary.as_deref()))
-            }
+            AgentActivityKind::Tool {
+                name,
+                summary,
+                phase,
+                ..
+            } => Some((name.as_str(), summary.as_deref(), *phase)),
             AgentActivityKind::Text { .. } => None,
         })
     {
-        return compact_chars(&format_tool_summary("Used", name, summary), 96);
+        return compact_chars(&child_tool_status_text(name, summary, phase, now), 96);
     }
     let view = child_activity_view(agent, 1);
     if let Some(tool) = view.tools.last() {
-        let verb = if tool.phase == AgentToolActivityPhase::Ongoing {
-            "Using"
-        } else {
-            "Used"
-        };
-        return compact_chars(&format_tool_summary(verb, tool.name, tool.summary), 96);
+        return compact_chars(
+            &child_tool_status_text(tool.name, tool.summary, tool.phase, now),
+            96,
+        );
     }
     if let Some(final_text) = view.final_text {
         return compact_chars(&one_line(&final_text), 96);

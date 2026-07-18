@@ -48,10 +48,10 @@ Neo 可以把一个任务派生（delegate）给一个或多个独立的子 Agen
 
 | 角色 | 字符串 | 工具集 | 权限策略 | 何时用 |
 | --- | --- | --- | --- | --- |
-| **Coder** | `coder` | Read/List/Grep/Find/Glob/Bash/Write/Edit/TodoList | 完全访问（shell + 写文件） | 实现类任务，默认选择 |
-| **Explorer** | `explorer` | Read/List/Grep/Find/Glob/Bash（只读） | shell 只读、禁写 | 只读代码勘探，可并发多个 |
-| **Planner** | `planner` | Read/List/Grep/Find/Glob | 无 shell、禁写 | 写代码前的实现规划 |
-| **Reviewer** | `reviewer` | Read/List/Grep/Find/Glob/Bash（只读） | shell 只读、禁写 | 改动后的只读评审 |
+| **Coder** | `coder` | Read/List/Grep/Find/Glob/Bash/Write/Edit/TodoList/Sleep | 完全访问（shell + 写文件） | 实现类任务，默认选择 |
+| **Explorer** | `explorer` | Read/List/Grep/Find/Glob/Bash（只读）/Sleep | shell 只读、禁写 | 只读代码勘探，可并发多个 |
+| **Planner** | `planner` | Read/List/Grep/Find/Glob/Sleep | 无 shell、禁写 | 写代码前的实现规划 |
+| **Reviewer** | `reviewer` | Read/List/Grep/Find/Glob/Bash（只读）/Sleep | shell 只读、禁写 | 改动后的只读评审 |
 
 Explorer / Reviewer 的 Bash 仅允许只读命令（`ls`、`rg`、`git status/diff/log/show` 等），写文件类工具不可用。角色的"何时用"提示会拼到工具 schema 里，引导模型正确选型。
 

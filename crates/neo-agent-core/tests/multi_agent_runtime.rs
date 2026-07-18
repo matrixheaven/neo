@@ -1821,6 +1821,75 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
     assert_eq!(finished.tool_count, 1);
 }
 
+#[test]
+fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
+    for starts_queued in [false, true] {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("run tests");
+        let started_at = std::time::Instant::now();
+        let mut events = Vec::new();
+        if starts_queued {
+            events.extend([
+                AgentEvent::ToolExecutionQueued {
+                    turn: 1,
+                    id: "call-1".to_owned(),
+                    name: "Bash".to_owned(),
+                    arguments: json!({"command": "cargo test"}),
+                },
+                AgentEvent::ToolExecutionQueueUpdated {
+                    turn: 1,
+                    id: "call-1".to_owned(),
+                    position: 2,
+                    waiting_ms: 18_000,
+                },
+            ]);
+        }
+        events.extend([
+            AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "call-1".to_owned(),
+                name: "Bash".to_owned(),
+                arguments: json!({"command": "cargo test"}),
+            },
+            AgentEvent::ToolExecutionUpdate {
+                turn: 1,
+                id: "call-1".to_owned(),
+                name: "Bash".to_owned(),
+                partial_result: ToolResult::ok("test output"),
+            },
+            AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "call-1".to_owned(),
+                name: "Bash".to_owned(),
+                result: ToolResult::ok("done"),
+            },
+        ]);
+        for event in events {
+            runtime.apply_child_event(&child.id, started_at, &event);
+        }
+        let snapshot = runtime
+            .agent_snapshot(child.id.as_str())
+            .expect("child snapshot");
+        let tools = snapshot
+            .activity
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                AgentActivityKind::Tool {
+                    summary,
+                    phase,
+                    output,
+                    ..
+                } => Some((summary, phase, output)),
+                AgentActivityKind::Text { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0.as_deref(), Some("cargo test"));
+        assert_eq!(*tools[0].1, AgentToolActivityPhase::Done);
+        assert_eq!(tools[0].2.as_ref().map(|o| o.text.as_str()), Some("done"));
+    }
+}
+
 fn latest_tool_phase(
     snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
     id: &str,

@@ -935,7 +935,10 @@ impl TranscriptPane {
     ) {
         if self.transcript.tool(id).is_some_and(|tool| {
             tool.finalization() == Finalization::Finalized
-                && matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
+                && matches!(
+                    status,
+                    ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running
+                )
         }) {
             return;
         }
@@ -1017,7 +1020,7 @@ impl TranscriptPane {
             let should_finish = self.transcript.tool(&id).is_some_and(|tool| {
                 matches!(
                     tool.status(),
-                    ToolStatusKind::Pending | ToolStatusKind::Running
+                    ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running
                 )
             });
             if !should_finish {
@@ -1102,7 +1105,7 @@ impl TranscriptPane {
             return self.has_absorption_target_for_each_tool_call(turn, kind, targets);
         };
         match tool.status() {
-            ToolStatusKind::Pending | ToolStatusKind::Running => {
+            ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running => {
                 self.has_absorption_target_for_each_tool_call(turn, kind, targets)
             }
             ToolStatusKind::Succeeded => tool

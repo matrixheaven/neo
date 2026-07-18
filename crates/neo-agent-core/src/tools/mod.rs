@@ -17,6 +17,7 @@ pub mod plan_mode;
 mod process_supervisor;
 mod read;
 mod sessions;
+mod sleep;
 mod shell_env;
 mod shell_guard;
 mod skills_manager;
@@ -30,7 +31,6 @@ use std::{
     path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use neo_ai::ModelClient;
@@ -47,9 +47,6 @@ use crate::multi_agent::MultiAgentRuntime;
 use crate::runtime::AgentConfig;
 
 use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
-
-#[allow(clippy::duration_suboptimal_units)]
-pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Format a shell failure message from `exit_code` and optional Unix `signal`.
 ///
@@ -114,8 +111,9 @@ pub use mcp::{
 pub use mcp_manager::*;
 pub use process_supervisor::ProcessSupervisor;
 pub use shell_guard::{
-    GuardLimits, ResourceLimitCause, ResourceLimitDetail, ShellLimits, ShellLimitsError,
-    ShellRuntime, run_process_guard, scavenge_completed_runtime_instances,
+    GuardLimits, ResourceLimitCause, ResourceLimitDetail, ShellAdmissionCallback,
+    ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest, ShellLimits, ShellLimitsError,
+    ShellRuntime, format_resource_limit, run_process_guard, scavenge_completed_runtime_instances,
 };
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).
@@ -144,6 +142,8 @@ pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 pub use goal::{ExitGoalModeTool, GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool};
 // Re-export session tool types.
 pub use sessions::SummarizeSessionsTool;
+// Re-export Sleep tool.
+pub use sleep::SleepTool;
 // Re-export skill-manager tool types.
 pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
 
@@ -202,7 +202,6 @@ pub struct ToolContext {
     pub access: ToolAccess,
     workspace_policy: WorkspaceAccessPolicy,
     allowed_external_write_paths: BTreeSet<PathBuf>,
-    pub bash_timeout: Duration,
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
@@ -230,6 +229,10 @@ pub struct ToolContext {
     /// tools (e.g. delegate lifecycle events). Set by the runtime so delegate
     /// tools can emit `DelegateStarted`/`DelegateFinished` events.
     pub tool_event: Option<ToolEventCallback>,
+    /// Optional shell-admission lifecycle callback. Installed by tool dispatch
+    /// after permission for Bash and Terminal Start so queue/start events stay
+    /// off the ToolResult / model-context path.
+    pub shell_admission_callback: Option<ShellAdmissionCallback>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -244,7 +247,6 @@ impl std::fmt::Debug for ToolContext {
                 "allowed_external_write_paths",
                 &self.allowed_external_write_paths,
             )
-            .field("bash_timeout", &self.bash_timeout)
             .field("max_output_bytes", &self.max_output_bytes)
             .field("cancel_token", &self.cancel_token)
             .field("process_supervisor", &self.process_supervisor)
@@ -261,6 +263,10 @@ impl std::fmt::Debug for ToolContext {
             .field("current_turn", &self.current_turn)
             .field("tool_update", &self.tool_update.is_some())
             .field("tool_event", &self.tool_event.is_some())
+            .field(
+                "shell_admission_callback",
+                &self.shell_admission_callback.is_some(),
+            )
             .finish()
     }
 }
@@ -276,7 +282,6 @@ impl ToolContext {
             access: ToolAccess::none(),
             workspace_policy,
             allowed_external_write_paths: BTreeSet::new(),
-            bash_timeout: DEFAULT_BASH_TIMEOUT,
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
@@ -290,6 +295,7 @@ impl ToolContext {
             current_turn: None,
             tool_update: None,
             tool_event: None,
+            shell_admission_callback: None,
         })
     }
 
@@ -318,12 +324,6 @@ impl ToolContext {
     }
 
     #[must_use]
-    pub fn with_bash_timeout(mut self, timeout: Duration) -> Self {
-        self.bash_timeout = timeout;
-        self
-    }
-
-    #[must_use]
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = cancel_token;
         self
@@ -347,7 +347,6 @@ impl ToolContext {
 
     #[must_use]
     pub fn with_shell_runtime(mut self, shell_runtime: ShellRuntime) -> Self {
-        self.bash_timeout = Duration::from_secs(shell_runtime.limits().foreground_timeout_secs);
         self.max_output_bytes = shell_runtime.limits().max_output_bytes;
         self.shell_runtime = shell_runtime;
         self
@@ -412,6 +411,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_tool_event(mut self, callback: ToolEventCallback) -> Self {
         self.tool_event = Some(callback);
+        self
+    }
+
+    #[must_use]
+    pub fn with_shell_admission_callback(mut self, callback: ShellAdmissionCallback) -> Self {
+        self.shell_admission_callback = Some(callback);
         self
     }
 
@@ -589,6 +594,7 @@ impl ToolRegistry {
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
+        registry.register(sleep::SleepTool);
         registry.register(workflow::RunWorkflowTool);
         registry
     }
@@ -617,6 +623,7 @@ impl ToolRegistry {
         registry.register(delegate_controls::WaitDelegateTool);
         registry.register(delegate_controls::InterruptDelegateTool);
         registry.register(delegate_controls::MessageDelegateTool);
+        registry.register(sleep::SleepTool);
         registry.register(workflow::RunWorkflowTool);
         registry
     }
@@ -715,6 +722,7 @@ fn is_builtin_tool_name(name: &str) -> bool {
             "InterruptDelegate",
             "MessageDelegate",
             "RunWorkflow",
+            "Sleep",
             "StartGoal",
             "ExitGoalMode",
             "UpdateGoalStatus",
@@ -873,6 +881,30 @@ mod tests {
     #[test]
     fn format_exit_code_no_code_no_signal() {
         assert_eq!(format_exit_code(None, None), "no exit code");
+    }
+
+    #[test]
+    fn resource_limit_messages_name_observation_and_next_step() {
+        let process = ResourceLimitDetail {
+            cause: ResourceLimitCause::ProcessCount,
+            configured: Some(32),
+            observed: Some(41),
+        };
+        let memory = ResourceLimitDetail {
+            cause: ResourceLimitCause::TreeMemory,
+            configured: Some(25),
+            observed: Some(31),
+        };
+        let sampler = ResourceLimitDetail {
+            cause: ResourceLimitCause::SamplerUnavailable,
+            configured: None,
+            observed: None,
+        };
+        assert!(format_resource_limit(Some(&process)).contains("41 > 32"));
+        assert!(format_resource_limit(Some(&memory)).contains("31% > 25%"));
+        let sampler = format_resource_limit(Some(&sampler));
+        assert!(sampler.contains("monitoring unavailable"));
+        assert!(sampler.contains("retry"));
     }
 
     struct CountingTool {

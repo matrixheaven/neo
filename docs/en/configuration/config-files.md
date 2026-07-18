@@ -145,6 +145,31 @@ Ordinary retries resend the same frozen request, keeping prompt and cache identi
 
 Press `Esc` to cancel an active stream or retry wait. The inline Card animates while waiting or connecting; replay restores only an exhausted state, never an in-progress animation.
 
+### `[runtime.shell]` Sub-Table
+
+Shared shell admission and per-command resource limits for `Bash` and `Terminal`:
+
+```toml
+[runtime.shell]
+max_active_commands = 4
+max_command_parallelism = 4
+max_command_descendant_processes = 32
+max_command_memory_percent = 25
+max_output_bytes = 65536
+max_background_log_bytes = 10485760
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `max_active_commands` | usize | `4` | Maximum concurrently running shell commands across the shared scheduler |
+| `max_command_parallelism` | usize | `4` | Per-command advisory parallelism budget (for example `CARGO_BUILD_JOBS` when unset) |
+| `max_command_descendant_processes` | usize | `32` | Maximum observed descendant processes for each command tree |
+| `max_command_memory_percent` | u8 | `25` | Maximum resident-memory percentage for each command tree (`1..=100`) |
+| `max_output_bytes` | usize | `65536` | Maximum captured shell output bytes retained for tool results |
+| `max_background_log_bytes` | u64 | `10485760` | Maximum background command log size on disk |
+
+`max_active_commands` controls scheduler capacity only. The three `max_command_*` values are direct per-command budgets and are never divided by capacity. All integer limits must be positive.
+
 ### `[runtime.compaction]` Sub-Table
 
 Context compaction is enabled by default. Fresh config writes include this table; if the table is missing from an older config, Neo still uses the enabled defaults. Set `enabled = false` explicitly to disable it. All other sub-fields are optional:

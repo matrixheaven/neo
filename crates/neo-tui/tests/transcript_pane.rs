@@ -1147,7 +1147,7 @@ fn transcript_pane_accumulates_tool_argument_delta_fragments() {
     });
 
     let frame = plain_frame(&mut transcript_pane, 80, 12);
-    assert!(frame.iter().any(|l| l.contains("Queued Read (README.md)")));
+    assert!(frame.iter().any(|l| l.contains("Preparing Read (README.md)")));
 }
 
 #[test]
@@ -1256,11 +1256,15 @@ fn transcript_pane_marks_declared_tool_call_as_queued_until_execution_starts() {
         json_fragment: r#"{"command":"cargo test"}"#.to_owned(),
     });
 
-    let queued = plain_frame(&mut transcript_pane, 80, 12);
-    assert!(queued.iter().any(|line| line.contains("Queued Bash")));
+    let preparing = plain_frame(&mut transcript_pane, 80, 12);
+    assert!(preparing.iter().any(|line| line.contains("Preparing Bash")));
     assert!(
-        !queued.iter().any(|line| line.contains("Using Bash")),
-        "declared-but-not-started tool calls must not look like running tools: {queued:?}"
+        !preparing.iter().any(|line| line.contains("Using Bash")),
+        "declared-but-not-started tool calls must not look like running tools: {preparing:?}"
+    );
+    assert!(
+        !preparing.iter().any(|line| line.contains("Queued Bash")),
+        "Pending preparation must not be labeled Queued: {preparing:?}"
     );
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {

@@ -1481,6 +1481,33 @@ impl MultiAgentRuntime {
                     }
                 }
             }
+            AgentEvent::ToolExecutionQueued {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                changed = upsert_queued_tool_activity(
+                    &mut snapshot.activity,
+                    id,
+                    name,
+                    summarize_tool_arguments(arguments),
+                    now_ms(),
+                );
+            }
+            AgentEvent::ToolExecutionQueueUpdated {
+                id,
+                position,
+                waiting_ms,
+                ..
+            } => {
+                changed = update_queued_tool_activity(
+                    &mut snapshot.activity,
+                    id,
+                    *position,
+                    now_ms().saturating_sub(*waiting_ms),
+                );
+            }
             AgentEvent::ToolExecutionStarted {
                 id,
                 name,
@@ -2155,6 +2182,34 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
     for event in events {
         if apply_retry_activity(&mut activity, &mut attempt_start, event).is_none() {
             match event {
+                AgentEvent::ToolExecutionQueued {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    tool_args.insert(id.clone(), arguments.clone());
+                    let _ = upsert_queued_tool_activity(
+                        &mut activity,
+                        id,
+                        name,
+                        summarize_tool_arguments(arguments),
+                        now_ms(),
+                    );
+                }
+                AgentEvent::ToolExecutionQueueUpdated {
+                    id,
+                    position,
+                    waiting_ms,
+                    ..
+                } => {
+                    let _ = update_queued_tool_activity(
+                        &mut activity,
+                        id,
+                        *position,
+                        now_ms().saturating_sub(*waiting_ms),
+                    );
+                }
                 AgentEvent::ToolExecutionStarted {
                     id,
                     name,
@@ -2179,7 +2234,10 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                     } else {
                         AgentToolActivityPhase::Done
                     };
-                    let summary = tool_args.get(id).and_then(summarize_tool_arguments);
+                    let summary = tool_args
+                        .get(id)
+                        .and_then(summarize_tool_arguments)
+                        .or_else(|| last_tool_summary(activity.as_slice(), id));
                     upsert_tool_activity(
                         &mut activity,
                         id,
@@ -2195,7 +2253,10 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
                     partial_result,
                     ..
                 } => {
-                    let summary = tool_args.get(id).and_then(summarize_tool_arguments);
+                    let summary = tool_args
+                        .get(id)
+                        .and_then(summarize_tool_arguments)
+                        .or_else(|| last_tool_summary(activity.as_slice(), id));
                     upsert_tool_activity(
                         &mut activity,
                         id,
@@ -2444,6 +2505,95 @@ fn upsert_tool_activity(
             output,
         },
     });
+}
+
+fn upsert_queued_tool_activity(
+    activity: &mut Vec<AgentActivityEntry>,
+    id: &str,
+    name: &str,
+    summary: Option<String>,
+    queued_at_ms: u64,
+) -> bool {
+    for entry in activity.iter_mut().rev() {
+        let AgentActivityKind::Tool {
+            id: entry_id,
+            name: entry_name,
+            summary: entry_summary,
+            phase: entry_phase,
+            ..
+        } = &mut entry.kind
+        else {
+            continue;
+        };
+        if entry_id != id {
+            continue;
+        }
+        match entry_phase {
+            AgentToolActivityPhase::Ongoing
+            | AgentToolActivityPhase::Done
+            | AgentToolActivityPhase::Failed => {
+                // Late queue transition must not regress live/terminal work.
+                return false;
+            }
+            AgentToolActivityPhase::Queued { .. } => {
+                if summary.is_some() {
+                    *entry_summary = summary;
+                }
+                name.clone_into(entry_name);
+                *entry_phase = AgentToolActivityPhase::Queued {
+                    position: None,
+                    queued_at_ms,
+                };
+                return true;
+            }
+        }
+    }
+    activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            summary,
+            phase: AgentToolActivityPhase::Queued {
+                position: None,
+                queued_at_ms,
+            },
+            output: None,
+        },
+    });
+    true
+}
+
+fn update_queued_tool_activity(
+    activity: &mut Vec<AgentActivityEntry>,
+    id: &str,
+    position: usize,
+    queued_at_ms: u64,
+) -> bool {
+    for entry in activity.iter_mut().rev() {
+        let AgentActivityKind::Tool {
+            id: entry_id,
+            phase: entry_phase,
+            ..
+        } = &mut entry.kind
+        else {
+            continue;
+        };
+        if entry_id != id {
+            continue;
+        }
+        let AgentToolActivityPhase::Queued {
+            position: entry_position,
+            queued_at_ms: entry_queued_at_ms,
+        } = entry_phase
+        else {
+            // Only live Queued rows accept rank/wait ticks.
+            return false;
+        };
+        *entry_position = Some(position);
+        *entry_queued_at_ms = queued_at_ms;
+        return true;
+    }
+    false
 }
 
 fn last_tool_summary(activity: &[AgentActivityEntry], id: &str) -> Option<String> {

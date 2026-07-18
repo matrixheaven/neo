@@ -871,6 +871,7 @@ impl TranscriptEntry {
             }
             | Self::Compaction { .. } => true,
             Self::ToolRun { component } => component.has_visible_animation(),
+            Self::ShellRun { component } => component.has_visible_animation(),
             Self::Delegate { component } => {
                 Component::finalization(component) == Finalization::Live
             }

@@ -145,6 +145,31 @@ stream_idle_timeout_secs = 120
 
 按 `Esc` 可取消正在进行的 stream 或 retry wait。内联 Card 会在 waiting 或 connecting 时动画显示；replay 只恢复 exhausted state，绝不恢复进行中的动画。
 
+### `[runtime.shell]` 子表
+
+`Bash` 与 `Terminal` 共享的 shell 准入调度与单命令资源上限：
+
+```toml
+[runtime.shell]
+max_active_commands = 4
+max_command_parallelism = 4
+max_command_descendant_processes = 32
+max_command_memory_percent = 25
+max_output_bytes = 65536
+max_background_log_bytes = 10485760
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `max_active_commands` | usize | `4` | 共享调度器上同时运行的 shell 命令上限 |
+| `max_command_parallelism` | usize | `4` | 单命令建议并行度预算（例如环境未设置时的 `CARGO_BUILD_JOBS`） |
+| `max_command_descendant_processes` | usize | `32` | 每个命令进程树允许的最大观测后代进程数 |
+| `max_command_memory_percent` | u8 | `25` | 每个命令进程树允许的最大常驻内存百分比（`1..=100`） |
+| `max_output_bytes` | usize | `65536` | 工具结果中保留的最大 shell 输出字节数 |
+| `max_background_log_bytes` | u64 | `10485760` | 后台命令磁盘日志上限 |
+
+`max_active_commands` 只控制调度容量。三个 `max_command_*` 是直接的单命令预算，不会按容量再分摊。所有整数限制必须为正。
+
 ### `[runtime.compaction]` 子表
 
 上下文压缩默认开启。首次写入配置时会包含此表；如果旧配置缺少该表，Neo 仍使用开启状态的默认值。需要关闭时必须显式设置 `enabled = false`。其余子字段都可选：

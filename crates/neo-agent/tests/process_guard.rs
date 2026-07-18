@@ -304,9 +304,9 @@ fn start_bash_frame(
         "limits": {
             "timeout_ms": timeout_ms,
             "background_timeout_ms": 1_800_000,
-            "max_parallelism": 4,
-            "max_descendant_processes": max_descendant_processes,
-            "max_tree_memory_percent": 25,
+            "max_command_parallelism": 4,
+            "max_command_descendant_processes": max_descendant_processes,
+            "max_command_memory_percent": 25,
             "max_output_bytes": 65_536,
             "max_background_log_bytes": max_background_log_bytes
         },

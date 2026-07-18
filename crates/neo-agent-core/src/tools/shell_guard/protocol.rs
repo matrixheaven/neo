@@ -15,7 +15,7 @@ const START: u8 = 1;
 const WRITE: u8 = 2;
 const READ: u8 = 3;
 const RESIZE: u8 = 4;
-const SET_BACKGROUND_DEADLINE: u8 = 5;
+// Frame kind 5 was SetBackgroundDeadline and has been removed.
 const STOP: u8 = 6;
 const STARTED: u8 = 101;
 const OUTPUT: u8 = 102;
@@ -62,9 +62,6 @@ pub(crate) enum GuardRequest {
         request_id: u64,
         cols: u16,
         rows: u16,
-    },
-    SetBackgroundDeadline {
-        request_id: u64,
     },
     Stop {
         request_id: u64,
@@ -231,9 +228,6 @@ fn encode_request(request: &GuardRequest) -> Result<Vec<u8>, ProtocolError> {
             payload.extend_from_slice(&rows.to_be_bytes());
             (RESIZE, *request_id, payload)
         }
-        GuardRequest::SetBackgroundDeadline { request_id } => {
-            (SET_BACKGROUND_DEADLINE, *request_id, Vec::new())
-        }
         GuardRequest::Stop { request_id } => (STOP, *request_id, Vec::new()),
     };
     encode_frame(kind, request_id, &payload)
@@ -277,10 +271,6 @@ fn decode_request_body(body: &[u8]) -> Result<GuardRequest, ProtocolError> {
                 cols: u16::from_be_bytes([payload[0], payload[1]]),
                 rows: u16::from_be_bytes([payload[2], payload[3]]),
             })
-        }
-        SET_BACKGROUND_DEADLINE => {
-            require_len(payload, 0)?;
-            Ok(GuardRequest::SetBackgroundDeadline { request_id })
         }
         STOP => {
             require_len(payload, 0)?;
@@ -674,5 +664,34 @@ mod tests {
             Err(ProtocolError::FrameTooLarge { size, max })
                 if size == MAX_TERMINAL_WRITE + 1 && max == MAX_TERMINAL_WRITE
         ));
+    }
+
+    #[test]
+    fn guard_start_round_trips_without_deadline() {
+        let request = GuardRequest::Start {
+            request_id: 1,
+            request: StartRequest {
+                task_id: "task-1".to_owned(),
+                kind: GuardTaskKind::Bash,
+                command: "printf ready".to_owned(),
+                limits: GuardLimits {
+                    timeout_ms: None,
+                    max_command_parallelism: 4,
+                    max_command_descendant_processes: 32,
+                    max_command_memory_percent: 25,
+                    max_output_bytes: 65_536,
+                    max_background_log_bytes: 10_485_760,
+                },
+                status_dir: PathBuf::from("status"),
+                cols: None,
+                rows: None,
+            },
+        };
+        let bytes = encode_request_for_test(&request).expect("encode");
+        assert_eq!(decode_request_for_test(&bytes).expect("decode"), request);
+        let GuardRequest::Start { request, .. } = request else {
+            unreachable!("constructed Start request");
+        };
+        assert_eq!(request.limits.timeout_ms, None);
     }
 }

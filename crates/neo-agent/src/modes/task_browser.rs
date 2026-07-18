@@ -255,10 +255,10 @@ fn format_agent_activity(activity: &neo_agent_core::multi_agent::AgentActivityEn
             phase,
             ..
         } => {
-            let verb = if *phase == AgentToolActivityPhase::Failed {
-                "Failed"
-            } else {
-                "Used"
+            let verb = match phase {
+                AgentToolActivityPhase::Queued { .. } => "queued",
+                AgentToolActivityPhase::Failed => "Failed",
+                AgentToolActivityPhase::Done | AgentToolActivityPhase::Ongoing => "Used",
             };
             match summary {
                 Some(summary) => format!("{verb} {name} ({summary})"),

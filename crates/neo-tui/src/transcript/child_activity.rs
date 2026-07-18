@@ -144,38 +144,63 @@ pub fn child_activity_view(
     }
 }
 
+#[must_use]
+pub fn child_tool_status_text(
+    name: &str,
+    summary: Option<&str>,
+    phase: AgentToolActivityPhase,
+    now_ms: u64,
+) -> String {
+    let verb = match phase {
+        AgentToolActivityPhase::Queued { .. } => "Queued",
+        AgentToolActivityPhase::Ongoing => "Using",
+        AgentToolActivityPhase::Done => "Used",
+        AgentToolActivityPhase::Failed => "Failed",
+    };
+    let suffix = summary
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" ({})", one_line(value)))
+        .unwrap_or_default();
+    let mut text = format!("{verb} {name}{suffix}");
+    if let AgentToolActivityPhase::Queued {
+        position: Some(position),
+        queued_at_ms,
+    } = phase
+    {
+        let waiting_s = now_ms.saturating_sub(queued_at_ms) / 1_000;
+        text.push_str(&format!(" · #{position} · waiting {waiting_s}s"));
+    }
+    text
+}
+
 pub fn render_child_tool_row(
     row: &ChildToolRow<'_>,
     width: usize,
     indent: &str,
     theme: &TuiTheme,
+    now_ms: Option<u64>,
 ) -> Vec<Line> {
     let marker = match row.phase {
         AgentToolActivityPhase::Failed => "✗",
-        AgentToolActivityPhase::Done | AgentToolActivityPhase::Ongoing => "•",
+        AgentToolActivityPhase::Done
+        | AgentToolActivityPhase::Ongoing
+        | AgentToolActivityPhase::Queued { .. } => "•",
     };
     let marker_style = match row.phase {
         AgentToolActivityPhase::Failed => Style::default().fg(theme.status_error),
         AgentToolActivityPhase::Done => Style::default().fg(theme.status_ok),
-        AgentToolActivityPhase::Ongoing => Style::default().fg(theme.text_primary),
+        AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. } => {
+            Style::default().fg(theme.text_primary)
+        }
     };
-    let verb = match row.phase {
-        AgentToolActivityPhase::Ongoing => "Using",
-        AgentToolActivityPhase::Done | AgentToolActivityPhase::Failed => "Used",
-    };
-    let suffix = row
-        .summary
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" ({})", one_line(value)))
-        .unwrap_or_default();
+    let status = child_tool_status_text(row.name, row.summary, row.phase, now_ms.unwrap_or(0));
     let muted = Style::default().fg(theme.text_muted);
     let mut lines = vec![
         Line::from_spans(vec![
             Span::styled(indent.to_owned(), muted),
             Span::styled(marker, marker_style),
-            Span::raw(format!(" {verb} ")),
-            Span::styled(row.name.to_owned(), Style::default().fg(theme.brand)),
-            Span::styled(suffix, muted),
+            Span::raw(" "),
+            Span::raw(status),
         ])
         .truncate_to_width(width),
     ];
@@ -344,7 +369,10 @@ fn visible_tool_rows(
 
     let mut keep = vec![false; tool_rows.len()];
     for (index, row) in tool_rows.iter().enumerate().rev() {
-        if row.phase == AgentToolActivityPhase::Ongoing {
+        if matches!(
+            row.phase,
+            AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
+        ) {
             keep[index] = true;
         }
     }

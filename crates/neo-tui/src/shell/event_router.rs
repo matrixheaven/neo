@@ -51,9 +51,13 @@ impl NeoChromeState {
             | AgentEvent::ToolCallArgumentsDelta { .. }
             | AgentEvent::ToolCallFinished { .. }
             | AgentEvent::ToolExecutionStarted { .. }
+            | AgentEvent::ToolExecutionQueued { .. }
+            | AgentEvent::ToolExecutionQueueUpdated { .. }
             | AgentEvent::ToolExecutionUpdate { .. }
             | AgentEvent::ToolExecutionFinished { .. }
             | AgentEvent::ShellCommandStarted { .. }
+            | AgentEvent::ShellCommandQueued { .. }
+            | AgentEvent::ShellCommandQueueUpdated { .. }
             | AgentEvent::ShellCommandFinished { .. }
             | AgentEvent::DelegateStarted { .. }
             | AgentEvent::DelegateUpdated { .. }

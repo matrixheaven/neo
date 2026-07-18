@@ -6,11 +6,14 @@ use serde_json::json;
 use tokio::{sync::Mutex, time::Instant};
 use uuid::Uuid;
 
-use super::shell_guard::{GuardStatusKind, GuardedCommandResult};
-use super::shell_guard::{GuardianClient, TerminalClientSession, TerminalClientState};
+use super::shell_guard::{
+    GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionClass,
+    ShellAdmissionEvent, ShellAdmissionRequest, TerminalClientSession, TerminalClientState,
+};
 use super::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code, parse_input, schema,
 };
+use crate::session::MAIN_AGENT_ID;
 
 const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
@@ -35,6 +38,11 @@ struct TerminalInput {
     cols: Option<u16>,
     #[schemars(description = "Terminal rows. Defaults to 24 for start.")]
     rows: Option<u16>,
+    #[schemars(
+        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. For potentially long-running work, prefer omission; if a limit is necessary, do not set it below 7200 seconds. Use shorter values only for commands that are explicitly expected to finish quickly. Valid only for mode=start.",
+        range(min = 1)
+    )]
+    timeout_secs: Option<u64>,
     #[schemars(description = "Maximum output bytes for read and stop.")]
     max_output_bytes: Option<usize>,
 }
@@ -80,6 +88,18 @@ impl Tool for TerminalTool {
                     message: "`cwd` is only valid for mode `start`".to_owned(),
                 });
             }
+            if input.timeout_secs.is_some() && input.mode != TerminalMode::Start {
+                return Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: "timeout_secs is valid only for start".to_owned(),
+                });
+            }
+            if input.timeout_secs == Some(0) {
+                return Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: "timeout_secs must be positive".to_owned(),
+                });
+            }
             let max_output_bytes = input
                 .max_output_bytes
                 .unwrap_or(ctx.max_output_bytes)
@@ -92,6 +112,7 @@ impl Tool for TerminalTool {
                         input.cwd.as_deref(),
                         input.cols,
                         input.rows,
+                        input.timeout_secs.map(Duration::from_secs),
                     )
                     .await
                 }
@@ -143,6 +164,7 @@ async fn start_terminal(
     cwd: Option<&str>,
     cols: Option<u16>,
     rows: Option<u16>,
+    timeout: Option<Duration>,
 ) -> Result<ToolResult, ToolError> {
     let cols = cols.unwrap_or(80).max(1);
     let rows = rows.unwrap_or(24).max(1);
@@ -152,10 +174,35 @@ async fn start_terminal(
         ctx.shell_runtime.runtime_root(),
         std::path::PathBuf::as_path,
     );
+    // Pre-resolve so invalid paths fail before admission wait.
+    let _ = match cwd {
+        Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
+        None => ctx.cwd.clone(),
+    };
+    let admission = ShellAdmissionRequest {
+        owner: ctx
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+        class: ShellAdmissionClass::AgentBackground,
+    };
+    let permit = tokio::select! {
+        permit = ctx.shell_runtime.acquire(admission, ctx.shell_admission_callback.clone()) => permit,
+        () = ctx.cancel_token.cancelled() => return Err(ToolError::Cancelled),
+    };
+    if ctx.cancel_token.is_cancelled() {
+        drop(permit);
+        return Err(ToolError::Cancelled);
+    }
+    ctx.ensure_shell_allowed()?;
+    // Re-resolve after grant so containment cannot drift during queue wait.
     let cwd = match cwd {
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
+    if let Some(callback) = &ctx.shell_admission_callback {
+        callback(ShellAdmissionEvent::Started);
+    }
     let client = GuardianClient::start_terminal(
         &ctx.shell_runtime,
         task_id,
@@ -164,6 +211,8 @@ async fn start_terminal(
         status_dir,
         cols,
         rows,
+        timeout,
+        permit,
     )
     .await?;
     let guardian_pid = client.guardian_pid;
@@ -486,6 +535,7 @@ fn format_terminal_output(content: &str, truncated: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn terminal_input_normalizes_line_endings() {
@@ -493,5 +543,36 @@ mod tests {
             normalize_terminal_input_newlines("a\nb\r\nc\r"),
             "a\rb\rc\r"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_timeout_is_valid_only_for_start() {
+        let schema = TerminalTool.input_schema();
+        let schema = schema.get("schema").unwrap_or(&schema);
+        let properties = schema["properties"].as_object().expect("properties");
+        let timeout_schema = properties["timeout_secs"].to_string();
+        assert!(timeout_schema.contains("7200"));
+        assert!(!timeout_schema.to_lowercase().contains("rust"));
+        assert!(!timeout_schema.to_lowercase().contains("cargo"));
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = ToolContext::new(temp.path())
+            .expect("tool context")
+            .with_access(crate::ToolAccess::all());
+        let error = TerminalTool
+            .execute(
+                &context,
+                json!({"mode": "read", "handle": "missing", "timeout_secs": 5}),
+            )
+            .await
+            .expect_err("non-start timeout was accepted");
+        assert!(error.to_string().contains("timeout_secs is valid only for start"));
+        let error = TerminalTool
+            .execute(
+                &context,
+                json!({"mode": "start", "command": "printf ready", "timeout_secs": 0}),
+            )
+            .await
+            .expect_err("zero start timeout was accepted");
+        assert!(error.to_string().contains("timeout_secs must be positive"));
     }
 }

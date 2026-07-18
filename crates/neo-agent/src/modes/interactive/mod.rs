@@ -706,7 +706,9 @@ impl InteractiveController {
             Box::pin(async move {
                 let id = request.id.clone();
                 let event_tx = request.event_tx.clone();
-                let stream_update: neo_agent_core::tools::ToolUpdateCallback =
+                let stream_update: neo_agent_core::tools::ToolUpdateCallback = {
+                    let event_tx = event_tx.clone();
+                    let id = id.clone();
                     Arc::new(move |partial: &str| {
                         let _ = event_tx.send(AgentEvent::ToolExecutionUpdate {
                             turn: 0,
@@ -719,20 +721,63 @@ impl InteractiveController {
                                 terminate: false,
                             },
                         });
-                    });
+                    })
+                };
+                let admission_callback: neo_agent_core::tools::ShellAdmissionCallback = {
+                    let event_tx = event_tx.clone();
+                    let id = id.clone();
+                    let command = request.command.clone();
+                    let cwd = request.cwd.clone();
+                    Arc::new(move |event| match event {
+                        neo_agent_core::tools::ShellAdmissionEvent::Queued => {
+                            let _ = event_tx.send(AgentEvent::ShellCommandQueued {
+                                turn: 0,
+                                id: id.clone(),
+                                command: command.clone(),
+                                cwd: cwd.clone(),
+                                origin: ShellCommandOrigin::UserShellMode,
+                            });
+                        }
+                        neo_agent_core::tools::ShellAdmissionEvent::Position {
+                            position,
+                            waiting,
+                        } => {
+                            let _ = event_tx.send(AgentEvent::ShellCommandQueueUpdated {
+                                turn: 0,
+                                id: id.clone(),
+                                position,
+                                waiting_ms: u64::try_from(waiting.as_millis())
+                                    .unwrap_or(u64::MAX),
+                            });
+                        }
+                        neo_agent_core::tools::ShellAdmissionEvent::Started => {
+                            let _ = event_tx.send(AgentEvent::ShellCommandStarted {
+                                turn: 0,
+                                id: id.clone(),
+                                command: command.clone(),
+                                cwd: cwd.clone(),
+                                origin: ShellCommandOrigin::UserShellMode,
+                            });
+                        }
+                    })
+                };
                 neo_agent_core::tools::execute_shell_command(
                     neo_agent_core::tools::ShellExecutionRequest {
                         id: request.id,
                         command: request.command,
                         cwd: request.cwd,
                         origin: ShellCommandOrigin::UserShellMode,
-                        foreground_timeout: request.foreground_timeout,
-                        background_timeout: request.background_timeout,
+                        timeout: request.timeout,
                         max_output_bytes: request.max_output_bytes,
                         cancel_token: request.cancel_token,
                         stream_update: Some(stream_update),
                         background_tasks: Some(request.background_tasks),
                         shell_runtime: request.shell_runtime,
+                        admission: neo_agent_core::tools::ShellAdmissionRequest {
+                            owner: "user".to_owned(),
+                            class: neo_agent_core::tools::ShellAdmissionClass::User,
+                        },
+                        admission_callback: Some(admission_callback),
                     },
                 )
                 .await
@@ -2303,8 +2348,12 @@ impl ReplayAggregateCoverage {
                 self.assistant.tool_ids.insert(tool_call.id.to_string());
             }
             AgentEvent::ToolExecutionStarted { id, .. }
+            | AgentEvent::ToolExecutionQueued { id, .. }
+            | AgentEvent::ToolExecutionQueueUpdated { id, .. }
             | AgentEvent::ToolExecutionUpdate { id, .. }
             | AgentEvent::ShellCommandStarted { id, .. }
+            | AgentEvent::ShellCommandQueued { id, .. }
+            | AgentEvent::ShellCommandQueueUpdated { id, .. }
             | AgentEvent::ShellCommandFinished { id, .. }
                 if self.assistant.open =>
             {

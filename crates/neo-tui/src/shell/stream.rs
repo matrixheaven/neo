@@ -55,6 +55,7 @@ pub enum StreamUpdate {
 #[repr(usize)]
 pub enum ToolStatusKind {
     Pending,
+    Queued,
     Running,
     Succeeded,
     Failed,
@@ -64,11 +65,11 @@ pub enum ToolStatusKind {
 impl ToolStatusKind {
     #[must_use]
     pub fn label(self) -> &'static str {
-        ["pending", "running", "succeeded", "failed", "cancelled"][self as usize]
+        ["pending", "queued", "running", "succeeded", "failed", "cancelled"][self as usize]
     }
 
     #[must_use]
     pub fn marker(self) -> &'static str {
-        ["-", "*", "+", "!", "x"][self as usize]
+        ["-", "q", "*", "+", "!", "x"][self as usize]
     }
 }

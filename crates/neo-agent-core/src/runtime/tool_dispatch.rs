@@ -9,7 +9,7 @@ use super::config::{AgentConfig, BlockedInstructionScope, ToolExecutionMode};
 use super::context::AgentContext;
 use super::error::AgentRuntimeError;
 use super::events::{
-    EventEmitter, emit_shell_finished, emit_shell_started, emit_terminal_events,
+    EventEmitter, emit_shell_finished, emit_terminal_events, make_shell_admission_callback,
     make_tool_event_callback, make_tool_update_callback,
 };
 use super::instruction_context::InstructionContextBridge;
@@ -903,6 +903,12 @@ pub(super) fn ask_user_runs_in_background(arguments: &serde_json::Value) -> bool
         .unwrap_or(false)
 }
 
+fn uses_shell_admission(name: &str, arguments: &serde_json::Value) -> bool {
+    name == "Bash"
+        || (name == "Terminal"
+            && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_authorized_sequential(
     config: &AgentConfig,
@@ -958,14 +964,9 @@ async fn execute_authorized_sequential(
             }
             continue;
         };
-        emitter.emit(AgentEvent::ToolExecutionStarted {
-            turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            arguments: prepared_call.arguments.clone(),
-        });
         let sink = emitter.sink();
-        let context = tool_context
+        let arguments = Arc::new(prepared_call.arguments.clone());
+        let mut context = tool_context
             .clone()
             .with_access(*access)
             .with_tool_update(make_tool_update_callback(
@@ -974,15 +975,30 @@ async fn execute_authorized_sequential(
                 tool_call.id.to_string(),
                 tool_call.name.to_string(),
             ))
-            .with_tool_event(make_tool_event_callback(sink));
-        if tool_call.name.as_ref() == "Bash" {
-            emit_shell_started(turn, &prepared_call.arguments, tool_call, &context, emitter);
+            .with_tool_event(make_tool_event_callback(sink.clone()));
+        if uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref()) {
+            let workspace_root = context.workspace_root().to_path_buf();
+            context = context.with_shell_admission_callback(make_shell_admission_callback(
+                sink,
+                turn,
+                tool_call.id.to_string(),
+                tool_call.name.to_string(),
+                Arc::clone(&arguments),
+                workspace_root,
+            ));
+        } else {
+            emitter.emit(AgentEvent::ToolExecutionStarted {
+                turn,
+                id: tool_call.id.to_string(),
+                name: tool_call.name.to_string(),
+                arguments: arguments.as_ref().clone(),
+            });
         }
         let mut result = run_tool_with_cancel(
             skills,
             registry.as_ref(),
             tool_call,
-            &prepared_call.arguments,
+            arguments.as_ref(),
             &context,
             cancel_token,
         )
@@ -994,7 +1010,7 @@ async fn execute_authorized_sequential(
         emit_shell_finished(turn, tool_call, &result, emitter);
         emit_terminal_events(
             turn,
-            &prepared_call.arguments,
+            arguments.as_ref(),
             tool_call,
             &result,
             tool_context,
@@ -1003,7 +1019,7 @@ async fn execute_authorized_sequential(
         emit_tool_execution_finished(
             turn,
             tool_call,
-            Some(&prepared_call.arguments),
+            Some(arguments.as_ref()),
             &result,
             emitter,
         );
@@ -1073,33 +1089,47 @@ async fn execute_authorized_parallel(
             continue;
         };
 
-        emitter.emit(AgentEvent::ToolExecutionStarted {
-            turn,
-            id: tool_call.id.to_string(),
-            name: tool_call.name.to_string(),
-            arguments: prepared_call.arguments.clone(),
-        });
-
         let config = config.clone();
         let registry = Arc::clone(&registry);
         let tool_context = tool_context.clone().with_access(*access);
         let cancel_token = cancel_token.clone();
         let sink = emitter.sink();
-        let arguments = prepared_call.arguments.clone();
+        let arguments = Arc::new(prepared_call.arguments.clone());
+        let uses_admission = uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref());
+        if !uses_admission {
+            emitter.emit(AgentEvent::ToolExecutionStarted {
+                turn,
+                id: tool_call.id.to_string(),
+                name: tool_call.name.to_string(),
+                arguments: arguments.as_ref().clone(),
+            });
+        }
         running.push(async move {
-            let tool_context = tool_context
+            let mut tool_context = tool_context
                 .with_tool_update(make_tool_update_callback(
                     sink.clone(),
                     turn,
                     tool_call.id.to_string(),
                     tool_call.name.to_string(),
                 ))
-                .with_tool_event(make_tool_event_callback(sink));
+                .with_tool_event(make_tool_event_callback(sink.clone()));
+            if uses_admission {
+                let workspace_root = tool_context.workspace_root().to_path_buf();
+                tool_context =
+                    tool_context.with_shell_admission_callback(make_shell_admission_callback(
+                        sink,
+                        turn,
+                        tool_call.id.to_string(),
+                        tool_call.name.to_string(),
+                        Arc::clone(&arguments),
+                        workspace_root,
+                    ));
+            }
             let mut result = run_tool_with_cancel(
                 skills,
                 registry.as_ref(),
                 tool_call,
-                &arguments,
+                arguments.as_ref(),
                 &tool_context,
                 &cancel_token,
             )
@@ -1218,27 +1248,30 @@ async fn run_model_bash_with_cancel(
     }
 }
 
-fn model_bash_error_result(tool_context: &ToolContext, error: &ToolError) -> ToolResult {
-    let ToolError::ResourceLimited { cause } = error else {
-        return ToolResult::error(error.to_string());
-    };
-    let configured =
-        u64::try_from(tool_context.shell_runtime.limits().max_active_commands).unwrap_or(u64::MAX);
-    ToolResult::error("Resource limit exceeded.").with_details(serde_json::json!({
-        "exit_code": null,
-        "signal": null,
-        "stdout": "",
-        "stderr": "",
-        "stdout_truncated": false,
-        "stderr_truncated": false,
-        "truncated": false,
-        "outcome": "resource_limited",
-        "resource_limit": ResourceLimitDetail {
-            cause: *cause,
-            configured: Some(configured),
-            observed: Some(configured.saturating_add(1)),
-        },
-    }))
+fn model_bash_error_result(_tool_context: &ToolContext, error: &ToolError) -> ToolResult {
+    match error {
+        ToolError::ResourceLimited { cause } => {
+            let detail = ResourceLimitDetail {
+                cause: *cause,
+                configured: None,
+                observed: None,
+            };
+            ToolResult::error(crate::tools::format_resource_limit(Some(&detail))).with_details(
+                serde_json::json!({
+                    "exit_code": null,
+                    "signal": null,
+                    "stdout": "",
+                    "stderr": "",
+                    "stdout_truncated": false,
+                    "stderr_truncated": false,
+                    "truncated": false,
+                    "outcome": "resource_limited",
+                    "resource_limit": detail,
+                }),
+            )
+        }
+        _ => ToolResult::error(error.to_string()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1317,39 +1350,111 @@ fn default_tool_context(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ShellLimits, ShellRuntime};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use neo_ai::ModelClient;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{execute_tool_calls, EventEmitter};
+    use crate::harness::fake_model;
+    use crate::runtime::config::{AgentConfig, ToolExecutionMode};
+    use crate::tools::{
+        ShellAdmissionClass, ShellAdmissionRequest, ShellLimits, ShellRuntime, ToolRegistry,
+    };
+    use crate::{
+        AgentContext, AgentEvent, AgentToolCall, PermissionApprovalDecision, PermissionMode,
+        ProcessSupervisor,
+    };
 
     #[tokio::test]
-    async fn model_bash_admission_rejection_returns_resource_limit_details() {
+    async fn approved_bash_emits_queued_then_started_only_after_grant() {
         let workspace = tempfile::tempdir().expect("workspace");
-        let limits = ShellLimits {
-            max_active_commands: 1,
-            ..ShellLimits::default()
-        };
         let runtime = ShellRuntime::new(
-            limits,
-            PathBuf::from("unused-guardian"),
+            ShellLimits {
+                max_active_commands: 1,
+                ..ShellLimits::default()
+            },
+            PathBuf::from("missing-guardian"),
             workspace.path().join("runtime"),
         );
-        let _permit = runtime.try_acquire().expect("occupy admission slot");
-        let context = ToolContext::new(workspace.path())
-            .expect("tool context")
-            .with_access(ToolAccess::all())
+        let held = runtime
+            .acquire(
+                ShellAdmissionRequest {
+                    owner: "hold".to_owned(),
+                    class: ShellAdmissionClass::AgentForeground,
+                },
+                None,
+            )
+            .await;
+        let config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_permission_mode(PermissionMode::Ask)
+            .with_approval_handler(|_| PermissionApprovalDecision::AllowOnce)
+            .with_tool_execution_mode(ToolExecutionMode::Sequential)
             .with_shell_runtime(runtime);
-
-        let result = run_model_bash_with_cancel(
-            &serde_json::json!({ "command": "printf rejected" }),
-            &context,
-            &CancellationToken::new(),
-        )
-        .await;
-        let details = result.details.expect("structured rejection details");
-
-        assert!(result.is_error);
-        assert_eq!(details["outcome"], "resource_limited");
-        assert_eq!(details["resource_limit"]["cause"], "active_commands");
-        assert_eq!(details["resource_limit"]["configured"], 1);
-        assert_eq!(details["resource_limit"]["observed"], 2);
+        let model: Arc<dyn ModelClient> =
+            Arc::new(neo_ai::providers::fake::FakeModelClient::new(Vec::new()));
+        let registry = Arc::new(ToolRegistry::with_builtin_tools());
+        let calls = [AgentToolCall {
+            id: "call-1".into(),
+            name: "Bash".into(),
+            raw_arguments: r#"{"command":"printf ready"}"#.into(),
+        }];
+        let cancel = CancellationToken::new();
+        let supervisor = ProcessSupervisor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+        let run = execute_tool_calls(
+            &config,
+            model,
+            registry,
+            None,
+            1,
+            &calls,
+            &mut emitter,
+            &cancel,
+            &supervisor,
+        );
+        tokio::pin!(run);
+        let mut approval_seen = false;
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    let event = event.expect("event channel").expect("runtime event");
+                    if matches!(event, AgentEvent::ApprovalRequested { .. }) {
+                        approval_seen = true;
+                    }
+                    if matches!(event, AgentEvent::ToolExecutionQueued { .. }) {
+                        assert!(approval_seen, "Bash queued before approval completed");
+                        break;
+                    }
+                    assert!(!matches!(event, AgentEvent::ToolExecutionStarted { .. }));
+                }
+                result = &mut run => panic!(
+                    "Bash returned before admission: ok={}",
+                    result.is_ok()
+                ),
+            }
+        }
+        while let Ok(Ok(event)) = rx.try_recv() {
+            assert!(!matches!(event, AgentEvent::ToolExecutionStarted { .. }));
+        }
+        drop(held);
+        let results = run.await.expect("tool dispatch");
+        let events = std::iter::from_fn(|| rx.try_recv().ok())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("runtime events");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecutionStarted { .. }))
+        );
+        let result = &results.results[0].1;
+        let model_visible = format!("{} {:?}", result.content, result.details);
+        assert!(!model_visible.contains("position"));
+        assert!(!model_visible.contains("waiting_ms"));
     }
 }
+

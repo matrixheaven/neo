@@ -68,6 +68,10 @@ pub struct AgentTerminalOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolActivityPhase {
+    Queued {
+        position: Option<usize>,
+        queued_at_ms: u64,
+    },
     Ongoing,
     Done,
     Failed,

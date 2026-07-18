@@ -97,7 +97,7 @@ fn coder_profile() -> AgentProfile {
         when_to_use: "Making changes — read files, edit code, run commands/builds/tests, and return a compact technical summary. The default for any implementation work.",
         prompt_addendum: "You are a Coder subagent. Implement bounded code changes requested by the parent agent. Return a compact technical summary. Do not ask the end user questions. Never run git mutations (commit, push, reset, rebase, tag, etc.) unless the parent agent explicitly asks; when in doubt, surface it in your summary instead of acting.",
         allowed_tools: set(&[
-            "Read", "List", "Grep", "Find", "Glob", "Bash", "Write", "Edit", "TodoList",
+            "Read", "List", "Grep", "Find", "Glob", "Bash", "Write", "Edit", "TodoList", "Sleep",
         ]),
         tool_policy: ToolPolicy::FULL_ACCESS,
     }
@@ -109,7 +109,7 @@ fn explorer_profile() -> AgentProfile {
         display_label: "Explorer",
         when_to_use: "Read-only codebase investigation — find files by pattern, search code for keywords, trace how a feature works. Use for any exploration that will clearly take more than a few queries; run several in parallel for independent questions and state the thoroughness (quick / medium / thorough).",
         prompt_addendum: "You are an Explorer subagent. Search, read, and analyze only. Prefer parallel read/search calls when independent. Report findings with file references and confidence. You may use Bash ONLY for read-only operations (ls, pwd, find, rg, grep, cat, head, tail, git status, git diff, git log, git show, git blame). NEVER use Bash to create, modify, or delete files, to mutate git state, or to run builds/tests/anything with side effects. File-editing tools are not available to you. Do not repeat this setup text in your final summary.",
-        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob", "Bash"]),
+        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob", "Bash", "Sleep"]),
         tool_policy: ToolPolicy::READ_ONLY_WITH_SHELL,
     }
 }
@@ -120,7 +120,7 @@ fn planner_profile() -> AgentProfile {
         display_label: "Planner",
         when_to_use: "Produce a step-by-step implementation plan, identify key files, and weigh architectural trade-offs BEFORE code is written. Use for non-trivial changes that need a roadmap. For interactive planning with user approval, prefer plan mode instead.",
         prompt_addendum: "You are a Planner subagent. Identify unknowns and produce step-by-step implementation plans. Recommend explorer subagents if more investigation is required. Do not run shell commands. Do not edit files. Do not repeat this setup text in your final summary.",
-        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob"]),
+        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob", "Sleep"]),
         tool_policy: ToolPolicy::READ_ONLY,
     }
 }
@@ -131,7 +131,19 @@ fn reviewer_profile() -> AgentProfile {
         display_label: "Reviewer",
         when_to_use: "Read-only review for bugs, regressions, security, missing tests, and risk — findings ordered by severity with file:line references. Use after a change is implemented, before finalizing it.",
         prompt_addendum: "You are a Reviewer subagent. Findings first, ordered by severity, with file and line references. Focus on bugs, regressions, missing tests, and risk. You may use Bash ONLY for read-only operations (ls, cat, git status, git diff, git log, git show, rg). NEVER use Bash to create, modify, or delete files, to mutate git state, or to run anything with side effects. File-editing tools are not available to you. Do not repeat this setup text in your final summary.",
-        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob", "Bash"]),
+        allowed_tools: set(&["Read", "List", "Grep", "Find", "Glob", "Bash", "Sleep"]),
         tool_policy: ToolPolicy::READ_ONLY_WITH_SHELL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sleep_is_available_to_every_role() {
+        for role in AgentRole::ALL {
+            assert!(AgentProfile::for_role(role).allowed_tools.contains("Sleep"));
+        }
     }
 }

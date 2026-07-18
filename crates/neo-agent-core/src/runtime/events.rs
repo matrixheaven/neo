@@ -2,6 +2,7 @@
 //! `EventSink`, and the `emit_*` helpers that translate tool results into
 //! `AgentEvent` values.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -10,6 +11,7 @@ use crate::{
     AgentEvent, AgentRuntimeError, AgentToolCall, QueueKind, ShellCommandOrigin,
     ShellCommandOutcome, TodoEventData, ToolContext, ToolResult, ToolUpdateCallback,
 };
+use crate::tools::{ShellAdmissionCallback, ShellAdmissionEvent};
 
 use super::config::AgentConfig;
 use super::context::AgentContext;
@@ -130,6 +132,57 @@ impl EventPublisher for EventSink {
     fn emit(&mut self, event: AgentEvent) {
         self.emit_event(event);
     }
+}
+
+/// Build the shell-admission callback for Bash / Terminal Start after permission.
+/// Shares one `Arc` of prepared arguments so waiters never deep-copy command JSON.
+pub(super) fn make_shell_admission_callback(
+    sink: EventSink,
+    turn: u32,
+    id: String,
+    name: String,
+    arguments: Arc<serde_json::Value>,
+    bash_display_cwd: PathBuf,
+) -> ShellAdmissionCallback {
+    Arc::new(move |event| match event {
+        ShellAdmissionEvent::Queued => {
+            sink.emit_event(AgentEvent::ToolExecutionQueued {
+                turn,
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.as_ref().clone(),
+            });
+        }
+        ShellAdmissionEvent::Position { position, waiting } => {
+            sink.emit_event(AgentEvent::ToolExecutionQueueUpdated {
+                turn,
+                id: id.clone(),
+                position,
+                waiting_ms: u64::try_from(waiting.as_millis()).unwrap_or(u64::MAX),
+            });
+        }
+        ShellAdmissionEvent::Started => {
+            sink.emit_event(AgentEvent::ToolExecutionStarted {
+                turn,
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.as_ref().clone(),
+            });
+            if name == "Bash"
+                && let Some(command) = arguments
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+            {
+                sink.emit_event(AgentEvent::ShellCommandStarted {
+                    turn,
+                    id: id.clone(),
+                    command: command.to_owned(),
+                    cwd: bash_display_cwd.clone(),
+                    origin: ShellCommandOrigin::ModelBashTool,
+                });
+            }
+        }
+    })
 }
 
 /// Build a `ToolEventCallback` that forwards structured `AgentEvent` values
@@ -258,27 +311,6 @@ pub(super) fn emit_context_window_snapshot(
             .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
         source: Some(snapshot.source),
     });
-}
-
-pub(super) fn emit_shell_started(
-    turn: u32,
-    arguments: &serde_json::Value,
-    tool_call: &AgentToolCall,
-    tool_context: &ToolContext,
-    emitter: &mut impl EventPublisher,
-) {
-    if tool_call.name.as_ref() != "Bash" {
-        return;
-    }
-    if let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) {
-        emitter.emit(AgentEvent::ShellCommandStarted {
-            turn,
-            id: tool_call.id.to_string(),
-            command: command.to_owned(),
-            cwd: tool_context.workspace_root().to_path_buf(),
-            origin: ShellCommandOrigin::ModelBashTool,
-        });
-    }
 }
 
 pub(super) fn emit_shell_finished(

@@ -5,12 +5,18 @@
 use std::{path::PathBuf, sync::LazyLock, time::Duration};
 
 use super::shell_env::{self, ShellEnv};
-use super::shell_guard::{GuardStatusKind, GuardedCommandResult, GuardianClient};
+use super::shell_guard::{
+    GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionCallback,
+    ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest, ShellCommandPermit,
+};
 use super::{
     CommandOutput, ManagedBackgroundCommand, Tool, ToolContext, ToolError, ToolFuture, ToolResult,
     ToolUpdateCallback, cap_plain_output, parse_input, schema,
 };
-use crate::{BackgroundTaskManager, BackgroundTaskStatus, ShellCommandOrigin, ShellCommandOutcome};
+use crate::{
+    BackgroundTaskManager, BackgroundTaskStatus, ShellCommandOrigin, ShellCommandOutcome,
+    session::MAIN_AGENT_ID,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -42,9 +48,10 @@ struct BashInput {
     )]
     cwd: Option<String>,
     #[schemars(
-        description = "Optional timeout in seconds for foreground commands. Background commands run until finished or stopped. Defaults to the runtime bash timeout."
+        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. For potentially long-running work, prefer omission; if a limit is necessary, do not set it below 7200 seconds. Use shorter values only for commands that are explicitly expected to finish quickly.",
+        range(min = 1)
     )]
-    timeout: Option<u64>,
+    timeout_secs: Option<u64>,
     #[schemars(
         description = "Whether to run the command as a background task. When true, you must provide a description."
     )]
@@ -74,11 +81,11 @@ The dedicated tools render in the per-tool permission UI and keep raw stdout out
 **Output:**
 The stdout and stderr will be combined and returned as a string. The output may be truncated if it is too long. If the command failed, the output will end with a line describing the failure: either `Command failed with exit code: N` for a non-zero exit, or `Command terminated by signal N (NAME) — hint` on Unix when the process was killed by a signal (e.g. SIGPIPE from a closed pipe).
 
-If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. Background commands are not subject to the foreground `timeout`. You will be automatically notified when the task completes. Use `TaskOutput` with this task_id for a non-blocking status/output snapshot, and only set `block=true` when you explicitly want to wait for completion. Use `TaskStop` only if the task must be cancelled.
+If `run_in_background=true`, the command will be started as a background task and this tool will return a task ID instead of waiting for command completion. When doing that, you must provide a short `description`. Background commands are not subject to the foreground `timeout_secs`. You will be automatically notified when the task completes. Use `TaskOutput` with this task_id for a non-blocking status/output snapshot, and only set `block=true` when you explicitly want to wait for completion. Use `TaskStop` only if the task must be cancelled.
 
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.
-- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For possibly long-running foreground commands, set the `timeout` argument in seconds. The foreground timeout defaults to the runtime bash timeout (currently 10 minutes).
+- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For potentially long-running work, prefer omitting `timeout_secs`; if a limit is necessary, do not set it below 7200 seconds.
 - Avoid using `..` to access files or directories outside the working directory.
 - Avoid modifying files outside the working directory unless explicitly instructed to do so.
 - Never run commands that require superuser privileges unless explicitly instructed to do so.
@@ -111,13 +118,50 @@ pub struct ShellExecutionRequest {
     pub command: String,
     pub cwd: PathBuf,
     pub origin: ShellCommandOrigin,
-    pub foreground_timeout: Duration,
-    pub background_timeout: Duration,
+    pub timeout: Option<Duration>,
     pub max_output_bytes: usize,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub stream_update: Option<ToolUpdateCallback>,
     pub background_tasks: Option<BackgroundTaskManager>,
     pub shell_runtime: super::ShellRuntime,
+    pub admission: ShellAdmissionRequest,
+    pub admission_callback: Option<ShellAdmissionCallback>,
+}
+
+fn admission_owner(ctx: &ToolContext) -> String {
+    ctx.agent_id
+        .clone()
+        .unwrap_or_else(|| MAIN_AGENT_ID.to_owned())
+}
+
+fn model_admission(ctx: &ToolContext, class: ShellAdmissionClass) -> ShellAdmissionRequest {
+    ShellAdmissionRequest {
+        owner: admission_owner(ctx),
+        class,
+    }
+}
+
+async fn acquire_shell_permit(
+    request: &ShellExecutionRequest,
+) -> Result<ShellCommandPermit, ToolError> {
+    let permit = tokio::select! {
+        permit = request.shell_runtime.acquire(
+            request.admission.clone(),
+            request.admission_callback.clone(),
+        ) => permit,
+        () = request.cancel_token.cancelled() => return Err(ToolError::Cancelled),
+    };
+    if request.cancel_token.is_cancelled() {
+        drop(permit);
+        return Err(ToolError::Cancelled);
+    }
+    Ok(permit)
+}
+
+fn emit_admission_started(callback: &Option<ShellAdmissionCallback>) {
+    if let Some(callback) = callback {
+        callback(ShellAdmissionEvent::Started);
+    }
 }
 
 /// Platform-aware termination info: `exit_code` from `ExitStatus::code()`,
@@ -180,15 +224,12 @@ impl Tool for BashTool {
                 .await;
             }
 
-            let timeout_ms = input.timeout.map_or_else(
-                || u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX),
-                |s| s.saturating_mul(1000),
-            );
+            let timeout = parse_timeout_secs(self.name(), input.timeout_secs)?;
             let result = run_command(
                 ctx,
                 &input.command,
                 input.cwd.as_deref(),
-                Duration::from_millis(timeout_ms),
+                timeout,
                 max_output_bytes,
             )
             .await?;
@@ -236,7 +277,9 @@ fn shell_outcome_message(result: &ShellExecutionResult) -> Option<String> {
             .then(|| super::format_shell_failure(result.exit_code, result.signal)),
         ShellCommandOutcome::Cancelled => Some("Cancelled.".to_owned()),
         ShellCommandOutcome::TimedOut => Some("Timed out.".to_owned()),
-        ShellCommandOutcome::ResourceLimited => Some("Resource limit exceeded.".to_owned()),
+        ShellCommandOutcome::ResourceLimited => {
+            Some(super::format_resource_limit(result.resource_limit.as_ref()))
+        }
         ShellCommandOutcome::Backgrounded { .. } => {
             Some("Moved to background. Use /tasks to view.".to_owned())
         }
@@ -291,26 +334,34 @@ pub async fn execute_model_bash_for_runtime(
         .await;
     }
 
-    let timeout_ms = input.timeout.map_or_else(
-        || u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX),
-        |s| s.saturating_mul(1000),
-    );
+    let timeout = parse_timeout_secs("Bash", input.timeout_secs)?;
     let result = run_command_without_error_mapping(
         ctx,
         &input.command,
         input.cwd.as_deref(),
-        Duration::from_millis(timeout_ms),
+        timeout,
         max_output_bytes,
     )
     .await?;
     Ok(shell_command_result(&result))
 }
 
+fn parse_timeout_secs(tool: &str, timeout_secs: Option<u64>) -> Result<Option<Duration>, ToolError> {
+    match timeout_secs {
+        None => Ok(None),
+        Some(0) => Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "timeout_secs must be positive".to_owned(),
+        }),
+        Some(secs) => Ok(Some(Duration::from_secs(secs))),
+    }
+}
+
 async fn run_command(
     ctx: &ToolContext,
     command: &str,
     workdir: Option<&str>,
-    timeout_duration: Duration,
+    timeout_duration: Option<Duration>,
     stream_max_bytes: usize,
 ) -> Result<ShellExecutionResult, ToolError> {
     let result = run_command_without_error_mapping(
@@ -323,7 +374,9 @@ async fn run_command(
     .await?;
     match result.outcome {
         ShellCommandOutcome::TimedOut => Err(ToolError::CommandTimedOut {
-            timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
+            timeout_ms: timeout_duration
+                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0),
         }),
         ShellCommandOutcome::Cancelled => Err(ToolError::Cancelled),
         ShellCommandOutcome::ResourceLimited
@@ -332,34 +385,30 @@ async fn run_command(
     }
 }
 
-#[allow(clippy::duration_suboptimal_units)]
 async fn run_command_without_error_mapping(
     ctx: &ToolContext,
     command: &str,
     workdir: Option<&str>,
-    timeout_duration: Duration,
+    timeout_duration: Option<Duration>,
     stream_max_bytes: usize,
 ) -> Result<ShellExecutionResult, ToolError> {
     let cwd = match workdir {
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
-    let timeout_duration = ctx
-        .shell_runtime
-        .limits()
-        .clamp_foreground_timeout(Some(timeout_duration));
     execute_shell_command(ShellExecutionRequest {
         id: "bash".to_owned(),
         command: command.to_owned(),
         cwd,
         origin: ShellCommandOrigin::ModelBashTool,
-        foreground_timeout: timeout_duration,
-        background_timeout: Duration::from_secs(10 * 60),
+        timeout: timeout_duration,
         max_output_bytes: stream_max_bytes,
         cancel_token: ctx.cancel_token.clone(),
         stream_update: ctx.tool_update.clone(),
         background_tasks: None,
         shell_runtime: ctx.shell_runtime.clone(),
+        admission: model_admission(ctx, ShellAdmissionClass::AgentForeground),
+        admission_callback: ctx.shell_admission_callback.clone(),
     })
     .await
 }
@@ -372,15 +421,26 @@ pub async fn execute_shell_command(
     {
         return execute_manager_owned_shell_command(request).await;
     }
+    let permit = acquire_shell_permit(&request).await?;
+    if request.cancel_token.is_cancelled() {
+        drop(permit);
+        return Err(ToolError::Cancelled);
+    }
+    let max_output_bytes = request
+        .shell_runtime
+        .limits()
+        .clamp_output_bytes(Some(request.max_output_bytes));
+    emit_admission_started(&request.admission_callback);
     let client = GuardianClient::start_bash(
         &request.shell_runtime,
         BackgroundTaskManager::next_bash_task_id(),
         request.command,
         &request.cwd,
         request.shell_runtime.runtime_root(),
-        request.foreground_timeout,
-        request.max_output_bytes,
+        request.timeout,
+        max_output_bytes,
         request.stream_update,
+        permit,
     )
     .await?;
     let result = tokio::select! {
@@ -390,7 +450,7 @@ pub async fn execute_shell_command(
     Ok(shell_result_from_guarded(
         result,
         None,
-        request.max_output_bytes,
+        max_output_bytes,
     ))
 }
 
@@ -402,6 +462,16 @@ async fn execute_manager_owned_shell_command(
         .clone()
         .expect("checked background task manager");
     let task_id = BackgroundTaskManager::next_bash_task_id();
+    let permit = acquire_shell_permit(&request).await?;
+    if request.cancel_token.is_cancelled() {
+        drop(permit);
+        return Err(ToolError::Cancelled);
+    }
+    let max_output_bytes = request
+        .shell_runtime
+        .limits()
+        .clamp_output_bytes(Some(request.max_output_bytes));
+    emit_admission_started(&request.admission_callback);
     let client = GuardianClient::start_bash(
         &request.shell_runtime,
         task_id.clone(),
@@ -410,9 +480,10 @@ async fn execute_manager_owned_shell_command(
         manager
             .persistence_dir()
             .map_or(request.shell_runtime.runtime_root(), PathBuf::as_path),
-        request.foreground_timeout,
-        request.max_output_bytes,
+        request.timeout,
+        max_output_bytes,
         request.stream_update.clone(),
+        permit,
     )
     .await?;
     manager
@@ -432,7 +503,7 @@ async fn execute_manager_owned_shell_command(
                     task_id: task_id.clone().into(),
                 },
                 Some(task_id),
-                request.max_output_bytes,
+                max_output_bytes,
             ));
         }
 
@@ -449,20 +520,20 @@ async fn execute_manager_owned_shell_command(
                 output,
                 outcome,
                 Some(task_id.clone()),
-                request.max_output_bytes,
+                max_output_bytes,
             ));
         }
 
         tokio::select! {
             () = request.cancel_token.cancelled() => {
-                let _ = manager.stop(&task_id, "Cancelled foreground shell command", request.max_output_bytes).await?;
+                let _ = manager.stop(&task_id, "Cancelled foreground shell command", max_output_bytes).await?;
                 let snapshot = manager.snapshot(&task_id).await?;
                 let output = snapshot.output.unwrap_or_else(empty_command_output);
                 return Ok(shell_result_from_output(
                     output,
                     ShellCommandOutcome::Cancelled,
                     Some(task_id.clone()),
-                    request.max_output_bytes,
+                    max_output_bytes,
                 ));
             }
             () = tokio::time::sleep(Duration::from_millis(20)) => {}
@@ -560,11 +631,31 @@ async fn start_background_command(
     description: String,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
-    let cwd = match workdir {
+    // Validate path before waiting for admission.
+    let _ = match workdir {
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
     let task_id = BackgroundTaskManager::next_bash_task_id();
+    let admission = model_admission(ctx, ShellAdmissionClass::AgentBackground);
+    let permit = tokio::select! {
+        permit = ctx.shell_runtime.acquire(admission, ctx.shell_admission_callback.clone()) => permit,
+        () = ctx.cancel_token.cancelled() => return Err(ToolError::Cancelled),
+    };
+    if ctx.cancel_token.is_cancelled() {
+        drop(permit);
+        return Err(ToolError::Cancelled);
+    }
+    ctx.ensure_shell_allowed()?;
+    let cwd = match workdir {
+        Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
+        None => ctx.cwd.clone(),
+    };
+    emit_admission_started(&ctx.shell_admission_callback);
+    let max_output_bytes = ctx
+        .shell_runtime
+        .limits()
+        .clamp_output_bytes(Some(max_output_bytes));
     let client = GuardianClient::start_bash(
         &ctx.shell_runtime,
         task_id.clone(),
@@ -573,9 +664,10 @@ async fn start_background_command(
         ctx.background_tasks
             .persistence_dir()
             .map_or(ctx.shell_runtime.runtime_root(), PathBuf::as_path),
-        Duration::from_secs(ctx.shell_runtime.limits().background_timeout_secs),
+        None,
         max_output_bytes,
         ctx.tool_update.clone(),
+        permit,
     )
     .await?;
 

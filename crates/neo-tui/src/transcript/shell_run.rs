@@ -1,9 +1,12 @@
+use std::time::Instant;
+
 use neo_agent_core::ShellCommandOutcome;
 use neo_agent_core::tools::format_shell_failure;
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Finalization, Line, Span, Style};
+use crate::token_estimate::format_elapsed;
 use crate::utils::shell_output::{sanitize_shell_output, split_sanitized_shell_lines};
 
 const MAX_LIVE_OUTPUT_LINES: usize = 12;
@@ -11,6 +14,11 @@ const MAX_LIVE_OUTPUT_CHARS: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellRunState {
+    Queued {
+        position: Option<usize>,
+        waiting_ms: u64,
+        observed_at: Instant,
+    },
     Running,
     Finished {
         stdout: String,
@@ -34,6 +42,22 @@ pub struct ShellRunComponent {
 }
 
 impl ShellRunComponent {
+    #[must_use]
+    pub fn queued(id: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            command: command.into(),
+            state: ShellRunState::Queued {
+                position: None,
+                waiting_ms: 0,
+                observed_at: Instant::now(),
+            },
+            live_output: Vec::new(),
+            dropped_live_output_lines: 0,
+            live_output_chars: 0,
+        }
+    }
+
     #[must_use]
     pub fn running(id: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
@@ -88,8 +112,41 @@ impl ShellRunComponent {
     #[must_use]
     pub const fn finalization(&self) -> Finalization {
         match self.state {
-            ShellRunState::Running => Finalization::Live,
+            ShellRunState::Queued { .. } | ShellRunState::Running => Finalization::Live,
             ShellRunState::Finished { .. } => Finalization::Finalized,
+        }
+    }
+
+    #[must_use]
+    pub const fn has_visible_animation(&self) -> bool {
+        matches!(self.state, ShellRunState::Queued { .. })
+    }
+
+    /// Apply a live queue-position update. Ignored once the shell has started
+    /// or finished so delayed scheduler notifications cannot regress the card.
+    pub fn update_queue(&mut self, position: usize, waiting_ms: u64) -> bool {
+        match &mut self.state {
+            ShellRunState::Queued {
+                position: current_position,
+                waiting_ms: current_waiting_ms,
+                observed_at,
+            } => {
+                *current_position = Some(position);
+                *current_waiting_ms = waiting_ms;
+                *observed_at = Instant::now();
+                true
+            }
+            ShellRunState::Running | ShellRunState::Finished { .. } => false,
+        }
+    }
+
+    /// Transition a queued shell into the running state in place.
+    pub fn start(&mut self) -> bool {
+        if matches!(self.state, ShellRunState::Queued { .. }) {
+            self.state = ShellRunState::Running;
+            true
+        } else {
+            false
         }
     }
 
@@ -175,6 +232,23 @@ impl ShellRunComponent {
         ]));
 
         match &self.state {
+            ShellRunState::Queued {
+                position,
+                waiting_ms,
+                observed_at,
+            } => {
+                let mut status = "Queued".to_owned();
+                if let Some(position) = position {
+                    let elapsed_ms = waiting_ms.saturating_add(
+                        u64::try_from(observed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    );
+                    status.push_str(&format!(
+                        " · #{position} · waiting {}",
+                        format_elapsed(elapsed_ms / 1000)
+                    ));
+                }
+                rows.push(Line::styled(format!("  {status}"), muted_style));
+            }
             ShellRunState::Running => {
                 if self.dropped_live_output_lines > 0 {
                     rows.push(Line::styled(
@@ -215,6 +289,24 @@ impl ShellRunComponent {
     pub fn copy_text(&self) -> String {
         let mut text = format!("$ {}", self.command);
         match &self.state {
+            ShellRunState::Queued {
+                position,
+                waiting_ms,
+                observed_at,
+            } => {
+                let mut status = "Queued".to_owned();
+                if let Some(position) = position {
+                    let elapsed_ms = waiting_ms.saturating_add(
+                        u64::try_from(observed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    );
+                    status.push_str(&format!(
+                        " · #{position} · waiting {}",
+                        format_elapsed(elapsed_ms / 1000)
+                    ));
+                }
+                text.push('\n');
+                text.push_str(&status);
+            }
             ShellRunState::Running => {
                 for line in &self.live_output {
                     text.push('\n');
@@ -316,7 +408,7 @@ pub(crate) fn finished_plain_lines(
             lines.push("Timed out.".to_owned());
         }
         ShellCommandOutcome::ResourceLimited => {
-            lines.push("Resource limit exceeded.".to_owned());
+            lines.push(neo_agent_core::format_resource_limit(None));
         }
         ShellCommandOutcome::Completed => {
             if exit_code != Some(0) {

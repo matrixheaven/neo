@@ -3,8 +3,10 @@ use neo_agent_core::instructions::{
     InstructionScopeKind,
 };
 use neo_agent_core::multi_agent::{
-    AgentId, AgentLifecycleState, AgentProgressSnapshot, AgentToolActivityPhase,
-    DelegateToolProgress, SwarmAggregate, SwarmChildProgress,
+    AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+    AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot,
+    AgentToolActivityPhase, DelegateContext, DelegateToolProgress, SwarmAggregate,
+    SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, SessionEventPersistence,
@@ -1134,4 +1136,303 @@ async fn instruction_epoch_persists_once_and_replays_model_context() {
             .collect::<String>(),
         "scoped rules body"
     );
+}
+
+#[test]
+fn session_persists_queue_transition_but_not_live_queue_updates() {
+    let mut persistence = SessionEventPersistence::default();
+    let queued = AgentEvent::ToolExecutionQueued {
+        turn: 1,
+        id: "call-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: json!({"command": "printf ready"}),
+    };
+    let update = AgentEvent::ToolExecutionQueueUpdated {
+        turn: 1,
+        id: "call-1".to_owned(),
+        position: 2,
+        waiting_ms: 18_000,
+    };
+    assert_eq!(persistence.persisted_events(&queued), vec![queued]);
+    assert!(persistence.persisted_events(&update).is_empty());
+}
+
+#[test]
+fn delegate_persistence_strips_live_shell_queue_metadata() {
+    let mut agent = queued_shell_agent_snapshot("call-1", Some(2), 2_000);
+    let mut persistence = SessionEventPersistence::default();
+
+    let finished = AgentEvent::DelegateFinished {
+        turn: 1,
+        agent: agent.clone(),
+    };
+    let persisted = persistence.persisted_events(&finished);
+    assert_eq!(persisted.len(), 1);
+    assert_queued_phase_stripped(&persisted[0]);
+
+    let swarm = SwarmSnapshot {
+        swarm_id: "swarm-queue".to_owned(),
+        description: "queued child".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: AgentLifecycleState::Running,
+        max_concurrency: 1,
+        aggregate: SwarmAggregate {
+            total: 1,
+            running: 1,
+            ..SwarmAggregate::default()
+        },
+        children: vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "item-0".to_owned(),
+            agent: agent.clone(),
+        }],
+    };
+    let swarm_finished = AgentEvent::DelegateSwarmFinished {
+        turn: 1,
+        swarm: swarm.clone(),
+    };
+    let mut swarm_persistence = SessionEventPersistence::default();
+    let persisted_swarm = swarm_persistence.persisted_events(&swarm_finished);
+    assert_eq!(persisted_swarm.len(), 1);
+    assert_queued_phase_stripped(&persisted_swarm[0]);
+
+    // Compact progress uses the same projection: first update persists the
+    // stripped snapshot, and later rank/wait-only changes coalesce away.
+    let mut progress_persistence = SessionEventPersistence::default();
+    let updated = AgentEvent::DelegateUpdated {
+        turn: 2,
+        agent: agent.clone(),
+    };
+    let progress_events = progress_persistence.persisted_events(&updated);
+    assert_eq!(progress_events.len(), 1);
+    assert_queued_phase_stripped(&progress_events[0]);
+
+    if let AgentActivityKind::Tool { phase, .. } = &mut agent.activity[0].kind {
+        *phase = AgentToolActivityPhase::Queued {
+            position: Some(1),
+            queued_at_ms: 5_000,
+        };
+    }
+    agent.updated_at_ms = 5_000;
+    assert!(
+        progress_persistence
+            .persisted_events(&AgentEvent::DelegateUpdated { turn: 3, agent })
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    let mut persistence = SessionEventPersistence::default();
+
+    let events = [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("run shell"),
+        },
+        AgentEvent::ToolExecutionQueued {
+            turn: 1,
+            id: "call-queue".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"command": "printf ready"}),
+        },
+        AgentEvent::ToolExecutionQueueUpdated {
+            turn: 1,
+            id: "call-queue".to_owned(),
+            position: 3,
+            waiting_ms: 12_500,
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "call-queue".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"command": "printf ready"}),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "call-queue".to_owned(),
+            name: "Bash".to_owned(),
+            result: neo_agent_core::ToolResult::ok("ready").with_details(json!({
+                "exit_code": 0,
+                "outcome": "completed",
+                "stdout": "ready",
+                "stderr": "",
+            })),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                Vec::new(),
+                vec![AgentToolCall {
+                    id: "call-queue".into(),
+                    name: "Bash".into(),
+                    raw_arguments: json!({"command": "printf ready"}).to_string().into(),
+                }],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::tool_result(
+                "call-queue",
+                "Bash",
+                vec![Content::text("ready")],
+                false,
+            ),
+        },
+    ];
+
+    for event in &events {
+        for persisted in persistence.persisted_events(event) {
+            writer
+                .append_event(&persisted)
+                .await
+                .expect("append persisted event");
+        }
+    }
+    writer.flush().await.expect("flush");
+
+    let on_disk = JsonlSessionReader::read_all(&path).await.expect("read all");
+    assert!(
+        on_disk
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolExecutionQueued { .. })),
+        "queued transition itself remains durable"
+    );
+    assert!(
+        on_disk
+            .iter()
+            .all(|event| !matches!(event, AgentEvent::ToolExecutionQueueUpdated { .. })),
+        "live queue rank/wait updates must never be persisted"
+    );
+    for event in &on_disk {
+        if let AgentEvent::ToolExecutionFinished { result, .. } = event {
+            let visible = format!("{} {:?}", result.content, result.details);
+            assert!(
+                !visible.contains("position") && !visible.contains("waiting_ms"),
+                "tool result must not carry queue metadata: {visible}"
+            );
+        }
+    }
+
+    let replayed = JsonlSessionReader::replay_messages(&path)
+        .await
+        .expect("replay model messages");
+    let replay_text = format!("{replayed:?}");
+    assert!(
+        !replay_text.contains("position")
+            && !replay_text.contains("waiting_ms")
+            && !replay_text.contains("queued_at_ms"),
+        "replayed model messages must not include live queue metadata: {replay_text}"
+    );
+    assert!(
+        replayed.iter().any(|message| {
+            matches!(message, AgentMessage::ToolResult { .. }) && message.text().contains("ready")
+        }),
+        "tool result content itself should still replay: {replayed:?}"
+    );
+}
+
+fn queued_shell_agent_snapshot(
+    tool_id: &str,
+    position: Option<usize>,
+    queued_at_ms: u64,
+) -> AgentSnapshot {
+    let name = AgentDisplayName::new("Gibbs");
+    AgentSnapshot {
+        id: AgentId::from_suffix_for_test("queued-shell"),
+        display_name: name.clone(),
+        path: AgentPath::root_child(&name),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state: AgentLifecycleState::Running,
+        task: "run tests".to_owned(),
+        task_title: "run tests".to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 0,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: std::time::Duration::from_secs(1),
+        latest_text: None,
+        activity: vec![AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: tool_id.to_owned(),
+                name: "Bash".to_owned(),
+                summary: Some("cargo test".to_owned()),
+                phase: AgentToolActivityPhase::Queued {
+                    position,
+                    queued_at_ms,
+                },
+                output: None,
+            },
+        }],
+        prior_messages: Vec::new(),
+        outcome: None,
+    }
+}
+
+fn assert_queued_phase_stripped(event: &AgentEvent) {
+    match event {
+        AgentEvent::DelegateFinished { agent, .. } | AgentEvent::DelegateStarted { agent, .. } => {
+            assert_agent_queue_stripped(agent);
+        }
+        AgentEvent::DelegateProgressUpdated { progress, .. } => {
+            assert_progress_queue_stripped(progress);
+        }
+        AgentEvent::DelegateSwarmFinished { swarm, .. }
+        | AgentEvent::DelegateSwarmStarted { swarm, .. } => {
+            for child in &swarm.children {
+                assert_agent_queue_stripped(&child.agent);
+            }
+        }
+        AgentEvent::DelegateSwarmProgressUpdated { child_progress, .. } => {
+            assert_progress_queue_stripped(&child_progress.progress);
+        }
+        other => panic!("unexpected persisted event: {other:?}"),
+    }
+}
+
+fn assert_agent_queue_stripped(agent: &AgentSnapshot) {
+    for entry in &agent.activity {
+        if let AgentActivityKind::Tool { phase, .. } = &entry.kind {
+            assert_phase_queue_stripped(phase);
+        }
+    }
+    assert_progress_queue_stripped(&agent.progress_snapshot());
+}
+
+fn assert_progress_queue_stripped(progress: &AgentProgressSnapshot) {
+    if let Some(tool) = &progress.last_tool {
+        assert_phase_queue_stripped(&tool.phase);
+    }
+}
+
+fn assert_phase_queue_stripped(phase: &AgentToolActivityPhase) {
+    match phase {
+        AgentToolActivityPhase::Queued {
+            position,
+            queued_at_ms,
+        } => {
+            assert_eq!(*position, None);
+            assert_eq!(*queued_at_ms, 0);
+        }
+        AgentToolActivityPhase::Ongoing
+        | AgentToolActivityPhase::Done
+        | AgentToolActivityPhase::Failed => {}
+    }
 }

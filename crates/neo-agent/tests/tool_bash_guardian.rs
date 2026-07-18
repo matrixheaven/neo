@@ -1,9 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use neo_agent_core::{
-    ResourceLimitCause, ShellCommandOrigin, ShellCommandOutcome, ShellExecutionRequest,
-    ShellLimits, ShellRuntime, ToolAccess, ToolContext, ToolError, execute_model_bash_for_runtime,
-    execute_shell_command,
+    ShellAdmissionClass, ShellAdmissionRequest, ShellCommandOrigin, ShellCommandOutcome,
+    ShellExecutionRequest, ShellLimits, ShellRuntime, ToolAccess, ToolContext,
+    execute_model_bash_for_runtime, execute_shell_command,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -18,39 +18,57 @@ fn guarded_context(workspace: &tempfile::TempDir, limits: ShellLimits) -> ToolCo
         ))
 }
 
-#[tokio::test]
-async fn background_timeout_finishes_without_task_output_polling() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let limits = ShellLimits {
-        background_timeout_secs: 1,
-        ..ShellLimits::default()
+fn user_admission() -> ShellAdmissionRequest {
+    ShellAdmissionRequest {
+        owner: "user".to_owned(),
+        class: ShellAdmissionClass::User,
+    }
+}
+
+fn count_running_markers(runtime_root: &std::path::Path) -> usize {
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(runtime_root) else {
+        return 0;
     };
-    let ctx = guarded_context(&workspace, limits);
-    let result = execute_model_bash_for_runtime(
-        &ctx,
-        serde_json::json!({
-            "command": "sleep 30",
-            "run_in_background": true,
-            "description": "deadline regression"
-        }),
-    )
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            count += count_running_markers(&path);
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".running.json"))
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test]
+async fn explicit_timeout_starts_after_guardian_start_and_kills_tree() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let ctx = guarded_context(&workspace, ShellLimits::default());
+    let result = execute_shell_command(ShellExecutionRequest {
+        id: "shell-timeout".to_owned(),
+        command: "sleep 30".to_owned(),
+        cwd: ctx.cwd.clone(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: Some(Duration::from_secs(1)),
+        max_output_bytes: 1_024,
+        cancel_token: CancellationToken::new(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: ctx.shell_runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
+    })
     .await
-    .expect("start background command");
-    let task_id = result
-        .details
-        .as_ref()
-        .and_then(|details| details["task_id"].as_str())
-        .expect("task id")
-        .to_owned();
+    .expect("run timed shell");
 
-    tokio::time::sleep(Duration::from_millis(1_800)).await;
-    let stopped = ctx
-        .background_tasks
-        .stop(&task_id, "test cleanup", limits.max_output_bytes)
-        .await
-        .expect("stop timed-out task");
-
-    assert_eq!(stopped.details.as_ref().unwrap()["status"], "timed_out");
+    assert_eq!(result.outcome, ShellCommandOutcome::TimedOut);
 }
 
 #[tokio::test]
@@ -62,13 +80,14 @@ async fn bash_foreground_collects_output_through_guardian() {
         command: "printf ok".to_owned(),
         cwd: ctx.cwd.clone(),
         origin: ShellCommandOrigin::UserShellMode,
-        foreground_timeout: Duration::from_secs(5),
-        background_timeout: Duration::from_secs(30),
+        timeout: Some(Duration::from_secs(5)),
         max_output_bytes: 1_024,
         cancel_token: CancellationToken::new(),
         stream_update: None,
         background_tasks: None,
         shell_runtime: ctx.shell_runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
     })
     .await
     .expect("run guarded shell");
@@ -89,13 +108,14 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
         command: "sleep 30 & wait".to_owned(),
         cwd: ctx.cwd.clone(),
         origin: ShellCommandOrigin::UserShellMode,
-        foreground_timeout: Duration::from_secs(30),
-        background_timeout: Duration::from_secs(30),
+        timeout: None,
         max_output_bytes: 1_024,
         cancel_token: task_cancel,
         stream_update: None,
         background_tasks: None,
         shell_runtime: ctx.shell_runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
     }));
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
@@ -117,17 +137,22 @@ async fn user_shell_runner_registers_foreground_task_for_detach() {
         command: "sleep 30".to_owned(),
         cwd,
         origin: ShellCommandOrigin::UserShellMode,
-        foreground_timeout: Duration::from_secs(10),
-        background_timeout: Duration::from_secs(30),
+        timeout: None,
         max_output_bytes: 1_024,
         cancel_token: CancellationToken::new(),
         stream_update: None,
         background_tasks: Some(task_manager),
         shell_runtime: runtime,
+        admission: user_admission(),
+        admission_callback: None,
     }));
 
     let mut task_id = None;
-    for _ in 0..100 {
+    for _ in 0..500 {
+        assert!(
+            !task.is_finished(),
+            "foreground shell exited before registering"
+        );
         task_id = manager
             .list(true, 10)
             .await
@@ -153,45 +178,93 @@ async fn user_shell_runner_registers_foreground_task_for_detach() {
 }
 
 #[tokio::test]
-async fn second_bash_is_rejected_by_shared_active_command_limit() {
+async fn queued_bash_does_not_spawn_guardian_before_permit() {
     let workspace = tempfile::tempdir().expect("workspace");
     let limits = ShellLimits {
         max_active_commands: 1,
         ..ShellLimits::default()
     };
-    let ctx = guarded_context(&workspace, limits);
-    let started = execute_model_bash_for_runtime(
-        &ctx,
-        serde_json::json!({
-            "command": "sleep 30",
-            "run_in_background": true,
-            "description": "hold admission permit"
-        }),
-    )
-    .await
-    .expect("start first bash");
-    let task_id = started
-        .details
-        .as_ref()
-        .and_then(|details| details["task_id"].as_str())
-        .expect("task id")
-        .to_owned();
+    let runtime = ShellRuntime::new(
+        limits,
+        PathBuf::from(env!("CARGO_BIN_EXE_neo")),
+        workspace.path().join("runtime"),
+    );
+    let runtime_root = runtime.runtime_root().to_path_buf();
+    let hold_cancel = CancellationToken::new();
+    let hold_task = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "shell-hold".to_owned(),
+        command: "sleep 30".to_owned(),
+        cwd: workspace.path().to_path_buf(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: None,
+        max_output_bytes: 1_024,
+        cancel_token: hold_cancel.clone(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
+    }));
 
-    let error =
-        execute_model_bash_for_runtime(&ctx, serde_json::json!({ "command": "printf second" }))
-            .await
-            .expect_err("second bash must not queue or spawn");
-    ctx.background_tasks
-        .stop(&task_id, "test cleanup", limits.max_output_bytes)
-        .await
-        .expect("stop first bash");
-
-    assert!(matches!(
-        error,
-        ToolError::ResourceLimited {
-            cause: ResourceLimitCause::ActiveCommands
+    let mut holders = 0;
+    for _ in 0..500 {
+        assert!(
+            !hold_task.is_finished(),
+            "hold command exited before occupying capacity"
+        );
+        holders = count_running_markers(&runtime_root);
+        if holders >= 1 {
+            break;
         }
-    ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        holders, 1,
+        "first command must occupy the only capacity slot"
+    );
+
+    let second = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "shell-queued".to_owned(),
+        command: "printf second".to_owned(),
+        cwd: workspace.path().to_path_buf(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: Some(Duration::from_secs(5)),
+        max_output_bytes: 1_024,
+        cancel_token: CancellationToken::new(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: runtime.clone(),
+        admission: ShellAdmissionRequest {
+            owner: "user-2".to_owned(),
+            class: ShellAdmissionClass::User,
+        },
+        admission_callback: None,
+    }));
+
+    // Give the second request time to reach the scheduler queue, then prove it
+    // does not spawn another guardian while the first still holds capacity.
+    for _ in 0..50 {
+        assert!(
+            !hold_task.is_finished(),
+            "hold command must remain running while second is queued"
+        );
+        assert_eq!(
+            count_running_markers(&runtime_root),
+            1,
+            "queued command must not spawn a second guardian"
+        );
+        assert!(!second.is_finished());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    hold_cancel.cancel();
+    let hold_result = hold_task.await.expect("join hold").expect("cancel hold");
+    assert_eq!(hold_result.outcome, ShellCommandOutcome::Cancelled);
+
+    let second_result = second.await.expect("join queued").expect("run queued");
+    assert_eq!(second_result.exit_code, Some(0));
+    assert_eq!(second_result.stdout, "second");
+    assert_eq!(second_result.outcome, ShellCommandOutcome::Completed);
 }
 
 #[tokio::test]
@@ -237,5 +310,128 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
     assert_eq!(
         std::fs::read_to_string(log).expect("read guardian task log"),
         "persisted-output"
+    );
+}
+
+#[tokio::test]
+async fn explicit_timeout_excludes_time_spent_in_admission_queue() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let limits = ShellLimits {
+        max_active_commands: 1,
+        ..ShellLimits::default()
+    };
+    let runtime = ShellRuntime::new(
+        limits,
+        PathBuf::from(env!("CARGO_BIN_EXE_neo")),
+        workspace.path().join("runtime"),
+    );
+    let runtime_root = runtime.runtime_root().to_path_buf();
+    let started_marker = workspace.path().join("timeout-started.marker");
+
+    let hold_cancel = CancellationToken::new();
+    let hold_task = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "shell-hold-timeout".to_owned(),
+        command: "sleep 30".to_owned(),
+        cwd: workspace.path().to_path_buf(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: None,
+        max_output_bytes: 1_024,
+        cancel_token: hold_cancel.clone(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
+    }));
+
+    let mut holders = 0;
+    for _ in 0..500 {
+        assert!(
+            !hold_task.is_finished(),
+            "hold command exited before occupying capacity"
+        );
+        holders = count_running_markers(&runtime_root);
+        if holders >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(holders, 1, "hold must occupy the only capacity slot");
+
+    let command = if cfg!(windows) {
+        format!(
+            "echo started> \"{}\" & ping -n 31 127.0.0.1 >nul",
+            started_marker.display()
+        )
+    } else {
+        format!("printf started > '{}'; sleep 30", started_marker.display())
+    };
+    let queued = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "shell-timeout-queued".to_owned(),
+        command,
+        cwd: workspace.path().to_path_buf(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: Some(Duration::from_secs(1)),
+        max_output_bytes: 1_024,
+        cancel_token: CancellationToken::new(),
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: runtime.clone(),
+        admission: ShellAdmissionRequest {
+            owner: "timeout-owner".to_owned(),
+            class: ShellAdmissionClass::User,
+        },
+        admission_callback: None,
+    }));
+
+    // Queue longer than the explicit one-second deadline so a leak would
+    // expire the command before it ever starts.
+    for _ in 0..20 {
+        assert!(!queued.is_finished(), "queued command finished while held");
+        assert_eq!(
+            count_running_markers(&runtime_root),
+            1,
+            "queued command must not spawn before grant"
+        );
+        assert!(
+            !started_marker.exists(),
+            "command body must not run while queued"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    hold_cancel.cancel();
+    let hold_result = hold_task.await.expect("join hold").expect("cancel hold");
+    assert_eq!(hold_result.outcome, ShellCommandOutcome::Cancelled);
+
+    for _ in 0..500 {
+        if started_marker.exists() {
+            break;
+        }
+        assert!(
+            !queued.is_finished(),
+            "timeout command finished before start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        started_marker.exists(),
+        "command must begin after admission grant"
+    );
+    let granted_at = std::time::Instant::now();
+
+    let result = queued
+        .await
+        .expect("join timeout command")
+        .expect("run timeout command");
+    assert_eq!(result.outcome, ShellCommandOutcome::TimedOut);
+    let after_grant = granted_at.elapsed();
+    assert!(
+        after_grant >= Duration::from_millis(700),
+        "explicit timeout must run for about one second after start, got {after_grant:?}"
+    );
+    assert!(
+        after_grant <= Duration::from_secs(4),
+        "timeout should not include multi-second queue wait, got {after_grant:?}"
     );
 }
