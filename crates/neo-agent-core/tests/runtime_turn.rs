@@ -2397,16 +2397,31 @@ async fn stream_timeout_zero_waits_until_cancelled() {
     );
     let mut events = Vec::new();
 
+    loop {
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("turn should start promptly")
+            .expect("turn stream should remain open")
+            .expect("turn event should be ok");
+        let turn_started = matches!(event, AgentEvent::TurnStarted { .. });
+        events.push(event);
+        if turn_started {
+            break;
+        }
+    }
+    assert!(
+        timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err(),
+        "zero timeouts must leave the pending model stream silent"
+    );
+
+    cancel.cancel();
     while let Some(event) = timeout(Duration::from_millis(250), stream.next())
         .await
         .expect("silent stream cancellation should not stall")
     {
-        let event = event.expect("cancelled stream should remain in-band");
-        let turn_started = matches!(event, AgentEvent::TurnStarted { .. });
-        events.push(event);
-        if turn_started {
-            cancel.cancel();
-        }
+        events.push(event.expect("cancelled stream should remain in-band"));
     }
     drop(stream);
 
