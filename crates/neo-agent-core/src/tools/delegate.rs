@@ -718,7 +718,6 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
     const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
     const MAX_SWARM_ITEM_TITLE_CHARS: usize = 80;
     const MAX_SWARM_ITEM_VALUE_CHARS: usize = 512;
-    const MAX_SWARM_PROMPT_TEMPLATE_CHARS: usize = 512;
     if request.description.trim().is_empty() {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -759,14 +758,6 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
         });
     }
     if let Some(template) = request.prompt_template.as_deref() {
-        if template.chars().count() > MAX_SWARM_PROMPT_TEMPLATE_CHARS {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!(
-                    "prompt_template must not exceed {MAX_SWARM_PROMPT_TEMPLATE_CHARS} characters"
-                ),
-            });
-        }
         if !request.items.is_empty() && !template.contains("{{item}}") {
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
@@ -963,6 +954,20 @@ mod tests {
             err.to_string(),
             "invalid input for DelegateSwarm: items[0].title must not be empty"
         );
+    }
+
+    #[test]
+    fn delegate_swarm_accepts_long_prompt_template() {
+        let request: DelegateSwarmRequest = serde_json::from_value(serde_json::json!({
+            "description": "long instructions",
+            "items": [
+                { "title": "check", "value": "neo-ai" }
+            ],
+            "prompt_template": "x".repeat(513) + " {{item}}"
+        }))
+        .expect("request parses");
+
+        validate_swarm_request("DelegateSwarm", &request).expect("long template accepted");
     }
 
     #[test]
