@@ -115,24 +115,33 @@ workspace/
 
 When a batch touches new or changed scopes, preflight defers the entire tool batch — it never partially executes — appends one instruction epoch, and the model replans within the same turn. Rules render general-to-specific: global first, then trusted ancestors outermost-to-nearest, then the workspace root, then nested scopes shallowest-to-deepest, so deeper files override broader guidance. A missing `AGENTS.md` in a directory is not an error, and absence is not cached across turns, so a newly created file is discovered before the next tool runs in its scope. A tool that modifies an active source is still governed by the old revision; after that tool completes, Neo appends an update or removal epoch. Rewriting identical content creates no epoch.
 
-### Standalone `@path` Imports
+### Instruction Imports
 
 Only a standalone line with one leading `@` outside fenced code is an import:
 
 ```md
-@./docs/rust-rules.md
-@~/.neo/CX.md
+@./docs/project-rules.md
+@~/.neo/shared-rules.md
 ```
 
-The following remain ordinary text: `@@./rules.md`; inline mentions such as `See @docs/rules.md`; import-looking text inside fenced code; URLs; and environment-variable expressions.
+Local Markdown links to `.md` files are imports too:
+
+```md
+Read the [project rules](./docs/project-rules.md) before acting.
+```
+
+`[project rules](./docs/project-rules.md)` and a standalone `@./docs/project-rules.md` load the same file and use the same recursion, trust, deduplication, and size limits. The only presentation difference is that Neo preserves the Markdown link, while the `@` directive is replaced by the imported body.
+
+Neo preserves the original link and inserts the imported body immediately after it. Images, links inside inline or fenced code, URLs, and fragment-only links are not imported. For `@`, these also remain ordinary text: `@@./rules.md`, inline mentions such as `See @docs/rules.md`, URLs, and environment-variable expressions.
 
 Resolution rules:
 
 - Relative paths resolve from the directory containing the importing file; `~` uses the platform home directory.
-- The final canonical path must remain inside the primary workspace or `$NEO_HOME`; anything else is rejected (`Blocked: untrusted import`).
+- Project and ancestor bundles may import only from the primary workspace or `$NEO_HOME`.
+- The user-global `$NEO_HOME/AGENTS.md` bundle may additionally import Markdown under the platform home. If the project is untrusted, its workspace subtree remains excluded.
 - Imported sources must be regular UTF-8 `.md` files; directories, devices, sockets, URLs, and other special files are rejected.
 - Canonical paths drive cycle detection and deduplication; a source imported more than once expands only at its first occurrence.
-- Imported content replaces the directive at its original position, wrapped in an `<included_instructions path="...">` provenance element; source bodies remain exact UTF-8 text.
+- Imported content is wrapped in an `<included_instructions path="...">` provenance element; it replaces an `@` directive or follows a preserved Markdown link. Source bodies remain exact UTF-8 text.
 
 Structural safety limits (maximum recursive import depth 5, at most 32 sources per import graph, 1 MiB per source, 8 MiB per complete graph) are host safety limits, not the model-context budget:
 
@@ -147,7 +156,7 @@ One `AGENTS.md` plus its complete recursive import graph forms one atomic bundle
 
 ### Trust and Filesystem Boundary
 
-- `$NEO_HOME/AGENTS.md` and imports under `$NEO_HOME` are user-global and always trusted.
+- `$NEO_HOME/AGENTS.md` is user-global and always trusted; its imports may read Markdown under `$NEO_HOME` or the platform home, except an untrusted workspace subtree.
 - Project `AGENTS.md` files and their workspace-local imports load only when the primary project is trusted.
 - Downward discovery never crosses the primary workspace boundary; workspace-external absolute `Read` paths and additional workspace roots do not trigger scoped discovery.
 - Canonical containment uses `Path`/`PathBuf` semantics, not string prefix tests.

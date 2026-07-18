@@ -1,5 +1,5 @@
-//! Canonical scope discovery, strict `@path` import expansion, and stable
-//! source reads for the path-scoped instruction engine.
+//! Canonical scope discovery, Markdown instruction imports, and stable source
+//! reads for the path-scoped instruction engine.
 //!
 //! The resolver is deterministic and side-effect-free after filesystem
 //! reads. It never caches results across calls, so newly created
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use pulldown_cmark::{Event, Parser, Tag};
 use sha2::{Digest, Sha256};
 
 use super::types::{
@@ -395,6 +396,19 @@ impl InstructionResolver {
                 .is_some_and(|home| path.starts_with(home))
     }
 
+    fn is_allowed_global_path(&self, path: &Path) -> bool {
+        if path.starts_with(&self.canonical_workspace) {
+            return self.project_trusted;
+        }
+        self.canonical_neo_home
+            .as_ref()
+            .is_some_and(|home| path.starts_with(home))
+            || self
+                .home_dir
+                .as_ref()
+                .is_some_and(|home| path.starts_with(home))
+    }
+
     /// Model-facing display path: redacts the platform home as `~`.
     #[must_use]
     pub fn display_for_model(&self, path: &Path) -> PathBuf {
@@ -515,23 +529,19 @@ impl InstructionResolver {
                     path: agents_file.clone(),
                     reason: error.to_string(),
                 })?;
-        let untrusted_global_source_leaves_home = !self.project_trusted
-            && self.canonical_neo_home.as_ref().is_some_and(|home| {
-                canonical_dir.starts_with(home) && !canonical_file.starts_with(home)
-            });
-        let source_is_allowed = !untrusted_global_source_leaves_home
-            && if canonical_dir.starts_with(&self.canonical_workspace)
-                || self
-                    .canonical_neo_home
-                    .as_ref()
-                    .is_some_and(|home| canonical_dir.starts_with(home))
-            {
-                self.is_contained(&canonical_file)
-            } else {
-                // Trusted ancestor roots are outside the ordinary import roots,
-                // but their AGENTS.md source must still stay inside that ancestor.
-                canonical_file.starts_with(&canonical_dir)
-            };
+        let global_bundle = self
+            .canonical_neo_home
+            .as_ref()
+            .is_some_and(|home| canonical_dir.starts_with(home));
+        let source_is_allowed = if global_bundle {
+            self.is_allowed_global_path(&canonical_file)
+        } else if canonical_dir.starts_with(&self.canonical_workspace) {
+            self.is_contained(&canonical_file)
+        } else {
+            // Trusted ancestor roots are outside the ordinary import roots,
+            // but their AGENTS.md source must still stay inside that ancestor.
+            canonical_file.starts_with(&canonical_dir)
+        };
         if !source_is_allowed {
             return Err(InstructionError::UntrustedImport {
                 path: canonical_file,
@@ -552,6 +562,7 @@ impl InstructionResolver {
         }
         let mut expander = ImportExpander {
             resolver: self,
+            global_bundle,
             visited: HashSet::new(),
             stack: Vec::new(),
             sources: Vec::new(),
@@ -577,6 +588,7 @@ impl InstructionResolver {
 
 struct ImportExpander<'a> {
     resolver: &'a InstructionResolver,
+    global_bundle: bool,
     visited: HashSet<PathBuf>,
     stack: Vec<PathBuf>,
     sources: Vec<PathBuf>,
@@ -652,6 +664,7 @@ impl ImportExpander<'_> {
         importer_dir: &Path,
         depth: u32,
     ) -> Result<String, InstructionError> {
+        let text = self.expand_markdown_links(text, importer_dir, depth)?;
         let mut output = String::with_capacity(text.len());
         let mut fence: Option<(u8, usize)> = None;
         for line in text.split_inclusive('\n') {
@@ -709,6 +722,54 @@ impl ImportExpander<'_> {
         Ok(output)
     }
 
+    fn expand_markdown_links(
+        &mut self,
+        text: &str,
+        importer_dir: &Path,
+        depth: u32,
+    ) -> Result<String, InstructionError> {
+        let links = Parser::new(text)
+            .into_offset_iter()
+            .filter_map(|(event, range)| match event {
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    markdown_import_target(&dest_url).map(|target| (range, target.to_owned()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if links.is_empty() {
+            return Ok(text.to_owned());
+        }
+
+        let mut output = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for (range, target) in links {
+            output.push_str(&text[cursor..range.end]);
+            let (source_path, canonical) = self.resolve_import(importer_dir, &target, depth)?;
+            let included = self.expand_canonical(&source_path, &canonical, depth + 1)?;
+            if !included.is_empty() {
+                let display = escape_attribute(
+                    &self
+                        .resolver
+                        .display_for_model(&canonical)
+                        .to_string_lossy(),
+                );
+                write!(
+                    output,
+                    "<included_instructions path=\"{display}\">\n{included}"
+                )
+                .expect("write to string");
+                if !included.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str("</included_instructions>");
+            }
+            cursor = range.end;
+        }
+        output.push_str(&text[cursor..]);
+        Ok(output)
+    }
+
     fn resolve_import(
         &self,
         importer_dir: &Path,
@@ -746,13 +807,12 @@ impl ImportExpander<'_> {
                 }
             }
         })?;
-        let untrusted_global_import_leaves_home = !self.resolver.project_trusted
-            && self
-                .resolver
-                .canonical_neo_home
-                .as_ref()
-                .is_some_and(|home| importer_dir.starts_with(home) && !canonical.starts_with(home));
-        if !self.resolver.is_contained(&canonical) || untrusted_global_import_leaves_home {
+        let allowed = if self.global_bundle {
+            self.resolver.is_allowed_global_path(&canonical)
+        } else {
+            self.resolver.is_contained(&canonical)
+        };
+        if !allowed {
             return Err(InstructionError::UntrustedImport { path: canonical });
         }
         let metadata = self
@@ -780,6 +840,33 @@ impl ImportExpander<'_> {
         }
         Ok((joined, canonical))
     }
+}
+
+fn markdown_import_target(destination: &str) -> Option<&str> {
+    let target = destination
+        .split_once('#')
+        .map_or(destination, |(path, _)| path);
+    if target.is_empty() || target.contains('?') || has_uri_scheme(target) {
+        return None;
+    }
+    Path::new(target)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        .then_some(target)
+}
+
+fn has_uri_scheme(target: &str) -> bool {
+    if Path::new(target).is_absolute() {
+        return false;
+    }
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.starts_with(char::is_alphabetic)
+        && scheme.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
 }
 
 /// Returns the fence marker `(char, length)` for a trimmed line that opens
@@ -895,6 +982,41 @@ mod tests {
             .expect("global bundle");
 
         assert!(bundle.expanded.contains("WORKSPACE SECRET"));
+    }
+
+    #[test]
+    fn global_agents_can_import_platform_home_markdown_outside_neo_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let workspace = home.join("workspace");
+        let neo_home = home.join(".neo");
+        let shared_rules = home.join(".codex/RTK.md");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&neo_home).expect("neo home");
+        std::fs::create_dir_all(shared_rules.parent().expect("rules parent"))
+            .expect("rules parent");
+        std::fs::write(&shared_rules, "SHARED USER RULES\n").expect("shared rules");
+        std::fs::write(
+            neo_home.join("AGENTS.md"),
+            format!("@{}\n", shared_rules.display()),
+        )
+        .expect("global agents");
+        let resolver = InstructionResolver::with_home(
+            &InstructionRegistryConfig {
+                primary_workspace: workspace,
+                neo_home: Some(neo_home.clone()),
+                project_trusted: false,
+            },
+            home,
+        )
+        .expect("resolver");
+
+        let bundle = resolver
+            .load_bundle(&neo_home)
+            .expect("global home import")
+            .expect("global bundle");
+
+        assert!(bundle.expanded.contains("SHARED USER RULES"));
     }
 
     #[cfg(windows)]

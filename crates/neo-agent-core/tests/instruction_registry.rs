@@ -165,6 +165,46 @@ See @docs/rules.md inline.
 }
 
 #[test]
+fn resolver_expands_local_markdown_links_but_not_images_code_or_urls() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("CX.md"), "CX RULES\n").expect("cx file");
+    for name in ["image.md", "inline-code.md", "fenced.md"] {
+        fs::write(workspace.join(name), format!("{name} MUST NOT LOAD\n")).expect("fixture");
+    }
+    let agents = r#"Read [CX.md](./CX.md) before acting.
+![diagram](./image.md)
+`[inline](./inline-code.md)`
+```markdown
+[fenced](./fenced.md)
+```
+[web](https://example.com/rules.md) [section](#local)
+"#;
+    fs::write(workspace.join("AGENTS.md"), agents).expect("agents file");
+
+    let resolver = InstructionResolver::new(&config_for(&workspace, None)).expect("resolver");
+    let bundle = resolver
+        .load_bundle(&workspace)
+        .expect("load bundle")
+        .expect("bundle present");
+    let expanded = &bundle.expanded;
+
+    assert!(expanded.contains("Read [CX.md](./CX.md)"), "{expanded}");
+    assert!(expanded.contains("CX RULES"), "{expanded}");
+    for sentinel in [
+        "image.md MUST NOT LOAD",
+        "inline-code.md MUST NOT LOAD",
+        "fenced.md MUST NOT LOAD",
+    ] {
+        assert!(!expanded.contains(sentinel), "{expanded}");
+    }
+    assert_eq!(
+        expanded.matches("<included_instructions").count(),
+        1,
+        "{expanded}"
+    );
+}
+
+#[test]
 fn resolver_rejects_casefold_collision_and_canonical_escape() {
     // Case-insensitive filesystems (default macOS/Windows) cannot hold two
     // case-folded variants in one directory, so the collision path is tested

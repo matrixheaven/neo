@@ -377,7 +377,7 @@ pub enum InstructionError {
     IncludeCycle { path: PathBuf },
     #[error("instruction limit exceeded: {0}")]
     LimitExceeded(String),
-    #[error("import `{path}` canonicalizes outside the primary workspace and $NEO_HOME")]
+    #[error("import `{path}` canonicalizes outside the allowed instruction roots")]
     UntrustedImport { path: PathBuf },
     #[error("source `{path}` changed repeatedly while being read")]
     UnstableSource { path: PathBuf },
