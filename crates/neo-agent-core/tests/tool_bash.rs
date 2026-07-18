@@ -154,7 +154,10 @@ fn bash_schema_uses_optional_timeout_secs_without_legacy_timeout() {
         .into_iter()
         .find(|spec| spec.name == "Bash")
         .expect("Bash spec");
-    let schema = bash.input_schema.get("schema").unwrap_or(&bash.input_schema);
+    let schema = bash
+        .input_schema
+        .get("schema")
+        .unwrap_or(&bash.input_schema);
     let properties = schema["properties"].as_object().expect("properties");
     assert!(properties.contains_key("timeout_secs"));
     assert!(!properties.contains_key("timeout"));

@@ -65,7 +65,14 @@ pub enum ToolStatusKind {
 impl ToolStatusKind {
     #[must_use]
     pub fn label(self) -> &'static str {
-        ["pending", "queued", "running", "succeeded", "failed", "cancelled"][self as usize]
+        [
+            "pending",
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+        ][self as usize]
     }
 
     #[must_use]

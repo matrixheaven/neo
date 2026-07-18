@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::tools::{ShellAdmissionCallback, ShellAdmissionEvent};
 use crate::{
     AgentEvent, AgentRuntimeError, AgentToolCall, QueueKind, ShellCommandOrigin,
     ShellCommandOutcome, TodoEventData, ToolContext, ToolResult, ToolUpdateCallback,
 };
-use crate::tools::{ShellAdmissionCallback, ShellAdmissionEvent};
 
 use super::config::AgentConfig;
 use super::context::AgentContext;
@@ -169,9 +169,7 @@ pub(super) fn make_shell_admission_callback(
                 arguments: arguments.as_ref().clone(),
             });
             if name == "Bash"
-                && let Some(command) = arguments
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
+                && let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str)
             {
                 sink.emit_event(AgentEvent::ShellCommandStarted {
                     turn,

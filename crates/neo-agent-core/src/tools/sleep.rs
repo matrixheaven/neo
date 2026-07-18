@@ -44,9 +44,7 @@ impl Tool for SleepTool {
             let input: SleepInput = parse_input(self.name(), input)?;
             let reason = input.reason.trim();
             if !(1..=3600).contains(&input.duration_seconds) {
-                return Err(invalid_sleep(
-                    "duration_seconds must be between 1 and 3600",
-                ));
+                return Err(invalid_sleep("duration_seconds must be between 1 and 3600"));
             }
             if reason.is_empty()
                 || reason.contains('\r')
@@ -88,14 +86,21 @@ mod tests {
     async fn sleep_validates_bounds_reason_and_cancellation() {
         let tool = SleepTool;
         let spec = tool.spec();
-        let schema = spec.input_schema.get("schema").unwrap_or(&spec.input_schema);
+        let schema = spec
+            .input_schema
+            .get("schema")
+            .unwrap_or(&spec.input_schema);
         let required = schema["required"].as_array().expect("required fields");
         assert!(
             required
                 .iter()
                 .any(|field| field.as_str() == Some("duration_seconds"))
         );
-        assert!(required.iter().any(|field| field.as_str() == Some("reason")));
+        assert!(
+            required
+                .iter()
+                .any(|field| field.as_str() == Some("reason"))
+        );
         assert!(spec.description.contains("WaitDelegate"));
         assert!(spec.description.contains("TaskOutput"));
         assert!(spec.description.contains("block=true"));

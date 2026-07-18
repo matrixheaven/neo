@@ -6,9 +6,10 @@ use neo_agent_core::multi_agent::{
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, child_activity_view, child_tool_status_text, compact_chars, display_elapsed,
-    format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
+    MAX_CHILD_TOOL_ROWS, child_activity_view, child_tool_status_text, compact_chars,
+    display_elapsed, format_cache_token_usage, format_elapsed, format_token_count, one_line,
+    render_child_body, render_child_final, render_child_thinking, render_child_tool_row,
+    role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -546,26 +547,23 @@ fn child_activity_summary(
         return compact_chars(&one_line(fallback_item), 96);
     }
     let now = now_ms.unwrap_or_else(|| child_activity_time_ms(agent));
-    if let Some((name, summary, phase)) = agent
-        .activity
-        .iter()
-        .rev()
-        .find_map(|entry| match &entry.kind {
-            AgentActivityKind::Tool {
-                name,
-                summary,
-                phase,
-                ..
-            } if matches!(
-                phase,
-                AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
-            ) =>
-            {
-                Some((name.as_str(), summary.as_deref(), *phase))
-            }
-            AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
-        })
+    if let Some((name, summary, phase)) = agent.activity.iter().rev().find_map(|entry| match &entry
+        .kind
     {
+        AgentActivityKind::Tool {
+            name,
+            summary,
+            phase,
+            ..
+        } if matches!(
+            phase,
+            AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
+        ) =>
+        {
+            Some((name.as_str(), summary.as_deref(), *phase))
+        }
+        AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+    }) {
         if matches!(phase, AgentToolActivityPhase::Ongoing) && waiting {
             return compact_chars(&format_tool_summary("waiting on", name, summary), 96);
         }
@@ -589,20 +587,17 @@ fn child_activity_summary(
             return compact_chars(&one_line(text), 96);
         }
     }
-    if let Some((name, summary, phase)) = agent
-        .activity
-        .iter()
-        .rev()
-        .find_map(|entry| match &entry.kind {
-            AgentActivityKind::Tool {
-                name,
-                summary,
-                phase,
-                ..
-            } => Some((name.as_str(), summary.as_deref(), *phase)),
-            AgentActivityKind::Text { .. } => None,
-        })
+    if let Some((name, summary, phase)) = agent.activity.iter().rev().find_map(|entry| match &entry
+        .kind
     {
+        AgentActivityKind::Tool {
+            name,
+            summary,
+            phase,
+            ..
+        } => Some((name.as_str(), summary.as_deref(), *phase)),
+        AgentActivityKind::Text { .. } => None,
+    }) {
         return compact_chars(&child_tool_status_text(name, summary, phase, now), 96);
     }
     let view = child_activity_view(agent, 1);

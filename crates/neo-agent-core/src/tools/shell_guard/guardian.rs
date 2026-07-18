@@ -1038,13 +1038,11 @@ fn resource_limit_for_sample(
     let memory_percent =
         u64::try_from((u128::from(sample.resident_memory) * 100) / u128::from(sample.total_memory))
             .unwrap_or(u64::MAX);
-    (memory_percent > u64::from(limits.max_command_memory_percent)).then_some(
-        ResourceLimitDetail {
-            cause: ResourceLimitCause::TreeMemory,
-            configured: Some(u64::from(limits.max_command_memory_percent)),
-            observed: Some(memory_percent),
-        },
-    )
+    (memory_percent > u64::from(limits.max_command_memory_percent)).then_some(ResourceLimitDetail {
+        cause: ResourceLimitCause::TreeMemory,
+        configured: Some(u64::from(limits.max_command_memory_percent)),
+        observed: Some(memory_percent),
+    })
 }
 
 #[cfg(test)]

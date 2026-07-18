@@ -126,9 +126,11 @@ impl ToolCallComponent {
         if self.state.status != ToolStatusKind::Queued {
             return false;
         }
-        if self.queue.as_ref().is_some_and(|current| {
-            current.position == position && current.waiting_ms == waiting_ms
-        }) {
+        if self
+            .queue
+            .as_ref()
+            .is_some_and(|current| current.position == position && current.waiting_ms == waiting_ms)
+        {
             return false;
         }
         self.queue = Some(QueueDisplayState {

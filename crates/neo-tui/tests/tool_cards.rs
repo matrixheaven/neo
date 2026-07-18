@@ -1288,7 +1288,11 @@ fn generic_pending_tool_is_not_called_queued() {
         status: ToolStatusKind::Pending,
         exit_code: None,
     });
-    assert!(plain(component.render(80)).join("\n").contains("Preparing Read"));
+    assert!(
+        plain(component.render(80))
+            .join("\n")
+            .contains("Preparing Read")
+    );
 }
 
 #[test]

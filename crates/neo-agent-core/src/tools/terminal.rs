@@ -565,7 +565,11 @@ mod tests {
             )
             .await
             .expect_err("non-start timeout was accepted");
-        assert!(error.to_string().contains("timeout_secs is valid only for start"));
+        assert!(
+            error
+                .to_string()
+                .contains("timeout_secs is valid only for start")
+        );
         let error = TerminalTool
             .execute(
                 &context,

@@ -476,5 +476,4 @@ mod tests {
         assert_eq!(guard.max_command_memory_percent, 25);
         assert_eq!(guard.timeout_ms, Some(60_000));
     }
-
-    }
+}

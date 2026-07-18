@@ -26,10 +26,7 @@ pub struct ShellAdmissionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellAdmissionEvent {
     Queued,
-    Position {
-        position: usize,
-        waiting: Duration,
-    },
+    Position { position: usize, waiting: Duration },
     Started,
 }
 
@@ -256,11 +253,7 @@ impl ShellScheduler {
         Self::deliver(Vec::new(), notices);
     }
 
-    fn dispatch(
-        state: &mut SchedulerState,
-        capacity: usize,
-        scheduler: &Arc<Self>,
-    ) -> Vec<Grant> {
+    fn dispatch(state: &mut SchedulerState, capacity: usize, scheduler: &Arc<Self>) -> Vec<Grant> {
         let mut grants = Vec::new();
         while state.running_total < capacity {
             let Some(mut waiter) = state.pop_next_eligible(capacity) else {
@@ -347,17 +340,13 @@ impl SchedulerState {
         if !self.user.is_empty() {
             return self.user.pop_front();
         }
-        if let Some(waiter) = Self::pop_owner_class(
-            &mut self.foreground_owners,
-            &mut self.foreground_ring,
-        ) {
+        if let Some(waiter) =
+            Self::pop_owner_class(&mut self.foreground_owners, &mut self.foreground_ring)
+        {
             return Some(waiter);
         }
         if self.running_background < Self::background_limit(capacity) {
-            return Self::pop_owner_class(
-                &mut self.background_owners,
-                &mut self.background_ring,
-            );
+            return Self::pop_owner_class(&mut self.background_owners, &mut self.background_ring);
         }
         None
     }
@@ -477,14 +466,12 @@ impl SchedulerState {
     fn ordered_ids(&self, class: ShellAdmissionClass) -> Vec<u64> {
         match class {
             ShellAdmissionClass::User => self.user.iter().map(|waiter| waiter.id).collect(),
-            ShellAdmissionClass::AgentForeground => Self::round_robin_ids(
-                &self.foreground_owners,
-                &self.foreground_ring,
-            ),
-            ShellAdmissionClass::AgentBackground => Self::round_robin_ids(
-                &self.background_owners,
-                &self.background_ring,
-            ),
+            ShellAdmissionClass::AgentForeground => {
+                Self::round_robin_ids(&self.foreground_owners, &self.foreground_ring)
+            }
+            ShellAdmissionClass::AgentBackground => {
+                Self::round_robin_ids(&self.background_owners, &self.background_ring)
+            }
         }
     }
 
@@ -567,11 +554,11 @@ mod tests {
         ShellCommandPermit, ShellScheduler,
     };
     use crate::tools::shell_guard::{ShellLimits, ShellRuntime};
+    use ShellAdmissionClass::{AgentBackground, AgentForeground, User};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
     };
-    use ShellAdmissionClass::{AgentBackground, AgentForeground, User};
 
     fn agent(owner: &str, class: ShellAdmissionClass) -> ShellAdmissionRequest {
         ShellAdmissionRequest {
@@ -635,7 +622,9 @@ mod tests {
     #[tokio::test]
     async fn user_then_foreground_then_background_and_owner_round_robin() {
         let scheduler = ShellScheduler::new(1);
-        let held = scheduler.acquire(agent("hold", AgentForeground), None).await;
+        let held = scheduler
+            .acquire(agent("hold", AgentForeground), None)
+            .await;
         let order = Arc::new(Mutex::new(Vec::new()));
         let bg_a1 = spawn_waiter(&scheduler, "a", AgentBackground, "bg-a1", order.clone());
         wait_for_queued(&scheduler, 1).await;
@@ -693,7 +682,9 @@ mod tests {
     async fn dropping_waiter_during_grant_never_leaks_capacity() {
         let scheduler = ShellScheduler::new(1);
         for release_first in [false, true].into_iter().cycle().take(64) {
-            let held = scheduler.acquire(agent("hold", AgentForeground), None).await;
+            let held = scheduler
+                .acquire(agent("hold", AgentForeground), None)
+                .await;
             let waiter = spawn_waiter(
                 &scheduler,
                 "cancelled",
@@ -711,7 +702,9 @@ mod tests {
                 drop(held);
             }
             let _ = waiter.await;
-            let probe = scheduler.acquire(agent("probe", AgentForeground), None).await;
+            let probe = scheduler
+                .acquire(agent("probe", AgentForeground), None)
+                .await;
             drop(probe);
             assert_eq!(scheduler.running_counts(), (0, 0));
         }
@@ -720,7 +713,9 @@ mod tests {
     #[tokio::test]
     async fn positions_follow_class_local_owner_round_robin() {
         let scheduler = ShellScheduler::new(1);
-        let held = scheduler.acquire(agent("hold", AgentForeground), None).await;
+        let held = scheduler
+            .acquire(agent("hold", AgentForeground), None)
+            .await;
         let positions = Arc::new(Mutex::new(HashMap::<&'static str, usize>::new()));
         let mut waiters = Vec::new();
         for (index, (owner, label)) in [("a", "a1"), ("b", "b1"), ("a", "a2")]
@@ -730,7 +725,10 @@ mod tests {
             let observed = positions.clone();
             let callback: ShellAdmissionCallback = Arc::new(move |event| {
                 if let ShellAdmissionEvent::Position { position, .. } = event {
-                    observed.lock().expect("positions lock").insert(label, position);
+                    observed
+                        .lock()
+                        .expect("positions lock")
+                        .insert(label, position);
                 }
             });
             let queued = scheduler.clone();
@@ -780,9 +778,8 @@ mod tests {
         });
         let held = runtime.acquire(agent("a", AgentForeground), None).await;
         let clone = runtime.clone();
-        let queued = tokio::spawn(async move {
-            clone.acquire(agent("b", AgentForeground), None).await
-        });
+        let queued =
+            tokio::spawn(async move { clone.acquire(agent("b", AgentForeground), None).await });
         while runtime.scheduler.queued_count() != 1 {
             tokio::task::yield_now().await;
         }
