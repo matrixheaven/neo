@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, io::Cursor};
+use std::{borrow::Cow, error::Error, fmt, io::Cursor};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,10 @@ pub use kitty::{KittyGraphicsOptions, KittyImageFormat, encode_kitty_graphics};
 pub use sixel::{SixelImageOptions, SixelPaletteColor, encode_sixel_image};
 
 pub(super) const STRING_TERMINATOR: &str = "\x1b\\";
+const MAX_KITTY_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_KITTY_IMAGE_PIXELS: u64 = 40_000_000;
+const MAX_KITTY_IMAGE_ALLOC_BYTES: u64 = MAX_KITTY_IMAGE_PIXELS * 4;
+const MAX_KITTY_IMAGE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -148,6 +152,26 @@ impl ImageRenderPolicy {
                 escape_sequence: None,
             };
         }
+        self.render_inline_image_bytes(
+            &image.id,
+            &image.mime_type,
+            bytes,
+            metadata,
+            capabilities,
+            display,
+        )
+    }
+
+    pub(crate) fn render_inline_image_bytes(
+        self,
+        id: &str,
+        mime_type: &str,
+        bytes: &[u8],
+        metadata: String,
+        capabilities: TerminalImageCapabilities,
+        display: &ImageDisplayOptions,
+    ) -> RenderedInlineImage {
+        let fallback = display.fallback_line(metadata.clone());
         let Some((cell_width, cell_height)) = display.cell_size() else {
             return RenderedInlineImage {
                 metadata,
@@ -159,20 +183,21 @@ impl ImageRenderPolicy {
 
         let protocol = self.negotiate(capabilities);
         let escape_sequence = match protocol {
-            NegotiatedImageProtocol::Kitty => normalize_kitty_payload(bytes, &image.mime_type)
-                .and_then(|png| {
+            NegotiatedImageProtocol::Kitty => {
+                normalize_kitty_payload(bytes, mime_type).and_then(|png| {
                     encode_kitty_graphics(
-                        &png,
+                        png.as_ref(),
                         &KittyGraphicsOptions::new(KittyImageFormat::Png)
-                            .with_image_id(stable_image_id(&image.id))
+                            .with_image_id(stable_image_id(id))
                             .with_cell_size(cell_width, cell_height),
                     )
                     .ok()
-                }),
+                })
+            }
             NegotiatedImageProtocol::Iterm2 => encode_iterm2_inline_image(
                 bytes,
                 &Iterm2InlineImageOptions::new()
-                    .with_name(image.id.clone())
+                    .with_name(id)
                     .with_width(Iterm2Dimension::Cells(cell_width))
                     .with_height(Iterm2Dimension::Cells(cell_height)),
             )
@@ -420,27 +445,62 @@ enum InlineImagePayload {
     RemoteUrl(String),
 }
 
-fn normalize_kitty_payload(bytes: &[u8], mime_type: &str) -> Option<Vec<u8>> {
-    if mime_type == "image/png" {
-        // Kitty supports PNG directly.
-        if let Ok(image) = image::load_from_memory_with_format(bytes, image::ImageFormat::Png) {
-            let mut png = Cursor::new(Vec::new());
-            if image.write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                return Some(png.into_inner());
-            }
-        }
+fn normalize_kitty_payload<'a>(bytes: &'a [u8], mime_type: &str) -> Option<Cow<'a, [u8]>> {
+    if bytes.len() > MAX_KITTY_IMAGE_PAYLOAD_BYTES {
         return None;
     }
     let input_format = match mime_type {
+        "image/png" => {
+            if !validate_kitty_png(bytes)? {
+                return Some(Cow::Borrowed(bytes));
+            }
+            image::ImageFormat::Png
+        }
         "image/jpeg" => image::ImageFormat::Jpeg,
         "image/gif" => image::ImageFormat::Gif,
         "image/webp" => image::ImageFormat::WebP,
         _ => return None,
     };
-    let image = image::load_from_memory_with_format(bytes, input_format).ok()?;
+    safe_kitty_dimensions(detect_image_dimensions(bytes, mime_type)?)?;
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), input_format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_KITTY_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_KITTY_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_KITTY_IMAGE_ALLOC_BYTES);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
     let mut png = Cursor::new(Vec::new());
     image.write_to(&mut png, image::ImageFormat::Png).ok()?;
-    Some(png.into_inner())
+    Some(Cow::Owned(png.into_inner()))
+}
+
+fn validate_kitty_png(bytes: &[u8]) -> Option<bool> {
+    let mut cursor = Cursor::new(bytes);
+    let decoder = png::Decoder::new_with_limits(
+        &mut cursor,
+        png::Limits {
+            bytes: MAX_KITTY_IMAGE_PAYLOAD_BYTES,
+        },
+    );
+    let mut reader = decoder.read_info().ok()?;
+    safe_kitty_dimensions((reader.info().width, reader.info().height))?;
+    let is_animated = reader.info().animation_control.is_some();
+    while reader.next_row().ok()?.is_some() {}
+    reader.finish().ok()?;
+    drop(reader);
+    (usize::try_from(cursor.position()).ok()? == bytes.len()).then_some(is_animated)
+}
+
+fn safe_kitty_dimensions((width, height): (u32, u32)) -> Option<()> {
+    if width == 0
+        || height == 0
+        || width > MAX_KITTY_IMAGE_DIMENSION
+        || height > MAX_KITTY_IMAGE_DIMENSION
+        || u64::from(width) * u64::from(height) > MAX_KITTY_IMAGE_PIXELS
+    {
+        return None;
+    }
+    Some(())
 }
 
 #[must_use]
@@ -455,7 +515,11 @@ pub fn detect_image_dimensions(bytes: &[u8], mime_type: &str) -> Option<(u32, u3
 }
 
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+    if bytes.len() < 24
+        || &bytes[0..8] != b"\x89PNG\r\n\x1a\n"
+        || &bytes[8..12] != 13_u32.to_be_bytes().as_slice()
+        || &bytes[12..16] != b"IHDR"
+    {
         return None;
     }
     Some((
@@ -631,9 +695,112 @@ pub(super) fn encode_base64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use image::{ColorType, codecs::jpeg::JpegEncoder};
+    use image::{ColorType, ImageEncoder as _, codecs::jpeg::JpegEncoder};
 
     use super::*;
+
+    fn test_png() -> Vec<u8> {
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0, 0, 0], 1, 1, ColorType::Rgb8.into())
+            .expect("encode test PNG");
+        png
+    }
+
+    fn test_apng() -> Vec<u8> {
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_animated(2, 0).expect("configure APNG");
+        let mut writer = encoder.write_header().expect("write APNG header");
+        writer
+            .write_image_data(&[255, 0, 0])
+            .expect("write first APNG frame");
+        writer
+            .write_image_data(&[0, 255, 0])
+            .expect("write second APNG frame");
+        writer.finish().expect("finish APNG");
+        png
+    }
+
+    #[test]
+    fn kitty_png_payload_preserves_original_bytes() {
+        let png = test_png();
+
+        let normalized = normalize_kitty_payload(&png, "image/png").expect("valid PNG");
+
+        assert!(matches!(normalized, Cow::Borrowed(_)));
+        assert_eq!(normalized.as_ref(), png);
+    }
+
+    #[test]
+    fn kitty_apng_payload_becomes_static_owned_png() {
+        let apng = test_apng();
+
+        let normalized = normalize_kitty_payload(&apng, "image/png").expect("valid APNG");
+
+        assert!(matches!(normalized, Cow::Owned(_)));
+        assert!(!normalized.windows(4).any(|window| window == b"acTL"));
+        assert!(
+            image::load_from_memory_with_format(normalized.as_ref(), image::ImageFormat::Png)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn kitty_png_payload_rejects_bad_crc() {
+        let mut png = test_png();
+        *png.last_mut().expect("IEND CRC") ^= 1;
+
+        assert!(normalize_kitty_payload(&png, "image/png").is_none());
+    }
+
+    #[test]
+    fn kitty_png_payload_rejects_bad_zlib_with_valid_chunk_crc() {
+        let mut png = test_png();
+        let chunk_type = png
+            .windows(4)
+            .position(|window| window == b"IDAT")
+            .expect("IDAT chunk");
+        let data_len = u32::from_be_bytes(
+            png[chunk_type - 4..chunk_type]
+                .try_into()
+                .expect("IDAT length"),
+        ) as usize;
+        let data_start = chunk_type + 4;
+        let data_end = chunk_type + 4 + data_len;
+        png[data_start] = 0;
+        let crc = crc32fast::hash(&png[chunk_type..data_end]);
+        png[data_end..data_end + 4].copy_from_slice(&crc.to_be_bytes());
+
+        assert!(normalize_kitty_payload(&png, "image/png").is_none());
+    }
+
+    #[test]
+    fn kitty_png_payload_rejects_truncation() {
+        let mut png = test_png();
+        png.pop();
+
+        assert!(normalize_kitty_payload(&png, "image/png").is_none());
+    }
+
+    #[test]
+    fn kitty_png_payload_rejects_excessive_encoded_bytes() {
+        let mut png = test_png();
+        png.resize(MAX_KITTY_IMAGE_PAYLOAD_BYTES + 1, 0);
+
+        assert!(normalize_kitty_payload(&png, "image/png").is_none());
+    }
+
+    #[test]
+    fn kitty_png_payload_rejects_excessive_pixel_count() {
+        let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        header.extend_from_slice(&10_000_u32.to_be_bytes());
+        header.extend_from_slice(&5_000_u32.to_be_bytes());
+
+        assert!(normalize_kitty_payload(&header, "image/png").is_none());
+    }
 
     #[test]
     fn kitty_jpeg_payload_is_png_or_falls_back() {

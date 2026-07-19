@@ -11,6 +11,7 @@ crossterm.workspace = true
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 neo-ai = { path = "../neo-ai" }
 neo-agent-core = { path = "../neo-agent-core" }
+png = "0.18.1"
 pulldown-cmark.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -25,6 +26,7 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+crc32fast = "1.5.0"
 tempfile.workspace = true
 vt100 = "0.16.2"
 

@@ -2081,10 +2081,12 @@ name = "neo-tui"
 version = "0.1.1"
 dependencies = [
  "base64",
+ "crc32fast",
  "crossterm",
  "image",
  "neo-agent-core",
  "neo-ai",
+ "png",
  "pulldown-cmark",
  "regex",
  "serde",

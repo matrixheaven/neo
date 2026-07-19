@@ -3,7 +3,7 @@ use crate::primitive::wrap_width;
 use crate::primitive::{Color, Component, Expandable, Finalization, Style, visible_width};
 use crate::primitive::{Line, Span};
 use crate::terminal_image::{
-    ImageDisplayOptions, ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
+    ImageDisplayOptions, ImageRenderPolicy, ImageSource, TerminalImageCapabilities,
 };
 use crate::transcript::DelegateCardComponent;
 use crate::transcript::DelegateGroupComponent;
@@ -770,16 +770,12 @@ impl TranscriptEntry {
             Self::Image {
                 id,
                 mime_type,
-                alt,
-                source,
                 metadata,
                 payload,
                 ..
             } => render_image_entry(
                 id,
                 mime_type,
-                alt.as_deref(),
-                *source,
                 metadata,
                 payload.as_deref(),
                 inner_width,
@@ -948,8 +944,7 @@ impl TranscriptEntry {
         let Self::Image {
             id,
             mime_type,
-            alt,
-            source,
+            metadata,
             payload,
             ..
         } = self
@@ -957,16 +952,12 @@ impl TranscriptEntry {
             return None;
         };
         let payload = payload.as_ref()?;
-        let inline = InlineImage::bytes(
-            id.clone(),
-            mime_type.clone(),
-            payload.clone(),
-            alt.clone(),
-            *source,
-        );
         image_render_policy
-            .render_inline_image(
-                &inline,
+            .render_inline_image_bytes(
+                id,
+                mime_type,
+                payload,
+                metadata.clone(),
                 image_capabilities,
                 &ImageDisplayOptions::bounded(1, 1),
             )
@@ -1210,8 +1201,6 @@ fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme
 fn render_image_entry(
     id: &str,
     mime_type: &str,
-    alt: Option<&str>,
-    source: ImageSource,
     metadata: &str,
     payload: Option<&[u8]>,
     width: usize,
@@ -1228,17 +1217,17 @@ fn render_image_entry(
         return styled_wrap(metadata, width, render_status::status_style(theme));
     };
     let placeholder = format!("[image ({image_width}x{image_height})]");
-    let inline = InlineImage::bytes(
-        id.to_owned(),
-        mime_type.to_owned(),
-        payload.to_vec(),
-        alt.map(str::to_owned),
-        source,
-    );
     let display = ImageDisplayOptions::thumbnail(image_width, image_height, placeholder)
         .with_max_cols(thumbnail_cols(width));
     image_render_policy
-        .render_inline_image(&inline, image_capabilities, &display)
+        .render_inline_image_bytes(
+            id,
+            mime_type,
+            payload,
+            metadata.to_owned(),
+            image_capabilities,
+            &display,
+        )
         .lines
         .into_iter()
         .map(Line::raw)
