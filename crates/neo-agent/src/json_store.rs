@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
-    path::{Path, PathBuf},
+    path::Path,
     thread,
     time::Duration,
 };
@@ -124,29 +124,38 @@ where
 }
 
 struct StoreLock {
-    path: PathBuf,
+    _file: fs::File,
 }
 
 impl StoreLock {
     fn acquire(store_path: &Path) -> anyhow::Result<Self> {
+        Self::acquire_with_retry(store_path, LOCK_RETRY_ATTEMPTS, LOCK_RETRY_DELAY)
+    }
+
+    fn acquire_with_retry(
+        store_path: &Path,
+        attempts: usize,
+        retry_delay: Duration,
+    ) -> anyhow::Result<Self> {
         let lock_path = store_path.with_extension("json.lock");
-        for attempt in 0..LOCK_RETRY_ATTEMPTS {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Self { path: lock_path }),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if attempt + 1 == LOCK_RETRY_ATTEMPTS {
-                        break;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open store lock {}", lock_path.display()))?;
+        for attempt in 0..attempts {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => {
+                    if attempt + 1 < attempts {
+                        thread::sleep(retry_delay);
                     }
-                    thread::sleep(LOCK_RETRY_DELAY);
                 }
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!("failed to create store lock {}", lock_path.display())
-                    });
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to lock store {}", store_path.display()));
                 }
             }
         }
@@ -154,8 +163,48 @@ impl StoreLock {
     }
 }
 
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_lock_file_does_not_block_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("trust.json");
+        fs::write(store_path.with_extension("json.lock"), b"stale").unwrap();
+
+        update(&store_path, "trust", |entries: &mut Vec<String>| {
+            entries.push("allowed".to_owned());
+        })
+        .unwrap();
+
+        assert_eq!(
+            read_or_default::<Vec<String>>(&store_path, "trust").unwrap(),
+            ["allowed"]
+        );
+    }
+
+    #[test]
+    fn live_lock_is_rejected_after_bounded_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("trust.json");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(store_path.with_extension("json.lock"))
+            .unwrap();
+        lock_file.lock().unwrap();
+
+        let error = StoreLock::acquire_with_retry(&store_path, 1, Duration::ZERO)
+            .err()
+            .expect("live lock should remain unavailable");
+
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for store lock")
+        );
     }
 }
