@@ -6,6 +6,12 @@ Approved design. This document fixes the outer transcript overflow behavior and
 the presentation of `ListDelegates` and `Sleep`. It does not redesign Delegate,
 DelegateGroup, DelegateSwarm, or child-activity cards.
 
+`2026-07-19-terminal-live-viewport-isolation-design.md` is the higher-priority
+physical-terminal baseline and implementation prerequisite. This design starts
+from its completed absolute-geometry, protected-history-insertion state. It does
+not rename, replace, or modify that design's `InlineTerminal`, `LiveRenderer`,
+cursor-observation, scroll-region, resize-generation, or terminal-mode owners.
+
 This document supersedes only the live-height fitting policy in
 `2026-07-13-immutable-terminal-scrollback-design.md`: bounded live tails,
 presentation-generated omitted-row markers, and header-only fallback when the
@@ -52,8 +58,9 @@ Two ordinary tool cards also lack useful presentation:
   complete mutable suffix does not fit.
 - Keep composer and footer fixed, visible, editable, and submittable during
   automatic overflow.
-- Preserve primary terminal scrollback and append history finalized during
-  overflow exactly once after returning to the primary surface.
+- Preserve pre-existing shell and finalized Neo scrollback, and append history
+  finalized during overflow exactly once after returning to the primary
+  surface.
 - Render `ListDelegates` from its existing structured result without exposing
   its opaque pagination cursor.
 - Render `Sleep` with total duration, remaining countdown, and reason without a
@@ -95,8 +102,9 @@ them to render a different mode.
 `TranscriptPresentation` composes the complete mutable suffix in canonical
 transcript order. If its row count is at most
 `terminal_height - fitted_chrome_height`, Neo uses the existing inline terminal
-path: finalized history is appended to native scrollback and the complete
-mutable suffix plus chrome is rendered at the primary live anchor.
+path: finalized history is inserted through the protected history-only scroll
+region owned by `InlineTerminal`, and the complete mutable suffix plus chrome is
+rendered inside its absolute live viewport.
 
 There is no presentation-level row fitting, header prioritization, tail
 selection, or omission line.
@@ -108,6 +116,10 @@ the existing alternate-screen capability as a bounded viewport. The viewport
 renders the complete canonical transcript source using the current card
 expansion state. It must not enable a compact or expanded variant merely because
 overflow is active.
+
+`NeoTui` requests that existing physical surface through the current
+`TerminalFrame` surface flag. Automatic overflow adds no physical transition,
+geometry, cursor-observation, scroll-region, or renderer code.
 
 The viewport body receives only the rows left after the normal fitted chrome is
 reserved. The composer, footer, and logical cursor are appended through the
@@ -167,20 +179,32 @@ pub struct TranscriptTerminalUpdate {
 The presentation owner continues to decide history versus mutable suffix,
 spacing, atomic blocks, and animation visibility. `NeoTui` owns selection of the
 normal or alternate viewport because it already composes transcript and chrome.
-`InlineTerminal` owns only the physical primary/alternate transition and never
-interprets Delegate or tool semantics.
+`InlineTerminal` remains the higher-priority physical owner of absolute live
+geometry, protected history insertion, primary/alternate transitions, margin
+cleanup, and transactional renderer state. It never interprets Delegate or tool
+semantics.
 
-## Alternate-Surface Terminology
+## Composition With Terminal Live Viewport Isolation
 
-The current physical output contract uses review-specific names such as
-`review_surface`, even though the same mechanism will serve manual review and
-automatic overflow. Those physical names become alternate-surface names.
-Logical `TranscriptBrowserState` review terminology remains unchanged.
+This work deliberately retains the post-isolation physical API and its current
+internal names, including the existing `TerminalFrame` surface flag. A canonical
+rename is not required for automatic overflow and would create avoidable churn
+in the higher-priority geometry owner.
+
+The ownership split is strict:
+
+- `TranscriptPresentation` emits complete live rows plus overflow/frontier
+  signals.
+- `NeoTui` owns the automatic viewport state, logical manual/automatic
+  precedence, and bounded source selection above chrome.
+- The post-isolation `InlineTerminal` owns absolute normal-screen geometry,
+  protected history insertion, physical alternate-screen transitions, saved
+  primary geometry, CPR/resize reconciliation, and cleanup.
 
 This is one canonical physical mechanism, not a second renderer or nested
-alternate-screen stack. Entering any first owner saves the primary live anchor;
-switching logical owners stays on the alternate surface; leaving the last owner
-restores the saved anchor.
+alternate-screen stack. Switching logical viewport owners keeps the same
+surface flag active. No source change in `screen_output`, raw input, or
+`terminal_io` is authorized by this design.
 
 ## Source-Preserving Viewport
 
@@ -240,8 +264,9 @@ No timer, cancellation, schema, result, or shell-admission behavior changes in
   zero body rows, but the final frame must remain bounded and cursor-safe.
 - Width changes re-render canonical rows at the new width and resynchronize the
   viewport without changing Card semantics.
-- Height changes update the viewport capacity but do not release an active
-  overflow latch before the live frontier clears.
+- Height changes update the application viewport capacity but do not release an
+  active overflow latch before the live frontier clears. Physical geometry and
+  matching resize generations remain owned by the isolation baseline.
 - Terminal write/flush failure leaves presentation acknowledgement and physical
   surface state unchanged under the existing transactional contract.
 - Suspend, resume, and application exit leave the alternate surface through the
@@ -260,8 +285,9 @@ No timer, cancellation, schema, result, or shell-admission behavior changes in
   continue to work.
 - Manual Ctrl+O can open and close during automatic overflow without nested
   physical transitions.
-- Primary scrollback is byte-preserved across overflow, and history finalized
-  during overflow is appended exactly once afterward.
+- Pre-existing shell/finalized scrollback content and order are preserved across
+  overflow, and history finalized during overflow is appended exactly once
+  afterward.
 - `ListDelegates` shows structured counts and agent/swarm rows without an opaque
   cursor.
 - Running `Sleep` shows total, remaining countdown, and reason; completed
@@ -273,9 +299,10 @@ No timer, cancellation, schema, result, or shell-admission behavior changes in
   signals without fitting or omission.
 - Frame regressions prove automatic alternate selection, bounded rows, fixed
   chrome, cursor bounds, latch behavior, and manual-review precedence.
-- Virtual-terminal regressions prove one enter/leave transition, preserved
-  primary scrollback, deferred history exactly once, and absence of `CSI 2 J` /
-  `CSI 3 J`.
+- Virtual-terminal regressions run against the post-isolation absolute-geometry
+  backend and prove one enter/leave transition, preserved shell/finalized
+  scrollback, deferred history exactly once, zero obsolete live rows, and
+  absence of `CSI 2 J` / `CSI 3 J`.
 - Controller regressions prove overflow scrolling does not consume prompt edit,
   submit, interrupt, suspend, or exit behavior.
 - Tool-card regressions prove structured `ListDelegates` and semantic `Sleep`
@@ -285,9 +312,9 @@ No timer, cancellation, schema, result, or shell-admission behavior changes in
 
 ## Architecture Signal
 
-This design changes a durable terminal-presentation boundary: overflow moves
-from destructive row selection inside `TranscriptPresentation` to viewport
-selection in `NeoTui`, while `InlineTerminal` retains one physical
-alternate-surface owner. After implementation, architecture review should decide
-whether this supersession belongs in an ADR or is sufficiently captured by the
-updated immutable-scrollback baseline and this design spec.
+This design changes only the application presentation boundary: overflow moves
+from destructive row selection inside `TranscriptPresentation` to bounded source
+selection in `NeoTui`. The higher-priority isolation design remains the complete
+physical-terminal architecture. After implementation, architecture review
+should treat both specs as one composed baseline and must not infer a second
+viewport or geometry owner from this document.
