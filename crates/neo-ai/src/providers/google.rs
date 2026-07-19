@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -99,11 +99,7 @@ fn headers(
 
 fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
-        "contents": request
-            .messages
-            .iter()
-            .filter_map(|message| content_body(message, request.options.replay_reasoning))
-            .collect::<Result<Vec<_>, _>>()?,
+        "contents": content_bodies(&request.messages, request.options.replay_reasoning)?,
     });
 
     let system = request
@@ -169,6 +165,27 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     Ok(body)
 }
 
+fn content_bodies(
+    messages: &[ChatMessage],
+    replay_reasoning: bool,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut tool_names = BTreeMap::new();
+    let mut contents = Vec::new();
+    for message in messages {
+        if let ChatMessage::Assistant { tool_calls, .. } = message {
+            tool_names.extend(
+                tool_calls
+                    .iter()
+                    .map(|tool_call| (tool_call.id.as_str(), tool_call.name.as_str())),
+            );
+        }
+        if let Some(content) = content_body(message, replay_reasoning, &tool_names) {
+            contents.push(content?);
+        }
+    }
+    Ok(contents)
+}
+
 fn thinking_budget_tokens(effort: &ReasoningEffort) -> Result<i32, ProviderError> {
     match effort.as_str() {
         ReasoningEffort::MINIMAL | ReasoningEffort::LOW => Ok(1_024),
@@ -185,6 +202,7 @@ fn thinking_budget_tokens(effort: &ReasoningEffort) -> Result<i32, ProviderError
 fn content_body(
     message: &ChatMessage,
     replay_reasoning: bool,
+    tool_names: &BTreeMap<&str, &str>,
 ) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
@@ -230,19 +248,24 @@ fn content_body(
             content,
             is_error,
         } => Some(
-            reject_images(content, "Google Generative AI", "tool result").map(|()| {
-                json!({
+            reject_images(content, "Google Generative AI", "tool result").and_then(|()| {
+                let name = tool_names.get(tool_call_id.as_str()).ok_or_else(|| {
+                    ProviderError::Protocol(format!(
+                        "Google tool result references unknown tool call '{tool_call_id}'"
+                    ))
+                })?;
+                Ok(json!({
                     "role": "function",
                     "parts": [{
                         "functionResponse": {
-                            "name": tool_call_id,
+                            "name": name,
                             "response": {
                                 "result": content_text(content),
                                 "is_error": is_error,
                             },
                         },
                     }],
-                })
+                }))
             }),
         ),
     }
@@ -435,8 +458,8 @@ impl IncrementalSse {
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,
-    tool_args: BTreeMap<String, Value>,
-    open_tool_ids: BTreeSet<String>,
+    tool_args: Vec<(String, Value)>,
+    tool_call_nonce: u128,
     next_thought_index: u64,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
@@ -449,8 +472,8 @@ impl Default for ParseState {
         Self {
             events: Vec::new(),
             started: false,
-            tool_args: BTreeMap::new(),
-            open_tool_ids: BTreeSet::new(),
+            tool_args: Vec::new(),
+            tool_call_nonce: rand::random(),
             next_thought_index: 0,
             last_stop_reason: StopReason::EndTurn,
             usage: None,
@@ -611,15 +634,18 @@ impl ParseState {
         })?;
 
         self.ensure_started();
-        if self.open_tool_ids.insert(name.clone()) {
-            self.events.push(AiStreamEvent::ToolCallStart {
-                id: name.clone(),
-                name: name.clone(),
-            });
-        }
-        self.tool_args.insert(name.clone(), args);
+        let id = format!(
+            "google-tool:{:032x}:{}",
+            self.tool_call_nonce,
+            self.tool_args.len()
+        );
+        self.events.push(AiStreamEvent::ToolCallStart {
+            id: id.clone(),
+            name,
+        });
+        self.tool_args.push((id.clone(), args));
         self.events.push(AiStreamEvent::ToolCallArgsDelta {
-            id: name,
+            id,
             json_fragment: fragment,
         });
         Ok(())
@@ -686,6 +712,7 @@ mod tests {
                 }],
             },
             false,
+            &BTreeMap::new(),
         )
         .expect("assistant message should produce content");
 
@@ -693,6 +720,123 @@ mod tests {
         assert!(
             matches!(err, ProviderError::Protocol(message) if message.contains("invalid raw tool arguments"))
         );
+    }
+
+    #[test]
+    fn duplicate_function_calls_keep_unique_ids_and_replay_names() {
+        let mut parser = ParseState {
+            tool_call_nonce: 1,
+            ..ParseState::default()
+        };
+        let response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "functionCall": { "name": "read", "args": { "path": "a" } } },
+                        { "functionCall": { "name": "read", "args": { "path": "b" } } }
+                    ]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        parser.ingest(&response).unwrap();
+        let mut events = parser.drain_events();
+        events.extend(parser.finish_events());
+
+        let ids = events
+            .iter()
+            .filter_map(|event| match event {
+                AiStreamEvent::ToolCallStart { id, name } if name == "read" => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+
+        for (id, arguments) in ids.iter().zip([r#"{"path":"a"}"#, r#"{"path":"b"}"#]) {
+            assert!(events.contains(&AiStreamEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                json_fragment: arguments.to_owned(),
+            }));
+            assert!(events.contains(&AiStreamEvent::ToolCallEnd {
+                id: id.clone(),
+                raw_arguments: arguments.to_owned(),
+            }));
+        }
+
+        let mut second_parser = ParseState {
+            tool_call_nonce: 2,
+            ..ParseState::default()
+        };
+        second_parser
+            .ingest(&json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [
+                            { "functionCall": { "name": "write", "args": { "path": "c" } } }
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }))
+            .unwrap();
+        let second_id = second_parser
+            .drain_events()
+            .into_iter()
+            .find_map(|event| match event {
+                AiStreamEvent::ToolCallStart { id, name } if name == "write" => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!ids.contains(&second_id));
+
+        let messages = vec![
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: ids
+                    .iter()
+                    .zip([r#"{"path":"a"}"#, r#"{"path":"b"}"#])
+                    .map(|(id, raw_arguments)| ToolCall {
+                        id: id.clone(),
+                        name: "read".to_owned(),
+                        raw_arguments: raw_arguments.to_owned(),
+                    })
+                    .collect(),
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: ids[0].clone(),
+                content: vec![ContentPart::Text {
+                    text: "first".to_owned(),
+                }],
+                is_error: false,
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: ids[1].clone(),
+                content: vec![ContentPart::Text {
+                    text: "second".to_owned(),
+                }],
+                is_error: false,
+            },
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: second_id.clone(),
+                    name: "write".to_owned(),
+                    raw_arguments: r#"{"path":"c"}"#.to_owned(),
+                }],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: second_id,
+                content: vec![ContentPart::Text {
+                    text: "written".to_owned(),
+                }],
+                is_error: false,
+            },
+        ];
+        let contents = content_bodies(&messages, false).unwrap();
+        assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "read");
+        assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "read");
+        assert_eq!(contents[4]["parts"][0]["functionResponse"]["name"], "write");
     }
 
     #[test]
