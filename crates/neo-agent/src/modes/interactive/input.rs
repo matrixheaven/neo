@@ -61,6 +61,9 @@ impl InteractiveController {
         if self.handle_transcript_browser_event(&event) {
             return Ok(false);
         }
+        if self.handle_automatic_overflow_event(&event) {
+            return Ok(false);
+        }
         if self.handle_prompt_edit_event(&event) {
             return Ok(false);
         }
@@ -89,6 +92,55 @@ impl InteractiveController {
         }
 
         Ok(false)
+    }
+
+    fn handle_automatic_overflow_event(&mut self, event: &InputEvent) -> bool {
+        // Manual review keeps logical precedence; only consume wheel/page while
+        // automatic overflow is latched and review is absent.
+        if self.tui.chrome().transcript_browser_state().is_some()
+            || !self.tui.automatic_overflow_active()
+            || matches!(event, InputEvent::Interrupt)
+        {
+            return false;
+        }
+        let key_actions = match event {
+            InputEvent::Key(key) => self.keybindings.matching_actions(key),
+            _ => Vec::new(),
+        };
+        let matches_action = |action: KeybindingAction| {
+            matches!(event, InputEvent::Action(candidate) if *candidate == action)
+                || key_actions.contains(&action)
+        };
+        let scroll = if matches_action(KeybindingAction::EditorPageUp)
+            || matches_action(KeybindingAction::SelectPageUp)
+        {
+            Some((true, 8))
+        } else if matches_action(KeybindingAction::EditorPageDown)
+            || matches_action(KeybindingAction::SelectPageDown)
+        {
+            Some((false, 8))
+        } else {
+            match event {
+                InputEvent::ScrollUp(rows) => Some((true, *rows)),
+                InputEvent::ScrollDown(rows) => Some((false, *rows)),
+                InputEvent::Key(key) => match key.as_str() {
+                    "pageup" => Some((true, 8)),
+                    "pagedown" => Some((false, 8)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        if let Some((up, rows)) = scroll {
+            if up {
+                self.tui.scroll_automatic_overflow_up(rows);
+            } else {
+                self.tui.scroll_automatic_overflow_down(rows);
+            }
+            self.transcript_mut().mark_dirty();
+            return true;
+        }
+        false
     }
 
     fn handle_transcript_browser_event(&mut self, event: &InputEvent) -> bool {
