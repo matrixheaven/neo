@@ -66,8 +66,9 @@ viewport abstraction or dependency.
 
 **Architecture Integrity Lens:** `TranscriptPresentation` decides history vs
 live; `InlineTerminal` owns physical geometry; `LiveRenderer` diffs rows within
-the supplied absolute viewport. The old relative cursor and full-screen history
-writer are duplicate physical owners and must be deleted. Verdict: proceed.
+the supplied absolute viewport. The old relative cursor and bottom-anchored
+history writer are duplicate physical owners and must be deleted. Verdict:
+proceed.
 
 **Anti-Entropy Declaration:**
 
@@ -310,21 +311,22 @@ emit CRLF to establish a new anchor.
 
 - [ ] **Step 3: Insert history above the live viewport**
 
-Replace `append_history_lines` with one private protected insertion helper. For
-`live_top > 0`, emit:
+Replace `append_history_lines` with one private protected promotion helper.
+After clearing the old live rows, emit:
 
 ```text
-CSI 1;<live_top> r
-CSI <live_top>;1 H
-for each history line: CRLF + line
+CSI 1;<height> r
+CSI <live_top + 1>;1 H
+for each history line: clear row + line + CRLF
 CSI r
 ```
 
 Remember that ANSI coordinates are one-based while stored geometry is
-zero-based. Clear the prior live viewport before the region can move, restore
-the absolute live cursor after resetting margins, and redraw the complete live
-frame. Handle a full-screen live viewport only after clearing every visible row
-as live-owned; never clear a committed row.
+zero-based. Advance `live_top` by the promoted rows and full-screen scroll only
+when the promoted history plus the new live suffix crosses the physical bottom.
+Clear the prior live viewport before any scroll, restore the absolute live
+cursor after resetting margins, and redraw the complete live frame. Never clear
+a committed row or scroll unused live capacity into history.
 
 Keep history insertion, live redraw, cursor restoration, synchronized-output
 end marker, and flush in one transaction. Commit geometry/cache state only
@@ -335,7 +337,8 @@ returning the original error.
 
 When live height grows, make room above the viewport before drawing; when it
 shrinks, clear released rows before changing the viewport. Use absolute
-geometry and a history-only scroll region. Do not add a `fresh anchor` branch.
+geometry and scroll the full screen only after mutable rows are cleared and
+only by the required overflow. Do not add a `fresh anchor` branch.
 
 - [ ] **Step 5: Run the root regression**
 

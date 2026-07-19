@@ -38,7 +38,7 @@ old copies even though the canonical transcript contains no duplicates.
 Synchronized output is not the root cause. It makes a byte sequence visually
 atomic, but it does not change which rows the sequence is allowed to scroll.
 Codex uses synchronized output in the same terminal while protecting its live
-viewport with absolute geometry and a history-only scroll region.
+viewport with absolute geometry and explicit live-row ownership.
 
 The existing regression
 `history_commit_does_not_leave_ghost_live_rows_above_terminal_bottom` checks
@@ -48,16 +48,16 @@ native scrollback.
 ## Decision
 
 `InlineTerminal` becomes the sole owner of absolute normal-screen geometry.
-Finalized history is inserted only inside a scroll region above the live
-viewport. The live viewport is never part of a terminal scroll operation that
-creates native history.
+Finalized history replaces the cleared prefix of the live viewport at its
+absolute origin. Mutable live rows are cleared before any full-screen scroll
+that creates native history.
 
 One successful render transaction performs this sequence:
 
 1. Reconcile the current screen size, absolute cursor, and live viewport.
 2. Clear the previous live viewport using absolute coordinates.
-3. Insert finalized rows inside a scroll region whose bottom is immediately
-   above the live viewport.
+3. Promote finalized rows at the cleared live origin, scrolling only on actual
+   screen overflow.
 4. Reset the scroll region unconditionally.
 5. Redraw the live frame at its absolute viewport origin.
 6. Restore the logical cursor at its absolute screen position.
@@ -182,34 +182,34 @@ purge or replay prior screen contents.
 Later live-height changes reuse the same absolute owner:
 
 - shrinking clears rows released by the live viewport before reducing it;
-- growing moves the viewport upward or scrolls the history-only region enough
-  to make room without scrolling populated live rows;
+- growing clears populated live rows, then scrolls only the rows needed to make
+  room;
 - a live frame remains bounded by the screen height and the existing automatic
   overflow surface remains authoritative for oversized mutable content.
 
 ## Protected History Insertion
 
-For a viewport whose top is greater than zero, finalized lines are inserted as
-follows:
+Finalized lines are promoted at the cleared live viewport origin:
 
 ```text
-set scroll region: screen row 1 through live_viewport.top
-move cursor: final row of that region
+clear the previously owned live rows
+set the full-screen scroll region
+move cursor: live_viewport.top
 for each finalized line:
-    print CRLF
+    clear the current row
     print the line
+    print CRLF
 reset scroll region
+scroll only the additional rows needed by the new live suffix
 restore absolute live cursor
 ```
 
-The region starts at the physical top row so normal terminal history semantics
-remain available, and ends immediately before the live viewport so no mutable
-row can be scrolled.
-
-If the live viewport temporarily occupies the full visible screen, all visible
-rows are live-owned. `InlineTerminal` first clears that owned surface, inserts
-history, and re-establishes a bounded viewport before redraw. It never clears a
-visible row classified as committed history.
+Full-screen scrolling is safe only after every mutable row has been cleared.
+Starting at the previous `live_top` overwrites those cleared rows with the
+finalized prefix, so unused screen capacity never becomes a history gap. The
+terminal scrolls only when the promoted history and new live suffix actually
+cross the physical bottom; this preserves native scrollback without replaying
+or clearing committed rows.
 
 History lines retain the existing terminal wrapping policy and are written once.
 No committed block is replayed to repair geometry.
@@ -276,7 +276,7 @@ Delete these internal paths in the same implementation:
 - relative `LiveRenderer::hardware_cursor_row` ownership;
 - `fresh_anchor_pending` and its anchor-abandoning CRLF behavior;
 - `clear_for_history_redraw` behavior based on an inferred relative origin;
-- unrestricted `append_history_lines` full-screen CRLF insertion; and
+- bottom-anchored `append_history_lines` that scrolls cleared live capacity; and
 - visible-only ghost-row assertions that can pass with scrollback pollution.
 
 Deletion class is internal code retirement. No public wire contract,

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use neo_tui::screen_output::{InlineTerminal, TerminalFrame};
+use neo_tui::screen_output::{CursorPos, InlineTerminal, TerminalFrame};
 use neo_tui::transcript::TranscriptPane;
 
 const KITTY_IMAGE: &str = "\x1b_Ga=T,f=100,i=41,r=1;payload\x1b\\";
@@ -24,6 +24,31 @@ fn failed_transaction_retries_history_and_live_without_advancing_state() {
     let retry = String::from_utf8(retry).expect("ANSI output is UTF-8");
     assert!(retry.contains("committed history"));
     assert!(retry.contains("live surface"));
+}
+
+#[test]
+fn initial_history_starts_at_observed_cursor_and_restores_live_cursor() {
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.push_status("initial history");
+    let update = pane.render_terminal_update(80, 12);
+    let frame = TerminalFrame::new(
+        update.history,
+        vec!["live composer".to_owned()],
+        Some(CursorPos { row: 0, col: 4 }),
+    );
+    let mut terminal = InlineTerminal::for_test_with_cursor(80, 12, 0, 0);
+    let mut output = Vec::new();
+
+    terminal
+        .render_to(&mut output, &frame)
+        .expect("render initial history and live surface");
+
+    let mut screen = vt100::Parser::new(12, 80, 0);
+    screen.process(&output);
+    let rows = screen.screen().rows(0, 80).collect::<Vec<_>>();
+    assert!(rows[0].contains("initial history"), "{rows:#?}");
+    assert!(rows[1].contains("live composer"), "{rows:#?}");
+    assert_eq!(screen.screen().cursor_position(), (1, 4));
 }
 
 #[test]

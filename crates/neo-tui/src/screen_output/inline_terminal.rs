@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::time::Instant;
 
@@ -225,22 +226,13 @@ impl InlineTerminal {
         }
 
         if !history_lines.is_empty() {
-            if let Err(error) =
-                append_protected_history(&mut transaction, &mut next_geometry, &history_lines)
-            {
-                let _ = output.write_all(RESET_SCROLL_REGION);
-                let _ = output.flush();
-                return Err(error);
-            }
+            append_protected_history(&mut transaction, &mut next_geometry, &history_lines);
         }
 
         // Reconcile live height: shrink clears released rows; grow makes room above.
-        if let Err(error) = reconcile_live_viewport(
-            &mut transaction,
-            &mut next_geometry,
-            frame.live.len(),
-            previous_live_rows,
-        ) {
+        if let Err(error) =
+            reconcile_live_viewport(&mut transaction, &mut next_geometry, frame.live.len())
+        {
             let _ = output.write_all(RESET_SCROLL_REGION);
             let _ = output.flush();
             return Err(error);
@@ -274,9 +266,6 @@ impl InlineTerminal {
         if transaction.is_empty() {
             return Ok(());
         }
-
-        // Ensure scroll margins are reset at the end of every successful body.
-        transaction.extend_from_slice(RESET_SCROLL_REGION);
 
         let transaction = if self.synchronized_output {
             format!(
@@ -555,39 +544,39 @@ impl InlineTerminal {
     }
 }
 
-/// Insert finalized history inside a DECSTBM region after the live viewport
-/// has been cleared at its absolute origin.
+/// Promote finalized history at the cleared live origin.
 ///
-/// Precondition: live-owned rows are blank. The region spans the full screen so
-/// scrolled history enters native scrollback on real terminals and on the
-/// vt100 harness (which discards rows scrolled out of a partial region). Mutable
-/// chrome cannot re-enter the region because it was erased first and is redrawn
-/// only after margins reset.
+/// Prior live rows are blank, so full-screen scrolling preserves native
+/// scrollback without carrying mutable chrome into it.
 fn append_protected_history(
     transaction: &mut Vec<u8>,
     geometry: &mut NormalScreenGeometry,
     lines: &[String],
-) -> std::io::Result<()> {
+) {
     if lines.is_empty() {
-        return Ok(());
+        return;
     }
 
-    let region_bottom = geometry.height.max(1);
     let mut body = String::new();
-    body.push_str(&format!("\x1b[1;{region_bottom}r"));
-    body.push_str(&format!("\x1b[{region_bottom};1H"));
+    let region_bottom = geometry.height.max(1);
+    let start_row = geometry.live_top.min(geometry.height.saturating_sub(1));
+    let ansi_start_row = u32::from(start_row).saturating_add(1);
+    let _ = write!(body, "\x1b[1;{region_bottom}r");
+    let _ = write!(body, "\x1b[{ansi_start_row};1H");
+    let mut cursor_row = start_row;
     for line in lines {
-        body.push_str("\r\n");
+        body.push_str("\r\x1b[2K");
         body.push_str(line);
+        body.push_str("\r\n");
+        cursor_row = cursor_row
+            .saturating_add(1)
+            .min(geometry.height.saturating_sub(1));
     }
     body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
     transaction.extend_from_slice(body.as_bytes());
-    // History consumed the bottom of the screen; reconcile re-establishes the
-    // bounded live viewport at the absolute bottom before the live redraw.
-    geometry.live_top = geometry.height;
-    geometry.cursor_row = geometry.height.saturating_sub(1);
+    geometry.live_top = cursor_row;
+    geometry.cursor_row = cursor_row;
     geometry.cursor_col = 0;
-    Ok(())
 }
 
 fn projected_live_top(geometry: &NormalScreenGeometry, live_len: usize) -> std::io::Result<u16> {
@@ -610,15 +599,12 @@ fn projected_live_top(geometry: &NormalScreenGeometry, live_len: usize) -> std::
 
 /// Grow or shrink the live viewport without scrolling populated live rows.
 ///
-/// When establishing a viewport over shell content (no prior live rows), scroll
-/// the full screen enough to push covered rows into native scrollback before
-/// absolute live paints overwrite them. When live already occupies the screen,
-/// only the history region above the current live top may scroll.
+/// The caller clears populated live rows before any origin move, so only the
+/// minimum required full-screen scroll is needed here.
 fn reconcile_live_viewport(
     transaction: &mut Vec<u8>,
     geometry: &mut NormalScreenGeometry,
     live_len: usize,
-    previous_live_rows: usize,
 ) -> std::io::Result<()> {
     let live_len = u16::try_from(live_len).unwrap_or(u16::MAX);
     if live_len > geometry.height {
@@ -640,29 +626,12 @@ fn reconcile_live_viewport(
     }
 
     // Need more room above the bottom of the screen.
-    let mut body = String::new();
-    if previous_live_rows == 0 {
-        // No mutable live yet: full-screen scroll by `live_len` so every row
-        // that the new live zone will cover enters native scrollback. Using
-        // only `cursor_row - max_top` is one short when the cursor sits on the
-        // bottom row, and the last shell line is then 2K-erased in place.
-        let need = live_len;
-        let bottom = geometry.height;
-        body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
-        body.push_str(&format!("\x1b[{bottom};1H"));
-        for _ in 0..need {
-            body.push_str("\r\n");
-        }
-    } else if geometry.live_top > 0 {
-        // Live already drawn: only the history region above live may scroll.
-        let need = geometry.live_top - max_top;
-        let region_bottom = geometry.live_top; // one-based bottom of history region
-        body.push_str(&format!("\x1b[1;{region_bottom}r"));
-        body.push_str(&format!("\x1b[{region_bottom};1H"));
-        for _ in 0..need {
-            body.push_str("\r\n");
-        }
-        body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
+    let need = geometry.live_top - max_top;
+    let bottom = geometry.height;
+    let mut body = String::from_utf8_lossy(RESET_SCROLL_REGION).into_owned();
+    let _ = write!(body, "\x1b[{bottom};1H");
+    for _ in 0..need {
+        body.push_str("\r\n");
     }
     transaction.extend_from_slice(body.as_bytes());
     geometry.live_top = max_top;
