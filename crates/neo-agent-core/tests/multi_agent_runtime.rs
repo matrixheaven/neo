@@ -642,6 +642,75 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
 }
 
 #[tokio::test]
+async fn resumed_child_turn_fails_when_agent_wire_is_missing_or_corrupt() {
+    use neo_agent_core::{
+        multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},
+        session::{SessionState, SessionStateStore, agent_wire_path},
+    };
+
+    for corrupt_wire in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_dir = temp.path();
+        let mut state = SessionState::new();
+        state.ensure_main_agent();
+        SessionStateStore::new(session_dir)
+            .write(&state)
+            .expect("state");
+
+        let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+        let first = runtime.start_foreground_delegate_for_test("first task");
+        let completed = runtime.complete_delegate_for_test(&first.id, "first answer");
+        let agent_id = completed.id.as_str().to_owned();
+        if corrupt_wire {
+            let wire = agent_wire_path(session_dir, &agent_id);
+            tokio::fs::create_dir_all(wire.parent().expect("agent directory"))
+                .await
+                .expect("create agent directory");
+            tokio::fs::write(&wire, b"not json\n")
+                .await
+                .expect("write corrupt wire");
+        }
+
+        let request = DelegateRequest {
+            task: "second task".to_owned(),
+            resume: Some(agent_id.clone()),
+            title: None,
+            role: None,
+            mode: AgentRunMode::Foreground,
+            context: DelegateContext::None,
+        };
+        let resumed = runtime
+            .start_resume_delegate(&agent_id, &request)
+            .expect("start resume");
+        let harness = FakeHarness::from_turns([child_text_turn("must not run")]);
+        let deps = ChildRuntimeDeps::new(
+            AgentConfig::for_model(harness.model()),
+            harness.client(),
+            Arc::new(ToolRegistry::new()),
+        );
+
+        let output = runtime
+            .run_started_child_turn(deps, resumed, DelegateContext::None, |_| {})
+            .await;
+
+        assert_eq!(output.snapshot.state, AgentLifecycleState::Failed);
+        assert!(
+            output
+                .snapshot
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.summary.contains("failed to replay delegate")),
+            "{:?}",
+            output.snapshot.outcome
+        );
+        assert!(
+            harness.requests().is_empty(),
+            "model must not run after replay failure"
+        );
+    }
+}
+
+#[tokio::test]
 async fn failed_child_run_discards_partial_model_attempt_from_agent_wire() {
     use neo_agent_core::{
         multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest},

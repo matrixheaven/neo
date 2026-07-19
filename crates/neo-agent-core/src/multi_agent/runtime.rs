@@ -1315,7 +1315,10 @@ impl MultiAgentRuntime {
             return self.finish_child_run(snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_context = self.replay_child_context(&snapshot).await;
+        let prior_context = match self.replay_child_context(&snapshot).await {
+            Ok(context) => context,
+            Err(error) => return self.finish_child_run(snapshot, started_at, Err(error)),
+        };
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
@@ -1405,7 +1408,10 @@ impl MultiAgentRuntime {
             return self.finish_child_run(snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
-        let prior_context = self.replay_child_context(&snapshot).await;
+        let prior_context = match self.replay_child_context(&snapshot).await {
+            Ok(context) => context,
+            Err(error) => return self.finish_child_run(snapshot, started_at, Err(error)),
+        };
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
@@ -1735,9 +1741,8 @@ impl MultiAgentRuntime {
     }
 
     /// Replay the child's prior context (messages plus instruction
-    /// visibility state) from its wire JSONL. Falls back to the snapshot's
-    /// stored messages when no readable wire exists.
-    async fn replay_child_context(&self, snapshot: &AgentSnapshot) -> AgentContext {
+    /// visibility state) from its wire JSONL.
+    async fn replay_child_context(&self, snapshot: &AgentSnapshot) -> Result<AgentContext, String> {
         let fallback = || {
             let mut context = AgentContext::new();
             for message in &snapshot.prior_messages {
@@ -1746,11 +1751,23 @@ impl MultiAgentRuntime {
             context
         };
         let Some(wire_path) = self.child_wire_path(snapshot.id.as_str()) else {
-            return fallback();
+            return Ok(fallback());
         };
-        crate::session::JsonlSessionReader::replay_context(wire_path)
-            .await
-            .unwrap_or_else(|_| fallback())
+        match crate::session::JsonlSessionReader::replay_context(&wire_path).await {
+            Ok(context) => Ok(context),
+            Err(crate::session::SessionError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && snapshot.run_count == 1
+                    && snapshot.resumed_from.is_none() =>
+            {
+                Ok(fallback())
+            }
+            Err(error) => Err(format!(
+                "failed to replay delegate `{}` from {}: {error}",
+                snapshot.id.as_str(),
+                wire_path.display()
+            )),
+        }
     }
 
     async fn register_persistent_agent(
