@@ -127,6 +127,55 @@ fn tool_call_updates_in_place_to_finished_state() {
 }
 
 #[test]
+fn terminal_output_controls_cannot_escape_tool_card() {
+    let raw = "\x0c\x1b[24;1H\"/tmp/test.txt\" 1 line, 24 bytes\x1b[1;1Hhello from neo terminal\r";
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "terminal-1".to_owned(),
+        name: "Terminal".to_owned(),
+        arguments: Some(r#"{"mode":"write","handle":"term-1"}"#.to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    assert!(card.append_live_output(raw));
+
+    let running = card
+        .render(80)
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!running.contains('\x0c'), "running output leaked form feed");
+    assert!(
+        !running.contains('\r'),
+        "running output leaked carriage return"
+    );
+    assert!(
+        !running.contains("\x1b[24;1H"),
+        "running output leaked cursor positioning"
+    );
+
+    assert!(card.set_result(Some(raw.to_owned()), None, false, None));
+    card.set_expanded(true);
+    let finished = card
+        .render(80)
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!finished.contains('\x0c'), "final output leaked form feed");
+    assert!(
+        !finished.contains('\r'),
+        "final output leaked carriage return"
+    );
+    assert!(
+        !finished.contains("\x1b[24;1H"),
+        "final output leaked cursor positioning"
+    );
+}
+
+#[test]
 fn wait_delegate_card_renders_running_and_final_outcomes() {
     const WIDTH: usize = 120;
     let arguments = json!({

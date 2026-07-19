@@ -189,7 +189,8 @@ pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
     }
 }
 
-/// Strip ANSI escape sequences from a string and return the visible text.
+/// Strip ANSI escape sequences and unsafe terminal controls from visible text.
+/// Newlines and tabs remain available to callers that own text layout.
 #[must_use]
 pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -199,7 +200,9 @@ pub fn strip_ansi(s: &str) -> String {
             index += seq.len();
         } else {
             let ch = s[index..].chars().next().unwrap();
-            result.push(ch);
+            if !ch.is_control() || matches!(ch, '\n' | '\t') {
+                result.push(ch);
+            }
             index += ch.len_utf8();
         }
     }

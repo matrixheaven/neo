@@ -1,7 +1,7 @@
 use crate::primitive::Style;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Component, Expandable, Finalization, Line, Span};
+use crate::primitive::{Component, Expandable, Finalization, Line, Span, strip_ansi};
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::format_elapsed;
 
@@ -429,7 +429,7 @@ fn wrap_live_rows(lines: &[String], width: usize, style: Style) -> Vec<Line> {
     lines
         .iter()
         .flat_map(|line| {
-            wrap_width(line, body_width)
+            wrap_width(&strip_ansi(line), body_width)
                 .into_iter()
                 .map(move |segment| Line::styled(format!("{PREFIX}{segment}"), style))
         })
