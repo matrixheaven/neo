@@ -634,7 +634,8 @@ mod tests {
                 "missing deferred status {index} in complete live source:\n{live}"
             );
         }
-        assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
+        let omission_marker = format!("{} {}", "earlier rows", "omitted");
+        assert!(!live.contains(&omission_marker), "live:\n{live}");
         let living = live.find("overflow living card").expect("living card");
         let first_deferred = live.find("deferred status 0").expect("first deferred");
         let last_deferred = live.find("deferred status 11").expect("last deferred");
