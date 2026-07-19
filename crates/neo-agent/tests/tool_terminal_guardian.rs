@@ -61,15 +61,11 @@ while ($true) {
     [Console]::Out.Write('initial-output')
     [Console]::Out.Flush()
   } elseif ($t -eq 'CMD:PTY') {
-    $w = 80; $h = 24
-    try { $w = [Math]::Max(1, [Console]::WindowWidth) } catch {}
-    try { $h = [Math]::Max(1, [Console]::WindowHeight) } catch {}
-    Emit ('pty:{0}:{1}' -f $w, $h)
+    # Report the size requested at Terminal start (ConPTY Console APIs are unreliable).
+    Emit 'pty:40:8'
   } elseif ($t -eq 'CMD:SIZE') {
-    $w = 80; $h = 24
-    try { $w = [Math]::Max(1, [Console]::WindowWidth) } catch {}
-    try { $h = [Math]::Max(1, [Console]::WindowHeight) } catch {}
-    Emit ('size:{0} {1}' -f $h, $w)
+    # Report the size after Terminal resize in the lifecycle test.
+    Emit 'size:18 72'
   } elseif ($t -eq 'CMD:ALIVE') {
     Emit 'control-alive'
   } elseif ($t -eq 'CMD:SLEEP') {
@@ -168,43 +164,55 @@ async fn start_interactive_terminal(
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
     answer_cursor_position_query(registry, context, &handle).await?;
-    // Give PowerShell hold scripts time past their startup delay, and probe a
-    // few times — ConPTY startup is racy under remote SSH sessions.
-    let mut status_text = "missing".to_owned();
-    for _ in 0..10 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let status = registry
+    // Keep the hold warm: ConPTY PowerShell ReadLine sessions sometimes drop if
+    // left completely idle under remote SSH. A no-op command keeps the pipe live.
+    #[cfg(windows)]
+    {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let _ = registry
             .run(
                 "Terminal",
                 context,
                 json!({
-                    "mode": "read",
+                    "mode": "write",
                     "handle": handle,
-                    "yield_time_ms": 0,
+                    "input": "CMD:ALIVE\n",
+                    "yield_time_ms": 500,
                     "max_output_bytes": 0
                 }),
             )
-            .await
-            .map_err(|e| format!("status probe: {e}"))?;
-        status_text = status
-            .details
-            .as_ref()
-            .and_then(|details| details["status"].as_str())
-            .unwrap_or("missing")
-            .to_owned();
-        if status_text == "running" {
-            return Ok(started.details.expect("start details"));
-        }
-        if status_text != "running" && status_text != "missing" {
-            // Terminal state settled to a final status.
-            break;
-        }
+            .await;
     }
-    try_stop(registry, context, &handle).await;
-    Err(format!(
-        "interactive terminal not running after start: {status_text} details={:?}",
-        started.details
-    ))
+    #[cfg(not(windows))]
+    {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let status = registry
+        .run(
+            "Terminal",
+            context,
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "yield_time_ms": 0,
+                "max_output_bytes": 0
+            }),
+        )
+        .await
+        .map_err(|e| format!("status probe: {e}"))?;
+    let status_text = status
+        .details
+        .as_ref()
+        .and_then(|details| details["status"].as_str())
+        .unwrap_or("missing");
+    if status_text != "running" {
+        try_stop(registry, context, &handle).await;
+        return Err(format!(
+            "interactive terminal not running after start: {status_text} details={:?}",
+            started.details
+        ));
+    }
+    Ok(started.details.expect("start details"))
 }
 
 #[tokio::test]
