@@ -2407,14 +2407,18 @@ fn completed_delegate() -> AgentSnapshot {
 }
 
 #[test]
-fn delegate_and_swarm_render_same_queued_shell_row() {
+fn delegate_and_swarm_render_same_bounded_shell_summary() {
     let now_ms = 20_000;
+    let command = format!(
+        "cargo test --package neo-tui --test multi_agent_transcript {} --exact --nocapture",
+        "delegate_and_swarm_render_same_bounded_shell_summary_".repeat(3)
+    );
     let mut snapshot = running_delegate();
     snapshot.activity = vec![AgentActivityEntry {
         kind: AgentActivityKind::Tool {
             id: "call-1".to_owned(),
             name: "Bash".to_owned(),
-            summary: Some("cargo test".to_owned()),
+            summary: Some(command),
             phase: AgentToolActivityPhase::Queued {
                 position: Some(2),
                 queued_at_ms: 2_000,
@@ -2422,40 +2426,152 @@ fn delegate_and_swarm_render_same_queued_shell_row() {
             output: None,
         },
     }];
-    let mut delegate_card = DelegateCardComponent::new(snapshot.clone());
-    delegate_card.on_render_tick(now_ms);
-    let delegate = plain(delegate_card.render_with_theme(120, &TuiTheme::default())).join("\n");
-    let mut swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
-    swarm.children[0].agent = snapshot.clone();
-    let mut swarm_card = SwarmCardComponent::new(swarm);
-    swarm_card.set_expanded(true);
-    swarm_card.on_render_tick(now_ms);
-    let swarm = plain(swarm_card.render_with_theme(120, &TuiTheme::default())).join("\n");
-    let expected = "Queued Bash (cargo test) · #2 · waiting 18s";
-    assert!(delegate.contains(expected), "{delegate}");
-    assert!(swarm.contains(expected), "{swarm}");
 
-    let AgentActivityKind::Tool { phase, output, .. } = &mut snapshot.activity[0].kind else {
-        panic!("expected tool activity");
-    };
-    *phase = AgentToolActivityPhase::Done;
-    *output = Some(AgentToolOutputPreview {
-        text: "done".to_owned(),
-        is_error: false,
-        truncated: false,
-        tail: false,
-    });
-    let delegate_card = DelegateCardComponent::new(snapshot.clone());
-    let delegate = plain(delegate_card.render_with_theme(120, &TuiTheme::default())).join("\n");
-    let mut done_swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
-    done_swarm.children[0].agent = snapshot;
-    let mut swarm_card = SwarmCardComponent::new(done_swarm);
-    swarm_card.set_expanded(true);
-    let swarm = plain(swarm_card.render_with_theme(120, &TuiTheme::default())).join("\n");
-    for rendered in [delegate, swarm] {
-        assert!(rendered.contains("Used Bash (cargo test)"), "{rendered}");
-        assert!(rendered.contains("done"), "{rendered}");
+    for width in [160, 240] {
+        let mut delegate_card = DelegateCardComponent::new(snapshot.clone());
+        delegate_card.on_render_tick(now_ms);
+        let delegate = delegate_card.render_with_theme(width, &TuiTheme::default());
+        let mut swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+        swarm.children[0].agent = snapshot.clone();
+        let mut collapsed_card = SwarmCardComponent::new(swarm.clone());
+        collapsed_card.on_render_tick(now_ms);
+        let collapsed = collapsed_card.render_with_theme(width, &TuiTheme::default());
+        let mut expanded_card = SwarmCardComponent::new(swarm);
+        expanded_card.set_expanded(true);
+        expanded_card.on_render_tick(now_ms);
+        let expanded = expanded_card.render_with_theme(width, &TuiTheme::default());
+
+        for (label, lines, expected_rows) in [
+            ("delegate queued", delegate, 1),
+            ("collapsed swarm queued", collapsed, 1),
+            ("expanded swarm queued", expanded, 2),
+        ] {
+            assert!(
+                lines.iter().all(|line| line.visible_width() <= width),
+                "{label} exceeded width {width}"
+            );
+            let rows = plain(lines);
+            let shell_rows = rows
+                .iter()
+                .filter(|row| row.contains("Queued Bash"))
+                .collect::<Vec<_>>();
+            assert_eq!(shell_rows.len(), expected_rows, "{label}: {rows:?}");
+            for row in shell_rows {
+                assert!(row.contains("cargo test --package"), "{label}: {row}");
+                assert!(row.contains("--exact --nocapture"), "{label}: {row}");
+                assert!(row.contains(" · #2 · waiting 18s"), "{label}: {row}");
+            }
+        }
+
+        let AgentActivityKind::Tool { phase, output, .. } = &mut snapshot.activity[0].kind else {
+            panic!("expected tool activity");
+        };
+        *phase = AgentToolActivityPhase::Done;
+        *output = Some(AgentToolOutputPreview {
+            text: "done".to_owned(),
+            is_error: false,
+            truncated: false,
+            tail: false,
+        });
+        let delegate = DelegateCardComponent::new(snapshot.clone())
+            .render_with_theme(width, &TuiTheme::default());
+        let mut done_swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+        done_swarm.children[0].agent = snapshot.clone();
+        let collapsed = SwarmCardComponent::new(done_swarm.clone())
+            .render_with_theme(width, &TuiTheme::default());
+        let mut expanded_card = SwarmCardComponent::new(done_swarm);
+        expanded_card.set_expanded(true);
+        let expanded = expanded_card.render_with_theme(width, &TuiTheme::default());
+
+        for (label, lines, expected_rows, expected_previews) in [
+            ("delegate done", delegate, 1, 1),
+            ("collapsed swarm done", collapsed, 1, 0),
+            ("expanded swarm done", expanded, 2, 1),
+        ] {
+            assert!(
+                lines.iter().all(|line| line.visible_width() <= width),
+                "{label} exceeded width {width}"
+            );
+            let rows = plain(lines);
+            let shell_rows = rows
+                .iter()
+                .filter(|row| row.contains("Used Bash"))
+                .collect::<Vec<_>>();
+            assert_eq!(shell_rows.len(), expected_rows, "{label}: {rows:?}");
+            for row in shell_rows {
+                assert!(row.contains("cargo test --package"), "{label}: {row}");
+                assert!(row.contains("--exact --nocapture"), "{label}: {row}");
+            }
+            assert_eq!(
+                rows.iter().filter(|row| row.trim() == "done").count(),
+                expected_previews,
+                "{label}: {rows:?}"
+            );
+        }
+
+        let AgentActivityKind::Tool { phase, output, .. } = &mut snapshot.activity[0].kind else {
+            panic!("expected tool activity");
+        };
+        *phase = AgentToolActivityPhase::Queued {
+            position: Some(2),
+            queued_at_ms: 2_000,
+        };
+        *output = None;
     }
+
+    let mut unicode_snapshot = running_delegate();
+    unicode_snapshot.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "call-wide".to_owned(),
+            name: "Bash".to_owned(),
+            summary: Some(format!(
+                "cargo 宽字符开始e\u{301}\u{200b} {} 宽字符结束 --exact --nocapture",
+                "界".repeat(60)
+            )),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+        },
+    }];
+    let width = 160;
+    let delegate = DelegateCardComponent::new(unicode_snapshot.clone())
+        .render_with_theme(width, &TuiTheme::default());
+    let mut unicode_swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+    unicode_swarm.children[0].agent = unicode_snapshot.clone();
+    let collapsed = SwarmCardComponent::new(unicode_swarm.clone())
+        .render_with_theme(width, &TuiTheme::default());
+    let mut expanded_card = SwarmCardComponent::new(unicode_swarm.clone());
+    expanded_card.set_expanded(true);
+    let expanded = expanded_card.render_with_theme(width, &TuiTheme::default());
+    for (label, lines, expected_rows) in [
+        ("delegate unicode", delegate, 1),
+        ("collapsed swarm unicode", collapsed, 1),
+        ("expanded swarm unicode", expanded, 2),
+    ] {
+        assert!(
+            lines.iter().all(|line| line.visible_width() <= width),
+            "{label} exceeded width {width}"
+        );
+        let rows = plain(lines);
+        let shell_rows = rows
+            .iter()
+            .filter(|row| row.contains("Using Bash"))
+            .collect::<Vec<_>>();
+        assert_eq!(shell_rows.len(), expected_rows, "{label}: {rows:?}");
+        for row in shell_rows {
+            assert!(row.contains("cargo 宽字符开始"), "{label}: {row}");
+            assert!(
+                row.contains("宽字符结束 --exact --nocapture"),
+                "{label}: {row}"
+            );
+        }
+    }
+
+    let tiny_delegate =
+        DelegateCardComponent::new(unicode_snapshot).render_with_theme(8, &TuiTheme::default());
+    let tiny_swarm =
+        SwarmCardComponent::new(unicode_swarm).render_with_theme(8, &TuiTheme::default());
+    assert!(!tiny_delegate.is_empty());
+    assert!(!tiny_swarm.is_empty());
 }
 
 fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {

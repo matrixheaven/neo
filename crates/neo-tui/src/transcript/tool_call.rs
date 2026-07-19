@@ -6,6 +6,7 @@ use crate::shell::ToolStatusKind;
 use crate::token_estimate::format_elapsed;
 
 use super::plan_box::PlanBoxComponent;
+use super::shell_tool_presentation;
 use super::tool_renderers::{
     is_file_write_tool, is_pending_or_running, render_streaming_preview, render_tool_body_themed,
     tool_header_spans_with_elapsed,
@@ -402,12 +403,18 @@ impl ToolCallComponent {
                 self.streaming_started_at,
             ));
         } else {
-            rows.extend(render_tool_body_themed(
-                &self.state,
-                self.expanded,
-                width,
-                theme,
-            ));
+            rows.extend(
+                shell_tool_presentation::render_body(
+                    &self.state,
+                    self.expanded,
+                    width,
+                    theme,
+                    self.workspace_dir.as_deref(),
+                )
+                .unwrap_or_else(|| {
+                    render_tool_body_themed(&self.state, self.expanded, width, theme)
+                }),
+            );
         }
         if self.state.status == ToolStatusKind::Running {
             let live_style = Style::default().fg(theme.text_muted);

@@ -11,6 +11,7 @@ use crate::shell::ToolStatusKind;
 use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
 
 use super::partial_json::extract_partial_string_field;
+use super::shell_tool_presentation;
 use super::tool_call::ToolCallState;
 
 const RESULT_PREVIEW_LINES: usize = 3;
@@ -57,13 +58,16 @@ pub fn tool_header_spans_with_elapsed(
         Span::styled(format!("{verb} "), Style::default().fg(status_color)),
         Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
     ];
+    let shell_metadata = shell_tool_presentation::header_metadata(state, theme);
     if state.name == "WaitDelegate" {
         return wait_delegate_header_spans(state, theme, elapsed_secs, header_width);
     }
     if state.name == "Sleep" {
         return sleep_header_spans(state, theme, elapsed_secs, header_width);
     }
-    if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
+    if let Some(metadata) = shell_metadata {
+        spans.extend(metadata);
+    } else if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
         let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
         spans.push(Span::styled(" (", Style::default().fg(meta_color)));
         spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
@@ -910,6 +914,15 @@ fn render_result_preview(
     rows
 }
 
+pub(super) fn render_text_preview_themed(
+    text: &str,
+    expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    render_result_preview(text, expanded, width, ToolBodyPalette::themed(theme))
+}
+
 pub(crate) const fn is_pending_or_running(status: ToolStatusKind) -> bool {
     matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
 }
@@ -1071,7 +1084,7 @@ fn format_key_argument(
     truncate_arg_value(is_path, &value)
 }
 
-fn make_workspace_relative(path: &str, workspace_dir: Option<&Path>) -> String {
+pub(super) fn make_workspace_relative(path: &str, workspace_dir: Option<&Path>) -> String {
     let Some(workspace_dir) = workspace_dir else {
         return path.to_owned();
     };

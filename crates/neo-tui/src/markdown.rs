@@ -596,7 +596,7 @@ fn spans_to_plain(spans: &[Span]) -> String {
 /// style of each original span. Spans that fit entirely on the current line are
 /// kept intact; spans that would overflow are split and continued on the next
 /// line.
-fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span>> {
+pub(crate) fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span>> {
     if max_width == 0 {
         return vec![Vec::new()];
     }

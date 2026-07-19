@@ -1497,7 +1497,7 @@ impl MultiAgentRuntime {
                     &mut snapshot.activity,
                     id,
                     name,
-                    summarize_tool_arguments(arguments),
+                    summarize_tool_arguments(name, arguments),
                     now_ms(),
                 );
             }
@@ -1525,7 +1525,7 @@ impl MultiAgentRuntime {
                     &mut snapshot.activity,
                     id,
                     name,
-                    summarize_tool_arguments(arguments),
+                    summarize_tool_arguments(name, arguments),
                     AgentToolActivityPhase::Ongoing,
                     None,
                 );
@@ -2264,7 +2264,7 @@ fn apply_tool_activity_event(
                 activity,
                 id,
                 name,
-                summarize_tool_arguments(arguments),
+                summarize_tool_arguments(name, arguments),
                 now_ms(),
             );
             true
@@ -2294,7 +2294,7 @@ fn apply_tool_activity_event(
                 activity,
                 id,
                 name,
-                summarize_tool_arguments(arguments),
+                summarize_tool_arguments(name, arguments),
                 AgentToolActivityPhase::Ongoing,
                 None,
             );
@@ -2310,7 +2310,7 @@ fn apply_tool_activity_event(
             };
             let summary = tool_args
                 .get(id)
-                .and_then(summarize_tool_arguments)
+                .and_then(|arguments| summarize_tool_arguments(name, arguments))
                 .or_else(|| last_tool_summary(activity.as_slice(), id));
             upsert_tool_activity(
                 activity,
@@ -2330,7 +2330,7 @@ fn apply_tool_activity_event(
         } => {
             let summary = tool_args
                 .get(id)
-                .and_then(summarize_tool_arguments)
+                .and_then(|arguments| summarize_tool_arguments(name, arguments))
                 .or_else(|| last_tool_summary(activity.as_slice(), id));
             upsert_tool_activity(
                 activity,
@@ -2656,7 +2656,16 @@ fn last_tool_summary(activity: &[AgentActivityEntry], id: &str) -> Option<String
     })
 }
 
-fn summarize_tool_arguments(arguments: &serde_json::Value) -> Option<String> {
+fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option<String> {
+    let starts_shell = name == "Bash"
+        || (name == "Terminal"
+            && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"));
+    if starts_shell
+        && let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str)
+        && !command.trim().is_empty()
+    {
+        return Some(compact_shell_command(command));
+    }
     for key in [
         "path",
         "pattern",
@@ -2701,6 +2710,35 @@ fn tool_output_preview(
         truncated,
         tail,
     })
+}
+
+fn compact_shell_command(command: &str) -> String {
+    const MAX: usize = 96;
+    const HEAD: usize = 46;
+    const SEPARATOR: &str = " … ";
+    const TAIL: usize = MAX - HEAD - 3;
+
+    let mut display = String::new();
+    for character in command.chars() {
+        if character.is_whitespace() {
+            display.push(' ');
+        } else if character.is_control() {
+            display.extend(character.escape_default());
+        } else {
+            display.push(character);
+        }
+    }
+    let line = display.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars = line.chars().count();
+    if chars <= MAX {
+        return line;
+    }
+    format!(
+        "{}{}{}",
+        line.chars().take(HEAD).collect::<String>(),
+        SEPARATOR,
+        line.chars().skip(chars - TAIL).collect::<String>()
+    )
 }
 
 fn should_preview_tool_output(name: &str) -> bool {
@@ -2810,6 +2848,62 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_tool_summary_preserves_head_and_tail_within_budget() {
+        let command = format!(
+            "cargo test --package neo-agent-core --lib {} --exact --nocapture",
+            "multi_agent::runtime::tests::very_long_filter_".repeat(4)
+        );
+        for (name, arguments) in [
+            ("Bash", serde_json::json!({"command": command.clone()})),
+            (
+                "Terminal",
+                serde_json::json!({"mode": "start", "command": command.clone()}),
+            ),
+        ] {
+            let summary = summarize_tool_arguments(name, &arguments).expect("shell summary");
+            assert_eq!(summary.chars().count(), 96, "{summary}");
+            assert!(
+                summary.starts_with("cargo test --package neo-agent-core"),
+                "{summary}"
+            );
+            assert!(summary.contains(" … "), "{summary}");
+            assert!(summary.ends_with("--exact --nocapture"), "{summary}");
+        }
+
+        let summary = summarize_tool_arguments(
+            "Terminal",
+            &serde_json::json!({"mode": "write", "command": command}),
+        )
+        .expect("terminal write summary");
+        assert_eq!(summary.chars().count(), 96, "{summary}");
+        assert!(summary.ends_with("..."), "{summary}");
+        assert!(!summary.contains(" … "), "{summary}");
+
+        let path = format!("/workspace/{}", "very-long-path-segment/".repeat(8));
+        let summary = summarize_tool_arguments("Read", &serde_json::json!({"path": path}))
+            .expect("read summary");
+        assert_eq!(summary.chars().count(), 96, "{summary}");
+        assert!(
+            summary.starts_with("/workspace/very-long-path"),
+            "{summary}"
+        );
+        assert!(summary.ends_with("..."), "{summary}");
+        assert!(!summary.contains('…'), "{summary}");
+
+        let summary = summarize_tool_arguments(
+            "Bash",
+            &serde_json::json!({"command": "printf\t'audit'\x1b[31m danger\x03"}),
+        )
+        .expect("unsafe bash summary");
+        assert!(summary.contains("printf 'audit'"), "{summary}");
+        assert!(summary.contains(r"\u{1b}[31m danger\u{3}"), "{summary}");
+        assert!(
+            summary.chars().all(|character| !character.is_control()),
+            "{summary:?}"
+        );
+    }
 
     #[test]
     fn summarized_child_activity_preserves_whitespace_deltas_without_duplicate_body() {

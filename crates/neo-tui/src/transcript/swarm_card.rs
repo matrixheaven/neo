@@ -4,13 +4,17 @@ use neo_agent_core::multi_agent::{
 };
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
+use crate::primitive::{
+    Color, Component, Expandable, Finalization, Line, Span, Style, visible_width,
+};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, child_activity_view, child_tool_status_text, compact_chars,
     display_elapsed, format_cache_token_usage, format_elapsed, format_token_count, one_line,
     render_child_body, render_child_final, render_child_thinking, render_child_tool_row,
     role_badge_style, role_label,
 };
+
+use super::child_activity::{bounded_child_tool_status_text, bounded_tool_status_text};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwarmCardComponent {
@@ -198,6 +202,29 @@ impl SwarmCardComponent {
             } else {
                 "├─"
             };
+            let activity_prefix = format!(
+                " {} · {} tools · {} · {} · ",
+                state_label(child.agent.state),
+                child.agent.tool_count,
+                format_elapsed(elapsed.as_secs()),
+                child_token_stats(&child.agent),
+            );
+            let row_prefix = format!(
+                "{branch} {}  [{}] {} [{}]{}",
+                child.agent.display_name.as_str(),
+                role_label(child.agent.role),
+                marker(child.agent.state),
+                progress_bar_text(progress, child.agent.state),
+                activity_prefix,
+            );
+            let activity_width = width.saturating_sub(visible_width(&row_prefix) + 1).min(96);
+            let activity_summary = child_activity_summary(
+                &child.agent,
+                &child.item,
+                waiting,
+                self.now_ms,
+                activity_width,
+            );
             lines.push(
                 Line::from_spans(vec![
                     Span::styled(format!("{branch} "), muted),
@@ -212,22 +239,7 @@ impl SwarmCardComponent {
                     Span::raw(" ["),
                     progress_bar_line(progress, child.agent.state, theme),
                     Span::raw("] "),
-                    Span::styled(
-                        format!(
-                            " {} · {} tools · {} · {} · {}",
-                            state_label(child.agent.state),
-                            child.agent.tool_count,
-                            format_elapsed(elapsed.as_secs()),
-                            child_token_stats(&child.agent),
-                            child_activity_summary(
-                                &child.agent,
-                                &child.item,
-                                waiting,
-                                self.now_ms,
-                            ),
-                        ),
-                        primary,
-                    ),
+                    Span::styled(format!("{activity_prefix}{activity_summary}"), primary),
                 ])
                 .truncate_to_width(width),
             );
@@ -539,6 +551,7 @@ fn child_activity_summary(
     fallback_item: &str,
     waiting: bool,
     now_ms: Option<u64>,
+    max_tool_width: usize,
 ) -> String {
     if agent.state == AgentLifecycleState::Queued {
         if !agent.task_title.is_empty() {
@@ -565,9 +578,14 @@ fn child_activity_summary(
         AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
     }) {
         if matches!(phase, AgentToolActivityPhase::Ongoing) && waiting {
-            return compact_chars(&format_tool_summary("waiting on", name, summary), 96);
+            let max_width = if matches!(name, "Bash" | "Terminal") {
+                max_tool_width
+            } else {
+                96
+            };
+            return bounded_tool_status_text("waiting on", name, summary, "", max_width);
         }
-        return compact_chars(&child_tool_status_text(name, summary, phase, now), 96);
+        return bounded_phase_tool_status(name, summary, phase, now, max_tool_width);
     }
     if waiting {
         return "waiting for activity".to_owned();
@@ -598,14 +616,11 @@ fn child_activity_summary(
         } => Some((name.as_str(), summary.as_deref(), *phase)),
         AgentActivityKind::Text { .. } => None,
     }) {
-        return compact_chars(&child_tool_status_text(name, summary, phase, now), 96);
+        return bounded_phase_tool_status(name, summary, phase, now, max_tool_width);
     }
     let view = child_activity_view(agent, 1);
     if let Some(tool) = view.tools.last() {
-        return compact_chars(
-            &child_tool_status_text(tool.name, tool.summary, tool.phase, now),
-            96,
-        );
+        return bounded_phase_tool_status(tool.name, tool.summary, tool.phase, now, max_tool_width);
     }
     if let Some(final_text) = view.final_text {
         return compact_chars(&one_line(&final_text), 96);
@@ -621,12 +636,17 @@ fn child_activity_summary(
     compact_chars(&one_line(fallback_item), 96)
 }
 
-fn format_tool_summary(verb: &str, name: &str, summary: Option<&str>) -> String {
-    match summary {
-        Some(summary) if !summary.trim().is_empty() => {
-            format!("{verb} {name} ({})", one_line(summary))
-        }
-        _ => format!("{verb} {name}"),
+fn bounded_phase_tool_status(
+    name: &str,
+    summary: Option<&str>,
+    phase: AgentToolActivityPhase,
+    now_ms: u64,
+    max_width: usize,
+) -> String {
+    if matches!(name, "Bash" | "Terminal") {
+        bounded_child_tool_status_text(name, summary, phase, now_ms, max_width)
+    } else {
+        compact_chars(&child_tool_status_text(name, summary, phase, now_ms), 96)
     }
 }
 

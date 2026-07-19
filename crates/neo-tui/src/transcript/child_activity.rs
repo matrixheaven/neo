@@ -1,13 +1,13 @@
-use std::fmt::Write;
 use std::time::Duration;
 
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentProfile, AgentRole,
     AgentRunMode, AgentSnapshot, AgentToolActivityPhase, AgentToolOutputPreview,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Line, Span, Style};
+use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width};
 
 pub const MAX_CHILD_TOOL_ROWS: usize = 4;
 const THINKING_PREVIEW_LINES: usize = 2;
@@ -152,26 +152,102 @@ pub fn child_tool_status_text(
     phase: AgentToolActivityPhase,
     now_ms: u64,
 ) -> String {
+    bounded_child_tool_status_text(name, summary, phase, now_ms, usize::MAX)
+}
+
+pub(super) fn bounded_child_tool_status_text(
+    name: &str,
+    summary: Option<&str>,
+    phase: AgentToolActivityPhase,
+    now_ms: u64,
+    max_width: usize,
+) -> String {
     let verb = match phase {
         AgentToolActivityPhase::Queued { .. } => "Queued",
         AgentToolActivityPhase::Ongoing => "Using",
         AgentToolActivityPhase::Done => "Used",
         AgentToolActivityPhase::Failed => "Failed",
     };
-    let suffix = summary
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" ({})", one_line(value)))
-        .unwrap_or_default();
-    let mut text = format!("{verb} {name}{suffix}");
-    if let AgentToolActivityPhase::Queued {
+    let fixed_suffix = if let AgentToolActivityPhase::Queued {
         position: Some(position),
         queued_at_ms,
     } = phase
     {
         let waiting_s = now_ms.saturating_sub(queued_at_ms) / 1_000;
-        let _ = write!(text, " · #{position} · waiting {waiting_s}s");
+        format!(" · #{position} · waiting {waiting_s}s")
+    } else {
+        String::new()
+    };
+    bounded_tool_status_text(verb, name, summary, &fixed_suffix, max_width)
+}
+
+pub(super) fn bounded_tool_status_text(
+    verb: &str,
+    name: &str,
+    summary: Option<&str>,
+    fixed_suffix: &str,
+    max_width: usize,
+) -> String {
+    let summary = summary
+        .filter(|value| !value.trim().is_empty())
+        .map(one_line);
+    let text = match &summary {
+        Some(summary) => format!("{verb} {name} ({summary}){fixed_suffix}"),
+        None => format!("{verb} {name}{fixed_suffix}"),
+    };
+    if !matches!(name, "Bash" | "Terminal") {
+        return compact_chars(&text, max_width);
     }
-    text
+    let Some(summary) = summary else {
+        return compact_chars(&text, max_width);
+    };
+    let fixed_width = visible_width(verb)
+        + 1
+        + visible_width(name)
+        + visible_width(" ()")
+        + visible_width(fixed_suffix);
+    let summary_width = max_width.saturating_sub(fixed_width);
+    if summary_width == 0 {
+        return format!("{verb} {name}{fixed_suffix}");
+    }
+    format!(
+        "{verb} {name} ({}){fixed_suffix}",
+        compact_middle_width(&summary, summary_width)
+    )
+}
+
+fn compact_middle_width(text: &str, max_width: usize) -> String {
+    let width = visible_width(text);
+    if width <= max_width {
+        return text.to_owned();
+    }
+    const SEPARATOR: &str = " … ";
+    let separator_width = visible_width(SEPARATOR);
+    if max_width <= separator_width {
+        return clip_plain_to_width(text, max_width);
+    }
+    let content_width = max_width - separator_width;
+    let head_width = content_width / 2;
+    let tail_width = content_width - head_width;
+    format!(
+        "{}{SEPARATOR}{}",
+        clip_plain_to_width(text, head_width),
+        clip_plain_tail_to_width(text, tail_width)
+    )
+}
+
+fn clip_plain_tail_to_width(text: &str, max_width: usize) -> String {
+    let mut kept = Vec::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true).rev() {
+        let grapheme_width = visible_width(grapheme);
+        if width + grapheme_width > max_width {
+            break;
+        }
+        kept.push(grapheme);
+        width += grapheme_width;
+    }
+    kept.into_iter().rev().collect()
 }
 
 pub fn render_child_tool_row(
@@ -194,7 +270,14 @@ pub fn render_child_tool_row(
             Style::default().fg(theme.text_primary)
         }
     };
-    let status = child_tool_status_text(row.name, row.summary, row.phase, now_ms.unwrap_or(0));
+    let status_width = width.saturating_sub(visible_width(indent) + visible_width(marker) + 1);
+    let status = bounded_child_tool_status_text(
+        row.name,
+        row.summary,
+        row.phase,
+        now_ms.unwrap_or(0),
+        status_width,
+    );
     let muted = Style::default().fg(theme.text_muted);
     let mut lines = vec![
         Line::from_spans(vec![

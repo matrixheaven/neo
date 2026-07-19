@@ -697,7 +697,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
     let frame = plain_frame(&mut transcript_pane, 100, 24);
     let tool_1 = frame
         .iter()
-        .position(|line| line.contains("Using Bash (printf 1)"))
+        .position(|line| line.contains("$ printf 1"))
         .expect("first tool");
     let approval = frame
         .iter()
@@ -705,7 +705,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         .expect("approval");
     let tool_2 = frame
         .iter()
-        .position(|line| line.contains("Using Bash (printf 2)"))
+        .position(|line| line.contains("$ printf 2"))
         .expect("second tool");
     assert!(tool_1 < approval);
     assert!(

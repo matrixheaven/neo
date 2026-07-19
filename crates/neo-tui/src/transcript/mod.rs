@@ -13,6 +13,7 @@ pub mod partial_json;
 pub mod plan_box;
 mod presentation;
 pub mod shell_run;
+mod shell_tool_presentation;
 pub mod store;
 mod streaming_prefix;
 mod swarm_card;

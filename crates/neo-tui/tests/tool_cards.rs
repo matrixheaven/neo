@@ -176,6 +176,238 @@ fn terminal_output_controls_cannot_escape_tool_card() {
 }
 
 #[test]
+fn terminal_tool_card_renders_operation_specific_body() {
+    use neo_tui::primitive::visible_width;
+
+    let cases = [
+        (
+            "start",
+            json!({
+                "mode": "start",
+                "handle": "typed-start-fake",
+                "command": "printf 'hello'",
+                "cwd": "C:\\repo\\\u{1b}[31mneo\u{1b}[0m\tui\r\n",
+            }),
+            "handle: term-start\nstatus: running\noutput:\n",
+            json!({
+                "handle": "\u{1b}[32mterm-start\u{1b}[0m\ttrue\u{7f}",
+                "status": "running",
+                "output": ""
+            }),
+        ),
+        (
+            "write",
+            json!({
+                "mode": "write",
+                "handle": "\u{1b}[31mterm-write\u{1b}[0m\ttyped",
+                "input": [
+                    {"text": r"\x03"},
+                    {"control": 3},
+                    {"text": "\r\n\t\u{1b}世界"},
+                    {"control": 4},
+                ],
+            }),
+            "handle: term-write\nstatus: running\noutput:\nwrite output",
+            json!({
+                "handle": "detail-write-fake",
+                "status": "running",
+                "output": "write \u{1b}[31mred\u{1b}[0m\t\u{7f}\u{85}\nnext\r"
+            }),
+        ),
+        (
+            "read",
+            json!({"mode": "read", "handle": "term-read"}),
+            "handle: term-read\nstatus: running\noutput:\nread one\nread two",
+            json!({"handle": "term-read", "status": "running", "output": "read one\nread two"}),
+        ),
+        (
+            "resize",
+            json!({"mode": "resize", "handle": "term-resize", "cols": 120, "rows": 40}),
+            "handle: term-resize\nstatus: running\ncols: 120\nrows: 40",
+            json!({"handle": "term-resize", "status": "running", "cols": 120, "rows": 40}),
+        ),
+        (
+            "stop",
+            json!({"mode": "stop", "handle": "term-stop"}),
+            "handle: term-stop\nstatus: completed\noutput:\nfinal output",
+            json!({"handle": "term-stop", "status": "completed", "output": "final output"}),
+        ),
+        (
+            "stop-failure",
+            json!({"mode": "stop", "handle": "term-failed"}),
+            "handle: term-failed\nstatus:\t\u{1b}[31mparent_exited\u{1b}[0m\u{7f}\noutput:\nparent\u{85}",
+            json!({"handle": "term-failed", "status": "parent_exited", "output": "parent vanished"}),
+        ),
+        (
+            "read-missing-details",
+            json!({"mode": "read", "handle": "term-legacy"}),
+            "legacy \u{1b}[31mread\u{1b}[0m\tvalue\u{7f}\nline\u{85}\r",
+            json!({}),
+        ),
+        (
+            "read-empty",
+            json!({"mode": "read", "handle": "term-empty"}),
+            "handle: term-empty\nstatus: running\noutput:\n",
+            json!({"handle": "detail-empty-fake", "status": "running", "output": "\u{1b}[31m\u{1b}[0m"}),
+        ),
+    ];
+    let theme = TuiTheme::default();
+
+    for width in [24, 100] {
+        for (label, arguments, result, details) in &cases {
+            let mut card = ToolCallComponent::new(ToolCallState {
+                id: format!("terminal-{label}"),
+                name: "Terminal".to_owned(),
+                arguments: Some(arguments.to_string()),
+                result: Some((*result).to_owned()),
+                details: Some(details.clone()),
+                status: ToolStatusKind::Succeeded,
+                exit_code: None,
+            });
+            let rows = card.render_with_theme(width, &theme);
+            assert!(
+                rows.iter().all(|row| visible_width(&row.text()) <= width),
+                "{label} exceeded width {width}: {:?}",
+                plain(rows.clone())
+            );
+            assert!(
+                rows.iter()
+                    .flat_map(Line::spans)
+                    .flat_map(|span| span.text().chars())
+                    .all(|character| !character.is_control()),
+                "{label} leaked a terminal control byte: {:?}",
+                plain(rows)
+            );
+        }
+    }
+
+    let render_wide = |label: &str| {
+        let (_, arguments, result, details) = cases
+            .iter()
+            .find(|(case, ..)| *case == label)
+            .expect("known terminal case");
+        let mut card = ToolCallComponent::new(ToolCallState {
+            id: format!("terminal-{label}"),
+            name: "Terminal".to_owned(),
+            arguments: Some(arguments.to_string()),
+            result: Some((*result).to_owned()),
+            details: Some(details.clone()),
+            status: ToolStatusKind::Succeeded,
+            exit_code: None,
+        });
+        card.set_expanded(true);
+        plain(card.render_with_theme(100, &theme))
+    };
+
+    let start = render_wide("start");
+    assert!(
+        start[0].contains(r"Used Terminal · start · term-start\ttrue\u{7f}"),
+        "{start:?}"
+    );
+    assert!(
+        start
+            .iter()
+            .any(|row| row.contains(r"cwd C:\repo\neo\tui\r\n")),
+        "{start:?}"
+    );
+    assert!(!start.join("\n").contains("typed-start-fake"), "{start:?}");
+    assert!(!start.join("\n").contains(r"C:\\repo"), "{start:?}");
+    assert!(
+        start.iter().any(|row| row.contains("$ printf 'hello'")),
+        "{start:?}"
+    );
+    assert!(
+        start.iter().any(|row| row.contains("Terminal started.")),
+        "{start:?}"
+    );
+    assert!(
+        !start.iter().any(|row| row.contains("handle:")),
+        "{start:?}"
+    );
+
+    let write = render_wide("write");
+    assert!(
+        write[0].contains(r"Used Terminal · write · term-write\ttyped"),
+        "{write:?}"
+    );
+    assert!(!write.join("\n").contains("detail-write-fake"), "{write:?}");
+    assert!(
+        write
+            .iter()
+            .any(|row| row.contains(r"stdin › \\x03\x03\r\n\t\x1b世界\x04")),
+        "{write:?}"
+    );
+    assert!(
+        write
+            .iter()
+            .any(|row| row.contains(r"write red\t\u{7f}\u{85}")),
+        "{write:?}"
+    );
+    assert!(write.iter().any(|row| row.contains(r"next\r")), "{write:?}");
+    assert!(
+        !write.iter().any(|row| row.contains("status:")),
+        "{write:?}"
+    );
+
+    let read = render_wide("read");
+    assert!(read.iter().any(|row| row.contains("read one")), "{read:?}");
+    assert!(read.iter().any(|row| row.contains("read two")), "{read:?}");
+    assert!(!read.iter().any(|row| row.contains("handle:")), "{read:?}");
+    assert!(!read.iter().any(|row| row.contains("output:")), "{read:?}");
+
+    let resize = render_wide("resize");
+    assert!(
+        resize.iter().any(|row| row.contains("size 120 × 40")),
+        "{resize:?}"
+    );
+    assert!(
+        !resize.iter().any(|row| row.contains("cols:")),
+        "{resize:?}"
+    );
+
+    let stop = render_wide("stop");
+    assert!(
+        stop.iter().any(|row| row.contains("final output")),
+        "{stop:?}"
+    );
+    assert!(
+        stop.iter().any(|row| row.contains("Process tree stopped.")),
+        "{stop:?}"
+    );
+    assert!(!stop.iter().any(|row| row.contains("status:")), "{stop:?}");
+
+    let failure = render_wide("stop-failure");
+    assert!(
+        failure
+            .iter()
+            .any(|row| row.contains(r"status:\tparent_exited\u{7f}")),
+        "{failure:?}"
+    );
+    assert!(
+        failure.iter().any(|row| row.contains(r"parent\u{85}")),
+        "{failure:?}"
+    );
+
+    let missing = render_wide("read-missing-details");
+    assert!(
+        missing
+            .iter()
+            .any(|row| row.contains(r"legacy read\tvalue\u{7f}")),
+        "{missing:?}"
+    );
+    assert!(
+        missing.iter().any(|row| row.contains(r"line\u{85}\r")),
+        "{missing:?}"
+    );
+
+    let empty = render_wide("read-empty");
+    assert_eq!(empty, ["● Used Terminal · read · term-empty"], "{empty:?}");
+    assert!(!empty.join("\n").contains("handle:"), "{empty:?}");
+    assert!(!empty.join("\n").contains("status:"), "{empty:?}");
+    assert!(!empty.join("\n").contains("output:"), "{empty:?}");
+}
+
+#[test]
 fn wait_delegate_card_renders_running_and_final_outcomes() {
     const WIDTH: usize = 120;
     let arguments = json!({
@@ -693,6 +925,15 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
     use neo_tui::primitive::strip_ansi;
 
     let mut runtime = TranscriptPane::new(80, 20);
+    let command = [
+        "printf command-head",
+        "printf command-middle-1",
+        "printf command-middle-2",
+        "printf command-middle-3",
+        "printf command-middle-4",
+        "printf command-tail",
+    ]
+    .join("\n");
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
         turn: 1,
         id: "bash-1".to_owned(),
@@ -701,7 +942,7 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "bash-1".to_owned(),
-        json_fragment: r#"{"command":"printf many"}"#.to_owned(),
+        json_fragment: json!({"command": command}).to_string(),
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -719,12 +960,26 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
     assert!(
         collapsed
             .iter()
-            .any(|line| line.contains("ctrl+o to expand")),
-        "collapsed frame should show expansion hint: {collapsed:?}"
+            .any(|line| line.contains("$ printf command-head")),
+        "collapsed frame should keep command head: {collapsed:?}"
     );
     assert!(
-        !collapsed.iter().any(|line| line.trim() == "8"),
-        "collapsed frame should not show final result line: {collapsed:?}"
+        collapsed
+            .iter()
+            .any(|line| line.contains("printf command-tail")),
+        "collapsed frame should keep command tail: {collapsed:?}"
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("characters hidden · ctrl+o to expand")),
+        "collapsed frame should show command expansion hint: {collapsed:?}"
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("more lines, ctrl+o to expand")),
+        "collapsed frame should show output expansion hint: {collapsed:?}"
     );
 
     runtime.set_tool_output_expanded(true);
@@ -734,6 +989,12 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
         .iter()
         .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
+    assert!(
+        expanded
+            .iter()
+            .any(|line| line.contains("printf command-middle-4")),
+        "expanded frame should show the complete command: {expanded:?}"
+    );
     assert!(
         expanded.iter().any(|line| line.trim() == "8"),
         "expanded frame should show final result line: {expanded:?}"
@@ -832,6 +1093,18 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("x".repeat(200)),
     });
+    runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-0".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: json!({"command": "y".repeat(200)}),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-0".to_owned(),
+        name: "Bash".to_owned(),
+        result: neo_agent_core::ToolResult::ok(""),
+    });
 
     let frame = runtime
         .render_frame(WIDTH, 20)
@@ -869,6 +1142,14 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         }
     }
     assert_eq!(tool_card_header_count, 1, "tool card header rendered once");
+    assert_eq!(
+        frame_with_gutter
+            .iter()
+            .filter(|line| line.contains("Used Bash"))
+            .count(),
+        1,
+        "Bash tool card header rendered once"
+    );
     assert!(
         frame_with_gutter
             .iter()
@@ -1170,37 +1451,147 @@ fn replay_exit_plan_mode_restores_plan_box_from_plan_file() {
 }
 
 #[test]
-fn long_command_header_keeps_closing_paren() {
-    let theme = TuiTheme::default();
-    let state = ToolCallState {
-        id: "bash-1".to_owned(),
-        name: "Bash".to_owned(),
-        arguments: Some(
-            serde_json::json!({
-                "command": "cargo nextest run -p neo-agent-core --test runtime_turn runtime_turn_and_then_some_more_stuff",
-            })
-            .to_string(),
+fn bash_tool_card_renders_command_body_across_lifecycle_states() {
+    let arguments = json!({"command": "cargo test", "description": "focused tests"}).to_string();
+    let cases = [
+        (
+            "preparing",
+            ToolStatusKind::Pending,
+            None,
+            None,
+            "$ cargo test",
         ),
-        result: None,
-        details: None,
-        status: ToolStatusKind::Running,
-        exit_code: None,
-    };
-    let rows = plain(vec![Line::from_spans(tool_header_spans(
-        &state,
-        &theme,
-        None,
-        usize::MAX,
-    ))]);
-    let header = &rows[0];
+        ("queued", ToolStatusKind::Queued, None, None, "$ cargo test"),
+        (
+            "running",
+            ToolStatusKind::Running,
+            None,
+            None,
+            "$ cargo test",
+        ),
+        (
+            "succeeded",
+            ToolStatusKind::Succeeded,
+            Some("tests passed"),
+            None,
+            "tests passed",
+        ),
+        (
+            "failed",
+            ToolStatusKind::Failed,
+            Some("tests failed"),
+            None,
+            "tests failed",
+        ),
+        (
+            "cancelled",
+            ToolStatusKind::Cancelled,
+            Some("cancelled by user"),
+            None,
+            "cancelled by user",
+        ),
+        (
+            "background",
+            ToolStatusKind::Succeeded,
+            None,
+            Some(json!({"outcome": "backgrounded", "task_id": "bash-1"})),
+            "task bash-1 · focused tests",
+        ),
+    ];
+
+    for (label, status, result, details, expected) in cases {
+        let mut card = ToolCallComponent::new(ToolCallState {
+            id: format!("bash-{label}"),
+            name: "Bash".to_owned(),
+            arguments: Some(arguments.clone()),
+            result: result.map(str::to_owned),
+            details,
+            status,
+            exit_code: None,
+        });
+        let rows = plain(card.render(80));
+        let header = &rows[0];
+        assert!(!header.contains("cargo test"), "{label}: {rows:?}");
+        assert!(!header.contains('('), "{label}: {rows:?}");
+        if label == "succeeded" {
+            assert_eq!(header.matches("· 1 lines").count(), 1, "{rows:?}");
+        }
+        if label == "background" {
+            assert_eq!(header.matches("· background").count(), 1, "{rows:?}");
+        }
+        assert!(
+            rows.iter().any(|line| line.contains("$ cargo test")),
+            "{label}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|line| line.contains(expected)),
+            "{label}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn bash_tool_card_replay_resize_and_expansion_use_original_arguments() {
+    let raw_arguments = json!({
+        "command": "printf original-alpha-original-beta-original-gamma-original-delta"
+    })
+    .to_string();
+    let mut transcript = TranscriptPane::new(28, 24);
+    transcript.replay_message(&AgentMessage::Assistant {
+        content: Vec::new(),
+        tool_calls: vec![AgentToolCall {
+            id: "bash-replay-1".into(),
+            name: "Bash".into(),
+            raw_arguments: raw_arguments.clone().into(),
+        }],
+        stop_reason: StopReason::ToolUse,
+    });
+    transcript.replay_message(&AgentMessage::ToolResult {
+        tool_call_id: "bash-replay-1".into(),
+        tool_name: "Bash".into(),
+        content: vec![Content::text(
+            "output-one\noutput-two\noutput-three\noutput-four",
+        )],
+        is_error: false,
+    });
+
+    let narrow = transcript
+        .render_frame(28, 24)
+        .expect("narrow frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(narrow.contains("original-alpha"), "{narrow}");
+    assert!(narrow.contains("original-delta"), "{narrow}");
+
+    transcript.set_tool_output_expanded(true);
+    let wide = transcript
+        .render_frame(100, 24)
+        .expect("wide frame")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        header.contains(')'),
-        "closing parenthesis should survive truncation: {header:?}"
+        wide.contains("$ printf original-alpha-original-beta-original-gamma-original-delta"),
+        "{wide}"
     );
-    assert!(
-        header.contains("..."),
-        "long argument should be truncated: {header:?}"
-    );
+    assert!(wide.contains("output-four"), "{wide}");
+
+    let stored_arguments = transcript
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            neo_tui::transcript::TranscriptEntry::ToolRun { component }
+                if component.id() == "bash-replay-1" =>
+            {
+                component.arguments()
+            }
+            _ => None,
+        });
+    assert_eq!(stored_arguments, Some(raw_arguments.as_str()));
 }
 
 #[test]
@@ -1390,7 +1781,8 @@ fn bash_queue_event_renders_position_and_wait_in_original_card() {
         waiting_ms: 18_000,
     });
     let rendered = rendered(&mut pane);
-    assert!(rendered.contains("Queued Bash (cargo test) · #2 · waiting 18s"));
+    assert!(rendered.contains("Queued Bash · #2 · waiting 18s"));
+    assert!(rendered.contains("$ cargo test"));
     assert_eq!(rendered.matches("Queued Bash").count(), 1);
 }
 
@@ -1424,7 +1816,7 @@ fn queued_shell_card_keeps_relative_position_across_later_entries() {
         arguments: json!({"command": "cargo test"}),
     });
     let rendered = rendered(&mut pane);
-    let tool = rendered.find("Bash (cargo test)").expect("tool row");
+    let tool = rendered.find("$ cargo test").expect("tool row");
     let later = rendered.find("later assistant text").expect("later row");
     assert!(tool < later, "living tool card drifted after later content");
 }
