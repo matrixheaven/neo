@@ -142,6 +142,18 @@ where
     decode_request_body(&frame)
 }
 
+pub(crate) fn request_stream<R>(
+    reader: R,
+) -> impl futures::Stream<Item = Result<GuardRequest, ProtocolError>>
+where
+    R: AsyncRead + Unpin,
+{
+    futures::stream::unfold(reader, |mut reader| async move {
+        let request = read_request(&mut reader).await;
+        Some((request, reader))
+    })
+}
+
 pub(crate) async fn write_request<W>(
     writer: &mut W,
     request: &GuardRequest,
@@ -587,7 +599,45 @@ fn unknown_frame() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt as _;
+
     use super::*;
+
+    #[tokio::test]
+    async fn request_stream_preserves_partial_frame_across_cancelled_poll() {
+        let expected = GuardRequest::Read {
+            request_id: 7,
+            offset: 11,
+            max_bytes: 13,
+        };
+        let frame = encode_request_for_test(&expected).expect("encode request");
+        let (mut writer, reader) = tokio::io::duplex(frame.len());
+        let mut requests = Box::pin(request_stream(reader));
+
+        writer
+            .write_all(&frame[..4])
+            .await
+            .expect("write frame length");
+        {
+            let next = requests.next();
+            tokio::pin!(next);
+            tokio::select! {
+                result = &mut next => panic!("partial frame completed unexpectedly: {result:?}"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+        }
+        writer
+            .write_all(&frame[4..])
+            .await
+            .expect("write frame body");
+
+        let actual = tokio::time::timeout(std::time::Duration::from_secs(1), requests.next())
+            .await
+            .expect("request stream timed out")
+            .expect("request stream ended")
+            .expect("decode request");
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn snapshot_and_exited_frames_are_ordered_and_final() {

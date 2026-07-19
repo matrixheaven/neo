@@ -21,7 +21,6 @@ const TERMINAL_READ_YIELD: Duration = Duration::from_secs(3);
 const TERMINAL_MAX_YIELD_MS: u64 = 30_000;
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TerminalInput {
@@ -275,16 +274,16 @@ async fn start_terminal(
     ctx.shell_runtime
         .insert_terminal(handle.clone(), session.clone())
         .await;
-    match collect_terminal_output(
+    let collected = collect_terminal_output(
         ctx,
-        "Terminal",
+        TerminalMode::Start,
         &handle,
         &session,
         max_output_bytes,
         yield_for,
     )
-    .await
-    {
+    .await;
+    match collected {
         Ok(mut result) => {
             if let Some(details) = result.details.as_mut() {
                 details["command"] = json!(command);
@@ -293,13 +292,12 @@ async fn start_terminal(
             }
             Ok(result)
         }
-        Err(ToolError::Cancelled) => {
+        Err(error) => {
             if let Some(session) = ctx.shell_runtime.remove_terminal(&handle).await {
                 let _ = session.client.stop().await;
             }
-            Err(ToolError::Cancelled)
+            Err(error)
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -316,8 +314,15 @@ async fn write_terminal(
         .client
         .write_terminal(normalize_terminal_input_newlines(input).as_bytes())
         .await?;
-    let mut result =
-        collect_terminal_output(ctx, tool, handle, &session, max_output_bytes, yield_for).await?;
+    let mut result = collect_terminal_output(
+        ctx,
+        TerminalMode::Write,
+        handle,
+        &session,
+        max_output_bytes,
+        yield_for,
+    )
+    .await?;
     if let Some(details) = result.details.as_mut() {
         details["written"] = json!(true);
     }
@@ -332,12 +337,20 @@ async fn read_terminal(
     yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
     let session = terminal_session(ctx, tool, handle).await?;
-    collect_terminal_output(ctx, tool, handle, &session, max_output_bytes, yield_for).await
+    collect_terminal_output(
+        ctx,
+        TerminalMode::Read,
+        handle,
+        &session,
+        max_output_bytes,
+        yield_for,
+    )
+    .await
 }
 
 async fn collect_terminal_output(
     ctx: &ToolContext,
-    _tool: &str,
+    mode: TerminalMode,
     handle: &str,
     session: &TerminalClientSession,
     max_output_bytes: usize,
@@ -347,9 +360,17 @@ async fn collect_terminal_output(
     let read_offset = session.state.lock().await.read_offset;
 
     if !yield_for.is_zero() && session.client.final_result().is_none() {
-        let deadline = Instant::now() + yield_for;
+        let started_at = Instant::now();
+        let deadline = started_at + yield_for;
+        // Raw PTY bootstrap bytes can precede child output on ConPTY.
+        let quiet_not_before = started_at
+            + if mode == TerminalMode::Start {
+                yield_for.min(TERMINAL_START_WRITE_YIELD)
+            } else {
+                Duration::ZERO
+            };
         let mut last_total = 0;
-        let mut last_change = Instant::now();
+        let mut last_change = started_at;
         while Instant::now() < deadline {
             if ctx.cancel_token.is_cancelled() {
                 return Err(ToolError::Cancelled);
@@ -364,6 +385,7 @@ async fn collect_terminal_output(
                 last_change = Instant::now();
             } else if snapshot.total > read_offset
                 && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD
+                && Instant::now() >= quiet_not_before
             {
                 break;
             }

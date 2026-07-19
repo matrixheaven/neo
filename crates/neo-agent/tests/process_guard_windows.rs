@@ -28,19 +28,13 @@ async fn windows_terminal_stop_closes_job_with_descendant() {
         .run(
             "Terminal",
             &context,
-            json!({
-                "mode": "start",
-                "command": descendant_command(&pid_file),
-                // Answer CSI 6n before any default yield window races process exit.
-                "yield_time_ms": 0
-            }),
+            json!({ "mode": "start", "command": descendant_command(&pid_file) }),
         )
         .await
         .expect("terminal start");
     let handle = started.details.as_ref().expect("start details")["handle"]
         .as_str()
         .expect("handle");
-    answer_cursor_position_query(&registry, &context, handle).await;
     let descendant = wait_for_terminal_pid(&registry, &context, handle, &pid_file).await;
 
     registry
@@ -65,12 +59,7 @@ async fn windows_terminal_guardian_loss_closes_job_with_descendant() {
         .run(
             "Terminal",
             &context,
-            json!({
-                "mode": "start",
-                "command": descendant_command(&pid_file),
-                // Answer CSI 6n before any default yield window races process exit.
-                "yield_time_ms": 0
-            }),
+            json!({ "mode": "start", "command": descendant_command(&pid_file) }),
         )
         .await
         .expect("terminal start");
@@ -78,7 +67,6 @@ async fn windows_terminal_guardian_loss_closes_job_with_descendant() {
     let handle = details["handle"].as_str().expect("handle");
     let guardian_pid = u32::try_from(details["guardian_pid"].as_u64().expect("guardian pid"))
         .expect("guardian pid u32");
-    answer_cursor_position_query(&registry, &context, handle).await;
     let descendant = wait_for_terminal_pid(&registry, &context, handle, &pid_file).await;
 
     kill_process(guardian_pid);
@@ -106,8 +94,7 @@ async fn windows_terminal_natural_exit_closes_job_with_descendant() {
             &context,
             json!({
                 "mode": "start",
-                "command": natural_exit_descendant_command(&pid_file),
-                "yield_time_ms": 0
+                "command": natural_exit_descendant_command(&pid_file)
             }),
         )
         .await
@@ -115,7 +102,6 @@ async fn windows_terminal_natural_exit_closes_job_with_descendant() {
     let handle = started.details.as_ref().expect("start details")["handle"]
         .as_str()
         .expect("handle");
-    answer_cursor_position_query(&registry, &context, handle).await;
     let descendant = wait_for_terminal_pid(&registry, &context, handle, &pid_file).await;
 
     assert!(wait_for_process_exit(descendant).await);
@@ -211,7 +197,7 @@ fn powershell_command(script: &str) -> String {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    format!("powershell.exe -NoProfile -EncodedCommand {encoded}")
+    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
 }
 
 fn start_bash_frame(status_dir: &std::path::Path, task_id: &str, command: &str) -> Vec<u8> {
@@ -259,43 +245,21 @@ async fn wait_for_terminal_pid(
         .run(
             "Terminal",
             context,
-            json!({ "mode": "read", "handle": handle }),
+            json!({ "mode": "read", "handle": handle, "yield_time_ms": 0 }),
         )
-        .await
-        .expect("read terminal diagnostics");
-    panic!(
-        "PID file was not written: {}\nterminal output:\n{}",
-        path.display(),
-        snapshot.content
-    );
-}
-
-async fn answer_cursor_position_query(
-    registry: &ToolRegistry,
-    context: &ToolContext,
-    handle: &str,
-) {
-    if let Err(error) = registry
+        .await;
+    let _ = registry
         .run(
             "Terminal",
             context,
-            json!({ "mode": "write", "handle": handle, "input": "\u{1b}[1;1R" }),
+            json!({ "mode": "stop", "handle": handle }),
         )
-        .await
-    {
-        let snapshot = registry
-            .run(
-                "Terminal",
-                context,
-                json!({ "mode": "read", "handle": handle }),
-            )
-            .await
-            .expect("read failed terminal after cursor query");
-        panic!(
-            "answer cursor position query: {error}\n{}",
-            snapshot.content
-        );
-    }
+        .await;
+    panic!(
+        "PID file was not written: {}\nterminal output:\n{:?}",
+        path.display(),
+        snapshot.as_ref().map(|result| &result.content)
+    );
 }
 
 async fn wait_for_pid(path: &std::path::Path) -> Option<u32> {

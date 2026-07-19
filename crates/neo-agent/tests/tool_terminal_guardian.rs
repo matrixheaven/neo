@@ -1,4 +1,7 @@
-use std::{path::PathBuf, process::Stdio, sync::LazyLock, time::Duration};
+use std::{path::PathBuf, sync::LazyLock, time::Duration};
+
+#[cfg(unix)]
+use std::process::Stdio;
 
 #[cfg(windows)]
 use base64::Engine as _;
@@ -32,11 +35,10 @@ fn guarded_context(workspace: &tempfile::TempDir, limits: ShellLimits) -> ToolCo
         ))
 }
 
-/// Unix interactive hold. Force `-i` so job control survives Ctrl+C under the
-/// outer login-shell wrapper.
+/// Portable Unix hold for tests that only need a live PTY.
 #[cfg(not(windows))]
 fn interactive_shell_command() -> String {
-    "bash --noprofile --norc -i".to_owned()
+    "sleep 300".to_owned()
 }
 
 /// Windows ConPTY + nested Git Bash `-c` is unreliable for interactive bash.
@@ -44,37 +46,47 @@ fn interactive_shell_command() -> String {
 #[cfg(windows)]
 fn interactive_shell_command() -> String {
     // Mini line protocol over stdin so tests can drive output without bash.
-    // Cursor answer may arrive first; ignore non-command lines.
     windows_powershell_command(
         r#"
 $ErrorActionPreference = 'Continue'
-Start-Sleep -Milliseconds 600
 function Emit([string]$text) {
   [Console]::Out.WriteLine($text)
   [Console]::Out.Flush()
+}
+function Size() {
+  try {
+    return @([Console]::WindowWidth, [Console]::WindowHeight)
+  } catch {
+    Emit ('size-error:{0}' -f $_.Exception.Message)
+    return @(-1, -1)
+  }
+}
+if (Test-Path -LiteralPath 'marker') {
+  [Console]::Out.Write('initial-output')
+  [Console]::Out.Flush()
+} else {
+  Emit ('cwd-missing:{0}' -f (Get-Location).Path)
 }
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($null -eq $line) { break }
   $t = $line.Trim()
-  if ($t -eq 'CMD:INIT') {
-    [Console]::Out.Write('initial-output')
-    [Console]::Out.Flush()
-  } elseif ($t -eq 'CMD:PTY') {
-    # Report the size requested at Terminal start (ConPTY Console APIs are unreliable).
-    Emit 'pty:40:8'
-  } elseif ($t -eq 'CMD:SIZE') {
-    # Report the size after Terminal resize in the lifecycle test.
-    Emit 'size:18 72'
+  if ($t -eq 'CMD:PTY') {
+    $size = Size
+    Emit ('pty:{0}:{1}' -f $size[0], $size[1])
+  } elseif ($t.StartsWith('CMD:SIZE:')) {
+    $parts = $t.Split(':')
+    $wantWidth = [int]$parts[2]
+    $wantHeight = [int]$parts[3]
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    do {
+      $size = Size
+      if ($size[0] -eq $wantWidth -and $size[1] -eq $wantHeight) { break }
+      Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Emit ('size:{0} {1}' -f $size[1], $size[0])
   } elseif ($t -eq 'CMD:ALIVE') {
     Emit 'control-alive'
-  } elseif ($t -eq 'CMD:SLEEP') {
-    Start-Sleep -Seconds 30
-  } elseif ($t -eq 'CMD:CAT_PAYLOAD') {
-    if (Test-Path -LiteralPath 'payload.txt') {
-      [Console]::Out.Write([IO.File]::ReadAllText((Resolve-Path -LiteralPath 'payload.txt')))
-      [Console]::Out.Flush()
-    }
   } elseif ($t.StartsWith('CMD:REPLY:')) {
     [Console]::Out.Write(('reply:{0}' -f $t.Substring(10)))
     [Console]::Out.Flush()
@@ -91,68 +103,27 @@ fn windows_powershell_command(script: &str) -> String {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    format!("powershell.exe -NoProfile -EncodedCommand {encoded}")
+    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
 }
 
-/// ConPTY emits CSI 6n after spawn. Answer it so the child can proceed.
-async fn answer_cursor_position_query(
+async fn start_terminal_command(
     registry: &ToolRegistry,
     context: &ToolContext,
-    handle: &str,
-) -> Result<(), String> {
-    if !cfg!(windows) {
-        return Ok(());
-    }
-    match registry
-        .run(
-            "Terminal",
-            context,
-            json!({
-                "mode": "write",
-                "handle": handle,
-                "input": "\u{1b}[1;1R",
-                "yield_time_ms": 200,
-                "max_output_bytes": 0
-            }),
-        )
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            let snapshot = registry
-                .run(
-                    "Terminal",
-                    context,
-                    json!({ "mode": "read", "handle": handle, "yield_time_ms": 0 }),
-                )
-                .await;
-            Err(format!(
-                "answer cursor position query: {error}\n{:?}",
-                snapshot.as_ref().map(|r| &r.content)
-            ))
-        }
-    }
-}
-
-async fn start_interactive_terminal(
-    registry: &ToolRegistry,
-    context: &ToolContext,
+    command: String,
     cols: u16,
     rows: u16,
-    _yield_time_ms: u64,
+    yield_time_ms: u64,
 ) -> Result<serde_json::Value, String> {
-    // Always start with yield 0 so Windows can answer CSI 6n before the hold
-    // script begins reading stdin.
     let started = registry
         .run(
             "Terminal",
             context,
             json!({
                 "mode": "start",
-                "command": interactive_shell_command(),
+                "command": command,
                 "cols": cols,
                 "rows": rows,
-                "yield_time_ms": 0
+                "yield_time_ms": yield_time_ms
             }),
         )
         .await
@@ -163,31 +134,7 @@ async fn start_interactive_terminal(
         .and_then(|details| details["handle"].as_str())
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
-    answer_cursor_position_query(registry, context, &handle).await?;
-    // Keep the hold warm: ConPTY PowerShell ReadLine sessions sometimes drop if
-    // left completely idle under remote SSH. A no-op command keeps the pipe live.
-    #[cfg(windows)]
-    {
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let _ = registry
-            .run(
-                "Terminal",
-                context,
-                json!({
-                    "mode": "write",
-                    "handle": handle,
-                    "input": "CMD:ALIVE\n",
-                    "yield_time_ms": 500,
-                    "max_output_bytes": 0
-                }),
-            )
-            .await;
-    }
-    #[cfg(not(windows))]
-    {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    let status = registry
+    let status = match registry
         .run(
             "Terminal",
             context,
@@ -199,7 +146,13 @@ async fn start_interactive_terminal(
             }),
         )
         .await
-        .map_err(|e| format!("status probe: {e}"))?;
+    {
+        Ok(status) => status,
+        Err(error) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("status probe: {error}"));
+        }
+    };
     let status_text = status
         .details
         .as_ref()
@@ -213,6 +166,24 @@ async fn start_interactive_terminal(
         ));
     }
     Ok(started.details.expect("start details"))
+}
+
+async fn start_interactive_terminal(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+    cols: u16,
+    rows: u16,
+    yield_time_ms: u64,
+) -> Result<serde_json::Value, String> {
+    start_terminal_command(
+        registry,
+        context,
+        interactive_shell_command(),
+        cols,
+        rows,
+        yield_time_ms,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -246,24 +217,19 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
 
-    // Under the guardian's `-lc` login-shell wrapper, bash may exit
-    // unpredictably depending on the user's shell init files.  Retry
-    // the whole test body up to 3 times so transient guardian exits
-    // do not cause spurious failures.
-    for attempt in 0..5 {
-        match run_one_attempt(&registry, &context).await {
-            Ok(()) => return,
-            Err(_) if attempt < 4 => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    panic!("terminal test failed after 5 attempts");
+    run_one_attempt(&registry, &context)
+        .await
+        .expect("terminal lifecycle");
 }
 
 async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Result<(), String> {
-    let details = start_interactive_terminal(registry, context, 40, 8, 500).await?;
+    #[cfg(windows)]
+    let command = interactive_shell_command();
+    #[cfg(not(windows))]
+    let command =
+        "while :; do set -- $(stty size); printf 'size:%s %s\\n' \"$1\" \"$2\"; sleep 0.1; done"
+            .to_owned();
+    let details = start_terminal_command(registry, context, command, 40, 8, 500).await?;
     let handle = details["handle"]
         .as_str()
         .expect("terminal handle")
@@ -273,7 +239,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
     let size_query = if cfg!(windows) {
         "CMD:PTY\n"
     } else {
-        "printf 'pty:%s\\n' \"$COLUMNS:$LINES\"\n"
+        "write-probe\n"
     };
     let written = match registry
         .run(
@@ -295,16 +261,23 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         }
     };
     // write now yields bounded PTY output and advances read_offset.
-    let mut output = written
-        .details
-        .as_ref()
-        .and_then(|details| details["output"].as_str())
-        .unwrap_or_default()
-        .to_owned();
-    if !output.contains("pty:40:8") {
-        output.push_str(&read_until(registry, context, &handle, "pty:40:8").await);
+    let mut output = details["output"].as_str().unwrap_or_default().to_owned();
+    output.push_str(
+        written
+            .details
+            .as_ref()
+            .and_then(|details| details["output"].as_str())
+            .unwrap_or_default(),
+    );
+    let initial_size = if cfg!(windows) {
+        "pty:40:8"
+    } else {
+        "size:8 40"
+    };
+    if !output.contains(initial_size) {
+        output.push_str(&read_until(registry, context, &handle, initial_size).await);
     }
-    if !output.contains("pty:40:8") {
+    if !output.contains(initial_size) || (!cfg!(windows) && !output.contains("write-probe")) {
         try_stop(registry, context, &handle).await;
         return Err(format!("terminal output: {output:?}"));
     }
@@ -320,11 +293,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         try_stop(registry, context, &handle).await;
         return Err(format!("terminal resize: {e}"));
     }
-    let resize_query = if cfg!(windows) {
-        "CMD:SIZE\n"
-    } else {
-        "printf 'size:%s %s\\n' \"$LINES\" \"$COLUMNS\"\n"
-    };
+    #[cfg(windows)]
     let resized_write = match registry
         .run(
             "Terminal",
@@ -332,7 +301,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": resize_query,
+                "input": "CMD:SIZE:72:18\n",
                 "yield_time_ms": 1500
             }),
         )
@@ -342,6 +311,25 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         Err(e) => {
             try_stop(registry, context, &handle).await;
             return Err(format!("write after resize: {e}"));
+        }
+    };
+    #[cfg(not(windows))]
+    let resized_write = match registry
+        .run(
+            "Terminal",
+            context,
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "yield_time_ms": 1500
+            }),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("read after resize: {e}"));
         }
     };
     let mut output = resized_write
@@ -480,59 +468,33 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
-    // Interactive shell is the portable hold. Put the secret payload only in a
-    // file so PTY echo of the typed command cannot leak the needle into the
-    // serialized tool result under a 4-byte cap.
+    // Keep the secret in a file so the command itself cannot leak the needle.
     std::fs::write(
         workspace.path().join("payload.txt"),
         "keep-terminal-leak-tail",
     )
     .expect("payload file");
-    for attempt in 0..5 {
-        match run_max_output_cap_attempt(&registry, &context, &workspace).await {
-            Ok(()) => return,
-            Err(_) if attempt < 4 => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    panic!("max_output_bytes cap test failed after 5 attempts");
+    run_max_output_cap_attempt(&registry, &context, &workspace)
+        .await
+        .expect("max_output_bytes cap");
 }
 
 async fn run_max_output_cap_attempt(
     registry: &ToolRegistry,
     context: &ToolContext,
-    workspace: &tempfile::TempDir,
+    _workspace: &tempfile::TempDir,
 ) -> Result<(), String> {
-    let details = start_interactive_terminal(registry, context, 80, 24, 500).await?;
+    #[cfg(windows)]
+    let command = windows_powershell_command(
+        "Start-Sleep -Milliseconds 200; [Console]::Out.Write([IO.File]::ReadAllText((Resolve-Path -LiteralPath 'payload.txt'))); [Console]::Out.Flush(); Start-Sleep -Seconds 300",
+    );
+    #[cfg(not(windows))]
+    let command = "sleep 0.2; cat payload.txt; sleep 300".to_owned();
+    let details = start_terminal_command(registry, context, command, 80, 24, 0).await?;
     let handle = details["handle"]
         .as_str()
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
-
-    let deposit = if cfg!(windows) {
-        "CMD:CAT_PAYLOAD\n"
-    } else {
-        "cat payload.txt\n"
-    };
-    if let Err(e) = registry
-        .run(
-            "Terminal",
-            context,
-            json!({
-                "mode": "write",
-                "handle": handle,
-                "input": deposit,
-                "yield_time_ms": 1200,
-                "max_output_bytes": 0
-            }),
-        )
-        .await
-    {
-        try_stop(registry, context, &handle).await;
-        return Err(format!("deposit: {e}"));
-    }
 
     let mut read = None;
     for _ in 0..30 {
@@ -616,7 +578,6 @@ async fn run_max_output_cap_attempt(
         )
         .await
         .map_err(|e| format!("stop: {e}"))?;
-    let _ = workspace;
     Ok(())
 }
 
@@ -964,20 +925,28 @@ async fn read_until(
     needle: &str,
 ) -> String {
     let mut output = String::new();
-    for _ in 0..50 {
-        let result = registry
-            .run(
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        let result = match tokio::time::timeout(
+            remaining,
+            registry.run(
                 "Terminal",
                 context,
-                json!({ "mode": "read", "handle": handle }),
-            )
-            .await
-            .expect("terminal read");
+                json!({ "mode": "read", "handle": handle, "yield_time_ms": 100 }),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) | Err(_) => break,
+        };
         output.push_str(result.details.as_ref().unwrap()["output"].as_str().unwrap());
         if output.contains(needle) {
             return output;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        if result.details.as_ref().unwrap()["status"].as_str() != Some("running") {
+            break;
+        }
     }
     output
 }
@@ -988,17 +957,9 @@ async fn terminal_start_write_and_read_share_incremental_bounded_output() {
     let workspace = tempfile::tempdir().expect("workspace");
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
-    // PTY/login-shell startup is flaky under both macOS and ConPTY; retry like lifecycle.
-    for attempt in 0..5 {
-        match run_incremental_bounded_attempt(&registry, &context, &workspace).await {
-            Ok(()) => return,
-            Err(_) if attempt < 4 => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    panic!("incremental bounded output test failed after 5 attempts");
+    run_incremental_bounded_attempt(&registry, &context, &workspace)
+        .await
+        .expect("incremental bounded output");
 }
 
 async fn run_incremental_bounded_attempt(
@@ -1020,19 +981,9 @@ async fn run_incremental_bounded_attempt(
         .map_err(|e| format!("cwd strip: {e}"))?
         .to_string_lossy()
         .into_owned();
-    #[cfg(windows)]
-    let command = interactive_shell_command();
-    #[cfg(not(windows))]
     let command =
         "test -f marker && printf initial-output; read line; printf 'reply:%s' \"$line\"; sleep 300"
             .to_owned();
-    #[cfg(windows)]
-    let start_yield = 0u64;
-    #[cfg(not(windows))]
-    let start_yield = 2000u64;
-
-    // Windows: yield 0 so we can answer CSI 6n before driving CMD:INIT.
-    // Unix: yield long enough to collect initial-output from the one-liner.
     let started = registry
         .run(
             "Terminal",
@@ -1040,7 +991,7 @@ async fn run_incremental_bounded_attempt(
             json!({
                 "mode": "start",
                 "cwd": cwd,
-                "yield_time_ms": start_yield,
+                "yield_time_ms": 2500,
                 "command": command
             }),
         )
@@ -1052,99 +1003,40 @@ async fn run_incremental_bounded_attempt(
         .and_then(|details| details["handle"].as_str())
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
-    answer_cursor_position_query(registry, context, &handle).await?;
-    let mut collected = started
+    let observed_output = started
         .details
         .as_ref()
         .and_then(|d| d["output"].as_str())
         .unwrap_or_default()
         .to_owned();
     #[cfg(windows)]
-    {
-        // Drive the PowerShell hold protocol after the cursor handshake.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let init = registry
-            .run(
-                "Terminal",
-                context,
-                json!({
-                    "mode": "write",
-                    "handle": handle,
-                    "input": "CMD:INIT\n",
-                    "yield_time_ms": 1500
-                }),
-            )
-            .await
-            .map_err(|e| format!("CMD:INIT: {e}"))?;
-        collected.push_str(
-            init.details
-                .as_ref()
-                .and_then(|d| d["output"].as_str())
-                .unwrap_or_default(),
-        );
-        if init.content.contains("initial-output") {
-            collected.push_str("initial-output");
-        }
-    }
-
-    let mut saw_initial =
-        collected.contains("initial-output") || started.content.contains("initial-output");
-    if !saw_initial {
-        for _ in 0..8 {
-            let probe = registry
-                .run(
-                    "Terminal",
-                    context,
-                    json!({
-                        "mode": "read",
-                        "handle": handle,
-                        "yield_time_ms": 500
-                    }),
-                )
-                .await
-                .map_err(|e| format!("probe read: {e}"))?;
-            let chunk = probe
-                .details
-                .as_ref()
-                .and_then(|details| details["output"].as_str())
-                .unwrap_or_default();
-            collected.push_str(chunk);
-            let status = probe
-                .details
-                .as_ref()
-                .and_then(|details| details["status"].as_str())
-                .unwrap_or("missing");
-            if status != "running" {
-                try_stop(registry, context, &handle).await;
-                return Err(format!(
-                    "not running while waiting for initial-output: {status} out={collected:?}"
-                ));
-            }
-            if collected.contains("initial-output") {
-                saw_initial = true;
-                break;
-            }
-        }
-    }
-    if !saw_initial {
+    if observed_output.contains("\u{1b}[6n") || started.content.contains("\u{1b}[6n") {
         try_stop(registry, context, &handle).await;
-        return Err(format!("missing initial-output: {collected:?}"));
+        return Err("ConPTY requested inherited cursor state".to_owned());
+    }
+    if !observed_output.contains("initial-output") && !started.content.contains("initial-output") {
+        try_stop(registry, context, &handle).await;
+        return Err(format!(
+            "start/handshake did not collect cwd-gated initial output: content={:?} output={observed_output:?}",
+            started.content
+        ));
     }
     let status = started
         .details
         .as_ref()
         .and_then(|d| d["status"].as_str())
         .unwrap_or("missing");
-    if status != "running" && !cfg!(windows) {
-        // Unix start yield may finalize as failed if the PTY raced; still require
-        // running for write interaction.
+    if status != "running" {
         try_stop(registry, context, &handle).await;
-        return Err(format!("start not running: {status}"));
+        return Err(format!(
+            "start not running: {status}; content={:?}; details={:?}",
+            started.content, started.details
+        ));
     }
 
     // Shared offset: a zero-yield read after consuming initial-output must not
     // re-emit it.
-    let immediate = registry
+    let immediate = match registry
         .run(
             "Terminal",
             context,
@@ -1155,7 +1047,13 @@ async fn run_incremental_bounded_attempt(
             }),
         )
         .await
-        .map_err(|e| format!("immediate read: {e}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("immediate read: {error}"));
+        }
+    };
     let immediate_output = immediate
         .details
         .as_ref()
@@ -1170,24 +1068,25 @@ async fn run_incremental_bounded_attempt(
         return Err(format!("immediate read not empty: {immediate_output:?}"));
     }
 
-    let write_input = if cfg!(windows) {
-        "CMD:REPLY:hello\n"
-    } else {
-        "hello\n"
-    };
-    let written = registry
+    let written = match registry
         .run(
             "Terminal",
             context,
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": write_input,
+                "input": "hello\n",
                 "yield_time_ms": 2500
             }),
         )
         .await
-        .map_err(|e| format!("write: {e}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("write: {error}"));
+        }
+    };
     let write_output = written
         .details
         .as_ref()
@@ -1210,7 +1109,7 @@ async fn run_incremental_bounded_attempt(
         return Err("written flag missing".to_owned());
     }
 
-    let after_write = registry
+    let after_write = match registry
         .run(
             "Terminal",
             context,
@@ -1221,7 +1120,13 @@ async fn run_incremental_bounded_attempt(
             }),
         )
         .await
-        .map_err(|e| format!("read after write: {e}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("read after write: {error}"));
+        }
+    };
     let after_write_output = after_write
         .details
         .as_ref()
@@ -1251,70 +1156,55 @@ async fn run_incremental_bounded_attempt(
     Ok(())
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
     let _guard = serial_guard().await;
     let workspace = tempfile::tempdir().expect("workspace");
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
-    for attempt in 0..5 {
-        match run_ctrl_c_attempt(&registry, &context).await {
-            Ok(()) => return,
-            Err(_) if attempt < 4 => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    panic!("ctrl-c session test failed after 5 attempts");
+    run_session_usability_attempt(&registry, &context)
+        .await
+        .expect("Ctrl+C session usability");
 }
 
-async fn run_ctrl_c_attempt(registry: &ToolRegistry, context: &ToolContext) -> Result<(), String> {
+#[cfg(windows)]
+#[tokio::test]
+async fn terminal_windows_session_remains_usable_without_signal_guarantee() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+    run_session_usability_attempt(&registry, &context)
+        .await
+        .expect("Windows session usability");
+}
+
+async fn run_session_usability_attempt(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+) -> Result<(), String> {
+    #[cfg(windows)]
     let details = start_interactive_terminal(registry, context, 80, 24, 800).await?;
+    #[cfg(not(windows))]
+    let details = start_terminal_command(
+        registry,
+        context,
+        "trap 'printf control-alive\\n' INT; while :; do sleep 30; done".to_owned(),
+        80,
+        24,
+        100,
+    )
+    .await?;
     let handle = details["handle"]
         .as_str()
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
 
+    #[cfg(windows)]
+    let alive_input = "CMD:ALIVE\n";
     #[cfg(not(windows))]
-    {
-        registry
-            .run(
-                "Terminal",
-                context,
-                json!({
-                    "mode": "write",
-                    "handle": handle,
-                    "input": "sleep 30\n",
-                    "yield_time_ms": 500
-                }),
-            )
-            .await
-            .map_err(|e| format!("write sleep: {e}"))?;
-        // Raw Ctrl+C interrupts the foreground child; shell must stay usable.
-        registry
-            .run(
-                "Terminal",
-                context,
-                json!({
-                    "mode": "write",
-                    "handle": handle,
-                    "input": "\u{0003}",
-                    "yield_time_ms": 800
-                }),
-            )
-            .await
-            .map_err(|e| format!("write ctrl-c: {e}"))?;
-    }
-    // Windows/ConPTY: no portable Ctrl+C semantics for hold processes (sending
-    // \u0003 often tears down the session). Isolated by cfg; still prove the
-    // interactive session remains usable via CMD:ALIVE below.
-
-    let alive_input = if cfg!(windows) {
-        "CMD:ALIVE\n"
-    } else {
-        "\nprintf control-alive\\n\n"
-    };
+    let alive_input = "\u{0003}";
     let alive = match registry
         .run(
             "Terminal",
@@ -1331,7 +1221,7 @@ async fn run_ctrl_c_attempt(registry: &ToolRegistry, context: &ToolContext) -> R
         Ok(result) => result,
         Err(e) => {
             try_stop(registry, context, &handle).await;
-            return Err(format!("write after ctrl-c: {e}"));
+            return Err(format!("write session probe: {e}"));
         }
     };
     let mut combined = alive
@@ -1345,7 +1235,7 @@ async fn run_ctrl_c_attempt(registry: &ToolRegistry, context: &ToolContext) -> R
     }
     if !combined.contains("control-alive") {
         try_stop(registry, context, &handle).await;
-        return Err(format!("session unusable after Ctrl+C input: {combined:?}"));
+        return Err(format!("session unusable: {combined:?}"));
     }
 
     registry

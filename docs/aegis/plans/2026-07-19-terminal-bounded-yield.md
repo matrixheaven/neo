@@ -10,12 +10,15 @@ command lifetime when `timeout_secs` is omitted.
 
 **Architecture:** Keep `TerminalTool` as the only observation/offset owner.
 Replace its read-only quiet-period helper with one collector shared by
-`start`, `write`, and `read`. Keep `ShellRuntime` as admission/session owner,
-the guardian buffer as raw output source of truth, and `portable-pty` process
-lifecycle unchanged.
+`start`, `write`, and `read`. Keep `ShellRuntime` as admission/session owner
+and the guardian buffer as raw output source of truth. Replace the
+`portable-pty` package with the API-compatible `xpty` backend so headless
+Windows ConPTY creation does not request inherited cursor state before a
+Terminal handle can be disclosed.
 
 **Tech Stack:** Rust 2024, Tokio, Serde/Schemars, existing guardian IPC,
-`portable-pty`, `ToolResult` details, Markdown.
+`xpty` behind the existing Cargo dependency key, `ToolResult` details,
+Markdown.
 
 **Baseline/Authority Refs:**
 
@@ -52,22 +55,30 @@ exact test. Run through `rtk`; do not run workspace-wide tests.
 timing, output semantics, non-goals, and acceptance evidence.
 
 **Change Necessity:** Code change. Docs cannot return initial/post-write output
-or expose a selectable read window. Minimum boundary: `tools/terminal.rs`, its
-existing guardian integration target, and zh/en tool docs.
+or expose a selectable read window. Review also proved that the runtime
+cancellation wrapper can drop a post-registration Terminal future before its
+cleanup settles. Minimum boundary: `tools/terminal.rs`, the wrapper in
+`runtime/tool_dispatch.rs`, their narrow regressions, existing Windows process
+guard coverage, the PTY backend dependency, and zh/en tool docs.
 
-**Existence Check:** Reuse current owners. No new module, actor, buffer,
-dependency, projection, signal adapter, or request watchdog.
+**Existence Check:** Reuse current owners and replace one backend dependency in
+place. No new module, actor, buffer, projection, signal adapter, request
+watchdog, or compatibility runtime path.
 
 **Architecture Integrity Lens:** `TerminalTool` observes, the guardian stores
-raw bytes, and `ShellRuntime` owns admission/session lifetime. One collector
-replaces the old read-only helper. Verdict: edit in place.
+raw bytes, `ShellRuntime` owns admission/session lifetime, and the PTY backend
+owns ConPTY creation flags. One collector replaces the old read-only helper;
+`xpty` removes the inherited-cursor requirement at its source. Verdict: edit in
+place.
 
 **Plan-Time Complexity Check:** `terminal.rs` is a single-purpose owner of about
 580 lines. The change consolidates existing read logic and remains within
 budget. Do not extract a file without implementation evidence.
 
-**Plan Pressure Test:** Proceed. Any required guardian/protocol/Bash/runtime/TUI
-change pauses execution and returns to the plan.
+**Plan Pressure Test:** Proceed. The user's later instruction to fix all review
+findings authorizes the runtime/test scope expansion recorded below. Any further
+guardian wire-protocol/Bash/runtime/TUI change pauses execution and returns to
+the plan.
 
 ---
 
@@ -76,14 +87,24 @@ change pauses execution and returns to the plan.
 **Modify**
 
 - `crates/neo-agent-core/src/tools/terminal.rs`
+- `crates/neo-agent-core/src/runtime/tool_dispatch.rs`
+- `crates/neo-agent-core/Cargo.toml`
+- `Cargo.lock`
+- `crates/neo-agent-core/src/tools/shell_guard/terminal_guard.rs`
+- `crates/neo-agent-core/src/tools/shell_guard/guardian.rs`
+- `crates/neo-agent-core/src/tools/shell_guard/protocol.rs`
 - `crates/neo-agent/tests/tool_terminal_guardian.rs`
+- `crates/neo-agent/tests/process_guard_windows.rs`
 - `docs/en/reference/tools.md`
 - `docs/zh/reference/tools.md`
 
+This is an approved scope expansion under the user's instruction to fix all
+review findings. It is not a second implementation path or a broader runtime
+redesign.
+
 **Do not modify**
 
-- `shell_guard/client.rs`, `terminal_guard.rs`, `scheduler.rs`, or protocol
-  frames.
+- `shell_guard/client.rs`, `scheduler.rs`, or protocol frames.
 - Bash, runtime event, or TUI owners unless a focused regression proves a real
   break and the plan is revised first.
 
@@ -165,8 +186,11 @@ async fn collect_terminal_output(
 
 With zero yield, snapshot immediately. Otherwise preserve the 50 ms quiet
 period and 10 ms polling, returning on quiet output, final state, cancellation,
-or deadline. Deadline returns the current snapshot and is not an error. Hold
-the read lock through offset advancement; different handles stay independent.
+or deadline. For `start`, do not let quiet output return before
+`min(250 ms, yield_for)` so raw PTY bootstrap bytes cannot prematurely end the
+initial observation; `write` and `read` have no settle floor. Deadline returns
+the current snapshot and is not an error. Hold the read lock through offset
+advancement; different handles stay independent.
 
 Preserve these base details:
 
@@ -192,10 +216,11 @@ json!({
 
 Pass `yield_for` and `max_output_bytes` to start/write and `yield_for` to read.
 Start inserts one cloned `TerminalClientSession`, then collects and merges
-command/PID metadata. If cancellation wins after insertion, remove the session
-and call existing `client.stop()` before returning `ToolError::Cancelled`.
-Write sends raw input first, then collects and adds `written: true`. Read calls
-the same collector. All three advance one offset; never filter echo.
+command/PID metadata. If any collector error occurs before the handle-bearing
+result is returned, remove the session, call existing `client.stop()`, and then
+return the original error. Write sends raw input first, then collects and adds
+`written: true`. Read calls the same collector. All three advance one offset;
+never filter echo.
 
 - [ ] **Step 4: Add one focused unit test**
 
@@ -221,9 +246,132 @@ Expected: one passing test.
 
 ---
 
-### Task 2: Prove the Real PTY Boundaries
+### Task 2: Preserve Runtime Cancellation Settlement
 
-**Files:** Modify `crates/neo-agent/tests/tool_terminal_guardian.rs`.
+**Files:** Modify `crates/neo-agent-core/src/runtime/tool_dispatch.rs`.
+
+**Why:** The runtime wrapper currently races registry execution against the
+same cancellation token. Winning the outer branch drops the in-flight tool
+future, preventing Terminal's post-registration remove-and-stop path from
+settling.
+
+- [ ] **Step 1: Directly await cancel-aware Terminal start**
+
+In `run_tool_with_cancel`, detect only `Terminal` with `mode=start` and directly
+await its existing cancel-aware registry execution. Keep the existing
+cancellation select for all other applicable tools. Add no timeout, watchdog,
+detached cleanup task, or broader dispatch behavior change.
+
+- [ ] **Step 2: Add the narrow runtime regression**
+
+Add `terminal_start_cancellation_allows_internal_cleanup_to_settle` to the
+existing `tool_dispatch.rs` unit-test module. Use one local Terminal test tool
+that observes the supplied cancellation token, records cleanup settlement
+before it returns, and assert dispatch does not return first.
+
+- [ ] **Step 3: Run exact runtime verification**
+
+```bash
+cargo test --package neo-agent-core --lib -- runtime::tool_dispatch::tests::terminal_start_cancellation_allows_internal_cleanup_to_settle --exact --nocapture --include-ignored
+```
+
+Expected: one passing test.
+
+---
+
+### Task 3: Replace the Headless Windows PTY Backend
+
+**Files:** Modify `crates/neo-agent-core/Cargo.toml`, `Cargo.lock`, and the
+existing import in `crates/neo-agent-core/src/tools/shell_guard/terminal_guard.rs`.
+
+**Why:** `portable-pty 0.9.0` unconditionally enables
+`PSEUDOCONSOLE_INHERIT_CURSOR`, so Windows ConPTY emits `CSI 6n` and waits for a
+terminal-emulator response before Neo can return a handle. Tool/guardian
+bootstrap replies are timing-dependent duplicate owners.
+
+**Change Necessity:** No configuration or test-only change can alter the
+ConPTY creation flags. Replace the backend package at the existing dependency
+key; add no local fork, feature adapter, or response parser.
+
+**Impact/Compatibility:** `xpty 0.3.6` preserves the used `portable_pty` Rust
+API while intentionally omitting inherited-cursor mode from its default
+ConPTY flags. Unix PTY behavior, raw output, guardian IPC, and public tool
+schema remain unchanged. Its `openpty` method requires the existing
+`PtySystem` trait to be imported explicitly; this is compile-time wiring only.
+
+- [ ] **Step 1: Replace the package at the existing dependency key**
+
+```toml
+portable-pty = { package = "xpty", version = "0.3.6" }
+```
+
+Add `PtySystem` to the existing `portable_pty` import in `terminal_guard.rs`.
+
+- [ ] **Step 2: Regenerate the lockfile through Cargo**
+
+Run the focused unit test from Task 1; Cargo must remove `portable-pty` from the
+`neo-agent-core` dependency path and lock `xpty 0.3.6`. The workspace lockfile
+may retain `portable-pty` through the unrelated `skim` dependency.
+
+- [ ] **Step 3: Verify Terminal dependency retirement**
+
+```bash
+cargo tree --package neo-agent-core --depth 1
+cargo tree --invert portable-pty@0.9.0
+```
+
+Expected: `neo-agent-core` directly uses `xpty`; any remaining
+`portable-pty` package is outside the Terminal/core dependency path. The
+current workspace retains it only through `skim`, which is out of scope.
+
+---
+
+### Task 4: Preserve In-Flight Guardian Protocol Reads
+
+**Files:** Modify `crates/neo-agent-core/src/tools/shell_guard/protocol.rs`,
+`guardian.rs`, and `terminal_guard.rs`.
+
+**Why:** Both supervision loops construct `read_request(control)` directly in
+`tokio::select!`. A process/resource timer can cancel that future after it has
+consumed the frame length but before the body is complete; the next loop then
+interprets the request kind as a new length and corrupts the control stream.
+
+**Change Necessity:** Timing changes, retries, or a larger frame cap cannot
+restore bytes already consumed by a cancelled future. The protocol owner must
+retain the in-flight decoder future across cancelled `next()` observations.
+
+**Impact/Compatibility:** Request encoding and wire bytes are unchanged. One
+`futures::stream::unfold` helper owns the persistent read future; Bash and
+Terminal supervision reuse it. No task, channel, timeout, protocol version, or
+fallback is added.
+
+- [ ] **Step 1: Add the cancellation-safe request stream**
+
+Add `request_stream` beside `read_request`. It repeatedly calls the existing
+decoder while retaining its internal future inside the stream.
+
+- [ ] **Step 2: Route both supervision loops through the stream**
+
+Pin one stream before each loop and select on `requests.next()`. Delete the two
+direct `read_request(control)` branches.
+
+- [ ] **Step 3: Add and run the focused regression**
+
+The test writes only a frame's 4-byte length, polls then cancels `next()`, writes
+the body, and asserts the same stream decodes the complete request:
+
+```bash
+cargo test --package neo-agent-core --lib -- tools::shell_guard::protocol::tests::request_stream_preserves_partial_frame_across_cancelled_poll --exact --nocapture --include-ignored
+```
+
+Expected: one passing test.
+
+---
+
+### Task 5: Prove the Real PTY Boundaries
+
+**Files:** Modify `crates/neo-agent/tests/tool_terminal_guardian.rs` and
+`crates/neo-agent/tests/process_guard_windows.rs`.
 
 **Why:** Only the real guardian/PTY proves offset consumption, survival, typed
 cwd, and control input.
@@ -251,12 +399,23 @@ test -f marker && printf initial-output; read line; printf 'reply:%s' "$line"; s
    valid echoed input.
 6. Another immediate read must be empty; then stop.
 
+On Windows, keep the normal nonzero start yield. The `xpty` backend must not
+request inherited cursor state, so tests must neither observe nor answer a
+startup `CSI 6n`. Require the child to check the relative `cwd` marker before
+reporting `initial-output`; do not synthesize that output through a command
+protocol. Resize coverage must query the child-observed console geometry before
+and after `resize`; never hardcode requested dimensions. Remove whole-test
+retries.
+
 - [ ] **Step 2: Add control-byte coverage**
 
-Add `terminal_ctrl_c_interrupts_command_and_keeps_session_usable`: start
-`bash --noprofile --norc`, write `sleep 30\n`, write `\u0003`, then write
-`printf control-alive\\n\n`; assert `control-alive` and stop. Isolate only a
-proven ConPTY-specific assertion behind `cfg`; add no signal adapter.
+On Unix, add `terminal_ctrl_c_interrupts_command_and_keeps_session_usable`:
+start `bash --noprofile --norc`, write `sleep 30\n`, write `\u0003`, then write
+`printf control-alive\\n\n`; assert `control-alive` and stop. On Windows, use a
+separately named `terminal_windows_session_remains_usable_without_signal_guarantee`
+test that
+proves only continued interaction. It must not claim or fake Ctrl+C signal
+semantics. Add no signal adapter.
 
 - [ ] **Step 3: Add start-cancellation cleanup coverage**
 
@@ -266,35 +425,55 @@ with 30000 ms yield, observe its running marker with existing bounded polling,
 cancel, assert `ToolError::Cancelled`, and assert the marker disappears within
 an outer Tokio timeout. Do not add a public terminal-count API.
 
+The unified `Err(error)` branch in `start_terminal` covers cancellation and
+other collector errors through the same remove-and-stop path. The cancellation
+cleanup regression exercises that shared path; do not add fault-injection
+infrastructure or a duplicate collector-error test.
+
 - [ ] **Step 4: Run exact integration verification**
 
 ```bash
 cargo test --package neo-agent --test tool_terminal_guardian -- terminal_start_write_and_read_share_incremental_bounded_output --exact --nocapture --include-ignored
-cargo test --package neo-agent --test tool_terminal_guardian -- terminal_ctrl_c_interrupts_command_and_keeps_session_usable --exact --nocapture --include-ignored
 cargo test --package neo-agent --test tool_terminal_guardian -- terminal_start_cancellation_after_registration_cleans_up_process --exact --nocapture --include-ignored
 cargo test --package neo-agent --test tool_terminal_guardian -- terminal_tool_start_write_read_resize_and_stop_uses_real_pty --exact --nocapture --include-ignored
 cargo test --package neo-agent --test tool_terminal_guardian -- terminal_read_details_do_not_leak_output_past_max_output_bytes --exact --nocapture --include-ignored
 ```
 
-Expected: one passing test per command.
+On Unix, also run:
+
+```bash
+cargo test --package neo-agent --test tool_terminal_guardian -- terminal_ctrl_c_interrupts_command_and_keeps_session_usable --exact --nocapture --include-ignored
+```
+
+On Windows, run the accurately named usability test plus the three affected
+process-guard tests:
+
+```bash
+cargo test --package neo-agent --test tool_terminal_guardian -- terminal_windows_session_remains_usable_without_signal_guarantee --exact --nocapture --include-ignored
+cargo test --package neo-agent --test process_guard_windows -- windows_terminal_guardian_loss_closes_job_with_descendant --exact --nocapture --include-ignored
+cargo test --package neo-agent --test process_guard_windows -- windows_terminal_natural_exit_closes_job_with_descendant --exact --nocapture --include-ignored
+cargo test --package neo-agent --test process_guard_windows -- windows_terminal_stop_closes_job_with_descendant --exact --nocapture --include-ignored
+```
+
+Expected: one passing test per applicable command.
 
 - [ ] **Step 5: Check touched Rust formatting**
 
 ```bash
-rustfmt --check --edition 2024 crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent/tests/tool_terminal_guardian.rs
+rustfmt --check --edition 2024 crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent-core/src/tools/shell_guard/protocol.rs crates/neo-agent-core/src/tools/shell_guard/guardian.rs crates/neo-agent-core/src/tools/shell_guard/terminal_guard.rs crates/neo-agent-core/src/runtime/tool_dispatch.rs crates/neo-agent/tests/tool_terminal_guardian.rs crates/neo-agent/tests/process_guard_windows.rs
 ```
 
 - [ ] **Step 6: Commit code and tests together**
 
 ```bash
-git add crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent/tests/tool_terminal_guardian.rs
+git add Cargo.lock crates/neo-agent-core/Cargo.toml crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent-core/src/tools/shell_guard/protocol.rs crates/neo-agent-core/src/tools/shell_guard/guardian.rs crates/neo-agent-core/src/tools/shell_guard/terminal_guard.rs crates/neo-agent-core/src/runtime/tool_dispatch.rs crates/neo-agent/tests/tool_terminal_guardian.rs crates/neo-agent/tests/process_guard_windows.rs
 git diff --cached --check
 git commit -m "feat(terminal): add bounded PTY yield"
 ```
 
 ---
 
-### Task 3: Synchronize the Public Contract
+### Task 6: Synchronize the Public Contract
 
 **Files:** Modify `docs/en/reference/tools.md` and
 `docs/zh/reference/tools.md`.
@@ -331,10 +510,11 @@ git commit -m "docs(terminal): document bounded PTY yield"
 
 ## Final Verification and Review
 
-Repeat the six exact Cargo tests from Tasks 1-2, then run:
+Repeat the exact Cargo tests from Tasks 1-5, including the runtime settlement
+regression and platform-appropriate Windows session-usability test, then run:
 
 ```bash
-rustfmt --check --edition 2024 crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent/tests/tool_terminal_guardian.rs
+rustfmt --check --edition 2024 crates/neo-agent-core/src/tools/terminal.rs crates/neo-agent-core/src/tools/shell_guard/protocol.rs crates/neo-agent-core/src/tools/shell_guard/guardian.rs crates/neo-agent-core/src/tools/shell_guard/terminal_guard.rs crates/neo-agent-core/src/runtime/tool_dispatch.rs crates/neo-agent/tests/tool_terminal_guardian.rs crates/neo-agent/tests/process_guard_windows.rs
 git diff --check
 ```
 
@@ -342,10 +522,15 @@ Architecture review checklist:
 
 - one Terminal observation owner;
 - no yield influence on admission or execution deadline;
-- no guardian/protocol/Bash/runtime/TUI changes;
+- Terminal start dispatch directly awaits its cancel-aware internal cleanup;
+- `xpty` owns Windows ConPTY creation without inherited-cursor bootstrap, with
+  no TerminalTool/guardian response path, guardian wire-format change, or
+  Bash/TUI product-behavior change;
 - no echo/ANSI filtering or duplicate output field;
 - old read-only helper deleted;
-- cancellation cannot orphan an undisclosed start;
+- no collector error can orphan an undisclosed start;
+- Windows start output, relative cwd, and resize tests observe real behavior
+  without hardcoded success values or whole-test retries;
 - English/Chinese docs agree.
 
 Do not claim Windows source verification from a macOS-only run. Report any
@@ -354,15 +539,23 @@ unavailable Windows CI/toolchain as residual verification risk.
 ## Execution Readiness View
 
 - Intent Lock: approved raw PTY + bounded yield only.
-- Scope Fence: Terminal owner, focused guardian tests, zh/en docs.
+- Scope Fence: Terminal owner, Terminal-start dispatch branch, PTY package
+  replacement, focused tool-dispatch/PTY/Windows process-guard tests, and zh/en
+  docs.
 - Baseline Lock: approved design plus admission and supervised-shell specs.
 - Approved Behavior: bounded start/write/read observation; queue and default
   command lifetime remain unbounded.
-- Owner Constraints: TerminalTool observes, guardian stores, ShellRuntime owns.
+- Owner Constraints: TerminalTool observes, guardian stores, ShellRuntime owns,
+  and the backend owns ConPTY creation flags.
 - Compatibility: existing calls valid; read default and resize/stop unchanged.
-- Retirement: delete old read-only helper; add no alias.
-- Task Batches: source contract, real-PTY tests, docs.
-- Test Obligations: six exact tests, touched rustfmt, diff hygiene.
+- Retirement: delete the old read-only helper and retire `portable-pty` from
+  the Terminal/core dependency path. The unrelated `skim` transitive dependency
+  remains out of scope; add no runtime compatibility path.
+- Task Batches: source contract, runtime settlement, PTY backend replacement,
+  cancellation-safe guardian reads, real-PTY tests, docs.
+- Test Obligations: focused exact tests for the source contract, runtime
+  settlement, real PTY, Windows ConPTY behavior, touched rustfmt, and diff
+  hygiene.
 - Review Gates: behavior, architecture invariants, docs parity, staged audit.
 - Drift Rule: any wider owner change pauses and returns to the plan/spec.
 - Evidence: passing exact commands and architecture review.
@@ -371,8 +564,9 @@ unavailable Windows CI/toolchain as residual verification risk.
 ## Risks and Retirement
 
 - PTY prompt timing varies; deterministic tests use explicit output.
-- Cancellation after registration is the only new ownership-sensitive await;
-  cleanup stays in the existing runtime/client path.
+- Cancellation after registration and its runtime wrapper are one ownership
+  chain; the wrapper must let cleanup settle before publishing cancellation.
+- Any collector error before handle disclosure removes and stops the session.
 - Offset errors can duplicate or skip bytes; immediate-read regressions prove
   the boundary.
 - The worktree is dirty elsewhere. Never stage unrelated runtime/TUI files.

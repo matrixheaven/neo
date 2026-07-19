@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use futures::StreamExt as _;
 use serde::Serialize;
 use sysinfo::{Pid as SystemPid, ProcessesToUpdate, System};
 use tokio::{
@@ -26,7 +27,7 @@ use super::{
     output::{StreamKind, TaggedHeadTailBuffer, TaggedOutput},
     protocol::{
         GuardRequest, GuardResponse, GuardTaskKind, ProtocolError, StartRequest, read_request,
-        write_response,
+        request_stream, write_response,
     },
     status::{FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind},
 };
@@ -287,6 +288,8 @@ where
     let mut deadline = super::command_deadline(start.limits.timeout_ms);
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
+    let requests = request_stream(&mut *control);
+    tokio::pin!(requests);
     let mut response_open = true;
     let result = loop {
         tokio::select! {
@@ -299,8 +302,8 @@ where
                 };
                 break (GuardStatusKind::ParentExited, None, None, Some(error));
             }
-            request = read_request(control) => {
-                match request {
+            request = requests.next() => {
+                match request.expect("guardian request stream does not terminate") {
                     Ok(request) => {
                         if let Some(tuple) = handle_request(
                             &request,

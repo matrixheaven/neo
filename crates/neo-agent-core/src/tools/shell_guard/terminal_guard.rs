@@ -4,7 +4,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use futures::StreamExt as _;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, PtySystem, native_pty_system};
 use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -20,7 +21,7 @@ use super::{
         ProcessSampler, ResourceTick, check_resource_tick, process_start_id, try_send_response,
     },
     process_tree::TerminalProcessTree,
-    protocol::{GuardRequest, GuardResponse, StartRequest, read_request, write_response},
+    protocol::{GuardRequest, GuardResponse, StartRequest, request_stream, write_response},
     status::{FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind},
 };
 use crate::{
@@ -153,6 +154,8 @@ where
     let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
     let mut resource_poll = tokio::time::interval(RESOURCE_POLL_INTERVAL);
     let mut writer_poll = tokio::time::interval(Duration::from_millis(10));
+    let requests = request_stream(&mut *control);
+    tokio::pin!(requests);
     let mut response_open = true;
     let result = 'supervision: loop {
         tokio::select! {
@@ -165,8 +168,8 @@ where
                 };
                 break (GuardStatusKind::ParentExited, None, None, Some(error));
             }
-            request = read_request(control) => {
-                match request {
+            request = requests.next() => {
+                match request.expect("guardian request stream does not terminate") {
                     Ok(request) => {
                         if let Some(tuple) = handle_terminal_request(
                             &request,

@@ -1243,6 +1243,15 @@ async fn run_tool_with_cancel(
             .await
             .unwrap_or_else(|err| ToolResult::error(err.to_string()));
     }
+    // Start may need async cleanup after registering a handle the model has not received yet.
+    if tool_call.name.as_ref() == "Terminal"
+        && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start")
+    {
+        return registry
+            .run(&tool_call.name, tool_context, arguments.clone())
+            .await
+            .unwrap_or_else(|err| ToolResult::error(err.to_string()));
+    }
     tokio::select! {
         biased;
         result = registry.run(&tool_call.name, tool_context, arguments.clone()) => {
@@ -1373,21 +1382,99 @@ fn default_tool_context(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use neo_ai::ModelClient;
+    use serde_json::json;
+    use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
-    use super::{EventEmitter, execute_tool_calls};
+    use super::{EventEmitter, execute_tool_calls, run_tool_with_cancel};
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
     use crate::tools::{
-        ShellAdmissionClass, ShellAdmissionRequest, ShellLimits, ShellRuntime, ToolRegistry,
+        ShellAdmissionClass, ShellAdmissionRequest, ShellLimits, ShellRuntime, Tool, ToolContext,
+        ToolError, ToolFuture, ToolRegistry,
     };
     use crate::{
         AgentContext, AgentEvent, AgentToolCall, ApprovalAction, ApprovalResponse, PermissionMode,
         ProcessSupervisor,
     };
+
+    struct CancellationSettlingTerminal {
+        entered: Arc<Notify>,
+        settled: Arc<AtomicBool>,
+    }
+
+    impl Tool for CancellationSettlingTerminal {
+        fn name(&self) -> &'static str {
+            "Terminal"
+        }
+
+        fn description(&self) -> &'static str {
+            "test terminal"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            ctx: &'a ToolContext,
+            _input: serde_json::Value,
+        ) -> ToolFuture<'a> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                ctx.cancel_token.cancelled().await;
+                tokio::task::yield_now().await;
+                self.settled.store(true, Ordering::SeqCst);
+                Err(ToolError::Cancelled)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_start_cancellation_allows_internal_cleanup_to_settle() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cancel = CancellationToken::new();
+        let context = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_cancel_token(cancel.clone());
+        let entered = Arc::new(Notify::new());
+        let settled = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(CancellationSettlingTerminal {
+            entered: Arc::clone(&entered),
+            settled: Arc::clone(&settled),
+        });
+        let call = AgentToolCall {
+            id: "terminal-start".into(),
+            name: "Terminal".into(),
+            raw_arguments: r#"{"mode":"start"}"#.into(),
+        };
+        let arguments = json!({ "mode": "start" });
+
+        let run = run_tool_with_cancel(None, &registry, &call, &arguments, &context, &cancel);
+        tokio::pin!(run);
+        tokio::select! {
+            () = entered.notified() => {}
+            result = &mut run => panic!("Terminal returned before cancellation: {result:?}"),
+        }
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+            .await
+            .expect("Terminal cleanup should settle after cancellation");
+
+        assert!(result.is_error);
+        assert!(
+            settled.load(Ordering::SeqCst),
+            "runtime returned before Terminal cleanup settled"
+        );
+    }
 
     #[tokio::test]
     async fn approved_bash_emits_queued_then_started_only_after_grant() {

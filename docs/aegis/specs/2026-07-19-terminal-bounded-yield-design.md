@@ -58,8 +58,9 @@ The repair must not weaken two existing shell contracts:
 - Keep raw PTY bytes as the only output source of truth.
 - Make existing control-byte input discoverable in the tool schema and public
   documentation.
-- Preserve Windows, Linux, and macOS behavior through the existing
-  `portable-pty` and guardian boundaries.
+- Preserve Windows, Linux, and macOS behavior through the PTY backend and
+  guardian boundaries, replacing `portable-pty` with `xpty` so headless Windows
+  ConPTY does not require inherited cursor state before handle disclosure.
 
 ## Non-Goals
 
@@ -121,6 +122,13 @@ Collection returns at the first applicable condition:
 2. the command reaches a terminal state;
 3. the caller is cancelled, subject to the start ownership rule below; or
 4. the yield deadline expires.
+
+For `start`, raw PTY bootstrap bytes may arrive before the child emits its
+first banner or prompt. The quiet condition is therefore ineligible during the
+first `min(250 ms, yield-time_ms)` of observation. This startup settle floor
+does not filter or classify any bytes; the caller-selected deadline still wins,
+and `yield-time_ms = 0` remains an immediate snapshot. `write` and `read` retain
+the existing 50 ms quiet behavior without a settle floor.
 
 Admission waiting remains unbounded and keeps the original tool future pending.
 Command lifetime remains unbounded when `timeout_secs` is omitted. A yield
@@ -186,7 +194,7 @@ TerminalTool
   -> ShellRuntime admission and terminal session map
   -> GuardianClient control protocol
   -> terminal guardian
-  -> portable-pty child and bounded raw output buffer
+  -> xpty child and bounded raw output buffer
 ```
 
 The implementation should replace `wait_for_output_quiet_period` with one
@@ -194,8 +202,9 @@ collector used by `start`, `write`, and `read`. The collector owns observation
 timing and offset advancement; it does not own admission, process lifetime,
 termination, output storage, or presentation filtering.
 
-No new module, actor, dependency, fallback, compatibility path, or alternate
-buffer is required.
+No new module, actor, fallback, compatibility path, or alternate buffer is
+required. The existing PTY dependency is replaced one-for-one with the
+API-compatible `xpty` package.
 
 ## Error and Cancellation Semantics
 
@@ -204,12 +213,21 @@ buffer is required.
   cancellation path.
 - Cancellation during `read` or `write` collection follows the existing
   cancelled tool outcome because the caller already owns the handle.
-- After `start` inserts a session into `ShellRuntime`, cancellation must not
-  leave a running process whose handle was never returned. The start path must
-  either return the current handle-bearing result or stop and remove the
-  session through its existing owner before returning cancellation.
+- After `start` inserts a session into `ShellRuntime`, no collector failure may
+  leave a running process whose handle was never returned. Before the handle is
+  disclosed, every collector error path, including cancellation, must remove
+  the session and stop it through the existing owner before returning the
+  original error.
+- Runtime dispatch must not race cancellation against `Terminal` `mode=start`
+  and drop its post-registration future. That one cancel-aware execution is
+  awaited directly so its internal cleanup settles before the runtime publishes
+  the result. Other tools retain their existing cancellation wrapper; this adds
+  no execution timeout or watchdog.
 - Guardian exit and protocol EOF continue to settle pending responses through
   the existing reader/final-result path.
+- Guardian request decoding remains in flight across supervision timer ticks.
+  Bash and Terminal supervision must select over a persistent request stream;
+  cancelling one `next()` observation must not discard a partially read frame.
 - Yield expiry is not an error. It returns the available output and current
   `status`, normally `running`.
 - This design adds no guardian request watchdog. A live guardian control-plane
@@ -253,6 +271,25 @@ than duplicate the existing lifecycle and resize tests:
    `start`, `write`, and `read`.
 9. Cancellation after start registration cannot leave an undisclosed live
    terminal session.
+10. Runtime dispatch directly awaits cancel-aware `Terminal` start execution so
+    post-registration cleanup settles instead of being dropped.
+11. A non-cancellation collector error before handle disclosure also removes
+    and stops the registered session.
+12. Cancelling a guardian request observation after reading only the frame
+    length does not corrupt the next request; the same decoder completes the
+    original frame for both Bash and Terminal supervision.
+
+Windows verification must exercise the real ConPTY boundary. `xpty` must create
+the headless pseudo console without `PSEUDOCONSOLE_INHERIT_CURSOR`, so startup
+must neither emit nor require a host response to `CSI 6n`. Tests use the normal
+nonzero start yield and verify cwd-gated child output. Resize evidence must come
+from state actually observed by the child; a test protocol must not print
+expected dimensions or success markers unconditionally. Whole-test retry loops
+are not acceptance evidence. Because raw `\u0003`
+has no portable ConPTY signal guarantee, Windows coverage must be accurately
+named as session-usability coverage rather than a Ctrl+C interruption test.
+The incremental test must require the cwd-gated child output in the `start`
+result itself; a later `read` must not be allowed to repair that assertion.
 
 Public English and Chinese tool documentation must describe the same yield,
 queue, lifetime, raw output, and control-byte semantics.
@@ -284,12 +321,24 @@ Impact statement:
 - Canonical owner: `TerminalTool` for yield and offset behavior; guardian raw
   buffer for output storage; `ShellRuntime` for admission and lifetime.
 - Architecture review required: yes, because the public tool contract changes.
-- ADR signal: no new ADR. Ownership and dependency direction remain unchanged;
-  this design spec is the durable contract refinement.
+- ADR signal: no separate ADR. This design spec records the one-for-one PTY
+  backend replacement; ownership and runtime dependency direction remain
+  unchanged.
+
+Review remediation scope:
+
+- The user's subsequent instruction to fix all review findings authorizes the
+  narrow expansion to the `Terminal` start dispatch branch, its focused
+  `tool_dispatch.rs` unit regression, the shared guardian request-decoder
+  lifetime, and existing Windows process-guard/Terminal integration tests.
+- This expansion does not change raw output, admission, command lifetime,
+  guardian wire protocol, Bash, or TUI contracts above.
 
 Minimality decision:
 
 - Reuse the existing Terminal session state, read lock, guardian snapshots,
   quiet period, and output cap.
 - Reject new projections, signal adapters, watchdogs, or persistence surfaces.
+- Replace `portable-pty` rather than retain an application-layer cursor-response
+  workaround or local fork.
 - Edit in place; no new owner file is justified.
