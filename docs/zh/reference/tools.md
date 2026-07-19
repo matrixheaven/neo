@@ -21,7 +21,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | 工具 | 用途 |
 | --- | --- |
 | `Bash` | 在工作区执行 `bash`（Windows 上为 Git Bash）命令，支持管道、后台任务、可选 `timeout_secs` 与取消。省略 `timeout_secs` 表示不设超时；显式值必须在 `300..=3600`。超时后应增大或翻倍再重试；若已为 `3600` 或耗时无法确定，则省略。 |
-| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。`start` / `write` / `read` 共用可选 `yield_time_ms`（默认 250 / 250 / 3000 ms，范围 `0..=30000`），在 admission 成功且操作就绪后等待增量 **原始 PTY** 输出；到期仅返回当前输出且 `status: running`，绝不停止命令。admission 队列等待仍无限，原 Tool Use 保持 pending。`timeout_secs` 仅对 `mode=start` 有效；省略表示不设命令生命周期截止，否则必须在 `300..=3600`。超时后应增大或翻倍再重试；若已为 `3600` 或耗时无法确定，则省略。不过滤 echo、ANSI、CR、光标控制。Write 可发送原始控制字节如 Ctrl+C（`\u0003`）、Ctrl+D（`\u0004`）、Ctrl+Z（`\u001a`），但不承诺跨平台 signal 语义。 |
+| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。`start` / `write` / `read` 共用可选 `yield_time_ms`（默认 250 / 250 / 3000 ms，范围 `0..=30000`），在 admission 成功且操作就绪后等待增量 **原始 PTY** 输出；到期仅返回当前输出且 `status: running`，绝不停止命令。admission 队列等待仍无限，原 Tool Use 保持 pending。`timeout_secs` 仅对 `mode=start` 有效；省略表示不设命令生命周期截止，否则必须在 `300..=3600`。超时后应增大或翻倍再重试；若已为 `3600` 或耗时无法确定，则省略。不过滤 echo、ANSI、CR、光标控制。发送控制输入时，`input` 必须解码为单个控制字符：Ctrl+C 是 U+0003，Ctrl+D 是 U+0004，Ctrl+Z 是 U+001A。可打印的“反斜杠-u-0-0-0-3”六字符文本会被原样发送，且控制输入不承诺跨平台 signal 语义。 |
 
 ## 网络
 

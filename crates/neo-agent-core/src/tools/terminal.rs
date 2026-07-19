@@ -31,7 +31,7 @@ struct TerminalInput {
     #[schemars(description = "Terminal handle. Required except for start.")]
     handle: Option<String>,
     #[schemars(
-        description = "Input text. Required for write. May include raw control bytes such as Ctrl+C (\\u0003), Ctrl+D (\\u0004), and Ctrl+Z (\\u001a). These are raw PTY inputs, not portable signal guarantees."
+        description = "Input text. Required for write. Control keys must decode to one control character: Ctrl+C is U+0003, Ctrl+D is U+0004, and Ctrl+Z is U+001A. Do not send printable escape text such as backslash-u-0-0-0-3. These are raw PTY inputs, not portable signal guarantees."
     )]
     input: Option<String>,
     #[schemars(
@@ -79,7 +79,7 @@ fn terminal_yield(mode: TerminalMode, requested: Option<u64>) -> Duration {
 
 const DESCRIPTION: &str = r"Operate a real PTY session with start/write/read/resize/stop modes.
 
-Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle plus any incremental raw PTY output collected during a short yield window. Write sends input (including raw control bytes such as \\u0003/\\u0004/\\u001a — not portable signal guarantees) and returns post-write output. Read returns output since the prior observation. Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is raw PTY bytes (echo, ANSI, CR, backspace, cursor control are not filtered) and is bounded by the runtime limit.
+Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle plus any incremental raw PTY output collected during a short yield window. Write sends input, including single control characters such as Ctrl+C (U+0003), Ctrl+D (U+0004), and Ctrl+Z (U+001A); printable escape text is sent literally, and control input has no portable signal guarantee. Read returns output since the prior observation. Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is raw PTY bytes (echo, ANSI, CR, backspace, cursor control are not filtered) and is bounded by the runtime limit.
 
 `yield_time_ms` is valid only for start/write/read (defaults 250/250/3000 ms, range 0..=30000). The yield clock starts only after admission and operation readiness; expiry returns current output with status running and never stops the command. Omit `timeout_secs` for unlimited command lifetime.
 
@@ -632,11 +632,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn terminal_input_normalizes_line_endings() {
+    fn terminal_input_preserves_control_bytes_and_normalizes_line_endings() {
         assert_eq!(
-            normalize_terminal_input_newlines("a\nb\r\nc\r"),
-            "a\rb\rc\r"
+            normalize_terminal_input_newlines("\0\u{1}\u{3}\u{4}\t\n\r\n\u{1a}\u{1b}\u{7f}")
+                .as_bytes(),
+            b"\0\x01\x03\x04\t\r\r\x1a\x1b\x7f"
         );
+        assert_eq!(normalize_terminal_input_newlines(r"\u0003"), r"\u0003");
     }
 
     #[tokio::test]
