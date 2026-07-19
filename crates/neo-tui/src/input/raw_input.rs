@@ -20,6 +20,7 @@ use regex::Regex;
 const ESC: &str = "\x1b";
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
+const MAX_BRACKETED_PASTE_BYTES: usize = 1024 * 1024;
 
 const MOD_SHIFT: u32 = 1;
 const MOD_ALT: u32 = 2;
@@ -343,6 +344,7 @@ pub struct RawInputParser {
     pending_utf8: Vec<u8>,
     paste_mode: bool,
     paste_buffer: String,
+    paste_pending: String,
     pending_kitty_printable_codepoint: Option<i32>,
 }
 
@@ -360,6 +362,7 @@ impl RawInputParser {
             pending_utf8: Vec::new(),
             paste_mode: false,
             paste_buffer: String::new(),
+            paste_pending: String::new(),
             pending_kitty_printable_codepoint: None,
         }
     }
@@ -376,24 +379,8 @@ impl RawInputParser {
         let mut events = Vec::new();
 
         if self.paste_mode {
-            self.paste_buffer
-                .push_str(&std::mem::take(&mut self.buffer));
-
-            if let Some(end_index) = self.paste_buffer.find(BRACKETED_PASTE_END) {
-                let pasted_content = self.paste_buffer[..end_index].to_owned();
-                let remaining =
-                    self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_owned();
-
-                self.paste_mode = false;
-                self.paste_buffer.clear();
-                self.pending_kitty_printable_codepoint = None;
-
-                events.push(RawEvent::Paste(pasted_content));
-
-                if !remaining.is_empty() {
-                    events.extend(self.process_internal(&remaining));
-                }
-            }
+            let data = std::mem::take(&mut self.buffer);
+            events.extend(self.process_paste_data(&data));
             return events;
         }
 
@@ -465,23 +452,10 @@ impl RawInputParser {
             self.pending_kitty_printable_codepoint = None;
             self.buffer = self.buffer[start_index + BRACKETED_PASTE_START.len()..].to_owned();
             self.paste_mode = true;
-            self.paste_buffer = std::mem::take(&mut self.buffer);
-
-            if let Some(end_index) = self.paste_buffer.find(BRACKETED_PASTE_END) {
-                let pasted_content = self.paste_buffer[..end_index].to_owned();
-                let remaining =
-                    self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_owned();
-
-                self.paste_mode = false;
-                self.paste_buffer.clear();
-                self.pending_kitty_printable_codepoint = None;
-
-                events.push(RawEvent::Paste(pasted_content));
-
-                if !remaining.is_empty() {
-                    events.extend(self.process_internal(&remaining));
-                }
-            }
+            self.paste_buffer.clear();
+            self.paste_pending.clear();
+            let data = std::mem::take(&mut self.buffer);
+            events.extend(self.process_paste_data(&data));
             return events;
         }
 
@@ -493,6 +467,39 @@ impl RawInputParser {
         }
 
         events
+    }
+
+    fn process_paste_data(&mut self, data: &str) -> Vec<RawEvent> {
+        let combined = std::mem::take(&mut self.paste_pending) + data;
+        if let Some(end_index) = combined.find(BRACKETED_PASTE_END) {
+            self.append_paste_content(&combined[..end_index]);
+            let remaining = &combined[end_index + BRACKETED_PASTE_END.len()..];
+            self.paste_mode = false;
+            self.pending_kitty_printable_codepoint = None;
+            let mut events = vec![RawEvent::Paste(std::mem::take(&mut self.paste_buffer))];
+            if !remaining.is_empty() {
+                events.extend(self.process_internal(remaining));
+            }
+            return events;
+        }
+
+        let pending_len = (1..BRACKETED_PASTE_END.len())
+            .rev()
+            .find(|&len| combined.ends_with(&BRACKETED_PASTE_END[..len]))
+            .unwrap_or(0);
+        let content_end = combined.len() - pending_len;
+        self.append_paste_content(&combined[..content_end]);
+        self.paste_pending.push_str(&combined[content_end..]);
+        Vec::new()
+    }
+
+    fn append_paste_content(&mut self, content: &str) {
+        let available = MAX_BRACKETED_PASTE_BYTES.saturating_sub(self.paste_buffer.len());
+        let mut end = content.len().min(available);
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.paste_buffer.push_str(&content[..end]);
     }
 
     fn emit_data_sequence(&mut self, sequence: &str, events: &mut Vec<RawEvent>) {
@@ -522,9 +529,22 @@ impl RawInputParser {
 
     /// Force-flush any buffered incomplete sequences.
     pub fn flush(&mut self) -> Vec<RawEvent> {
+        if self.paste_mode {
+            let pending = std::mem::take(&mut self.paste_pending);
+            self.append_paste_content(&pending);
+        }
         if !self.pending_utf8.is_empty() {
             let bytes = std::mem::take(&mut self.pending_utf8);
-            self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+            if self.paste_mode {
+                self.append_paste_content(&String::from_utf8_lossy(&bytes));
+            } else {
+                self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        if self.paste_mode {
+            self.paste_mode = false;
+            self.pending_kitty_printable_codepoint = None;
+            return vec![RawEvent::Paste(std::mem::take(&mut self.paste_buffer))];
         }
         if self.buffer.is_empty() {
             return Vec::new();
@@ -1773,6 +1793,47 @@ mod tests {
         assert!(events.is_empty());
         let events = parser.feed_bytes(b"lo\x1b[201~");
         assert_eq!(events, vec![RawEvent::Paste("hello".to_owned())]);
+    }
+
+    #[test]
+    fn unterminated_bracketed_paste_is_bounded_and_recovers() {
+        let mut parser = RawInputParser::new();
+        assert!(parser.feed_bytes(b"\x1b[200~unfinished").is_empty());
+        assert_eq!(
+            parser.flush(),
+            vec![RawEvent::Paste("unfinished".to_owned())]
+        );
+        assert_eq!(parser.feed_bytes(b"x"), vec![RawEvent::Key("x".to_owned())]);
+
+        let mut parser = RawInputParser::new();
+        assert!(parser.feed_bytes(b"\x1b[200~abc\x1b").is_empty());
+        assert!(parser.feed_bytes(&[0xe4]).is_empty());
+        assert_eq!(
+            parser.flush(),
+            vec![RawEvent::Paste("abc\x1b\u{fffd}".to_owned())]
+        );
+
+        let oversized = vec![b'a'; MAX_BRACKETED_PASTE_BYTES];
+        let mut input = BRACKETED_PASTE_START.as_bytes().to_vec();
+        input.extend_from_slice(&oversized);
+        input.extend_from_slice(b"discarded-tail");
+        assert!(parser.feed_bytes(&input).is_empty());
+        let events = parser.feed_bytes(b"\x1b[201~y");
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], RawEvent::Paste(text) if text.len() == MAX_BRACKETED_PASTE_BYTES)
+        );
+        assert_eq!(events[1], RawEvent::Key("y".to_owned()));
+
+        let mut parser = RawInputParser::new();
+        let unicode = "你".repeat(MAX_BRACKETED_PASTE_BYTES / 3 + 1);
+        let mut input = BRACKETED_PASTE_START.as_bytes().to_vec();
+        input.extend_from_slice(unicode.as_bytes());
+        assert!(parser.feed_bytes(&input).is_empty());
+        let events = parser.flush();
+        let expected_len = MAX_BRACKETED_PASTE_BYTES - MAX_BRACKETED_PASTE_BYTES % '你'.len_utf8();
+        assert!(matches!(&events[0], RawEvent::Paste(text) if text.len() == expected_len));
+        assert_eq!(parser.feed_bytes(b"z"), vec![RawEvent::Key("z".to_owned())]);
     }
 
     #[test]
