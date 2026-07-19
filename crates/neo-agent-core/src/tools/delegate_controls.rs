@@ -566,7 +566,7 @@ fn wait_target_snapshot(ctx: &ToolContext, id: &str) -> WaitTargetSnapshot {
                 super::multi_agent_format::SummaryScope::CurrentRun,
                 true,
                 true,
-                false,
+                true,
             ),
             found: true,
             terminal: agent.state.is_terminal(),
@@ -1279,7 +1279,8 @@ mod tests {
             .await
             .expect("wait delegate");
         assert_queue_metadata_cleared(
-            &waited.details.as_ref().expect("wait details")["agent"]["activity"][0]["kind"]["phase"],
+            &waited.details.as_ref().expect("wait details")["items"][0]["activity_tail"][0]["kind"]
+                ["phase"],
         );
     }
 

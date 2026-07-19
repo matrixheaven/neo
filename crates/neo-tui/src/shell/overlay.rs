@@ -260,8 +260,7 @@ impl OverlayKind {
             | Self::ChoicePicker(_)
             | Self::TrustDialog(_)
             | Self::HelpPanel(_) => Some(16),
-            Self::TaskBrowser(_) => Some(0),
-            Self::TranscriptBrowser(_) => Some(0),
+            Self::TaskBrowser(_) | Self::TranscriptBrowser(_) => Some(0),
             _ => None,
         }
     }

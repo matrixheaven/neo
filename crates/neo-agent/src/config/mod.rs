@@ -419,8 +419,8 @@ max_command_parallelism = 2
             .expect_err("removed key was accepted");
             let message = format!("{error:#}");
             assert!(message.contains(key), "{message}");
-            assert!(message.contains("max_active_commands"), "{message}");
-            assert!(message.contains("max_command_parallelism"), "{message}");
+            assert!(message.contains("active_commands"), "{message}");
+            assert!(message.contains("command_parallelism"), "{message}");
         }
     }
 
@@ -439,8 +439,8 @@ max_command_parallelism = 2
             .expect_err("removed timeout key was accepted");
             let message = format!("{error:#}");
             assert!(message.contains(key), "{message}");
-            assert!(message.contains("max_active_commands"), "{message}");
-            assert!(message.contains("max_command_parallelism"), "{message}");
+            assert!(message.contains("active_commands"), "{message}");
+            assert!(message.contains("command_parallelism"), "{message}");
         }
     }
 

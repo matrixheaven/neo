@@ -80,15 +80,15 @@ impl ApprovalRequestModal {
         if !self.collecting_feedback {
             return;
         }
-        match self.selected_action() {
-            Some(ApprovalAction::RevisePlan { preset_feedback })
-            | Some(ApprovalAction::ReviseGoal { preset_feedback }) => {
-                self.feedback_input = preset_feedback.clone().unwrap_or_default();
-            }
-            _ => {
-                self.collecting_feedback = false;
-                self.feedback_input.clear();
-            }
+        if let Some(
+            ApprovalAction::RevisePlan { preset_feedback }
+            | ApprovalAction::ReviseGoal { preset_feedback },
+        ) = self.selected_action()
+        {
+            self.feedback_input = preset_feedback.clone().unwrap_or_default();
+        } else {
+            self.collecting_feedback = false;
+            self.feedback_input.clear();
         }
     }
 
@@ -97,8 +97,10 @@ impl ApprovalRequestModal {
     /// Returns `false` if the current selection is not a revision action.
     pub fn begin_feedback_collection(&mut self) -> bool {
         let preset = match self.selected_action() {
-            Some(ApprovalAction::RevisePlan { preset_feedback })
-            | Some(ApprovalAction::ReviseGoal { preset_feedback }) => preset_feedback.clone(),
+            Some(
+                ApprovalAction::RevisePlan { preset_feedback }
+                | ApprovalAction::ReviseGoal { preset_feedback },
+            ) => preset_feedback.clone(),
             _ => return false,
         };
         self.collecting_feedback = true;

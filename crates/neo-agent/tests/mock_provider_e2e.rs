@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[derive(Debug, Clone)]
@@ -147,6 +148,26 @@ capabilities = ["streaming", "tools"]
     )
 }
 
+fn mock_responses_config_with_context(base_url: &str) -> String {
+    format!(
+        r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai_response"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools"]
+"#
+    )
+}
+
 fn write_mock_responses_config(temp: &TempDir, base_url: &str) {
     write_config(temp, &mock_responses_config(base_url));
 }
@@ -154,11 +175,12 @@ fn write_mock_responses_config(temp: &TempDir, base_url: &str) {
 fn write_trust_store(home: &std::path::Path, project: &std::path::Path, trusted: bool) {
     let canonical = project.canonicalize().expect("canonicalize project");
     std::fs::create_dir_all(home).expect("create neo home");
-    std::fs::write(
-        home.join("trust.json"),
-        json!({ canonical.to_str().expect("utf8 project path"): trusted }).to_string(),
-    )
-    .expect("write trust store");
+    use neo_agent_core::session::hash_os_path_into;
+    let mut hasher = Sha256::new();
+    hash_os_path_into(&canonical, &mut hasher);
+    let key = format!("project_{:x}", hasher.finalize());
+    std::fs::write(home.join("trust.json"), json!({ key: trusted }).to_string())
+        .expect("write trust store");
 }
 
 fn session_files(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -438,8 +460,7 @@ max_context_tokens = 128000
 capabilities = ["streaming", "tools", "reasoning"]
 
 [runtime.reasoning]
-mode = "effort"
-effort = "high"
+mode = "on"
 
 [defaults]
 mode = "json"
@@ -843,7 +864,7 @@ fn run_text_loads_project_context_after_persisted_trust() {
     std::fs::write(temp.path().join("AGENTS.md"), "Project context: use Rust.")
         .expect("write agents");
     let server = MockSseServer::start(vec![openai_response_sse("resp-trust", "trusted")]);
-    write_mock_responses_config(&temp, &server.url);
+    write_config(&temp, &mock_responses_config_with_context(&server.url));
 
     let mut command = neo();
     command
@@ -851,7 +872,8 @@ fn run_text_loads_project_context_after_persisted_trust() {
         .env("OPENAI_API_KEY", "test-key")
         .args(["run", "--output", "text", "hello"]);
 
-    run(command);
+    let output = command.output().expect("neo command should run");
+    assert!(output.status.success());
 
     let requests = server.requests();
     assert!(

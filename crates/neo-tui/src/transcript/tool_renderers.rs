@@ -634,9 +634,6 @@ fn render_result_preview(
     width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Vec<Line> {
-    if !expanded {
-        return Vec::new();
-    }
     let limit = if expanded {
         usize::MAX
     } else {

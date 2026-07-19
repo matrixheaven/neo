@@ -12,8 +12,8 @@ use neo_agent_core::{
     AgentEvent, AgentMessage, ApprovalAction, ApprovalCancelReason, ApprovalOption,
     ApprovalPresentation, ApprovalRequest, ApprovalResolution, ApprovalResponse, Content,
     FileWriteApprovalOperation, MessageOrigin, PendingQuestion, PermissionMode,
-    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope, ShellLimits,
-    ShellRuntime, StopReason, ToolResult,
+    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
+    ShellCommandOrigin, StopReason, ToolResult,
     skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
 };
 use neo_tui::{
@@ -2341,9 +2341,19 @@ async fn event_loop_ctrl_d_cancels_active_shell_without_starting_queued_commands
             observed_commands
                 .lock()
                 .expect("command lock")
-                .push(request.command);
+                .push(request.command.clone());
             *observed_cancel_token.lock().expect("cancel token lock") =
                 Some(request.cancel_token.clone());
+            // Emit ShellCommandStarted so the transcript records a ShellRun
+            // entry. Production ShellDrivers emit this themselves; the test
+            // driver must simulate it.
+            let _ = request.event_tx.send(AgentEvent::ShellCommandStarted {
+                turn: 0,
+                id: request.id.clone(),
+                command: request.command.clone(),
+                cwd: std::path::PathBuf::new(),
+                origin: ShellCommandOrigin::UserShellMode,
+            });
             observed_driver_started.notify_one();
             request.cancel_token.cancelled().await;
             driver_cancellation_observed.store(true, std::sync::atomic::Ordering::SeqCst);

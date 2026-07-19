@@ -702,12 +702,9 @@ mod tests {
         let input = json!({
             "path": external_file.to_str().unwrap(),
         });
-        let err = tool.execute(&ctx, input).await.expect_err("outside denied");
-
-        assert!(matches!(
-            err,
-            crate::tools::ToolError::PathOutsideWorkspace { .. }
-        ));
+        let result = tool.execute(&ctx, input).await.expect("outside allow");
+        assert!(!result.is_error);
+        assert!(result.content.contains("external content"));
     }
 
     #[tokio::test]
@@ -926,14 +923,11 @@ mod workspace_policy_tests {
             .expect("context")
             .with_access(ToolAccess::all());
 
-        let err = ReadTool
+        let result = ReadTool
             .execute(&ctx, json!({ "path": file }))
             .await
-            .expect_err("outside denied");
-
-        assert!(matches!(
-            err,
-            crate::tools::ToolError::PathOutsideWorkspace { .. }
-        ));
+            .expect("outside allow");
+        assert!(!result.is_error);
+        assert!(result.content.contains("secret"));
     }
 }

@@ -1034,13 +1034,13 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.extend(styled_wrap_with_indent(&detail, width, 2, 4, body));
     }
     rows.push(Line::raw(""));
-    if let ApprovalPresentation::Plan { markdown, path, .. } = &data.request.presentation {
-        if !markdown.trim().is_empty() {
-            let plan_path = path.as_ref().map(|p| p.display().to_string());
-            let plan_box = PlanBoxComponent::new(markdown.clone(), plan_path);
-            rows.extend(plan_box.render(width, theme));
-            rows.push(Line::raw(""));
-        }
+    if let ApprovalPresentation::Plan { markdown, path, .. } = &data.request.presentation
+        && !markdown.trim().is_empty()
+    {
+        let plan_path = path.as_ref().map(|p| p.display().to_string());
+        let plan_box = PlanBoxComponent::new(markdown.clone(), plan_path);
+        rows.extend(plan_box.render(width, theme));
+        rows.push(Line::raw(""));
     }
 
     for (index, option) in data.request.options.iter().enumerate() {

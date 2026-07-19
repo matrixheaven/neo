@@ -617,17 +617,26 @@ fn complete_plan_revision(app: &mut NeoChromeState) -> ApprovalResponse {
 #[test]
 fn approval_selection_returns_the_visible_option_action() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.push_approval(background_request());
+    let request = background_request();
+    app.push_approval(request.clone());
     app.handle_pending_approval_input(InputEvent::Key(KeyId::new("down").unwrap()));
 
-    let rendered = render_app(80, &app).join("\n");
-    assert!(rendered.contains("2. Reject"), "frame: {rendered}");
+    let mut transcript = TranscriptPane::new(80, 20);
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested { request });
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+
+    let (lines, _cursor) = tui.render_frame(80, 20);
+    let frame = strip_lines(lines).join("\n");
+    assert!(frame.contains("2. Reject"), "frame: {frame}");
     assert_eq!(
-        app.approval_selection().map(|(_, selected, ..)| selected),
+        tui.chrome()
+            .approval_selection()
+            .map(|(_, selected, ..)| selected),
         Some(1)
     );
 
-    let response = app
+    let response = tui
+        .chrome_mut()
         .handle_pending_approval_input(InputEvent::Key(KeyId::new("enter").unwrap()))
         .expect("Enter resolves visible Reject");
     assert!(matches!(
@@ -1379,7 +1388,13 @@ fn transcript_user_images_render_thumbnail_inside_normal_frame() {
             1_184,
             650,
             "[image #1 (1184x650)]",
-            vec![137, 80, 78, 71],
+            vec![
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+                0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92,
+                0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+            ],
         )],
     );
     let mut tui = neo_tui::NeoTui::new(chrome, transcript);

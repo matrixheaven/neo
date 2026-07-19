@@ -70,11 +70,11 @@ mod tests {
                 &AiError::Server {
                     status: 503,
                     message: "later".into(),
-                    retry_after: Some(Duration::from_secs(25 * 60 * 60)),
+                    retry_after: Some(Duration::from_hours(25)),
                 },
                 1,
             ),
-            Duration::from_secs(24 * 60 * 60)
+            Duration::from_hours(24)
         );
     }
 

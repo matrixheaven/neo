@@ -257,22 +257,22 @@ fn runtime_shell_from_file(shell: Option<FileRuntimeShellConfig>) -> ShellLimits
     let Some(shell) = shell else {
         return limits;
     };
-    if let Some(value) = shell.max_active_commands {
+    if let Some(value) = shell.active_commands {
         limits.max_active_commands = value;
     }
-    if let Some(value) = shell.max_command_parallelism {
+    if let Some(value) = shell.command_parallelism {
         limits.max_command_parallelism = value;
     }
-    if let Some(value) = shell.max_command_descendant_processes {
+    if let Some(value) = shell.command_descendant_processes {
         limits.max_command_descendant_processes = value;
     }
-    if let Some(value) = shell.max_command_memory_percent {
+    if let Some(value) = shell.command_memory_percent {
         limits.max_command_memory_percent = value;
     }
-    if let Some(value) = shell.max_output_bytes {
+    if let Some(value) = shell.output_bytes {
         limits.max_output_bytes = value;
     }
-    if let Some(value) = shell.max_background_log_bytes {
+    if let Some(value) = shell.background_log_bytes {
         limits.max_background_log_bytes = value;
     }
     limits

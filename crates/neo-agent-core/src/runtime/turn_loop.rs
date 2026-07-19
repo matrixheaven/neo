@@ -89,7 +89,7 @@ async fn run_model_turn_with_recovery(
         Some(AgentMessage::Assistant { stop_reason, .. }) => *stop_reason,
         _ => StopReason::EndTurn,
     };
-    emit_effective_context_window(config, emitter, turn).await;
+    emit_effective_context_window(config, emitter, turn);
     emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
     Ok(result)
 }
@@ -422,7 +422,7 @@ pub(super) async fn run_agent_turn(
         }
         pending_compaction_debt =
             observe_tool_group_debt(&config, emitter, turn, tool_results.len());
-        emit_effective_context_window(&config, emitter, turn).await;
+        emit_effective_context_window(&config, emitter, turn);
         if !synthesized {
             emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
         }
@@ -622,43 +622,17 @@ async fn admit_pending_epoch_compact_first(
         // lands. Failure is non-fatal; the next preflight re-derives it as a
         // typed Blocked epoch.
         rehydrate_instruction_context_after_compaction(emitter, true).await;
-        if refresh_after_compaction {
-            let registry = emitter
-                .context
-                .instruction_registry()
-                .expect("an instruction epoch implies an attached registry");
-            let targets = fingerprint.target_directories.clone();
-            match registry
-                .reconcile(
-                    InstructionReconcileRequest {
-                        agent_id: fingerprint.agent_id.clone(),
-                        kind: reconcile_kind,
-                        target_directories: targets.clone(),
-                        budget: InstructionContextBridge::budget(config, &emitter.context),
-                        deferred_tool_ids: fingerprint.deferred_tool_ids.clone(),
-                    },
-                    emitter.context.instruction_state(),
-                )
-                .await
-            {
-                InstructionPreflightDecision::Proceed { fingerprint: fresh } => {
-                    return Ok(Some(fresh));
-                }
-                InstructionPreflightDecision::Defer {
-                    epoch: fresh_epoch,
-                    fingerprint: fresh,
-                } => {
-                    epoch = fresh_epoch;
-                    fingerprint = fresh;
-                }
-                InstructionPreflightDecision::Block {
-                    epoch: fresh_epoch,
-                    fingerprint: fresh,
-                } => {
-                    epoch = fresh_epoch;
-                    fingerprint = fresh;
-                }
-            }
+        if refresh_after_compaction
+            && let Some(fresh) = refresh_epoch_after_compaction(
+                emitter,
+                config,
+                reconcile_kind,
+                &mut fingerprint,
+                &mut epoch,
+            )
+            .await?
+        {
+            return Ok(Some(fresh));
         }
         if InstructionContextBridge::prepare_pending_epoch_after_compaction(
             config,
@@ -695,6 +669,50 @@ async fn admit_pending_epoch_compact_first(
     }
     emitter.emit(AgentEvent::InstructionEpoch { epoch });
     Ok(Some(fingerprint))
+}
+
+/// Re-run reconciliation after compaction when ignored bundles were trimmed
+/// below nominal budget. Returns a fresh fingerprint on proceed, or updates
+/// epoch/fingerprint in place for Defer/Block.
+async fn refresh_epoch_after_compaction(
+    emitter: &EventEmitter,
+    config: &AgentConfig,
+    reconcile_kind: InstructionReconcileKind,
+    fingerprint: &mut InstructionFingerprint,
+    epoch: &mut InstructionEpochData,
+) -> Result<Option<InstructionFingerprint>, AgentRuntimeError> {
+    let registry = emitter
+        .context
+        .instruction_registry()
+        .expect("an instruction epoch implies an attached registry");
+    let targets = fingerprint.target_directories.clone();
+    match registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: fingerprint.agent_id.clone(),
+                kind: reconcile_kind,
+                target_directories: targets.clone(),
+                budget: InstructionContextBridge::budget(config, &emitter.context),
+                deferred_tool_ids: fingerprint.deferred_tool_ids.clone(),
+            },
+            emitter.context.instruction_state(),
+        )
+        .await
+    {
+        InstructionPreflightDecision::Proceed { fingerprint: fresh } => Ok(Some(fresh)),
+        InstructionPreflightDecision::Defer {
+            epoch: fresh_epoch,
+            fingerprint: fresh,
+        }
+        | InstructionPreflightDecision::Block {
+            epoch: fresh_epoch,
+            fingerprint: fresh,
+        } => {
+            *epoch = fresh_epoch;
+            *fingerprint = fresh;
+            Ok(None)
+        }
+    }
 }
 
 /// Reconcile the scopes a just-executed batch touched, before the next
@@ -1052,11 +1070,11 @@ pub(super) async fn emit_run_finished(
     turn: u32,
     stop_reason: StopReason,
 ) {
-    emit_effective_context_window(config, emitter, turn).await;
+    emit_effective_context_window(config, emitter, turn);
     emitter.emit(AgentEvent::RunFinished { turn, stop_reason });
 }
 
-pub(super) async fn emit_effective_context_window(
+pub(super) fn emit_effective_context_window(
     config: &AgentConfig,
     emitter: &mut EventEmitter,
     turn: u32,

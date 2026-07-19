@@ -218,6 +218,7 @@ impl AgentRuntime {
                 establish_instruction_baseline(&model, &config, &mut emitter, &cancel_token).await
             {
                 process_supervisor.cleanup_all().await;
+                emitter.emit(AgentEvent::MessageAppended { message });
                 emitter.emit(AgentEvent::RunFinished {
                     turn: emitter.context.turns.saturating_add(1),
                     stop_reason: StopReason::Error,

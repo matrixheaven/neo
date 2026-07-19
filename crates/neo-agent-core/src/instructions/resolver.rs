@@ -453,7 +453,6 @@ impl InstructionResolver {
         {
             resolved.global = Some(home.clone());
         }
-
         if self.project_trusted {
             if probe(&self.canonical_workspace.clone(), &mut probes)?.is_some() {
                 resolved.workspace_root = Some(self.canonical_workspace.clone());

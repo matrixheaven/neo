@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::time::Duration;
 
 use neo_agent_core::multi_agent::{
@@ -168,7 +169,7 @@ pub fn child_tool_status_text(
     } = phase
     {
         let waiting_s = now_ms.saturating_sub(queued_at_ms) / 1_000;
-        text.push_str(&format!(" · #{position} · waiting {waiting_s}s"));
+        let _ = write!(text, " · #{position} · waiting {waiting_s}s");
     }
     text
 }

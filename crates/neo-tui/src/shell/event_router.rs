@@ -83,7 +83,19 @@ impl NeoChromeState {
             // Live modal is opened by the interactive controller via
             // `push_approval` from the PendingApproval channel — not from this
             // observable event. Passive status only.
-            AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
+            AgentEvent::ApprovalRequested { .. }
+            | AgentEvent::ApprovalResolved { .. }
+            | AgentEvent::CompactionStarted { .. }
+            | AgentEvent::CompactionProgress { .. }
+            | AgentEvent::CompactionApplied { .. }
+            | AgentEvent::MessageAppended { .. }
+            | AgentEvent::RunStarted { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::MessageFinished { .. }
+            | AgentEvent::TerminalSessionStarted { .. }
+            | AgentEvent::TerminalSessionOutput { .. }
+            | AgentEvent::TerminalSessionFinished { .. }
+            | AgentEvent::SkillInvocation { .. } => {}
             AgentEvent::ContextWindowUpdated {
                 used_tokens,
                 projected_tokens,
@@ -127,17 +139,6 @@ impl NeoChromeState {
             AgentEvent::TokenUsage { usage, .. } => {
                 self.add_main_agent_token_usage(usage);
             }
-            AgentEvent::CompactionStarted { .. }
-            | AgentEvent::CompactionProgress { .. }
-            | AgentEvent::CompactionApplied { .. }
-            | AgentEvent::MessageAppended { .. }
-            | AgentEvent::RunStarted { .. }
-            | AgentEvent::TurnStarted { .. }
-            | AgentEvent::MessageFinished { .. }
-            | AgentEvent::TerminalSessionStarted { .. }
-            | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::SkillInvocation { .. } => {}
             AgentEvent::GoalStarted { .. } | AgentEvent::GoalResumed { .. } => {
                 self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Active));
             }

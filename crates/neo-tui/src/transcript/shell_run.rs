@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::time::Instant;
 
 use neo_agent_core::ShellCommandOutcome;
@@ -242,10 +243,11 @@ impl ShellRunComponent {
                     let elapsed_ms = waiting_ms.saturating_add(
                         u64::try_from(observed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
                     );
-                    status.push_str(&format!(
+                    let _ = write!(
+                        status,
                         " · #{position} · waiting {}",
                         format_elapsed(elapsed_ms / 1000)
-                    ));
+                    );
                 }
                 rows.push(Line::styled(format!("  {status}"), muted_style));
             }
@@ -299,10 +301,11 @@ impl ShellRunComponent {
                     let elapsed_ms = waiting_ms.saturating_add(
                         u64::try_from(observed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
                     );
-                    status.push_str(&format!(
+                    let _ = write!(
+                        status,
                         " · #{position} · waiting {}",
                         format_elapsed(elapsed_ms / 1000)
-                    ));
+                    );
                 }
                 text.push('\n');
                 text.push_str(&status);
@@ -443,15 +446,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_limited_shell_outcome_finalizes_with_terminal_message() {
-        assert_eq!(
-    #[test]
     fn timed_out_shell_outcome_recommends_a_larger_or_omitted_timeout() {
         let lines = finished_plain_lines("", "", None, None, &ShellCommandOutcome::TimedOut, false);
 
         assert_eq!(lines, [format_command_timeout()]);
     }
 
+    #[test]
+    fn resource_limited_shell_outcome_finalizes_with_terminal_message() {
+        assert_eq!(
             finished_plain_lines(
                 "",
                 "",

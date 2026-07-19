@@ -7,7 +7,10 @@ use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, s
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SleepInput {
-    #[schemars(range(min = 1, max = 3600))]
+    #[schemars(
+        description = "Number of seconds to wait before resuming. Must be between 1 and 3600 inclusive.",
+        range(min = 1, max = 3600)
+    )]
     duration_seconds: u64,
     #[schemars(description = "Short single-line reason for waiting (maximum 160 characters).")]
     reason: String,
@@ -24,11 +27,11 @@ fn invalid_sleep(message: &str) -> ToolError {
 }
 
 impl Tool for SleepTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "Sleep"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Pause this agent without starting a shell command. Use only for a \
          genuine time-based wait. Never use Sleep to wait for a delegate, swarm, \
          or background task, and never combine it with ListDelegates or TaskList \

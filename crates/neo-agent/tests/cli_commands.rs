@@ -1478,28 +1478,28 @@ url = "{}"
 #[test]
 fn run_text_rejects_remote_mcp_server_missing_url() {
     let temp = TempDir::new().expect("tempdir");
-    let provider = MockSseServer::start(vec![]);
-    write_home_config(&format!(
-        r#"{}
-
+    // Configure only an MCP server with a missing URL.  The MCP server
+    // itself logs a warning, and the model call is skipped because no
+    // model client can be created (the mock base URL is unreachable).
+    write_home_config(
+        r#"
 [[mcp.servers]]
 id = "remote-docs"
 enabled = true
 transport = "http"
 "#,
-        mock_responses_config(&provider.url)
-    ));
+    );
 
     let mut command = neo();
     command
         .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
+        .env_remove("OPENAI_API_KEY")
         .args(["run", "--output", "text", "show", "remote", "tools"]);
     let output = command.output().expect("neo command should run");
 
     // The MCP server with a missing URL means no MCP tools are registered,
-    // and the mock provider is unreachable so the model call fails. The
-    // command should not succeed either way.
+    // and without an API key the model call also fails.  The command should
+    // not succeed either way.
     assert!(!output.status.success());
 }
 

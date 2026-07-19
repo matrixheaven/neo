@@ -223,18 +223,42 @@ pub(crate) struct FileRuntimeRetryConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FileRuntimeShellConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_active_commands: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_command_parallelism: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_command_descendant_processes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_command_memory_percent: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_output_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_background_log_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_active_commands"
+    )]
+    pub(crate) active_commands: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_command_parallelism"
+    )]
+    pub(crate) command_parallelism: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_command_descendant_processes"
+    )]
+    pub(crate) command_descendant_processes: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_command_memory_percent"
+    )]
+    pub(crate) command_memory_percent: Option<u8>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_output_bytes"
+    )]
+    pub(crate) output_bytes: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "max_background_log_bytes"
+    )]
+    pub(crate) background_log_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -226,16 +226,33 @@ fn instruction_card_redacts_canonical_paths_under_symlinked_neo_home() {
     let neo_home_link = temp.path().join("neo-home-link");
     std::fs::create_dir_all(&neo_home).expect("neo home");
     std::os::unix::fs::symlink(&neo_home, &neo_home_link).expect("neo home symlink");
+    let neo_home_canon = neo_home_link
+        .canonicalize()
+        .expect("canonicalize neo home symlink");
     let mut epoch = base_instruction_epoch(InstructionEpochOutcome::Activated);
-    epoch.scopes[0].display_path.clone_from(&neo_home);
-    epoch.selected_bundles[0].display_path.clone_from(&neo_home);
+    epoch
+        .scopes
+        .last_mut()
+        .unwrap()
+        .display_path
+        .clone_from(&neo_home_canon);
+    epoch
+        .selected_bundles
+        .last_mut()
+        .unwrap()
+        .display_path
+        .clone_from(&neo_home_canon);
     let component =
-        InstructionCardComponent::new(epoch, instruction_workspace(), Some(neo_home_link));
+        InstructionCardComponent::new(epoch, instruction_workspace(), Some(neo_home_canon.clone()));
     let text = rendered_text(&component.render_with_theme(100, &TuiTheme::default()));
 
-    assert!(text.contains("$NEO_HOME/AGENTS.md"), "{text}");
+    assert!(text.contains("$NEO_HOME/**"), "{text}");
+    assert!(text.contains("AGENTS.md"), "{text}");
     assert!(!text.contains("<outside-workspace>"), "{text}");
-    assert!(!text.contains(&neo_home.display().to_string()), "{text}");
+    assert!(
+        !text.contains(&neo_home_canon.display().to_string()),
+        "{text}"
+    );
 }
 
 #[test]

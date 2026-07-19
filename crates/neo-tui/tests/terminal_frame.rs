@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use neo_agent_core::{AgentEvent, ToolResult};
 use neo_tui::NeoTui;
 use neo_tui::primitive::{strip_ansi, visible_width};
-use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::{NeoChromeState, PromptEdit};
 use neo_tui::transcript::{CHROME_GUTTER, TranscriptBrowserState, TranscriptEntry, TranscriptPane};
 

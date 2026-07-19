@@ -285,7 +285,7 @@ fn stream_response(
         .scan(IncrementalSse::default(), |state, chunk| {
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
-                StreamChunk::Data(Err(_)) if state.done => Vec::new(),
+                StreamChunk::Data(Err(_)) | StreamChunk::End if state.done => Vec::new(),
                 StreamChunk::Data(Err(err)) => {
                     if state.saw_done || state.parser.saw_finish_reason() {
                         state.finish()
@@ -296,7 +296,6 @@ fn stream_response(
                         })]
                     }
                 }
-                StreamChunk::End if state.done => Vec::new(),
                 StreamChunk::End => state.finish(),
             }))
         })
@@ -676,9 +675,8 @@ impl ParseState {
                 return Err(ProviderError::Protocol(
                     EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE.to_owned(),
                 ));
-            } else {
-                self.last_stop_reason = StopReason::ToolUse;
             }
+            self.last_stop_reason = StopReason::ToolUse;
         }
         if self.lifecycle.reasoning_started {
             self.events.push(AiStreamEvent::ThinkingEnd {

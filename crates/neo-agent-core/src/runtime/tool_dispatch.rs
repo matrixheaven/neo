@@ -960,20 +960,12 @@ async fn execute_authorized_sequential(
             if !cancel_token.is_cancelled() {
                 result = after_tool_result(config, tool_call, result, cancel_token).await;
             }
-            emit_shell_finished(turn, tool_call, &result, emitter);
-            emit_terminal_events(
-                turn,
-                &prepared_call.arguments,
-                tool_call,
-                &result,
-                tool_context,
-                emitter,
-            );
-            emit_tool_execution_finished(
+            emit_authorized_call_result(
                 turn,
                 tool_call,
                 Some(&prepared_call.arguments),
                 &result,
+                tool_context,
                 emitter,
             );
             results.push((tool_call.clone(), result));
@@ -1025,22 +1017,33 @@ async fn execute_authorized_sequential(
         if !cancel_token.is_cancelled() {
             result = after_tool_result(config, tool_call, result, cancel_token).await;
         }
-        emit_shell_finished(turn, tool_call, &result, emitter);
-        emit_terminal_events(
+        emit_authorized_call_result(
             turn,
-            arguments.as_ref(),
             tool_call,
+            Some(arguments.as_ref()),
             &result,
             tool_context,
             emitter,
         );
-        emit_tool_execution_finished(turn, tool_call, Some(arguments.as_ref()), &result, emitter);
         results.push((tool_call.clone(), result));
         if cancel_token.is_cancelled() {
             break;
         }
     }
     Ok((results, executed_any))
+}
+
+fn emit_authorized_call_result(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: Option<&serde_json::Value>,
+    result: &ToolResult,
+    tool_context: &ToolContext,
+    emitter: &mut EventEmitter,
+) {
+    emit_shell_finished(turn, tool_call, result, emitter);
+    emit_terminal_events(turn, arguments, tool_call, result, tool_context, emitter);
+    emit_tool_execution_finished(turn, tool_call, arguments, result, emitter);
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1084,7 +1087,7 @@ async fn execute_authorized_parallel(
             emit_shell_finished(turn, tool_call, &result, emitter);
             emit_terminal_events(
                 turn,
-                &prepared_call.arguments,
+                Some(&prepared_call.arguments),
                 tool_call,
                 &result,
                 tool_context,
@@ -1161,7 +1164,14 @@ async fn execute_authorized_parallel(
             None => serde_json::Value::Null,
         };
         emit_shell_finished(turn, &tool_call, &result, emitter);
-        emit_terminal_events(turn, &arguments, &tool_call, &result, tool_context, emitter);
+        emit_terminal_events(
+            turn,
+            Some(&arguments),
+            &tool_call,
+            &result,
+            tool_context,
+            emitter,
+        );
         emit_tool_execution_finished(turn, &tool_call, Some(&arguments), &result, emitter);
         completed.push((index, tool_call, result));
     }

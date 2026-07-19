@@ -23,12 +23,11 @@ pub(crate) struct TaggedHeadTailBuffer {
 
 impl TaggedHeadTailBuffer {
     pub(crate) fn new(capacity: usize) -> Self {
-        let head_capacity = capacity / 2;
         Self {
-            head_capacity,
-            tail_capacity: capacity - head_capacity,
-            head: Vec::with_capacity(head_capacity),
-            tail: VecDeque::with_capacity(capacity - head_capacity),
+            head_capacity: capacity,
+            tail_capacity: 0,
+            head: Vec::with_capacity(capacity),
+            tail: VecDeque::with_capacity(0),
             total_bytes: 0,
         }
     }
@@ -96,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stdout_and_stderr_share_one_head_tail_budget() {
+    fn stdout_and_stderr_share_one_head_budget() {
         let mut buffer = TaggedHeadTailBuffer::new(8);
         buffer.push(StreamKind::Stdout, b"abcd");
         buffer.push(StreamKind::Stderr, b"EFGH");
@@ -105,7 +104,8 @@ mod tests {
         let output = buffer.finish();
         assert_eq!(output.retained_bytes(), 8);
         assert_eq!(output.omitted_bytes, 4);
-        assert_eq!(output.stdout, b"abcdijkl");
-        assert!(output.stderr.is_empty());
+        // First 8 bytes: "abcd" (stdout) + "EFGH" (stderr). Subsequent "ijkl" (stdout) omitted.
+        assert_eq!(output.stdout, b"abcd");
+        assert_eq!(output.stderr, b"EFGH");
     }
 }

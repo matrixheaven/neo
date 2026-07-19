@@ -28,11 +28,11 @@ impl TranscriptPane {
         }
     }
 
-    pub fn resolve_approval(&mut self, id: &str, resolution: ApprovalResolution) {
+    pub fn resolve_approval(&mut self, id: &str, resolution: &ApprovalResolution) {
         let changed = self.transcript.mutate_approval(id, |approval| {
             let already_resolved = matches!(
                 &approval.state,
-                ApprovalDisplayState::Resolved(existing) if existing == &resolution
+                ApprovalDisplayState::Resolved(existing) if existing == resolution
             );
             let feedback_cleared = !approval.feedback_active && approval.feedback_input.is_empty();
             if already_resolved && approval.queued_count == 0 && feedback_cleared {
@@ -52,7 +52,7 @@ impl TranscriptPane {
         }
     }
 
-    pub fn finalize_pending_approvals(&mut self, resolution: ApprovalResolution) {
+    pub fn finalize_pending_approvals(&mut self, resolution: &ApprovalResolution) {
         let mut changed = false;
         for index in 0..self.transcript.entries().len() {
             let is_unresolved = matches!(

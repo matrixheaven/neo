@@ -39,19 +39,7 @@ impl SessionEventPersistence {
                 persisted
             }
             AgentEvent::DelegateStarted { .. } | AgentEvent::DelegateFinished { .. } => {
-                let mut event = event.clone();
-                if let AgentEvent::DelegateStarted { agent, .. }
-                | AgentEvent::DelegateFinished { agent, .. } = &mut event
-                {
-                    agent.clear_live_queue_metadata();
-                    let mut progress = agent.progress_snapshot();
-                    normalize_persisted_progress(&mut progress);
-                    self.agents.insert(
-                        agent.id.as_str().to_owned(),
-                        PersistedAgentProgress::from_progress(progress),
-                    );
-                }
-                vec![event]
+                self.process_delegate_boundary(event)
             }
             AgentEvent::DelegateUpdated { turn, agent } => {
                 self.persist_delegate_progress(*turn, agent.progress_snapshot())
@@ -60,22 +48,7 @@ impl SessionEventPersistence {
                 self.persist_delegate_progress(*turn, progress.clone())
             }
             AgentEvent::DelegateSwarmStarted { .. } | AgentEvent::DelegateSwarmFinished { .. } => {
-                let mut event = event.clone();
-                if let AgentEvent::DelegateSwarmStarted { swarm, .. }
-                | AgentEvent::DelegateSwarmFinished { swarm, .. } = &mut event
-                {
-                    swarm.clear_live_queue_metadata();
-                    let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
-                    for child in &swarm.children {
-                        let mut progress = child.agent.progress_snapshot();
-                        normalize_persisted_progress(&mut progress);
-                        swarm_gates.insert(
-                            child.agent.id.as_str().to_owned(),
-                            PersistedAgentProgress::from_progress(progress),
-                        );
-                    }
-                }
-                vec![event]
+                self.process_swarm_boundary(event)
             }
             AgentEvent::DelegateSwarmUpdated { turn, swarm } => {
                 for child in &swarm.children {
@@ -124,6 +97,41 @@ impl SessionEventPersistence {
             // through this default branch.
             _ => vec![event.clone()],
         }
+    }
+
+    fn process_delegate_boundary(&mut self, event: &AgentEvent) -> Vec<AgentEvent> {
+        let mut event = event.clone();
+        if let AgentEvent::DelegateStarted { agent, .. }
+        | AgentEvent::DelegateFinished { agent, .. } = &mut event
+        {
+            agent.clear_live_queue_metadata();
+            let mut progress = agent.progress_snapshot();
+            normalize_persisted_progress(&mut progress);
+            self.agents.insert(
+                agent.id.as_str().to_owned(),
+                PersistedAgentProgress::from_progress(progress),
+            );
+        }
+        vec![event]
+    }
+
+    fn process_swarm_boundary(&mut self, event: &AgentEvent) -> Vec<AgentEvent> {
+        let mut event = event.clone();
+        if let AgentEvent::DelegateSwarmStarted { swarm, .. }
+        | AgentEvent::DelegateSwarmFinished { swarm, .. } = &mut event
+        {
+            swarm.clear_live_queue_metadata();
+            let swarm_gates = self.swarm_agents.entry(swarm.swarm_id.clone()).or_default();
+            for child in &swarm.children {
+                let mut progress = child.agent.progress_snapshot();
+                normalize_persisted_progress(&mut progress);
+                swarm_gates.insert(
+                    child.agent.id.as_str().to_owned(),
+                    PersistedAgentProgress::from_progress(progress),
+                );
+            }
+        }
+        vec![event]
     }
 
     fn persist_delegate_progress(
@@ -348,7 +356,7 @@ mod tests {
             assert!(persistence.persisted_events(detail).is_empty());
         }
         let winning = persistence.persisted_events(&message_appended("winning"));
-        assert!(winning.len() >= 1);
+        assert!(!winning.is_empty());
         projected.extend(winning);
 
         let mut expected = vec![retry_scheduled()];

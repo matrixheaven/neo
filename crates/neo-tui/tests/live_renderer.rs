@@ -72,11 +72,11 @@ fn width_resize_redraws_at_absolute_observed_origin() {
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 
     assert!(
-        output.contains("\x1b[3;1H\x1b[2Knew-a"),
+        output.contains("\x1b[2;1H\x1b[2Knew-a"),
         "output: {output:?}"
     );
     assert!(
-        output.contains("\x1b[4;1H\x1b[2Knew-b"),
+        output.contains("\x1b[3;1H\x1b[2Knew-b"),
         "output: {output:?}"
     );
     assert!(

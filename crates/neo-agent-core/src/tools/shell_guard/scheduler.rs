@@ -198,20 +198,20 @@ impl ShellScheduler {
         // Queued/Position notification window.
         let correction = {
             let mut state = self.state.lock().expect("shell scheduler mutex");
-            if !state.contains_id(waiter_id) {
-                None
-            } else {
+            if state.contains_id(waiter_id) {
                 if let Some(waiter) = state.waiter_mut(waiter_id) {
                     waiter.ready = true;
                 }
-                let waiting = state
-                    .waiter_ref(waiter_id)
-                    .map(|waiter| waiter.enqueued_at.elapsed())
-                    .unwrap_or_else(|| enqueued_at.elapsed());
+                let waiting = state.waiter_ref(waiter_id).map_or_else(
+                    || enqueued_at.elapsed(),
+                    |waiter| waiter.enqueued_at.elapsed(),
+                );
                 state
                     .position_of(waiter_id, class)
                     .filter(|&position| Some(position) != initial_position)
                     .map(|position| (position, waiting))
+            } else {
+                None
             }
         };
         if let (Some(callback), Some((position, waiting))) = (&callback, correction) {

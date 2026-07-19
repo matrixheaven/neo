@@ -628,7 +628,7 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
             request: shell_request(&format!("bash-{number}"), &command, None, shell_options()),
         });
     }
-    transcript_pane.resolve_approval("bash-1", approved_resolution());
+    transcript_pane.resolve_approval("bash-1", &approved_resolution());
 
     let frame = plain_frame(&mut transcript_pane, 100, 24);
     assert!(frame.iter().any(|line| line.contains("Approved")));
@@ -656,7 +656,7 @@ fn finalizing_transcript_preserves_queued_approvals_before_exit() {
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         request: shell_request("current", "printf current", None, shell_options()),
     });
-    transcript_pane.resolve_approval("current", approved_resolution());
+    transcript_pane.resolve_approval("current", &approved_resolution());
 
     let ids = transcript_pane
         .transcript()
@@ -711,7 +711,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         "approval should stay near matching tool: {frame:?}"
     );
 
-    transcript_pane.resolve_approval("tool-1", approved_resolution());
+    transcript_pane.resolve_approval("tool-1", &approved_resolution());
     let resolved = plain_frame(&mut transcript_pane, 100, 24);
     assert!(
         resolved
@@ -1789,14 +1789,34 @@ fn browser_snapshot_expands_and_collapses_committed_tool_without_mutating_source
     pane.push_status("after-browser");
     let mut browser = TranscriptBrowserState::new(true);
 
-    let expanded = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
-    assert!(expanded.contains("{\"path\":\"a\"}"));
+    let expanded = strip_ansi(&pane.render_browser_rows(&mut browser, 80, 20).join("\n"));
+    assert!(
+        expanded.contains("Used Read (a)"),
+        "expanded must show tool header with key arg: {expanded}"
+    );
     assert!(pane.has_committed_expandable_entries());
     assert!(!pane.tool_output_expanded());
 
     browser.toggle();
-    let collapsed = pane.render_browser_rows(&mut browser, 80, 20).join("\n");
-    assert!(!collapsed.contains("{\"path\":\"a\"}"));
+    let collapsed = strip_ansi(&pane.render_browser_rows(&mut browser, 80, 20).join("\n"));
+    assert!(
+        collapsed.contains("Used Read"),
+        "collapsed still shows tool header: {collapsed}"
+    );
+    // In collapsed browser mode a truncated result preview (up to 3 lines)
+    // is shown; single-line results are fully visible with no expand hint.
+    assert!(
+        collapsed.contains("1 lines"),
+        "collapsed shows result line count chip: {collapsed}"
+    );
+    assert!(
+        collapsed.contains("ok"),
+        "collapsed shows result preview: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("ctrl+o to expand"),
+        "single-line result needs no expand hint: {collapsed}"
+    );
     assert!(pane.has_committed_expandable_entries());
     assert!(!pane.tool_output_expanded());
 

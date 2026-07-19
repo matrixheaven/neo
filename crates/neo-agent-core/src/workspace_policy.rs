@@ -132,7 +132,7 @@ impl WorkspaceAccessPolicy {
             || self.primary_root().unwrap_or(Path::new(".")).to_path_buf(),
             Path::to_path_buf,
         );
-        let canonical_parent = parent.canonicalize()?;
+        let canonical_parent = canonicalize_nearest_existing_parent(&parent)?;
         let file_name =
             candidate
                 .file_name()
@@ -201,6 +201,31 @@ impl WorkspaceAccessPolicy {
             .iter()
             .filter(|root| canonical_path.starts_with(&root.path))
             .max_by_key(|root| root.path.components().count())
+    }
+}
+
+fn canonicalize_nearest_existing_parent(path: &Path) -> Result<PathBuf, WorkspaceAccessError> {
+    let mut current = path.to_path_buf();
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                if current == *path {
+                    return Ok(canonical);
+                }
+                // Reconstruct the full path by appending the remaining segments.
+                let remaining = path.strip_prefix(&current).unwrap_or(Path::new(""));
+                return Ok(canonical.join(remaining));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Walk up to parent.
+                if let Some(parent) = current.parent() {
+                    current = parent.to_path_buf();
+                } else {
+                    return Err(WorkspaceAccessError::Io(error));
+                }
+            }
+            Err(error) => return Err(WorkspaceAccessError::Io(error)),
+        }
     }
 }
 

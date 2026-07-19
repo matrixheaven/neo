@@ -316,7 +316,7 @@ fn stream_response(
         .scan(IncrementalSse::default(), |state, chunk| {
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
-                StreamChunk::Data(Err(_)) if state.stopped => Vec::new(),
+                StreamChunk::Data(Err(_)) | StreamChunk::End if state.stopped => Vec::new(),
                 StreamChunk::Data(Err(err)) => {
                     if state.saw_done || state.parser.saw_terminal() {
                         state.finish()
@@ -327,7 +327,6 @@ fn stream_response(
                         })]
                     }
                 }
-                StreamChunk::End if state.stopped => Vec::new(),
                 StreamChunk::End => state.finish(),
             }))
         })
@@ -501,94 +500,9 @@ impl ParseState {
                 self.ingest_completed(value);
                 self.terminal = true;
             }
-            Some("error") => {
-                let nested = value.get("error");
-                let numeric_code = value
-                    .get("code")
-                    .and_then(Value::as_u64)
-                    .or_else(|| value.get("status").and_then(Value::as_u64))
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("code"))
-                            .and_then(Value::as_u64)
-                    })
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("status"))
-                            .and_then(Value::as_u64)
-                    })
-                    .map(|code| code.to_string());
-                let code = value
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("code"))
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| value.get("status").and_then(Value::as_str))
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("status"))
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("type"))
-                            .and_then(Value::as_str)
-                    })
-                    .or(numeric_code.as_deref());
-                let message = value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        nested
-                            .and_then(|error| error.get("message"))
-                            .and_then(Value::as_str)
-                    })
-                    .unwrap_or("provider returned an error")
-                    .to_owned();
-                return Err(stream_failure(code, message));
-            }
+            Some("error") => return Err(Self::ingest_error_event(value)),
             Some("response.failed" | "response.incomplete") => {
-                let response = value.get("response").unwrap_or(&Value::Null);
-                let status = response
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed");
-                let error = response.get("error");
-                let numeric_code = error
-                    .and_then(|error| error.get("code"))
-                    .and_then(Value::as_u64)
-                    .or_else(|| {
-                        error
-                            .and_then(|error| error.get("status"))
-                            .and_then(Value::as_u64)
-                    })
-                    .map(|code| code.to_string());
-                let code = error
-                    .and_then(|error| error.get("code"))
-                    .and_then(Value::as_str);
-                let code = code
-                    .or_else(|| {
-                        error
-                            .and_then(|error| error.get("type"))
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| {
-                        error
-                            .and_then(|error| error.get("status"))
-                            .and_then(Value::as_str)
-                    })
-                    .or(numeric_code.as_deref());
-                let message = error
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .map_or_else(
-                        || format!("provider response ended with status {status}"),
-                        str::to_owned,
-                    );
-                return Err(stream_failure(code, message));
+                return Err(Self::ingest_response_failed(value));
             }
             _ => {}
         }
@@ -856,6 +770,100 @@ impl ParseState {
         } else {
             StopReason::ToolUse
         };
+    }
+
+    /// Extract error information from a top-level `"error"` event.
+    fn ingest_error_event(value: &Value) -> ProviderError {
+        let nested = value.get("error");
+        let numeric_code = value
+            .get("code")
+            .and_then(Value::as_u64)
+            .or_else(|| value.get("status").and_then(Value::as_u64))
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("status"))
+                    .and_then(Value::as_u64)
+            })
+            .map(|code| code.to_string());
+        let code = value
+            .get("code")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| value.get("status").and_then(Value::as_str))
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("status"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("type"))
+                    .and_then(Value::as_str)
+            })
+            .or(numeric_code.as_deref());
+        let message = value
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                nested
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("provider returned an error")
+            .to_owned();
+        stream_failure(code, message)
+    }
+
+    /// Extract and classify error information from a
+    /// `"response.failed"` or `"response.incomplete"` event.
+    fn ingest_response_failed(value: &Value) -> ProviderError {
+        let response = value.get("response").unwrap_or(&Value::Null);
+        let status = response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        let error = response.get("error");
+        let numeric_code = error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                error
+                    .and_then(|error| error.get("status"))
+                    .and_then(Value::as_u64)
+            })
+            .map(|code| code.to_string());
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str);
+        let code = code
+            .or_else(|| {
+                error
+                    .and_then(|error| error.get("type"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                error
+                    .and_then(|error| error.get("status"))
+                    .and_then(Value::as_str)
+            })
+            .or(numeric_code.as_deref());
+        let message = error
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map_or_else(
+                || format!("provider response ended with status {status}"),
+                str::to_owned,
+            );
+        stream_failure(code, message)
     }
 
     fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {

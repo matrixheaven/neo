@@ -1,6 +1,6 @@
 //! Cross-boundary ownership tests for shell admission cancellation and isolation.
 //!
-//! These tests exercise the public ToolRegistry / MultiAgentRuntime surfaces with
+//! These tests exercise the public `ToolRegistry` / `MultiAgentRuntime` surfaces with
 //! a real capacity-one `ShellRuntime` (guardian binary from `CARGO_BIN_EXE_neo`).
 
 use std::{

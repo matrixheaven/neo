@@ -571,8 +571,7 @@ fn revise_plan_suggestion_option(suggestion: &ExitPlanModeSuggestion) -> Approva
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| suggestion.description.clone());
+        .map_or_else(|| suggestion.description.clone(), str::to_owned);
     ApprovalOption {
         label: suggestion.label.clone(),
         description: Some(suggestion.description.clone()),
@@ -629,8 +628,9 @@ fn build_plan_approval_request(
         .read()
         .ok()
         .and_then(|pm| pm.data().ok().flatten())
-        .map(|data| (Some(data.path), data.content))
-        .unwrap_or((None, String::new()));
+        .map_or((None, String::new()), |data| {
+            (Some(data.path), data.content)
+        });
     ApprovalRequest {
         turn,
         id: tool_call.id.to_string(),
@@ -724,35 +724,6 @@ fn build_ordinary_approval_request(
     }
 }
 
-fn build_approval_request(
-    config: &AgentConfig,
-    turn: u32,
-    tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
-    operation: PermissionOperation,
-    subject: &str,
-    session_scope: Option<SessionApprovalScope>,
-    prefix_rule: Option<PrefixApprovalRule>,
-) -> ApprovalRequest {
-    match operation {
-        PermissionOperation::PlanTransition => {
-            build_plan_approval_request(config, turn, tool_call, arguments)
-        }
-        PermissionOperation::GoalTransition => {
-            build_goal_approval_request(turn, tool_call, arguments)
-        }
-        _ => build_ordinary_approval_request(
-            turn,
-            tool_call,
-            arguments,
-            operation,
-            subject,
-            session_scope,
-            prefix_rule,
-        ),
-    }
-}
-
 /// Outcome of applying a validated approval resolution.
 enum AppliedApproval {
     Allow {
@@ -765,7 +736,7 @@ enum AppliedApproval {
 /// write fails. Returns `None` on success (continue execution) or a tool error.
 fn persist_prefix_rule_or_error(
     config: &AgentConfig,
-    rule: PrefixApprovalRule,
+    rule: &PrefixApprovalRule,
 ) -> Option<ToolResult> {
     if ApprovalRuleStore::is_would_approve_all(&rule.prefix) {
         return None;
@@ -820,7 +791,7 @@ fn apply_approval_resolution(
         ApprovalResolution::Selected {
             action: ApprovalAction::PermitForPrefix { rule },
             ..
-        } => match persist_prefix_rule_or_error(config, rule) {
+        } => match persist_prefix_rule_or_error(config, &rule) {
             Some(error) => AppliedApproval::Terminal(error),
             None => AppliedApproval::Allow { approval: None },
         },
@@ -905,16 +876,23 @@ async fn resolve_approval(
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> AppliedApproval {
-    let request = build_approval_request(
-        config,
-        turn,
-        tool_call,
-        arguments,
-        operation,
-        &subject,
-        session_scope,
-        prefix_rule,
-    );
+    let request = match operation {
+        PermissionOperation::PlanTransition => {
+            build_plan_approval_request(config, turn, tool_call, arguments)
+        }
+        PermissionOperation::GoalTransition => {
+            build_goal_approval_request(turn, tool_call, arguments)
+        }
+        _ => build_ordinary_approval_request(
+            turn,
+            tool_call,
+            arguments,
+            operation,
+            &subject,
+            session_scope,
+            prefix_rule,
+        ),
+    };
     emitter.emit(AgentEvent::ApprovalRequested {
         request: request.clone(),
     });

@@ -2445,7 +2445,7 @@ fn delegate_and_swarm_render_same_queued_shell_row() {
         truncated: false,
         tail: false,
     });
-    let mut delegate_card = DelegateCardComponent::new(snapshot.clone());
+    let delegate_card = DelegateCardComponent::new(snapshot.clone());
     let delegate = plain(delegate_card.render_with_theme(120, &TuiTheme::default())).join("\n");
     let mut done_swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
     done_swarm.children[0].agent = snapshot;

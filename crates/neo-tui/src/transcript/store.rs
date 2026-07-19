@@ -223,9 +223,7 @@ impl TranscriptStore {
     }
 
     pub(crate) fn take_empty_live_attempt_anchor(&mut self) -> Option<usize> {
-        let Some((_, index)) = self.live_model_attempt else {
-            return None;
-        };
+        let (_, index) = self.live_model_attempt?;
         if !matches!(
             self.entries.get(index),
             Some(TranscriptEntry::AssistantMessage { content }) if content.is_empty()
@@ -422,16 +420,14 @@ impl TranscriptStore {
         }
         // Merge a new thinking stream into an immediately preceding completed
         // thinking block so consecutive reasoning events render as one card.
-        if let Some(index) = self.entries.len().checked_sub(1) {
-            if let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
-            {
-                if *phase == ThinkingPhase::Complete {
-                    *phase = ThinkingPhase::Streaming;
-                    self.active_thinking = Some(index);
-                    self.touch_entry(index);
-                    return;
-                }
-            }
+        if let Some(index) = self.entries.len().checked_sub(1)
+            && let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
+            && *phase == ThinkingPhase::Complete
+        {
+            *phase = ThinkingPhase::Streaming;
+            self.active_thinking = Some(index);
+            self.touch_entry(index);
+            return;
         }
         let index = self.append_entry(TranscriptEntry::thinking_streaming(String::new()));
         self.active_thinking = Some(index);

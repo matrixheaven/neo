@@ -414,7 +414,14 @@ async fn goal_start_creates_supergoal_artifacts() {
     let active = manager.active().unwrap();
     let artifact_dir = active.artifact_dir.as_ref().expect("artifact dir");
     assert!(artifact_dir.ends_with(&active.id));
-    assert!(artifact_dir.starts_with(temp.path().join("agents/main/goals/runs")));
+    assert!(
+        artifact_dir.starts_with(
+            temp.path()
+                .canonicalize()
+                .unwrap()
+                .join("agents/main/goals/runs")
+        )
+    );
     for relative in [
         "GOAL.md",
         "ROADMAP.md",

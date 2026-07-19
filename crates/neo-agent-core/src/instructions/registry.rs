@@ -334,26 +334,8 @@ impl InstructionRegistry {
         request: &InstructionReconcileRequest,
         state: &AgentInstructionState,
     ) -> (InstructionFingerprint, Option<InstructionEpochData>) {
-        let mut failure: Option<InstructionError> = None;
-        let mut scopes: Vec<(InstructionScopeKind, PathBuf)> = Vec::new();
-        let mut candidates: Vec<AdmissionCandidate> = Vec::new();
-
-        match self.resolver.discover_scopes(&request.target_directories) {
-            Err(error) => failure = Some(error),
-            Ok(resolved) => {
-                scopes = resolved.rendering_order();
-                for (kind, dir) in &scopes {
-                    match self.load_cached(dir, *kind) {
-                        Ok(Some(candidate)) => candidates.push(candidate),
-                        Ok(None) => {}
-                        Err(error) => {
-                            failure = Some(error);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        let (failure, scopes, candidates) =
+            self.load_scopes_and_candidates(&request.target_directories);
 
         if failure.is_none() {
             let selected_bundles = candidates
@@ -426,75 +408,10 @@ impl InstructionRegistry {
             return (fingerprint, None);
         }
 
-        let scope_data: Vec<InstructionScopeData> = scopes
-            .iter()
-            .map(|(kind, dir)| {
-                let admitted = selection
-                    .admitted
-                    .iter()
-                    .find(|candidate| &candidate.scope_dir == dir);
-                let ignored = selection
-                    .ignored
-                    .iter()
-                    .find(|bundle| &bundle.display_path == dir);
-                InstructionScopeData {
-                    display_path: dir.clone(),
-                    kind: *kind,
-                    revision: admitted
-                        .map(|candidate| candidate.metadata.revision.clone())
-                        .or_else(|| ignored.map(|bundle| bundle.revision.clone())),
-                    token_estimate: admitted
-                        .map_or(0, |candidate| candidate.metadata.token_estimate)
-                        .max(ignored.map_or(0, |bundle| bundle.token_estimate)),
-                }
-            })
-            .collect();
+        let scope_data = build_scope_data(&scopes, &selection);
 
-        let mut replacements = Vec::new();
-        for candidate in &selection.admitted {
-            if let Some(previous) = state.visible_revisions.get(&candidate.scope_dir)
-                && previous != &candidate.metadata.revision
-            {
-                replacements.push(InstructionReplacement {
-                    display_path: candidate.scope_dir.clone(),
-                    previous_revision: previous.clone(),
-                    new_revision: candidate.metadata.revision.clone(),
-                });
-            }
-        }
-
-        let current_scope_removed = state.visible_revisions.keys().any(|scope| {
-            request
-                .target_directories
-                .iter()
-                .any(|target| target.starts_with(scope))
-                && !selection
-                    .admitted
-                    .iter()
-                    .any(|candidate| &candidate.scope_dir == scope)
-        });
-
-        let outcome = if failure.is_some() {
-            InstructionEpochOutcome::Blocked
-        } else if !selection.ignored.is_empty() {
-            InstructionEpochOutcome::PartiallyLoaded
-        } else if !replacements.is_empty() {
-            InstructionEpochOutcome::Updated
-        } else if current_scope_removed {
-            InstructionEpochOutcome::Removed
-        } else if selection.admitted.iter().any(|candidate| {
-            state.visited_revisions.contains_key(&candidate.scope_dir)
-                && !state.active_scopes.contains(&candidate.scope_dir)
-        }) {
-            InstructionEpochOutcome::Reactivated
-        } else if request.kind == InstructionReconcileKind::Baseline
-            && state.visible_generation == 0
-            && state.visible_revisions.is_empty()
-        {
-            InstructionEpochOutcome::Ready
-        } else {
-            InstructionEpochOutcome::Activated
-        };
+        let (replacements, outcome) =
+            build_replacements_and_outcome(&selection, state, request, failure.as_ref());
 
         let generation = self.generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
         let epoch = InstructionEpochData {
@@ -511,6 +428,39 @@ impl InstructionRegistry {
             model_content,
         };
         (fingerprint, Some(epoch))
+    }
+
+    /// Resolve scopes and load their bundles from cache. Returns failure, scopes,
+    /// and any loaded candidates.
+    fn load_scopes_and_candidates(
+        &self,
+        target_directories: &[PathBuf],
+    ) -> (
+        Option<InstructionError>,
+        Vec<(InstructionScopeKind, PathBuf)>,
+        Vec<AdmissionCandidate>,
+    ) {
+        let mut failure: Option<InstructionError> = None;
+        let mut scopes: Vec<(InstructionScopeKind, PathBuf)> = Vec::new();
+        let mut candidates: Vec<AdmissionCandidate> = Vec::new();
+
+        match self.resolver.discover_scopes(target_directories) {
+            Err(error) => failure = Some(error),
+            Ok(resolved) => {
+                scopes = resolved.rendering_order();
+                for (kind, dir) in &scopes {
+                    match self.load_cached(dir, *kind) {
+                        Ok(Some(candidate)) => candidates.push(candidate),
+                        Ok(None) => {}
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (failure, scopes, candidates)
     }
 
     /// Renders admitted bundles in model rendering order with provenance
@@ -804,6 +754,90 @@ fn source_stamps(bundle: &InstructionBundle) -> Vec<SourceStamp> {
             }
         })
         .collect()
+}
+
+fn build_scope_data(
+    scopes: &[(InstructionScopeKind, PathBuf)],
+    selection: &AdmissionSelection,
+) -> Vec<InstructionScopeData> {
+    scopes
+        .iter()
+        .map(|(kind, dir)| {
+            let admitted = selection
+                .admitted
+                .iter()
+                .find(|candidate| &candidate.scope_dir == dir);
+            let ignored = selection
+                .ignored
+                .iter()
+                .find(|bundle| &bundle.display_path == dir);
+            InstructionScopeData {
+                display_path: dir.clone(),
+                kind: *kind,
+                revision: admitted
+                    .map(|candidate| candidate.metadata.revision.clone())
+                    .or_else(|| ignored.map(|bundle| bundle.revision.clone())),
+                token_estimate: admitted
+                    .map_or(0, |candidate| candidate.metadata.token_estimate)
+                    .max(ignored.map_or(0, |bundle| bundle.token_estimate)),
+            }
+        })
+        .collect()
+}
+
+fn build_replacements_and_outcome(
+    selection: &AdmissionSelection,
+    state: &AgentInstructionState,
+    request: &InstructionReconcileRequest,
+    failure: Option<&InstructionError>,
+) -> (Vec<InstructionReplacement>, InstructionEpochOutcome) {
+    let mut replacements = Vec::new();
+    for candidate in &selection.admitted {
+        if let Some(previous) = state.visible_revisions.get(&candidate.scope_dir)
+            && previous != &candidate.metadata.revision
+        {
+            replacements.push(InstructionReplacement {
+                display_path: candidate.scope_dir.clone(),
+                previous_revision: previous.clone(),
+                new_revision: candidate.metadata.revision.clone(),
+            });
+        }
+    }
+
+    let current_scope_removed = state.visible_revisions.keys().any(|scope| {
+        request
+            .target_directories
+            .iter()
+            .any(|target| target.starts_with(scope))
+            && !selection
+                .admitted
+                .iter()
+                .any(|candidate| &candidate.scope_dir == scope)
+    });
+
+    let outcome = if failure.is_some() {
+        InstructionEpochOutcome::Blocked
+    } else if !selection.ignored.is_empty() {
+        InstructionEpochOutcome::PartiallyLoaded
+    } else if !replacements.is_empty() {
+        InstructionEpochOutcome::Updated
+    } else if current_scope_removed {
+        InstructionEpochOutcome::Removed
+    } else if selection.admitted.iter().any(|candidate| {
+        state.visited_revisions.contains_key(&candidate.scope_dir)
+            && !state.active_scopes.contains(&candidate.scope_dir)
+    }) {
+        InstructionEpochOutcome::Reactivated
+    } else if request.kind == InstructionReconcileKind::Baseline
+        && state.visible_generation == 0
+        && state.visible_revisions.is_empty()
+    {
+        InstructionEpochOutcome::Ready
+    } else {
+        InstructionEpochOutcome::Activated
+    };
+
+    (replacements, outcome)
 }
 
 fn candidate_from_bundle(

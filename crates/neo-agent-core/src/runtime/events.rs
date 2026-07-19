@@ -96,11 +96,6 @@ impl EventEmitter {
             AgentEvent::TodoUpdated { todos, .. } => {
                 context.todos.clone_from(todos);
             }
-            AgentEvent::RetryScheduled { .. }
-            | AgentEvent::RetryStarted { .. }
-            | AgentEvent::RetryResumed { .. }
-            | AgentEvent::RetrySucceeded { .. }
-            | AgentEvent::RetryExhausted { .. } => {}
             _ => {}
         }
     }
@@ -390,12 +385,15 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
 
 pub(super) fn emit_terminal_events(
     turn: u32,
-    arguments: &serde_json::Value,
+    arguments: Option<&serde_json::Value>,
     tool_call: &AgentToolCall,
     result: &ToolResult,
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
+    let Some(arguments) = arguments else {
+        return;
+    };
     if tool_call.name.as_ref() != "Terminal" {
         return;
     }
@@ -579,7 +577,7 @@ mod tests {
 
         emit_terminal_events(
             3,
-            &json!({ "mode": "read" }),
+            Some(&json!({ "mode": "read" })),
             &call,
             &result,
             &context,

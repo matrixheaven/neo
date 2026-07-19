@@ -128,6 +128,48 @@ impl InteractiveController {
         let Some(mut turn) = self.active_turn.take() else {
             return Ok(FrameRequest::None);
         };
+        let mut frame_request = self.drain_turn_channels(&mut turn);
+
+        if turn.task.is_finished() {
+            let turn_result = turn
+                .task
+                .await
+                .map_err(|error| anyhow::anyhow!("interactive turn task failed: {error}"))?;
+            // Turn-driver errors are already forwarded through the event channel
+            // and rendered into the transcript. Keep the interactive shell alive.
+            match turn_result {
+                Ok(outcome) => {
+                    if let Some(session_id) = outcome.session_id {
+                        // `turn.task` was moved by `.await`; remaining fields are accessible.
+                        self.bind_instruction_registry_to_session(
+                            &session_id,
+                            turn.instruction_registry.as_ref(),
+                        );
+                        self.set_active_session_id(session_id.clone());
+                        self.refresh_terminal_title_for_session(&session_id);
+                    }
+                }
+                Err(error) => {
+                    self.tui
+                        .chrome_mut()
+                        .apply_stream_update(StreamUpdate::Error {
+                            text: error.to_string(),
+                        });
+                    frame_request = frame_request.merge(FrameRequest::Coalesced);
+                }
+            }
+            if self.refresh_git_status_now() {
+                frame_request = frame_request.merge(FrameRequest::Coalesced);
+            }
+            self.start_next_queued_after_turn().await?;
+            frame_request = frame_request.merge(FrameRequest::Coalesced);
+        } else {
+            self.active_turn = Some(turn);
+        }
+        Ok(frame_request)
+    }
+
+    fn drain_turn_channels(&mut self, turn: &mut RunningTurn) -> FrameRequest {
         let mut frame_request = FrameRequest::None;
 
         while let Ok(session_id) = turn.session_ids.try_recv() {
@@ -161,74 +203,7 @@ impl InteractiveController {
                 }
             }
         }
-
-        if turn.task.is_finished() {
-            let turn_result = turn
-                .task
-                .await
-                .map_err(|error| anyhow::anyhow!("interactive turn task failed: {error}"))?;
-            while let Ok(session_id) = turn.session_ids.try_recv() {
-                self.bind_instruction_registry_to_session(
-                    &session_id,
-                    turn.instruction_registry.as_ref(),
-                );
-                self.set_active_session_id(session_id);
-                frame_request = frame_request.merge(FrameRequest::Coalesced);
-            }
-            while let Ok(approval) = turn.approvals.try_recv() {
-                self.register_pending_approval(approval);
-            }
-            while let Ok(pending) = turn.questions.try_recv() {
-                neo_tui::notify::notify_event(
-                    self.question_notification,
-                    neo_tui::notify::EventKind::Question,
-                );
-                self.register_pending_question(pending);
-                frame_request = frame_request.merge(FrameRequest::Immediate);
-            }
-            while let Ok(event) = turn.events.try_recv() {
-                match event {
-                    Ok(event) => {
-                        self.notify_for_event(&event);
-                        frame_request = frame_request.merge(self.apply_turn_event(event));
-                    }
-                    Err(error) => {
-                        self.push_status(format!("Error: {error}"));
-                        frame_request = frame_request.merge(FrameRequest::Coalesced);
-                    }
-                }
-            }
-            // Turn-driver errors are already forwarded through the event channel
-            // and rendered into the transcript. Keep the interactive shell alive.
-            match turn_result {
-                Ok(outcome) => {
-                    if let Some(session_id) = outcome.session_id {
-                        self.bind_instruction_registry_to_session(
-                            &session_id,
-                            turn.instruction_registry.as_ref(),
-                        );
-                        self.set_active_session_id(session_id.clone());
-                        self.refresh_terminal_title_for_session(&session_id);
-                    }
-                }
-                Err(error) => {
-                    self.tui
-                        .chrome_mut()
-                        .apply_stream_update(StreamUpdate::Error {
-                            text: error.to_string(),
-                        });
-                    frame_request = frame_request.merge(FrameRequest::Coalesced);
-                }
-            }
-            if self.refresh_git_status_now() {
-                frame_request = frame_request.merge(FrameRequest::Coalesced);
-            }
-            self.start_next_queued_after_turn().await?;
-            frame_request = frame_request.merge(FrameRequest::Coalesced);
-        } else {
-            self.active_turn = Some(turn);
-        }
-        Ok(frame_request)
+        frame_request
     }
 
     pub(super) async fn start_next_queued_after_turn(&mut self) -> Result<()> {

@@ -2181,111 +2181,7 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
     let mut tool_args: HashMap<String, serde_json::Value> = HashMap::new();
     for event in events {
         if apply_retry_activity(&mut activity, &mut attempt_start, event).is_none() {
-            match event {
-                AgentEvent::ToolExecutionQueued {
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    tool_args.insert(id.clone(), arguments.clone());
-                    let _ = upsert_queued_tool_activity(
-                        &mut activity,
-                        id,
-                        name,
-                        summarize_tool_arguments(arguments),
-                        now_ms(),
-                    );
-                }
-                AgentEvent::ToolExecutionQueueUpdated {
-                    id,
-                    position,
-                    waiting_ms,
-                    ..
-                } => {
-                    let _ = update_queued_tool_activity(
-                        &mut activity,
-                        id,
-                        *position,
-                        now_ms().saturating_sub(*waiting_ms),
-                    );
-                }
-                AgentEvent::ToolExecutionStarted {
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    tool_args.insert(id.clone(), arguments.clone());
-                    upsert_tool_activity(
-                        &mut activity,
-                        id,
-                        name,
-                        summarize_tool_arguments(arguments),
-                        AgentToolActivityPhase::Ongoing,
-                        None,
-                    );
-                }
-                AgentEvent::ToolExecutionFinished {
-                    id, name, result, ..
-                } => {
-                    let phase = if result.is_error {
-                        AgentToolActivityPhase::Failed
-                    } else {
-                        AgentToolActivityPhase::Done
-                    };
-                    let summary = tool_args
-                        .get(id)
-                        .and_then(summarize_tool_arguments)
-                        .or_else(|| last_tool_summary(activity.as_slice(), id));
-                    upsert_tool_activity(
-                        &mut activity,
-                        id,
-                        name,
-                        summary,
-                        phase,
-                        tool_output_preview(name, result, false),
-                    );
-                }
-                AgentEvent::ToolExecutionUpdate {
-                    id,
-                    name,
-                    partial_result,
-                    ..
-                } => {
-                    let summary = tool_args
-                        .get(id)
-                        .and_then(summarize_tool_arguments)
-                        .or_else(|| last_tool_summary(activity.as_slice(), id));
-                    upsert_tool_activity(
-                        &mut activity,
-                        id,
-                        name,
-                        summary,
-                        AgentToolActivityPhase::Ongoing,
-                        tool_output_preview(name, partial_result, true),
-                    );
-                }
-                AgentEvent::MessageAppended {
-                    message: AgentMessage::Assistant { content, .. },
-                } => {
-                    let text = content_text(content);
-                    let canonical_text = bounded_latest_text(&text);
-                    if !canonical_text.is_empty()
-                        && latest_text_activity(activity.as_slice(), false).as_deref()
-                            != Some(canonical_text.as_str())
-                    {
-                        let _ = append_text_activity(&mut activity, attempt_start, &text, false);
-                    }
-                }
-                AgentEvent::ThinkingDelta { text, .. } => {
-                    let _ = append_text_activity(&mut activity, attempt_start, text, true);
-                }
-                AgentEvent::TextDelta { text, .. } => {
-                    let _ = append_text_activity(&mut activity, attempt_start, text, false);
-                }
-                _ => {}
-            }
+            apply_activity_event(&mut activity, attempt_start, &mut tool_args, event);
         }
         if matches!(
             event,
@@ -2298,6 +2194,138 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
         attempt_start = attempt_start.saturating_sub(trim_activity(&mut activity));
     }
     activity
+}
+
+fn apply_activity_event(
+    activity: &mut Vec<AgentActivityEntry>,
+    attempt_start: usize,
+    tool_args: &mut HashMap<String, serde_json::Value>,
+    event: &AgentEvent,
+) {
+    if apply_tool_activity_event(activity, tool_args, event) {
+        return;
+    }
+    match event {
+        AgentEvent::MessageAppended {
+            message: AgentMessage::Assistant { content, .. },
+        } => {
+            let text = content_text(content);
+            let canonical_text = bounded_latest_text(&text);
+            if !canonical_text.is_empty()
+                && latest_text_activity(activity.as_slice(), false).as_deref()
+                    != Some(canonical_text.as_str())
+            {
+                let _ = append_text_activity(activity, attempt_start, &text, false);
+            }
+        }
+        AgentEvent::ThinkingDelta { text, .. } => {
+            let _ = append_text_activity(activity, attempt_start, text, true);
+        }
+        AgentEvent::TextDelta { text, .. } => {
+            let _ = append_text_activity(activity, attempt_start, text, false);
+        }
+        _ => {}
+    }
+}
+
+/// Process tool-related activity events. Returns `true` if the event was handled.
+fn apply_tool_activity_event(
+    activity: &mut Vec<AgentActivityEntry>,
+    tool_args: &mut HashMap<String, serde_json::Value>,
+    event: &AgentEvent,
+) -> bool {
+    match event {
+        AgentEvent::ToolExecutionQueued {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
+            tool_args.insert(id.clone(), arguments.clone());
+            let _ = upsert_queued_tool_activity(
+                activity,
+                id,
+                name,
+                summarize_tool_arguments(arguments),
+                now_ms(),
+            );
+            true
+        }
+        AgentEvent::ToolExecutionQueueUpdated {
+            id,
+            position,
+            waiting_ms,
+            ..
+        } => {
+            let _ = update_queued_tool_activity(
+                activity,
+                id,
+                *position,
+                now_ms().saturating_sub(*waiting_ms),
+            );
+            true
+        }
+        AgentEvent::ToolExecutionStarted {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
+            tool_args.insert(id.clone(), arguments.clone());
+            upsert_tool_activity(
+                activity,
+                id,
+                name,
+                summarize_tool_arguments(arguments),
+                AgentToolActivityPhase::Ongoing,
+                None,
+            );
+            true
+        }
+        AgentEvent::ToolExecutionFinished {
+            id, name, result, ..
+        } => {
+            let phase = if result.is_error {
+                AgentToolActivityPhase::Failed
+            } else {
+                AgentToolActivityPhase::Done
+            };
+            let summary = tool_args
+                .get(id)
+                .and_then(summarize_tool_arguments)
+                .or_else(|| last_tool_summary(activity.as_slice(), id));
+            upsert_tool_activity(
+                activity,
+                id,
+                name,
+                summary,
+                phase,
+                tool_output_preview(name, result, false),
+            );
+            true
+        }
+        AgentEvent::ToolExecutionUpdate {
+            id,
+            name,
+            partial_result,
+            ..
+        } => {
+            let summary = tool_args
+                .get(id)
+                .and_then(summarize_tool_arguments)
+                .or_else(|| last_tool_summary(activity.as_slice(), id));
+            upsert_tool_activity(
+                activity,
+                id,
+                name,
+                summary,
+                AgentToolActivityPhase::Ongoing,
+                tool_output_preview(name, partial_result, true),
+            );
+            true
+        }
+        _ => false,
+    }
 }
 
 fn push_text_activity(
@@ -2564,7 +2592,7 @@ fn upsert_queued_tool_activity(
 }
 
 fn update_queued_tool_activity(
-    activity: &mut Vec<AgentActivityEntry>,
+    activity: &mut [AgentActivityEntry],
     id: &str,
     position: usize,
     queued_at_ms: u64,
@@ -2696,6 +2724,28 @@ fn compact_line(text: &str) -> String {
 
 fn trim_activity(activity: &mut Vec<AgentActivityEntry>) -> usize {
     const MAX_AGENT_ACTIVITY: usize = 24;
+    if activity.len() <= MAX_AGENT_ACTIVITY {
+        return 0;
+    }
+
+    // Find the latest ongoing tool entry. If found, move it to the end so the
+    // plain drain-from-front keeps it.
+    let ongoing_index = activity.iter().rposition(|entry| {
+        matches!(
+            &entry.kind,
+            AgentActivityKind::Tool {
+                phase: AgentToolActivityPhase::Ongoing,
+                ..
+            }
+        )
+    });
+
+    if let Some(index) = ongoing_index {
+        // Move the latest ongoing tool to the very end.
+        let entry = activity.remove(index);
+        activity.push(entry);
+    }
+
     let excess = activity.len().saturating_sub(MAX_AGENT_ACTIVITY);
     activity.drain(..excess);
     excess

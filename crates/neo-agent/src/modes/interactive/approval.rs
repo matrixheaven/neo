@@ -22,13 +22,13 @@ impl InteractiveController {
             if let Ok(resolution) = pending.request.validate_response(&response) {
                 self.tui
                     .transcript_mut()
-                    .resolve_approval(&request_id, resolution);
+                    .resolve_approval(&request_id, &resolution);
             }
             let _ = pending.response_tx.send(response);
         }
         self.tui
             .transcript_mut()
-            .finalize_pending_approvals(ApprovalResolution::Cancelled {
+            .finalize_pending_approvals(&ApprovalResolution::Cancelled {
                 reason: ApprovalCancelReason::Interrupt,
             });
         had_pending
@@ -52,7 +52,7 @@ impl InteractiveController {
                 }
                 self.tui
                     .transcript_mut()
-                    .resolve_approval(&request_id, resolution);
+                    .resolve_approval(&request_id, &resolution);
             }
             let _ = pending.response_tx.send(response);
         }

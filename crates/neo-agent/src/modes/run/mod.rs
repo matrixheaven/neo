@@ -120,7 +120,7 @@ async fn run_prompt_with_retry_notices(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let user_message = user_message(content, MessageOrigin::User);
     record_session_activity(config, &session_id, &prompt_text);
-    let runtime = runtime_for_config(
+    let runtime = match runtime_for_config(
         config,
         Some(session_root_from_wire_path(&session_path)?),
         None,
@@ -132,7 +132,22 @@ async fn run_prompt_with_retry_notices(
         Arc::new(Mutex::new(None)),
         None,
     )
-    .await?;
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            // Persist user message so the session transcript is not empty
+            // when credential checks or other early failures prevent the
+            // runtime from emitting it.
+            writer
+                .append_event(&AgentEvent::MessageAppended {
+                    message: user_message,
+                })
+                .await?;
+            writer.flush().await?;
+            return Err(error);
+        }
+    };
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),

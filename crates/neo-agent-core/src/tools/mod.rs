@@ -245,7 +245,7 @@ pub struct ToolContext {
     pub tool_event: Option<ToolEventCallback>,
     /// Optional shell-admission lifecycle callback. Installed by tool dispatch
     /// after permission for Bash and Terminal Start so queue/start events stay
-    /// off the ToolResult / model-context path.
+    /// off the `ToolResult` / model-context path.
     pub shell_admission_callback: Option<ShellAdmissionCallback>,
 }
 

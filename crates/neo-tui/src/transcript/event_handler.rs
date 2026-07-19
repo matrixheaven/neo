@@ -351,7 +351,7 @@ impl TranscriptPane {
             } => {
                 // Resolve the matching card by request id. Canonical label and
                 // action come from the event; interactive feedback is cleared.
-                self.resolve_approval(request_id, resolution.clone());
+                self.resolve_approval(request_id, resolution);
                 true
             }
             AgentEvent::ToolExecutionUpdate {
@@ -993,11 +993,12 @@ fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Op
             "Run stopped after turn {turn}: response hit the output length cap (max_tokens). \
              Raise [models.<alias>].max_output_tokens or [runtime].max_tokens to continue."
         )),
-        neo_agent_core::StopReason::Error => None,
+        neo_agent_core::StopReason::Error
+        | neo_agent_core::StopReason::EndTurn
+        | neo_agent_core::StopReason::ToolUse => None,
         neo_agent_core::StopReason::Cancelled => {
             Some(format!("Run stopped after turn {turn}: cancelled."))
         }
-        neo_agent_core::StopReason::EndTurn | neo_agent_core::StopReason::ToolUse => None,
     }
 }
 

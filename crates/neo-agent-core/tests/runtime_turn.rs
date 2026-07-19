@@ -160,13 +160,6 @@ fn revise_goal_with_feedback(request: &ApprovalRequest, feedback: &str) -> Appro
     }
 }
 
-fn approval_request_id(event: &AgentEvent) -> Option<&str> {
-    match event {
-        AgentEvent::ApprovalRequested { request } => Some(request.id.as_str()),
-        _ => None,
-    }
-}
-
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
     let harness = FakeHarness::from_events([
@@ -1330,9 +1323,8 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
     );
     // After the second compaction, the context should contain:
     // 1. The injected compaction summary system message
-    // 2. The third user prompt
-    // 3. The third assistant response
-    assert_eq!(context.messages().len(), 3);
+    // 2. The third assistant response
+    assert_eq!(context.messages().len(), 2);
     assert!(matches!(
         context.messages().first(),
         Some(AgentMessage::System { .. })
@@ -4121,7 +4113,7 @@ async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() 
                     result
                 }
             })
-            .with_approval_handler(|request| permit_once(request)),
+            .with_approval_handler(permit_once),
         harness.client(),
         tools,
     );
@@ -6452,7 +6444,7 @@ async fn exit_plan_mode_generic_approval_has_no_selected_approach() {
     )));
 }
 
-/// Typed plan selection reaches the ExitPlanMode tool result details without
+/// Typed plan selection reaches the `ExitPlanMode` tool result details without
 /// a side map keyed by tool id.
 #[tokio::test]
 async fn exit_plan_mode_typed_selection_reaches_tool_result() {
@@ -6529,8 +6521,8 @@ async fn exit_plan_mode_typed_selection_reaches_tool_result() {
     ));
 }
 
-/// RejectGoal and ReviseGoal must not create a durable goal and must leave
-/// goal authoring pending (no GoalStarted).
+/// `RejectGoal` and `ReviseGoal` must not create a durable goal and must leave
+/// goal authoring pending (no `GoalStarted`).
 #[tokio::test]
 async fn exit_goal_mode_reject_and_revise_create_no_goal() {
     let home = tempfile::tempdir().expect("home");
@@ -8649,7 +8641,7 @@ async fn collect_approval_request_for_tool(
             .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace)
             .expect("workspace root")
-            .with_approval_handler(|request| permit_once(request)),
+            .with_approval_handler(permit_once),
         harness.client(),
         ToolRegistry::with_builtin_tools(),
     );
@@ -8852,7 +8844,7 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
         .with_permission_mode(PermissionMode::Ask)
         .with_workspace_root(workspace.path())
         .expect("workspace root")
-        .with_approval_handler(|request| permit_for_session(request));
+        .with_approval_handler(permit_for_session);
     let prefix_store = Arc::clone(&config.prefix_approval_rules);
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -8912,7 +8904,7 @@ async fn allow_for_prefix_persists_prefix_rule() {
         .with_permission_mode(PermissionMode::Ask)
         .with_workspace_root(workspace.path())
         .expect("workspace root")
-        .with_approval_handler(|request| permit_for_prefix(request));
+        .with_approval_handler(permit_for_prefix);
     let prefix_store = Arc::clone(&config.prefix_approval_rules);
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
@@ -9022,7 +9014,7 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
             .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace root")
-            .with_approval_handler(|request| permit_once(request)),
+            .with_approval_handler(permit_once),
         harness.client(),
         ToolRegistry::with_builtin_tools(),
     );
@@ -9302,7 +9294,7 @@ async fn apply_preflight_baseline(
     config: &AgentConfig,
     context: &mut AgentContext,
 ) -> String {
-    let (epoch, fingerprint) = match fixture
+    let InstructionPreflightDecision::Defer { epoch, fingerprint } = fixture
         .registry
         .reconcile(
             InstructionReconcileRequest {
@@ -9315,9 +9307,8 @@ async fn apply_preflight_baseline(
             context.instruction_state(),
         )
         .await
-    {
-        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
-        _ => panic!("expected baseline Defer"),
+    else {
+        panic!("expected baseline Defer")
     };
     let authority = epoch.model_content.clone().expect("baseline authority");
     InstructionContextBridge::apply_epoch(context, &epoch, &fingerprint);
@@ -9542,7 +9533,10 @@ async fn retained_blocked_notice_does_not_replace_compacted_authority() {
     context.append_message(AgentMessage::user_text("ordinary history"));
     std::fs::write(fixture.workspace.join("AGENTS.md"), "@./missing.md\n")
         .expect("break root bundle");
-    let (blocked, blocked_fingerprint) = match fixture
+    let InstructionPreflightDecision::Block {
+        epoch: blocked,
+        fingerprint: blocked_fingerprint,
+    } = fixture
         .registry
         .reconcile(
             InstructionReconcileRequest {
@@ -9555,9 +9549,8 @@ async fn retained_blocked_notice_does_not_replace_compacted_authority() {
             context.instruction_state(),
         )
         .await
-    {
-        InstructionPreflightDecision::Block { epoch, fingerprint } => (epoch, fingerprint),
-        _ => panic!("expected Block"),
+    else {
+        panic!("expected Block")
     };
     let blocked_notice = blocked.model_content.clone().expect("blocked notice");
     InstructionContextBridge::apply_epoch(&mut context, &blocked, &blocked_fingerprint);
@@ -10472,7 +10465,7 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
     let decision_receiver = Arc::new(Mutex::new(Some(decision_receiver)));
     let config = preflight_config(&fixture, &second_harness)
         .with_permission_mode(PermissionMode::Ask)
-        .with_async_approval_handler(move |request| {
+        .with_async_approval_handler(move |_request| {
             let receiver = decision_receiver
                 .lock()
                 .expect("decision receiver lock")

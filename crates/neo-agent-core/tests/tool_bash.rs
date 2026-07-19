@@ -437,7 +437,7 @@ async fn bash_foreground_returns_after_shell_exits_with_inherited_background_out
             &context,
             json!({
                 "command": "sleep 5 & printf done",
-                "timeout": 10
+                "timeout_secs": 300
             }),
         ),
     )
@@ -463,7 +463,6 @@ async fn bash_foreground_reports_missing_cd_promptly() {
             &context,
             json!({
                 "command": "cd /definitely/not/a/neo/workspace && printf nope",
-                "timeout": 10
             }),
         ),
     )
@@ -505,7 +504,7 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
     assert!(result.content.contains("[output truncated]"));
     assert!(!result.content.contains("secret-leak-tail"));
     assert!(!serialized.contains("secret-leak-tail"));
-    let details = result.details.expect("details");
+    let details = result.details.as_ref().expect("details");
     assert_eq!(details["stdout"], "keep");
     assert_eq!(details["stdout_truncated"], true);
 }
@@ -571,7 +570,6 @@ async fn bash_foreground_kills_child_when_cancel_token_is_cancelled() {
                 &context,
                 json!({
                     "command": "printf $$ > child.pid; sleep 5",
-                    "timeout": 10
                 }),
             )
             .await
@@ -626,7 +624,6 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
                 &context,
                 json!({
                     "command": "sleep 5 & echo $! > descendant.pid; wait",
-                    "timeout": 10
                 }),
             )
             .await

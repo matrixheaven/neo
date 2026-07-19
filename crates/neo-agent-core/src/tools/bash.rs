@@ -159,7 +159,7 @@ async fn acquire_shell_permit(
     Ok(permit)
 }
 
-fn emit_admission_started(callback: &Option<ShellAdmissionCallback>) {
+fn emit_admission_started(callback: Option<&ShellAdmissionCallback>) {
     if let Some(callback) = callback {
         callback(ShellAdmissionEvent::Started);
     }
@@ -366,9 +366,9 @@ async fn run_command(
     .await?;
     match result.outcome {
         ShellCommandOutcome::TimedOut => Err(ToolError::CommandTimedOut {
-            timeout_ms: timeout_duration
-                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-                .unwrap_or(0),
+            timeout_ms: timeout_duration.map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            }),
         }),
         ShellCommandOutcome::Cancelled => Err(ToolError::Cancelled),
         ShellCommandOutcome::ResourceLimited
@@ -434,7 +434,7 @@ async fn execute_shell_command_with_permit(
         .shell_runtime
         .limits()
         .clamp_output_bytes(Some(request.max_output_bytes));
-    emit_admission_started(&request.admission_callback);
+    emit_admission_started(request.admission_callback.as_ref());
     let client = GuardianClient::start_bash(
         &request.shell_runtime,
         BackgroundTaskManager::next_bash_task_id(),
@@ -472,7 +472,7 @@ async fn execute_manager_owned_shell_command(
         .shell_runtime
         .limits()
         .clamp_output_bytes(Some(request.max_output_bytes));
-    emit_admission_started(&request.admission_callback);
+    emit_admission_started(request.admission_callback.as_ref());
     let client = GuardianClient::start_bash(
         &request.shell_runtime,
         task_id.clone(),
@@ -665,7 +665,7 @@ async fn start_background_command(
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
-    emit_admission_started(&ctx.shell_admission_callback);
+    emit_admission_started(ctx.shell_admission_callback.as_ref());
     let max_output_bytes = ctx
         .shell_runtime
         .limits()

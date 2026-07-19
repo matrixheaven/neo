@@ -131,7 +131,7 @@ pub(crate) enum ProviderError {
 pub(crate) fn stream_failure(code: Option<&str>, message: impl Into<String>) -> ProviderError {
     let message = message.into();
     let raw_code = code.unwrap_or_default().trim().to_lowercase();
-    let normalized = raw_code.replace('-', "_").replace(' ', "_");
+    let normalized = raw_code.replace(['-', ' '], "_");
     let status = if PERMANENT_QUOTA_CODES.contains(&raw_code.as_str()) {
         Some(402)
     } else {

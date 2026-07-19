@@ -422,16 +422,14 @@ enum InlineImagePayload {
 
 fn normalize_kitty_payload(bytes: &[u8], mime_type: &str) -> Option<Vec<u8>> {
     if mime_type == "image/png" {
-        // Kitty supports PNG directly. Try to decode/re-encode to normalize the
-        // payload, but fall back to the raw bytes if decoding fails (e.g., test
-        // stubs that only contain the PNG magic header).
+        // Kitty supports PNG directly.
         if let Ok(image) = image::load_from_memory_with_format(bytes, image::ImageFormat::Png) {
             let mut png = Cursor::new(Vec::new());
             if image.write_to(&mut png, image::ImageFormat::Png).is_ok() {
                 return Some(png.into_inner());
             }
         }
-        return Some(bytes.to_vec());
+        return None;
     }
     let input_format = match mime_type {
         "image/jpeg" => image::ImageFormat::Jpeg,

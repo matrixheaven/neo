@@ -396,7 +396,7 @@ fn terminal_mcp_status_ignores_late_connecting_update() {
 fn resolved_approval_ignores_repeated_request() {
     let mut pane = TranscriptPane::new(80, 12);
     request_test_approval(&mut pane);
-    pane.resolve_approval("approval-1", approved_resolution());
+    pane.resolve_approval("approval-1", &approved_resolution());
     let revision = pane.transcript().entry_revisions()[0];
 
     request_test_approval(&mut pane);
@@ -535,16 +535,17 @@ fn completed_thinking_stays_finalized_when_adjacent_thinking_starts() {
     store.append_thinking_delta("first");
     store.finish_thinking();
     let completed_id = store.entry_ids()[0];
+    assert_eq!(store.entry_finalization(0), Some(Finalization::Finalized));
 
+    // Adjacent thinking reopens the completed block so consecutive reasoning
+    // events render as one card. The entry is no longer finalized.
     store.start_thinking();
     store.append_thinking_delta("second");
 
-    assert_eq!(thinking_contents(&store), vec!["first", "second"]);
-    assert_eq!(store.entries().len(), 2);
+    assert_eq!(thinking_contents(&store), vec!["firstsecond"]);
+    assert_eq!(store.entries().len(), 1);
     assert_eq!(store.entry_ids()[0], completed_id);
-    assert_ne!(store.entry_ids()[1], completed_id);
-    assert_eq!(store.entry_finalization(0), Some(Finalization::Finalized));
-    assert_eq!(store.entry_finalization(1), Some(Finalization::Live));
+    assert_eq!(store.entry_finalization(0), Some(Finalization::Live));
 }
 
 #[test]

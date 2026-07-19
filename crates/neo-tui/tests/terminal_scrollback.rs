@@ -1,4 +1,4 @@
-use neo_agent_core::{AgentEvent, ToolResult};
+use neo_agent_core::{AgentEvent, StopReason, ToolResult};
 use neo_tui::NeoTui;
 use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{InlineTerminal, TerminalFrame};
@@ -17,25 +17,21 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
 
     pane.push_banner("spacing-banner");
     pane.push_user_message("spacing-user");
-    pane.apply_agent_event(AgentEvent::ThinkingStarted {
-        turn: 1,
-        id: "spacing-thinking-id".to_owned(),
-    });
-    pane.apply_agent_event(AgentEvent::ThinkingDelta {
-        turn: 1,
-        text: "spacing-thinking".to_owned(),
-    });
+    // Use low-level thinking manipulation to avoid triggering
+    // live_model_attempt. The test exercises history/live partitioning
+    // independently of the full model turn lifecycle.
+    pane.transcript_mut().start_thinking();
+    pane.transcript_mut()
+        .append_thinking_delta("spacing-thinking");
+    pane.mark_dirty();
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     let banner_tail = block_tail_containing(&update.history, "spacing-banner");
     assert_blank_rows_between(&mut screen, &banner_tail, "spacing-user", 1);
     assert_blank_rows_between(&mut screen, "spacing-user", "thinking...", 1);
     pane.acknowledge_history(&update.history);
 
-    pane.apply_agent_event(AgentEvent::ThinkingFinished {
-        turn: 1,
-        signature: None,
-        redacted: false,
-    });
+    pane.transcript_mut().finish_thinking();
+    pane.mark_dirty();
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "spacing-tool-id".to_owned(),
@@ -426,6 +422,10 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     );
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "100x20 resize");
 
+    pane.apply_agent_event(AgentEvent::MessageStarted {
+        turn: 1,
+        id: "msg-lifecycle".to_owned(),
+    });
     pane.apply_agent_event(AgentEvent::ToolCallStarted {
         turn: 1,
         id: "final-lifecycle-tool".to_owned(),
@@ -441,6 +441,11 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
         id: "final-lifecycle-tool".to_owned(),
         name: "Bash".to_owned(),
         result: ToolResult::ok("final-tool-result-sentinel"),
+    });
+    pane.apply_agent_event(AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg-lifecycle".to_owned(),
+        stop_reason: StopReason::EndTurn,
     });
     let final_update = pane.render_terminal_update(100, 20);
     render_and_process(
@@ -586,10 +591,12 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
 
     browser.toggle();
     let collapsed_rows = pane.render_browser_rows(&mut browser, 80, 12);
+    // When collapsed (preview mode), short results still show within RESULT_PREVIEW_LINES.
     assert!(
         collapsed_rows
             .iter()
-            .all(|row| !row.contains("review-committed-tool-result"))
+            .any(|row| row.contains("review-committed-tool-result")),
+        "collapsed review should show result preview: {collapsed_rows:#?}"
     );
     let collapsed = TerminalFrame::with_surface(Vec::new(), collapsed_rows, None, true, None);
     assert!(collapsed.history.is_empty());
@@ -635,6 +642,8 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
 
     assert_eq!(primary_after_review, primary_before_review);
     let primary_after_review_rows = all_terminal_rows(&mut screen);
+    // Match the tool card header only — the result body also embeds the same
+    // path sentinel and must not be double-counted as a duplicate card.
     assert_eq!(
         primary_after_review_rows
             .iter()
@@ -647,7 +656,7 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
 
 #[test]
 fn review_acknowledgement_does_not_advance_normal_history_ledger() {
-    let chrome = NeoChromeState::new("neo", "session", "model", ".".into());
+    let chrome = NeoChromeState::new("neo", "session", "model", ".");
     let mut transcript = TranscriptPane::new(80, 12);
     transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 1,

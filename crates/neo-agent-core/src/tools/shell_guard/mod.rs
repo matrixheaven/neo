@@ -471,7 +471,7 @@ mod tests {
             ..ShellLimits::default()
         };
         let runtime = ShellRuntime::for_tests(limits);
-        let guard = runtime.guard_limits(Some(Duration::from_secs(60)), limits.max_output_bytes);
+        let guard = runtime.guard_limits(Some(Duration::from_mins(1)), limits.max_output_bytes);
         assert_eq!(guard.max_command_descendant_processes, 32);
         assert_eq!(guard.max_command_memory_percent, 25);
         assert_eq!(guard.timeout_ms, Some(60_000));

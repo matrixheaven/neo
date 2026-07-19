@@ -393,11 +393,8 @@ impl InlineTerminal {
     /// Apply a resize without generation checks (test helper).
     pub fn resize_for_test(&mut self, width: u16, height: u16) {
         let generation = self.geometry.generation.saturating_add(1);
-        let cursor_row = self
-            .geometry
-            .cursor_row
-            .min(height.saturating_sub(1).max(0));
-        let cursor_col = self.geometry.cursor_col.min(width.saturating_sub(1).max(0));
+        let cursor_row = self.geometry.cursor_row.min(height.saturating_sub(1));
+        let cursor_col = self.geometry.cursor_col.min(width.saturating_sub(1));
         let _ = self.resize(width, height, cursor_col, cursor_row, generation);
     }
 

@@ -351,33 +351,30 @@ fn handle_request(
     response_tx: &mpsc::Sender<GuardResponse>,
     response_open: &mut bool,
 ) -> Option<SupervisionBreak> {
-    match request {
-        GuardRequest::Stop { request_id } => {
-            let error = send_response_or_close(
-                response_tx,
-                GuardResponse::Ack {
-                    request_id: *request_id,
-                },
-                response_open,
-            );
-            let status_kind = if error.is_some() {
-                GuardStatusKind::ParentExited
-            } else {
-                GuardStatusKind::Cancelled
-            };
-            Some((status_kind, None, None, error))
-        }
-        _ => {
-            let error = send_response_or_close(
-                response_tx,
-                GuardResponse::Error {
-                    request_id: 0,
-                    message: "request is not valid for Bash".to_owned(),
-                },
-                response_open,
-            );
-            error.map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
-        }
+    if let GuardRequest::Stop { request_id } = request {
+        let error = send_response_or_close(
+            response_tx,
+            GuardResponse::Ack {
+                request_id: *request_id,
+            },
+            response_open,
+        );
+        let status_kind = if error.is_some() {
+            GuardStatusKind::ParentExited
+        } else {
+            GuardStatusKind::Cancelled
+        };
+        Some((status_kind, None, None, error))
+    } else {
+        let error = send_response_or_close(
+            response_tx,
+            GuardResponse::Error {
+                request_id: 0,
+                message: "request is not valid for Bash".to_owned(),
+            },
+            response_open,
+        );
+        error.map(|error| (GuardStatusKind::ParentExited, None, None, Some(error)))
     }
 }
 

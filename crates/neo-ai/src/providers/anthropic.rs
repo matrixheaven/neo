@@ -427,7 +427,7 @@ fn stream_response(
         .scan(IncrementalSse::default(), |state, chunk| {
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
-                StreamChunk::Data(Err(_)) if state.stopped => Vec::new(),
+                StreamChunk::Data(Err(_)) | StreamChunk::End if state.stopped => Vec::new(),
                 StreamChunk::Data(Err(err)) => {
                     if state.saw_done || state.parser.saw_terminal() {
                         state.finish()
@@ -438,7 +438,6 @@ fn stream_response(
                         })]
                     }
                 }
-                StreamChunk::End if state.stopped => Vec::new(),
                 StreamChunk::End => state.finish(),
             }))
         })

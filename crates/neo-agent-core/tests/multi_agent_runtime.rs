@@ -1909,7 +1909,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
             },
         ]);
         for event in events {
-            runtime.apply_child_event(&child.id, started_at, &event);
+            let _ = runtime.apply_child_event(&child.id, started_at, &event);
         }
         let snapshot = runtime
             .agent_snapshot(child.id.as_str())
@@ -2375,9 +2375,9 @@ impl ModelClient for DelayedTurnModel {
 }
 
 fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
-    let harness = FakeHarness::from_turns([vec![
+    let turn_done = vec![
         AiStreamEvent::MessageStart {
-            id: "msg_1".to_owned(),
+            id: "msg_x".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
@@ -2386,7 +2386,8 @@ fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
-    ]]);
+    ];
+    let harness = FakeHarness::from_turns((0..10).map(|_| turn_done.clone()));
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext::new(dir.path()).unwrap().with_child_runtime(
         AgentConfig::for_model(harness.model())
