@@ -4873,7 +4873,7 @@ async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
 }
 
 #[tokio::test]
-async fn runtime_emits_shell_finished_when_model_bash_times_out() {
+async fn runtime_returns_actionable_error_for_out_of_range_bash_timeout() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
             id: "msg_1".to_owned(),
@@ -4885,8 +4885,8 @@ async fn runtime_emits_shell_finished_when_model_bash_times_out() {
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
             raw_arguments: json!({
-                "command": "printf before-timeout; sleep 5",
-                "timeout_secs": 1
+                "command": "printf should-not-run",
+                "timeout_secs": 299
             })
             .to_string(),
         },
@@ -4908,30 +4908,13 @@ async fn runtime_emits_shell_finished_when_model_bash_times_out() {
     let mut context = AgentContext::new();
 
     let events = runtime
-        .run_turn(&mut context, AgentMessage::user_text("run shell timeout"))
+        .run_turn(&mut context, AgentMessage::user_text("run bounded shell"))
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should finish with tool error");
 
-    assert!(events.contains(&AgentEvent::ShellCommandStarted {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        command: "printf before-timeout; sleep 5".to_owned(),
-        cwd: workspace_root,
-        origin: ShellCommandOrigin::ModelBashTool,
-    }));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ShellCommandFinished {
-            turn: 1,
-            id,
-            origin: ShellCommandOrigin::ModelBashTool,
-            outcome: ShellCommandOutcome::TimedOut,
-            ..
-        } if id == "tool_1"
-    )));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::ToolExecutionFinished {
@@ -4940,11 +4923,7 @@ async fn runtime_emits_shell_finished_when_model_bash_times_out() {
             ..
         } if id == "tool_1"
             && result.is_error
-            && result
-                .details
-                .as_ref()
-                .and_then(|details| details["outcome"].as_str())
-                == Some("timed_out")
+            && result.content.contains("between 300 and 3600")
     )));
 }
 

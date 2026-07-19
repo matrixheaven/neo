@@ -48,6 +48,15 @@ use crate::runtime::AgentConfig;
 
 use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
 
+const MIN_SHELL_TIMEOUT_SECS: u64 = 300;
+const MAX_SHELL_TIMEOUT_SECS: u64 = 3_600;
+
+/// Format the actionable next step for a shell command that reached its deadline.
+#[must_use]
+pub const fn format_command_timeout() -> &'static str {
+    "Timed out. Increase or double timeout_secs within 300..=3600 and retry; if timeout_secs is already 3600 or the duration is uncertain, omit it."
+}
+
 /// Format a shell failure message from `exit_code` and optional Unix `signal`.
 ///
 /// Produces a precise, actionable line for tool results so the model does not
@@ -179,7 +188,9 @@ pub enum ToolError {
     PathOutsideWorkspace { path: PathBuf },
     #[error("invalid input for {tool}: {message}")]
     InvalidInput { tool: String, message: String },
-    #[error("command timed out after {timeout_ms} ms")]
+    #[error(
+        "command timed out after {timeout_ms} ms. Increase or double timeout_secs within 300..=3600 and retry; if timeout_secs is already 3600 or the duration is uncertain, omit it."
+    )]
     CommandTimedOut { timeout_ms: u64 },
     #[error("shell resource limit exceeded: {cause:?}")]
     ResourceLimited { cause: ResourceLimitCause },
@@ -752,6 +763,24 @@ where
     })
 }
 
+fn parse_shell_timeout_secs(
+    tool: &str,
+    timeout_secs: Option<u64>,
+) -> Result<Option<std::time::Duration>, ToolError> {
+    let Some(timeout_secs) = timeout_secs else {
+        return Ok(None);
+    };
+    if !(MIN_SHELL_TIMEOUT_SECS..=MAX_SHELL_TIMEOUT_SECS).contains(&timeout_secs) {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!(
+                "timeout_secs must be between {MIN_SHELL_TIMEOUT_SECS} and {MAX_SHELL_TIMEOUT_SECS} seconds inclusive; omit it for no execution timeout"
+            ),
+        });
+    }
+    Ok(Some(std::time::Duration::from_secs(timeout_secs)))
+}
+
 fn schema<T>() -> serde_json::Value
 where
     T: JsonSchema,
@@ -858,6 +887,17 @@ mod tests {
             format_shell_failure(None, None),
             "Command terminated before returning an exit code."
         );
+    }
+
+    #[test]
+    fn command_timeout_error_recommends_a_larger_or_omitted_timeout() {
+        let message = ToolError::CommandTimedOut {
+            timeout_ms: 300_000,
+        }
+        .to_string();
+
+        assert!(message.contains("Increase or double timeout_secs"));
+        assert!(message.contains("omit it"));
     }
 
     #[test]

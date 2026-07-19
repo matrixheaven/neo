@@ -17,8 +17,9 @@
 - Agent queues are FIFO per owner and round-robin between owners within each class.
 - Queueing has no item limit, TTL, admission timeout, ETA, task handle, or automatic background conversion.
 - Permission completes before enqueue; hard launch boundaries are checked again after grant and before spawn.
-- Omitted `timeout_secs` means no execution deadline; explicit values must be positive and queue time does not count.
-- The schema recommendation for potentially long-running work is language-neutral and uses `7200` seconds.
+- Omitted `timeout_secs` means no execution deadline; explicit values must be in `300..=3600` and queue time does not count.
+- Schema guidance is language-neutral and recommends omission for long-running or uncertain-duration work rather than guessing a deadline.
+- Timeout results tell the model to increase or double `timeout_secs` within `300..=3600` and retry, or omit it when already at `3600` or duration is uncertain.
 - Old timeout/config names and `SetBackgroundDeadline` are deleted without aliases or fallback paths.
 - Resource budgets are direct per command: parallelism `4`, descendants `32`, memory `25%`; capacity never divides them.
 - Real process/memory violations and unavailable sampling remain hard guardian failures.
@@ -409,8 +410,10 @@ fn bash_schema_uses_optional_timeout_secs_without_legacy_timeout() {
     let properties = schema["properties"].as_object().expect("properties");
     assert!(properties.contains_key("timeout_secs"));
     assert!(!properties.contains_key("timeout"));
-    let text = properties["timeout_secs"].to_string();
-    assert!(text.contains("7200"));
+    let timeout = &properties["timeout_secs"];
+    assert_eq!(timeout["minimum"], 300);
+    assert_eq!(timeout["maximum"], 3_600);
+    let text = timeout.to_string();
     assert!(!text.to_lowercase().contains("rust"));
     assert!(!text.to_lowercase().contains("cargo"));
 }
@@ -449,8 +452,10 @@ async fn terminal_timeout_is_valid_only_for_start() {
     let schema = TerminalTool.input_schema();
     let schema = schema.get("schema").unwrap_or(&schema);
     let properties = schema["properties"].as_object().expect("properties");
-    let timeout_schema = properties["timeout_secs"].to_string();
-    assert!(timeout_schema.contains("7200"));
+    let timeout = &properties["timeout_secs"];
+    assert_eq!(timeout["minimum"], 300);
+    assert_eq!(timeout["maximum"], 3_600);
+    let timeout_schema = timeout.to_string();
     assert!(!timeout_schema.to_lowercase().contains("rust"));
     assert!(!timeout_schema.to_lowercase().contains("cargo"));
     let temp = tempfile::tempdir().expect("tempdir");
@@ -466,11 +471,11 @@ async fn terminal_timeout_is_valid_only_for_start() {
     let error = TerminalTool
         .execute(
             &context,
-            json!({"mode": "start", "command": "printf ready", "timeout_secs": 0}),
+            json!({"mode": "start", "command": "printf ready", "timeout_secs": 299}),
         )
         .await
-        .expect_err("zero start timeout was accepted");
-    assert!(error.to_string().contains("timeout_secs must be positive"));
+        .expect_err("out-of-range start timeout was accepted");
+    assert!(error.to_string().contains("between 300 and 3600"));
 }
 
 #[test]
@@ -512,7 +517,7 @@ Expected: FAIL on the legacy Bash field, mandatory numeric deadline, and missing
 Use this schema text verbatim on Bash and Terminal Start:
 
 ```text
-Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. For potentially long-running work, prefer omission; if a limit is necessary, do not set it below 7200 seconds. Use shorter values only for commands that are explicitly expected to finish quickly.
+Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. When set, use a value from 300 seconds (5 minutes) to 3600 seconds (1 hour). For long-running or uncertain-duration work, prefer omission instead of guessing a deadline.
 ```
 
 The relevant final fields/signatures are:
@@ -521,7 +526,7 @@ The relevant final fields/signatures are:
 struct BashInput {
     command: String,
     cwd: Option<String>,
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 300, max = 3600))]
     timeout_secs: Option<u64>,
     run_in_background: Option<bool>,
     description: Option<String>,
@@ -535,7 +540,7 @@ struct TerminalInput {
     input: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 300, max = 3600))]
     timeout_secs: Option<u64>,
     max_output_bytes: Option<usize>,
 }
@@ -576,10 +581,10 @@ pub(crate) async fn GuardianClient::start_terminal(
 ) -> Result<Self, ToolError>;
 ```
 
-During this task, keep the existing fail-fast permit acquisition inside the guardian start path; Task 3 replaces it with queued acquisition and adds the permit parameters. Reject explicit zero before constructing `Duration`. Delete `ToolContext.bash_timeout`, `with_bash_timeout`, the timeout assignment in `with_shell_runtime`, both timeout fields from `ShellLimits` and `FileRuntimeShellConfig`, and both timeout assignments in `runtime_shell_from_file`.
+During this task, keep the existing fail-fast permit acquisition inside the guardian start path; Task 3 replaces it with queued acquisition and adds the permit parameters. Reject explicit values outside `300..=3600` before constructing `Duration`. Delete `ToolContext.bash_timeout`, `with_bash_timeout`, the timeout assignment in `with_shell_runtime`, both timeout fields from `ShellLimits` and `FileRuntimeShellConfig`, and both timeout assignments in `runtime_shell_from_file`.
 
 Rename only Bash input fixtures from `"timeout"` to `"timeout_secs"` in `tool_bash.rs`, `runtime_turn.rs`, and `tool_permissions.rs`; `TaskOutput.timeout` is a separate blocking-wait contract and remains unchanged. Remove the `with_bash_timeout` setup from permission tests. Replace `shell_mode_uses_spec_timeouts_for_user_commands` with `shell_mode_omits_execution_timeout_for_user_commands`, asserting `ShellExecutionRequest.timeout == None`.
-Rename `bash_requires_permission_and_honors_timeout` to `bash_requires_permission_and_rejects_zero_timeout_secs`; preserve its permission/output assertions and change its final assertion to `ToolError::InvalidInput` for explicit zero.
+Rename `bash_requires_permission_and_honors_timeout` to `bash_requires_permission_and_rejects_out_of_range_timeout_secs`; preserve its permission/output assertions and change its final assertion to `ToolError::InvalidInput` for an explicit out-of-range value.
 
 - [ ] **Step 4: Delete deadline mutation from IPC and detach**
 
@@ -622,7 +627,7 @@ Run:
 cargo test --package neo-agent --test tool_bash_guardian -- explicit_timeout_starts_after_guardian_start_and_kills_tree --exact --nocapture --include-ignored
 cargo test --package neo-agent --test tool_terminal_guardian -- terminal_start_accepts_no_execution_deadline --exact --nocapture --include-ignored
 cargo test --package neo-agent --bin neo -- modes::interactive::tests::shell_mode_omits_execution_timeout_for_user_commands --exact --nocapture --include-ignored
-cargo test --package neo-agent-core --test tool_permissions -- bash_requires_permission_and_rejects_zero_timeout_secs --exact --nocapture --include-ignored
+cargo test --package neo-agent-core --test tool_permissions -- bash_requires_permission_and_rejects_out_of_range_timeout_secs --exact --nocapture --include-ignored
 ```
 
 Expected after implementation: PASS.

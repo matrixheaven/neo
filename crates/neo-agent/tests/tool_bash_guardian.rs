@@ -314,29 +314,29 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
 }
 
 #[tokio::test]
-async fn background_bash_honors_explicit_timeout() {
+async fn background_bash_enforces_supported_timeout_range() {
     let workspace = tempfile::tempdir().expect("workspace");
     let ctx = guarded_context(&workspace, ShellLimits::default());
-    let zero = execute_model_bash_for_runtime(
+    let invalid = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "printf should-not-start",
             "run_in_background": true,
             "description": "invalid timeout",
-            "timeout_secs": 0
+            "timeout_secs": 299
         }),
     )
     .await
-    .expect_err("zero background timeout must be rejected");
-    assert!(zero.to_string().contains("timeout_secs must be positive"));
+    .expect_err("out-of-range background timeout must be rejected");
+    assert!(invalid.to_string().contains("between 300 and 3600"));
 
     let started = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
-            "command": if cfg!(windows) { "ping -n 31 127.0.0.1 >nul" } else { "sleep 30" },
+            "command": "printf completed",
             "run_in_background": true,
-            "description": "timed background command",
-            "timeout_secs": 1
+            "description": "bounded background command",
+            "timeout_secs": 300
         }),
     )
     .await
@@ -355,8 +355,9 @@ async fn background_bash_honors_explicit_timeout() {
         .expect("background output");
     assert_eq!(
         result.details.as_ref().expect("details")["status"],
-        "timed_out"
+        "completed"
     );
+    assert!(result.content.contains("completed"));
 }
 
 #[cfg(unix)]

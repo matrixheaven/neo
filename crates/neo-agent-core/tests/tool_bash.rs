@@ -124,27 +124,34 @@ async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
 }
 
 #[tokio::test]
-async fn model_bash_timeout_without_output_returns_visible_failure_text() {
+async fn bash_timeout_secs_enforces_supported_range() {
     let workspace = tempfile::tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path())
         .expect("context")
         .with_access(ToolAccess::all());
 
-    let result = execute_model_bash_for_runtime(
-        &context,
-        json!({
-            "command": "sleep 30",
-            "timeout_secs": 1,
-        }),
-    )
-    .await
-    .expect("model bash should return a tool result");
+    for timeout_secs in [299, 3_601] {
+        let error = execute_model_bash_for_runtime(
+            &context,
+            json!({"command": "printf ready", "timeout_secs": timeout_secs}),
+        )
+        .await
+        .expect_err("out-of-range timeout was accepted");
+        assert!(
+            error.to_string().contains("between 300 and 3600"),
+            "{error}"
+        );
+    }
 
-    assert!(result.is_error);
-    assert!(
-        result.content.contains("Timed out."),
-        "timeout with no shell output must still be visible to the model: {result:?}"
-    );
+    for timeout_secs in [300, 3_600] {
+        let result = execute_model_bash_for_runtime(
+            &context,
+            json!({"command": "printf ready", "timeout_secs": timeout_secs}),
+        )
+        .await
+        .expect("boundary timeout should be accepted");
+        assert_eq!(result.content, "ready");
+    }
 }
 
 #[test]
@@ -161,8 +168,10 @@ fn bash_schema_uses_optional_timeout_secs_without_legacy_timeout() {
     let properties = schema["properties"].as_object().expect("properties");
     assert!(properties.contains_key("timeout_secs"));
     assert!(!properties.contains_key("timeout"));
-    let text = properties["timeout_secs"].to_string();
-    assert!(text.contains("7200"));
+    let timeout = &properties["timeout_secs"];
+    assert_eq!(timeout["minimum"], 300);
+    assert_eq!(timeout["maximum"], 3_600);
+    let text = timeout.to_string();
     assert!(!text.to_lowercase().contains("rust"));
     assert!(!text.to_lowercase().contains("cargo"));
 }

@@ -11,7 +11,8 @@ use super::shell_guard::{
 };
 use super::{
     CommandOutput, ManagedBackgroundCommand, Tool, ToolContext, ToolError, ToolFuture, ToolResult,
-    ToolUpdateCallback, cap_plain_output, parse_input, schema,
+    ToolUpdateCallback, cap_plain_output, format_command_timeout, parse_input,
+    parse_shell_timeout_secs, schema,
 };
 use crate::{
     BackgroundTaskManager, BackgroundTaskStatus, ShellCommandOrigin, ShellCommandOutcome,
@@ -48,8 +49,8 @@ struct BashInput {
     )]
     cwd: Option<String>,
     #[schemars(
-        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. For potentially long-running work, prefer omission; if a limit is necessary, do not set it below 7200 seconds. Use shorter values only for commands that are explicitly expected to finish quickly.",
-        range(min = 1)
+        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. When set, use a value from 300 seconds (5 minutes) to 3600 seconds (1 hour). For long-running or uncertain-duration work, prefer omission instead of guessing a deadline.",
+        range(min = 300, max = 3600)
     )]
     timeout_secs: Option<u64>,
     #[schemars(
@@ -85,7 +86,7 @@ If `run_in_background=true`, the command will be started as a background task an
 
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.
-- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For potentially long-running work, prefer omitting `timeout_secs`; if a limit is necessary, do not set it below 7200 seconds.
+- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For long-running or uncertain-duration work, prefer omitting `timeout_secs`; when set, it must be between 300 and 3600 seconds.
 - Avoid using `..` to access files or directories outside the working directory.
 - Avoid modifying files outside the working directory unless explicitly instructed to do so.
 - Never run commands that require superuser privileges unless explicitly instructed to do so.
@@ -205,7 +206,7 @@ impl Tool for BashTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
-            let timeout = parse_timeout_secs(self.name(), input.timeout_secs)?;
+            let timeout = parse_shell_timeout_secs(self.name(), input.timeout_secs)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
             if input.run_in_background == Some(true) {
                 if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -277,7 +278,7 @@ fn shell_outcome_message(result: &ShellExecutionResult) -> Option<String> {
         ShellCommandOutcome::Completed => (result.exit_code != Some(0))
             .then(|| super::format_shell_failure(result.exit_code, result.signal)),
         ShellCommandOutcome::Cancelled => Some("Cancelled.".to_owned()),
-        ShellCommandOutcome::TimedOut => Some("Timed out.".to_owned()),
+        ShellCommandOutcome::TimedOut => Some(format_command_timeout().to_owned()),
         ShellCommandOutcome::ResourceLimited => {
             Some(super::format_resource_limit(result.resource_limit.as_ref()))
         }
@@ -317,7 +318,7 @@ pub async fn execute_model_bash_for_runtime(
 ) -> Result<ToolResult, ToolError> {
     ctx.ensure_shell_allowed()?;
     let input: BashInput = parse_input("Bash", input)?;
-    let timeout = parse_timeout_secs("Bash", input.timeout_secs)?;
+    let timeout = parse_shell_timeout_secs("Bash", input.timeout_secs)?;
     let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
     if input.run_in_background == Some(true) {
         if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -346,20 +347,6 @@ pub async fn execute_model_bash_for_runtime(
     )
     .await?;
     Ok(shell_command_result(&result))
-}
-
-fn parse_timeout_secs(
-    tool: &str,
-    timeout_secs: Option<u64>,
-) -> Result<Option<Duration>, ToolError> {
-    match timeout_secs {
-        None => Ok(None),
-        Some(0) => Err(ToolError::InvalidInput {
-            tool: tool.to_owned(),
-            message: "timeout_secs must be positive".to_owned(),
-        }),
-        Some(secs) => Ok(Some(Duration::from_secs(secs))),
-    }
 }
 
 async fn run_command(
@@ -706,4 +693,30 @@ async fn start_background_command(
             max_output_bytes,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timed_out_shell_result_includes_retry_guidance() {
+        let result = ShellExecutionResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            truncated: false,
+            outcome: ShellCommandOutcome::TimedOut,
+            foreground_task_id: None,
+            resource_limit: None,
+        };
+
+        let tool_result = shell_command_result(&result);
+
+        assert!(tool_result.is_error);
+        assert_eq!(tool_result.content, format_command_timeout());
+    }
 }

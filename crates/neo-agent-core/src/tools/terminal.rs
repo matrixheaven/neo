@@ -11,7 +11,8 @@ use super::shell_guard::{
     ShellAdmissionEvent, ShellAdmissionRequest, TerminalClientSession, TerminalClientState,
 };
 use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code, parse_input, schema,
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code, parse_input,
+    parse_shell_timeout_secs, schema,
 };
 use crate::session::MAIN_AGENT_ID;
 
@@ -39,8 +40,8 @@ struct TerminalInput {
     #[schemars(description = "Terminal rows. Defaults to 24 for start.")]
     rows: Option<u16>,
     #[schemars(
-        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. For potentially long-running work, prefer omission; if a limit is necessary, do not set it below 7200 seconds. Use shorter values only for commands that are explicitly expected to finish quickly. Valid only for mode=start.",
-        range(min = 1)
+        description = "Optional execution timeout in seconds. Omit this field to allow the command to run until it finishes or is cancelled. When set, use a value from 300 seconds (5 minutes) to 3600 seconds (1 hour). For long-running or uncertain-duration work, prefer omission instead of guessing a deadline. Valid only for mode=start.",
+        range(min = 300, max = 3600)
     )]
     timeout_secs: Option<u64>,
     #[schemars(description = "Maximum output bytes for read and stop.")]
@@ -94,12 +95,7 @@ impl Tool for TerminalTool {
                     message: "timeout_secs is valid only for start".to_owned(),
                 });
             }
-            if input.timeout_secs == Some(0) {
-                return Err(ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: "timeout_secs must be positive".to_owned(),
-                });
-            }
+            let timeout = parse_shell_timeout_secs(self.name(), input.timeout_secs)?;
             let max_output_bytes = input
                 .max_output_bytes
                 .unwrap_or(ctx.max_output_bytes)
@@ -112,7 +108,7 @@ impl Tool for TerminalTool {
                         input.cwd.as_deref(),
                         input.cols,
                         input.rows,
-                        input.timeout_secs.map(Duration::from_secs),
+                        timeout,
                     )
                     .await
                 }
@@ -550,8 +546,10 @@ mod tests {
         let schema = TerminalTool.input_schema();
         let schema = schema.get("schema").unwrap_or(&schema);
         let properties = schema["properties"].as_object().expect("properties");
-        let timeout_schema = properties["timeout_secs"].to_string();
-        assert!(timeout_schema.contains("7200"));
+        let timeout = &properties["timeout_secs"];
+        assert_eq!(timeout["minimum"], 300);
+        assert_eq!(timeout["maximum"], 3_600);
+        let timeout_schema = timeout.to_string();
         assert!(!timeout_schema.to_lowercase().contains("rust"));
         assert!(!timeout_schema.to_lowercase().contains("cargo"));
         let temp = tempfile::tempdir().expect("tempdir");
@@ -570,13 +568,19 @@ mod tests {
                 .to_string()
                 .contains("timeout_secs is valid only for start")
         );
-        let error = TerminalTool
-            .execute(
-                &context,
-                json!({"mode": "start", "command": "printf ready", "timeout_secs": 0}),
-            )
-            .await
-            .expect_err("zero start timeout was accepted");
-        assert!(error.to_string().contains("timeout_secs must be positive"));
+        for timeout_secs in [299, 3_601] {
+            let error = TerminalTool
+                .execute(
+                    &context,
+                    json!({
+                        "mode": "start",
+                        "command": "printf ready",
+                        "timeout_secs": timeout_secs,
+                    }),
+                )
+                .await
+                .expect_err("out-of-range start timeout was accepted");
+            assert!(error.to_string().contains("between 300 and 3600"));
+        }
     }
 }

@@ -20,8 +20,8 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 
 | Tool | Purpose |
 | --- | --- |
-| `Bash` | Execute `bash` (Git Bash on Windows) commands in the workspace; supports pipes, background tasks, optional `timeout_secs`, and cancellation. Omit `timeout_secs` for no timeout. |
-| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. `timeout_secs` is valid only for `mode=start`; omit it for no timeout. |
+| `Bash` | Execute `bash` (Git Bash on Windows) commands in the workspace; supports pipes, background tasks, optional `timeout_secs`, and cancellation. Omit `timeout_secs` for no timeout; explicit values must be `300..=3600`. After a timeout, increase or double it and retry. If it is already `3600` or duration is uncertain, omit it. |
+| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. `timeout_secs` is valid only for `mode=start`; omit it for no timeout, otherwise use `300..=3600`. After a timeout, increase or double it and retry. If it is already `3600` or duration is uncertain, omit it. |
 
 ## Network
 

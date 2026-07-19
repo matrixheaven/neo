@@ -84,7 +84,7 @@ async fn read_allows_symlink_to_external_file() {
 }
 
 #[tokio::test]
-async fn bash_requires_permission_and_rejects_zero_timeout_secs() {
+async fn bash_requires_permission_and_rejects_out_of_range_timeout_secs() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let denied_context = ToolContext::new(workspace.path())
@@ -132,10 +132,10 @@ async fn bash_requires_permission_and_rejects_zero_timeout_secs() {
         .run(
             "Bash",
             &allowed_context,
-            json!({ "command": "sleep 1", "timeout_secs": 0 }),
+            json!({ "command": "sleep 1", "timeout_secs": 299 }),
         )
         .await
-        .expect_err("zero timeout_secs should be rejected");
+        .expect_err("out-of-range timeout_secs should be rejected");
     assert!(matches!(invalid, ToolError::InvalidInput { .. }));
 }
 

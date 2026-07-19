@@ -20,8 +20,8 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 | 工具 | 用途 |
 | --- | --- |
-| `Bash` | 在工作区执行 `bash`（Windows 上为 Git Bash）命令，支持管道、后台任务、可选 `timeout_secs` 与取消。省略 `timeout_secs` 表示不设超时。 |
-| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。`timeout_secs` 仅对 `mode=start` 有效；省略表示不设超时。 |
+| `Bash` | 在工作区执行 `bash`（Windows 上为 Git Bash）命令，支持管道、后台任务、可选 `timeout_secs` 与取消。省略 `timeout_secs` 表示不设超时；显式值必须在 `300..=3600`。超时后应增大或翻倍再重试；若已为 `3600` 或耗时无法确定，则省略。 |
+| `Terminal` | 操作一个真实 PTY 会话：start / write / read / resize / stop，适合交互式长进程。`timeout_secs` 仅对 `mode=start` 有效；省略表示不设超时，否则必须在 `300..=3600`。超时后应增大或翻倍再重试；若已为 `3600` 或耗时无法确定，则省略。 |
 
 ## 网络
 

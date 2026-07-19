@@ -319,21 +319,24 @@ Providing it for Write, Read, Resize, or Stop is an invalid-input error. There
 is no alias for Bash `timeout`.
 
 Omission means no execution timeout for foreground Bash, background Bash,
-Terminal, and local user shell mode. An explicit positive value starts one
-monotonic deadline when the command process starts; queue wait is not counted.
-The same deadline remains in force if a running foreground user shell command
-is moved to the background. Neo does not reset or replace it.
+Terminal, and local user shell mode. An explicit value in the inclusive
+`300..=3600` second range starts one monotonic deadline when the command process
+starts; queue wait is not counted. The same deadline remains in force if a
+running foreground user shell command is moved to the background. Neo does not
+reset or replace it.
 
 Both tool schemas use this language-neutral guidance verbatim:
 
 > Optional execution timeout in seconds. Omit this field to allow the command
-> to run until it finishes or is cancelled. For potentially long-running work,
-> prefer omission; if a limit is necessary, do not set it below 7200 seconds.
-> Use shorter values only for commands that are explicitly expected to finish
-> quickly.
+> to run until it finishes or is cancelled. When set, use a value from 300
+> seconds (5 minutes) to 3600 seconds (1 hour). For long-running or
+> uncertain-duration work, prefer omission instead of guessing a deadline.
 
-The 7,200-second value is guidance, not a validation minimum: explicit values
-from 1 second upward are accepted. Zero is rejected.
+Explicit values outside `300..=3600` are rejected before execution. Every
+model-facing or TUI shell timeout result includes this next step:
+
+> Increase or double `timeout_secs` within `300..=3600` and retry; if
+> `timeout_secs` is already `3600` or the duration is uncertain, omit it.
 
 At the guardian boundary, `GuardLimits.timeout_ms` becomes `Option<u64>` and
 `background_timeout_ms` is deleted. Both Bash and Terminal supervision select
@@ -640,9 +643,10 @@ No new crate is required for scheduling or Sleep. Standard collections,
 7. Main, Delegate, and `DelegateSwarm` cards update in place, retain their
    canonical transcript position, and retain command summaries plus bounded
    Bash/Terminal output previews.
-8. Omitted `timeout_secs` means no timeout; explicit positive deadlines begin
-   only after admission; old timeout fields and `SetBackgroundDeadline` are
-   gone.
+8. Omitted `timeout_secs` means no timeout; explicit `300..=3600` deadlines
+   begin only after admission; out-of-range values are rejected and timeout
+   results recommend increasing/doubling or omitting the field; old timeout
+   fields and `SetBackgroundDeadline` are gone.
 9. Scheduler capacity no longer changes a command's descendant, memory, or
    parallelism budgets; old config names are rejected.
 10. Real process, memory, and sampler failures remain hard, measured,

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use neo_agent_core::ShellCommandOutcome;
-use neo_agent_core::tools::format_shell_failure;
+use neo_agent_core::tools::{format_command_timeout, format_shell_failure};
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
@@ -405,7 +405,7 @@ pub(crate) fn finished_plain_lines(
             lines.push("Cancelled.".to_owned());
         }
         ShellCommandOutcome::TimedOut => {
-            lines.push("Timed out.".to_owned());
+            lines.push(format_command_timeout().to_owned());
         }
         ShellCommandOutcome::ResourceLimited => {
             lines.push(neo_agent_core::format_resource_limit(None));
@@ -445,6 +445,13 @@ mod tests {
     #[test]
     fn resource_limited_shell_outcome_finalizes_with_terminal_message() {
         assert_eq!(
+    #[test]
+    fn timed_out_shell_outcome_recommends_a_larger_or_omitted_timeout() {
+        let lines = finished_plain_lines("", "", None, None, &ShellCommandOutcome::TimedOut, false);
+
+        assert_eq!(lines, [format_command_timeout()]);
+    }
+
             finished_plain_lines(
                 "",
                 "",
