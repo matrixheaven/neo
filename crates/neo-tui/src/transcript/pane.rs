@@ -773,9 +773,7 @@ impl TranscriptPane {
     /// strings.
     ///
     /// The chrome (prompt box + footer) depends on [`NeoChromeState`] state and is
-    /// appended by the caller via [`render_chrome_lines`]. The terminal path
-    /// partitions this canonical snapshot into immutable history and a bounded
-    /// mutable live surface.
+    /// appended by the caller via [`render_chrome_lines`].
     ///
     /// Returns `None` when the transcript pane has no pending body changes.
     #[must_use]
@@ -800,8 +798,6 @@ impl TranscriptPane {
     ) -> TranscriptTerminalUpdate {
         self.width = width;
         self.height = height;
-        let lines = self.render_body_lines(width);
-        self.last_frame.clone_from(&lines);
         self.dirty = false;
 
         let content_width = super::chrome_render::frame_content_width(width);
@@ -906,8 +902,6 @@ impl TranscriptPane {
     }
 
     /// Build the non-chrome body lines without consuming the dirty flag.
-    /// Shared between [`render_frame`] (live path) and [`frame_ansi_lines`]
-    /// (read-only snapshot for tests).
     ///
     fn render_body_lines(&mut self, width: usize) -> Vec<String> {
         let content_width = super::chrome_render::frame_content_width(width);

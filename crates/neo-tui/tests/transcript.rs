@@ -34,7 +34,7 @@ fn strip_ansi(text: &str) -> String {
 }
 
 #[test]
-fn canonical_snapshot_retains_full_history_after_terminal_commit() {
+fn terminal_update_leaves_canonical_snapshot_to_render_frame() {
     let mut pane = TranscriptPane::new(80, 6);
     pane.set_live_chrome_height(0);
     let status_lines = (0..12)
@@ -44,8 +44,20 @@ fn canonical_snapshot_retains_full_history_after_terminal_commit() {
     pane.push_status(status_lines);
 
     let update = pane.render_terminal_update(80, 6);
-    pane.acknowledge_history(&update.history);
+    let terminal_history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let terminal_history = strip_ansi(&terminal_history);
+    assert!(terminal_history.contains("status line 00"));
+    assert!(terminal_history.contains("status line 11"));
+    assert!(pane.frame_ansi_lines().is_empty());
 
+    pane.mark_dirty();
+    let _ = pane.render_frame(80, 6).expect("snapshot render");
     let canonical = pane.frame_ansi_lines().join("\n");
     let canonical = strip_ansi(&canonical);
     assert!(canonical.contains("status line 00"));
