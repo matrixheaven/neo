@@ -63,3 +63,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-17 | spec | docs/aegis/specs/2026-07-17-ctrl-o-review-chrome-design.md | Ctrl+O Review Chrome Design |
 | 2026-07-17 | spec | docs/aegis/specs/2026-07-17-path-scoped-agents-instructions-design.md | Path-Scoped AGENTS.md Instructions Design |
 | 2026-07-18 | spec | docs/aegis/specs/2026-07-18-shell-admission-scheduler-design.md | Shell Admission Scheduler |
+| 2026-07-19 | spec | docs/aegis/specs/2026-07-19-transcript-overflow-tool-results-design.md | Automatic Transcript Overflow and Tool Result Presentation |
+| 2026-07-19 | plan | docs/aegis/plans/2026-07-19-transcript-overflow-tool-results.md | Automatic Transcript Overflow and Tool Result Presentation |

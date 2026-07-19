@@ -193,12 +193,17 @@ Running cards remain normal inline transcript cards inside `LiveSurface`; they
 are not moved to a separate panel. Existing card styling and the DelegateSwarm
 Bayesian progress semantics remain unchanged.
 
-Live previews have a terminal-height budget. Long output shows a bounded tail
-and an omitted-row count while running. At `done`, `failed`, or `cancelled`, the
-final card is rendered once without the live preview cap and committed.
+Live previews normally render their complete mutable suffix inline. When that
+suffix exceeds the rows available above chrome, Neo uses the automatic
+alternate-screen viewport defined by
+`2026-07-19-transcript-overflow-tool-results-design.md`; the presentation layer
+does not emit omitted-row markers, bounded tails, or header-only fallbacks. At
+`done`, `failed`, or `cancelled`, the final card is rendered once and committed.
+This supersedes the bounded-fitting row-selection policy below while retaining
+its semantic-spacing and atomic-terminal-image invariants.
 
 The earliest live entry establishes a canonical commit frontier. Finalized
-entries after that frontier are held as a bounded live suffix and rendered in
+entries after that frontier are held as a mutable live suffix and rendered in
 their original transcript order; they are not committed in completion order.
 This keeps Delegate, DelegateSwarm, Workflow, tool, thinking, and assistant
 segments at their canonical relative positions across turns and resume. A
@@ -209,9 +214,9 @@ emitting a hidden card.
 The presentation layer owns semantic block spacing. Adjacent blocks with
 different entry owners receive exactly one blank row, while segments owned by
 the same assistant entry do not gain an extra row across history/live or
-acknowledgement boundaries. Bounded fitting reserves all visible mutable card
-headers before deferred static headers, and terminal image blocks are omitted
-atomically rather than emitting partial Kitty or iTerm sequences.
+acknowledgement boundaries. Automatic viewporting preserves every mutable and
+deferred row in source order, and terminal image blocks remain atomic rather
+than emitting partial Kitty or iTerm sequences.
 
 Lifecycle terminality is monotonic. A regressive or mutating update received
 after a card was committed is a lifecycle invariant violation. It is excluded
