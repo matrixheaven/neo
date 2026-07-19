@@ -1818,7 +1818,7 @@ async fn anthropic_messages_client_marks_system_tools_and_last_message_for_promp
         .unwrap();
 
     let sent = server.requests().pop().unwrap();
-    let cache_control = json!({ "type": "ephemeral", "ttl": "1h" });
+    let cache_control = json!({ "type": "ephemeral", "ttl": "5m" });
     assert_eq!(
         sent.body["system"],
         json!([{ "type": "text", "text": "stable system", "cache_control": cache_control.clone() }])

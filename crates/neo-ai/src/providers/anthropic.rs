@@ -9,8 +9,8 @@ use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
-    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
-    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
+    ModelClient, ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -95,6 +95,7 @@ fn headers(
 }
 
 fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
+    let cache_control = cache_control(request.options.cache);
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
@@ -102,7 +103,11 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         // catalog supplied one, use a coding-agent-friendly default rather than
         // the chat-era 4096 which truncates long edits/plans mid-stream.
         "max_tokens": request.options.max_tokens.unwrap_or(32_000),
-        "messages": message_bodies(&request.messages, request.options.replay_reasoning)?,
+        "messages": message_bodies(
+            &request.messages,
+            request.options.replay_reasoning,
+            cache_control.as_ref(),
+        )?,
     });
 
     let system = request
@@ -115,18 +120,19 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     if !system.is_empty() {
-        body["system"] = json!([{
-            "type": "text",
-            "text": system,
-            "cache_control": cache_control(),
-        }]);
+        let mut system = json!({ "type": "text", "text": system });
+        if let Some(cache_control) = &cache_control {
+            system["cache_control"] = cache_control.clone();
+        }
+        body["system"] = Value::Array(vec![system]);
     }
     if !request.tools.is_empty() {
         let mut tools = request.tools.iter().map(tool_body).collect::<Vec<_>>();
-        if let Some(last_tool) = tools.last_mut()
+        if let Some(cache_control) = &cache_control
+            && let Some(last_tool) = tools.last_mut()
             && let Some(object) = last_tool.as_object_mut()
         {
-            object.insert("cache_control".to_owned(), cache_control());
+            object.insert("cache_control".to_owned(), cache_control.clone());
         }
         body["tools"] = Value::Array(tools);
     }
@@ -223,6 +229,7 @@ fn message_body(
 fn message_bodies(
     messages: &[ChatMessage],
     replay_reasoning: bool,
+    cache_control: Option<&Value>,
 ) -> Result<Vec<Value>, ProviderError> {
     let mut bodies = Vec::new();
     let mut index = 0;
@@ -250,18 +257,21 @@ fn message_bodies(
         }
         index += 1;
     }
-    inject_cache_control_on_last_message(&mut bodies);
+    if let Some(cache_control) = cache_control {
+        inject_cache_control_on_last_message(&mut bodies, cache_control);
+    }
     Ok(bodies)
 }
 
-fn cache_control() -> Value {
-    json!({
-        "type": "ephemeral",
-        "ttl": "1h",
-    })
+fn cache_control(retention: CacheRetention) -> Option<Value> {
+    match retention {
+        CacheRetention::None => None,
+        CacheRetention::Short => Some(json!({ "type": "ephemeral", "ttl": "5m" })),
+        CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+    }
 }
 
-fn inject_cache_control_on_last_message(messages: &mut [Value]) {
+fn inject_cache_control_on_last_message(messages: &mut [Value], cache_control: &Value) {
     let Some(last_message) = messages.last_mut() else {
         return;
     };
@@ -281,7 +291,7 @@ fn inject_cache_control_on_last_message(messages: &mut [Value]) {
         return;
     }
     if let Some(object) = last_block.as_object_mut() {
-        object.insert("cache_control".to_owned(), cache_control());
+        object.insert("cache_control".to_owned(), cache_control.clone());
     }
 }
 
@@ -792,7 +802,61 @@ fn stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolCall;
+    use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, RequestOptions, ToolCall};
+
+    #[test]
+    fn request_body_maps_cache_retention_to_all_breakpoints() {
+        for (retention, ttl) in [
+            (CacheRetention::None, None),
+            (CacheRetention::Short, Some("5m")),
+            (CacheRetention::Long, Some("1h")),
+        ] {
+            let request = ChatRequest {
+                model: ModelSpec {
+                    provider: ProviderId("anthropic".to_owned()),
+                    model: "claude-test".to_owned(),
+                    api: ApiKind::AnthropicMessages,
+                    capabilities: ModelCapabilities::tool_chat(),
+                },
+                messages: vec![
+                    ChatMessage::System {
+                        content: vec![ContentPart::Text {
+                            text: "stable system".to_owned(),
+                        }],
+                    },
+                    ChatMessage::User {
+                        content: vec![ContentPart::Text {
+                            text: "hello".to_owned(),
+                        }],
+                    },
+                ],
+                tools: vec![ToolSpec::string_arg(
+                    "read_file",
+                    "Read a file",
+                    "path",
+                    "Path to read",
+                )],
+                options: RequestOptions {
+                    cache: retention,
+                    ..RequestOptions::default()
+                },
+            };
+            let body = request_body(&request).unwrap();
+            let expected = ttl.map(|ttl| json!({ "type": "ephemeral", "ttl": ttl }));
+
+            for pointer in [
+                "/system/0/cache_control",
+                "/tools/0/cache_control",
+                "/messages/0/content/0/cache_control",
+            ] {
+                assert_eq!(
+                    body.pointer(pointer),
+                    expected.as_ref(),
+                    "{retention:?} {pointer}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn assistant_replay_rejects_invalid_raw_tool_arguments() {
