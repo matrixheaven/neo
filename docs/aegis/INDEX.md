@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-20 | spec | docs/aegis/specs/2026-07-20-terminal-ordered-input-design.md | Terminal Ordered Input Sequence |
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-wait-delegate-card.md | WaitDelegate Card Implementation Plan |
 | 2026-07-19 | spec | docs/aegis/specs/2026-07-19-wait-delegate-card-brief.md | WaitDelegate Card Spec Brief |
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-terminal-live-viewport-isolation.md | Terminal Live Viewport Isolation Implementation Plan |
