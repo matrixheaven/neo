@@ -334,11 +334,7 @@ fn render_list_delegates_body(
                     }
                 }
             };
-            rows.push(
-                palette
-                    .body_line(line)
-                    .truncate_to_width(content_width),
-            );
+            rows.push(palette.body_line(line).truncate_to_width(content_width));
             if kind == "swarm"
                 && let Some(aggregate_line) = list_delegates_swarm_aggregate_line(row)
             {
@@ -362,7 +358,11 @@ fn render_list_delegates_body(
         .and_then(serde_json::Value::as_array)
     {
         for step in steps {
-            if let Some(text) = step.as_str().map(one_line).filter(|value| !value.is_empty()) {
+            if let Some(text) = step
+                .as_str()
+                .map(one_line)
+                .filter(|value| !value.is_empty())
+            {
                 rows.push(
                     palette
                         .weak_line(format!("  next: {text}"))
