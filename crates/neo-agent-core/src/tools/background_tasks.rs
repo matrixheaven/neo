@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -146,6 +146,12 @@ struct BackgroundTaskRecord {
 struct PersistedTaskIdentity {
     schema_version: u32,
     task_id: String,
+}
+
+enum PersistedTaskFiles {
+    Final(BackgroundTaskSnapshot),
+    Running,
+    Missing,
 }
 
 #[derive(Clone, Default)]
@@ -538,7 +544,7 @@ impl BackgroundTaskManager {
         task_ids.dedup();
         let mut snapshots = Vec::new();
         for task_id in task_ids {
-            if let Ok(snapshot) = self.snapshot(&task_id).await
+            if let Ok(snapshot) = self.snapshot_with_persisted_wait(&task_id, false).await
                 && (!active_only || snapshot.status.is_active())
             {
                 snapshots.push(snapshot);
@@ -558,7 +564,7 @@ impl BackgroundTaskManager {
     ) -> Result<ToolResult, ToolError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let snapshot = self.snapshot(task_id).await?;
+            let snapshot = self.snapshot_with_persisted_wait(task_id, block).await?;
             if !block || !snapshot.status.is_active() || Instant::now() >= deadline {
                 return Ok(snapshot_result(&snapshot, max_output_bytes));
             }
@@ -786,10 +792,18 @@ impl BackgroundTaskManager {
     }
 
     pub async fn snapshot(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
+        self.snapshot_with_persisted_wait(task_id, true).await
+    }
+
+    async fn snapshot_with_persisted_wait(
+        &self,
+        task_id: &str,
+        wait_for_final: bool,
+    ) -> Result<BackgroundTaskSnapshot, ToolError> {
         if let Some(snapshot) = self.snapshot_inner(task_id).await {
             return Ok(snapshot);
         }
-        self.persisted_snapshot(task_id)
+        self.persisted_snapshot(task_id, wait_for_final)
             .await?
             .ok_or_else(|| ToolError::InvalidInput {
                 tool: "TaskOutput".to_owned(),
@@ -824,6 +838,7 @@ impl BackgroundTaskManager {
     async fn persisted_snapshot(
         &self,
         task_id: &str,
+        wait_for_final: bool,
     ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
         let Some(root) = &self.persistence_dir else {
             return Ok(None);
@@ -831,72 +846,39 @@ impl BackgroundTaskManager {
         validate_persisted_task_id(task_id, root)?;
         let final_path = root.join(format!("{task_id}.status.json"));
         let running_path = root.join(format!("{task_id}.running.json"));
+        if !wait_for_final {
+            return Self::settled_persisted_snapshot(root, task_id, &final_path, &running_path)
+                .await;
+        }
+        match Self::inspect_persisted_task(root, task_id, &final_path, &running_path).await? {
+            PersistedTaskFiles::Final(snapshot) => return Ok(Some(snapshot)),
+            PersistedTaskFiles::Missing => return Ok(None),
+            PersistedTaskFiles::Running => {}
+        }
         let deadline = Instant::now() + Duration::from_secs(3);
-        let mut running_validated = false;
         loop {
-            match tokio::fs::read(&final_path).await {
-                Ok(bytes) => {
-                    let status: GuardStatus = serde_json::from_slice(&bytes)
-                        .map_err(|error| invalid_recovery_data(task_id, &final_path, error))?;
-                    validate_persisted_task_identity(
-                        task_id,
-                        &final_path,
-                        status.schema_version,
-                        &status.task_id,
-                    )?;
-                    let output = tokio::fs::read(root.join(format!("{task_id}.log")))
-                        .await
-                        .unwrap_or_default();
-                    let task_status = background_status_from_kind(status.exit.status);
-                    return Ok(Some(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Bash,
-                        status: task_status,
-                        description: task_id.to_owned(),
-                        elapsed: Duration::ZERO,
-                        output: Some(CommandOutput {
-                            exit_code: status.exit.exit_code,
-                            signal: status.exit.signal,
-                            stdout: String::from_utf8_lossy(&output).into_owned(),
-                            stderr: String::new(),
-                            stdout_truncated: status.exit.omitted_log_bytes > 0,
-                            stderr_truncated: false,
-                            resource_limit: status.exit.resource_limit,
-                        }),
-                        answers: None,
-                        delegate: None,
-                        swarm: None,
-                    }));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(ToolError::Io(error)),
-            }
-            if !running_validated {
-                match tokio::fs::read(&running_path).await {
-                    Ok(bytes) => {
-                        let running: PersistedTaskIdentity = serde_json::from_slice(&bytes)
-                            .map_err(|error| {
-                                invalid_recovery_data(task_id, &running_path, error)
-                            })?;
-                        validate_persisted_task_identity(
-                            task_id,
-                            &running_path,
-                            running.schema_version,
-                            &running.task_id,
-                        )?;
-                        running_validated = true;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(ToolError::Io(error)),
-                }
-            }
             if Instant::now() >= deadline {
-                if !running_validated {
-                    return Ok(None);
-                }
-                return Ok(Some(BackgroundTaskSnapshot {
+                return Self::settled_persisted_snapshot(root, task_id, &final_path, &running_path)
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(snapshot) = Self::read_persisted_final(root, task_id, &final_path).await? {
+                return Ok(Some(snapshot));
+            }
+        }
+    }
+
+    async fn settled_persisted_snapshot(
+        root: &Path,
+        task_id: &str,
+        final_path: &Path,
+        running_path: &Path,
+    ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
+        Ok(
+            match Self::inspect_persisted_task(root, task_id, final_path, running_path).await? {
+                PersistedTaskFiles::Final(snapshot) => Some(snapshot),
+                PersistedTaskFiles::Missing => None,
+                PersistedTaskFiles::Running => Some(BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Bash,
                     status: BackgroundTaskStatus::ParentExited,
@@ -906,10 +888,101 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: None,
-                }));
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+                }),
+            },
+        )
+    }
+
+    async fn inspect_persisted_task(
+        root: &Path,
+        task_id: &str,
+        final_path: &Path,
+        running_path: &Path,
+    ) -> Result<PersistedTaskFiles, ToolError> {
+        if let Some(snapshot) = Self::read_persisted_final(root, task_id, final_path).await? {
+            return Ok(PersistedTaskFiles::Final(snapshot));
         }
+        let running = Self::read_persisted_running(task_id, running_path).await?;
+        Self::inspect_after_first_running(root, task_id, final_path, running_path, running).await
+    }
+
+    async fn inspect_after_first_running(
+        root: &Path,
+        task_id: &str,
+        final_path: &Path,
+        running_path: &Path,
+        first_running: bool,
+    ) -> Result<PersistedTaskFiles, ToolError> {
+        if let Some(snapshot) = Self::read_persisted_final(root, task_id, final_path).await? {
+            return Ok(PersistedTaskFiles::Final(snapshot));
+        }
+        let second_running = Self::read_persisted_running(task_id, running_path).await?;
+        if first_running && second_running {
+            Ok(PersistedTaskFiles::Running)
+        } else {
+            Ok(PersistedTaskFiles::Missing)
+        }
+    }
+
+    async fn read_persisted_running(task_id: &str, running_path: &Path) -> Result<bool, ToolError> {
+        match tokio::fs::read(running_path).await {
+            Ok(bytes) => {
+                let running: PersistedTaskIdentity = serde_json::from_slice(&bytes)
+                    .map_err(|error| invalid_recovery_data(task_id, running_path, error))?;
+                validate_persisted_task_identity(
+                    task_id,
+                    running_path,
+                    running.schema_version,
+                    &running.task_id,
+                )?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(ToolError::Io(error)),
+        }
+    }
+
+    async fn read_persisted_final(
+        root: &Path,
+        task_id: &str,
+        final_path: &Path,
+    ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
+        let bytes = match tokio::fs::read(final_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ToolError::Io(error)),
+        };
+        let status: GuardStatus = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_recovery_data(task_id, final_path, error))?;
+        validate_persisted_task_identity(
+            task_id,
+            final_path,
+            status.schema_version,
+            &status.task_id,
+        )?;
+        let output = tokio::fs::read(root.join(format!("{task_id}.log")))
+            .await
+            .unwrap_or_default();
+        let task_status = background_status_from_kind(status.exit.status);
+        Ok(Some(BackgroundTaskSnapshot {
+            task_id: task_id.to_owned(),
+            kind: BackgroundTaskKind::Bash,
+            status: task_status,
+            description: task_id.to_owned(),
+            elapsed: Duration::ZERO,
+            output: Some(CommandOutput {
+                exit_code: status.exit.exit_code,
+                signal: status.exit.signal,
+                stdout: String::from_utf8_lossy(&output).into_owned(),
+                stderr: String::new(),
+                stdout_truncated: status.exit.omitted_log_bytes > 0,
+                stderr_truncated: false,
+                resource_limit: status.exit.resource_limit,
+            }),
+            answers: None,
+            delegate: None,
+            swarm: None,
+        }))
     }
 
     pub async fn is_detached(&self, task_id: &str) -> bool {
@@ -2116,7 +2189,7 @@ mod tests {
         let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
 
         for task_id in ["../escape", r"..\escape", "C:escape", "bash:stream"] {
-            let Err(error) = manager.persisted_snapshot(task_id).await else {
+            let Err(error) = manager.persisted_snapshot(task_id, true).await else {
                 panic!("unsafe task id must be rejected")
             };
 
@@ -2125,6 +2198,77 @@ mod tests {
                 ToolError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn non_blocking_persisted_reads_do_not_wait_for_stale_tasks() {
+        let tasks = tempfile::tempdir().expect("tasks");
+        for task_id in ["bash-stale-one", "bash-stale-two"] {
+            tokio::fs::write(
+                tasks.path().join(format!("{task_id}.running.json")),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "task_id": task_id,
+                    "guardian_pid": 1,
+                    "started_at_ms": 1
+                }))
+                .expect("serialize running marker"),
+            )
+            .await
+            .expect("write running marker");
+        }
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+
+        let (output, snapshots) = tokio::time::timeout(Duration::from_secs(1), async {
+            let output = manager
+                .output("bash-stale-one", false, Duration::from_secs(30), 1024)
+                .await
+                .expect("read stale task output");
+            (output, manager.list(false, 10).await)
+        })
+        .await
+        .expect("non-blocking reads must not poll for final status");
+
+        assert_eq!(output.details.as_ref().unwrap()["status"], "parent_exited");
+        assert_eq!(snapshots.len(), 2);
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.status == BackgroundTaskStatus::ParentExited)
+        );
+
+        let task_id = "bash-disappeared";
+        let running_path = tasks.path().join(format!("{task_id}.running.json"));
+        tokio::fs::write(
+            &running_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "task_id": task_id,
+                "guardian_pid": 1,
+                "started_at_ms": 1
+            }))
+            .expect("serialize running marker"),
+        )
+        .await
+        .expect("write running marker");
+        assert!(
+            BackgroundTaskManager::read_persisted_running(task_id, &running_path)
+                .await
+                .expect("first running read")
+        );
+        tokio::fs::remove_file(&running_path)
+            .await
+            .expect("remove running marker between reads");
+        let state = BackgroundTaskManager::inspect_after_first_running(
+            tasks.path(),
+            task_id,
+            &tasks.path().join(format!("{task_id}.status.json")),
+            &running_path,
+            true,
+        )
+        .await
+        .expect("second persisted inspection");
+        assert!(matches!(state, PersistedTaskFiles::Missing));
     }
 
     #[test]
@@ -2166,7 +2310,7 @@ mod tests {
 
             let manager =
                 BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
-            let mut recovery = Box::pin(manager.persisted_snapshot(task_id));
+            let mut recovery = Box::pin(manager.persisted_snapshot(task_id, true));
             assert!(matches!(
                 futures::poll!(&mut recovery),
                 std::task::Poll::Pending
