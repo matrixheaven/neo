@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
@@ -7,7 +8,7 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Style, truncate_width, visible_width};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
-use crate::token_estimate::{estimate_tokens, format_token_count};
+use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
 
 use super::partial_json::extract_partial_string_field;
 use super::tool_call::ToolCallState;
@@ -25,7 +26,7 @@ const MAX_ARG_LENGTH: usize = 60;
 /// Color mapping (mirrors Neo's tool header):
 /// - symbol + verb → status color
 /// - tool name → bold brand color
-/// - `WaitDelegate` target and `(key arg)` → weak text
+/// - `(key arg)` → weak text
 /// - chip (`· N lines`) → weak text
 #[must_use]
 pub fn tool_header_spans(
@@ -33,6 +34,17 @@ pub fn tool_header_spans(
     theme: &TuiTheme,
     workspace_dir: Option<&Path>,
     header_width: usize,
+) -> Vec<Span> {
+    tool_header_spans_with_elapsed(state, theme, workspace_dir, header_width, None)
+}
+
+#[must_use]
+pub fn tool_header_spans_with_elapsed(
+    state: &ToolCallState,
+    theme: &TuiTheme,
+    workspace_dir: Option<&Path>,
+    header_width: usize,
+    elapsed_secs: Option<u64>,
 ) -> Vec<Span> {
     let symbol = tool_symbol(state.status);
     let verb = tool_verb(state.status);
@@ -45,16 +57,8 @@ pub fn tool_header_spans(
         Span::styled(format!("{verb} "), Style::default().fg(status_color)),
         Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
     ];
-    let wait_title_separator = " · ";
-    let title_width = header_width.saturating_sub(
-        spans.iter().map(Span::visible_width).sum::<usize>() + visible_width(wait_title_separator),
-    );
-    if let Some(title) = wait_delegate_title(state, title_width) {
-        spans.push(Span::styled(
-            wait_title_separator,
-            Style::default().fg(meta_color),
-        ));
-        spans.push(Span::styled(title, Style::default().fg(meta_color)));
+    if state.name == "WaitDelegate" {
+        return wait_delegate_header_spans(state, theme, elapsed_secs, header_width);
     }
     if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
         let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
@@ -69,71 +73,227 @@ pub fn tool_header_spans(
     spans
 }
 
-fn wait_delegate_title(state: &ToolCallState, max_width: usize) -> Option<String> {
-    if state.name != "WaitDelegate" || max_width == 0 {
+/// Render the semantic WaitDelegate header. `elapsed_secs` is intentionally
+/// supplied by the live component; replayed cards have no trustworthy timer.
+#[must_use]
+pub fn wait_delegate_header_spans(
+    state: &ToolCallState,
+    theme: &TuiTheme,
+    elapsed_secs: Option<u64>,
+    max_width: usize,
+) -> Vec<Span> {
+    let (symbol, symbol_color, label) = if is_pending_or_running(state.status) {
+        let (ids, timeout_ms) = wait_delegate_args(state.arguments.as_deref());
+        let timeout = format_wait_duration(timeout_ms.unwrap_or(30_000));
+        let elapsed = elapsed_secs
+            .map(|seconds| format!(" · elapsed {}", format_elapsed(seconds)))
+            .unwrap_or_default();
+        let noun = if ids.len() == 1 {
+            "delegate"
+        } else {
+            "delegates"
+        };
+        (
+            "●",
+            tool_status_color(state.status, theme),
+            format!(
+                "Waiting for {} {noun} · timeout {timeout}{elapsed}",
+                ids.len(),
+            ),
+        )
+    } else if let Some(details) = state.details.as_ref() {
+        let outcome = details.get("outcome").and_then(serde_json::Value::as_str);
+        let aggregate = details.get("aggregate");
+        let total = aggregate_u64(aggregate, "total").unwrap_or_else(|| {
+            details
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len) as u64
+        });
+        let terminal = aggregate_u64(aggregate, "terminal").unwrap_or(0);
+        let pending = aggregate_u64(aggregate, "pending").unwrap_or(0);
+        let not_found = aggregate_u64(aggregate, "not_found").unwrap_or(0);
+        let failed = wait_item_status_count(details, "failed");
+        let cancelled = wait_item_status_count(details, "cancelled");
+        let timed_out = wait_item_status_count(details, "timed_out");
+        match outcome {
+            Some("wait_timed_out") => (
+                "◷",
+                theme.status_cancelled,
+                format!("Wait timed out · {terminal}/{total} terminal · {pending} still running"),
+            ),
+            Some("not_found") => (
+                "?",
+                theme.status_error,
+                format!("Target not found · {not_found} unknown"),
+            ),
+            Some("all_terminal") => {
+                let mut label = format!("Wait complete · {terminal} terminal");
+                append_count(&mut label, failed, "failed");
+                append_count(&mut label, cancelled, "cancelled");
+                append_count(&mut label, timed_out, "timed out");
+                ("●", theme.status_ok, label)
+            }
+            _ => return generic_wait_header(state, theme),
+        }
+    } else {
+        return generic_wait_header(state, theme);
+    };
+
+    let prefix_width = visible_width(&format!("{symbol} "));
+    let label = truncate_width(
+        &label,
+        max_width.saturating_sub(prefix_width).max(1),
+        "...",
+        false,
+    );
+    vec![
+        Span::styled(format!("{symbol} "), Style::default().fg(symbol_color)),
+        Span::styled(label, Style::default().fg(theme.brand).bold()),
+    ]
+}
+
+fn generic_wait_header(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
+    vec![
+        Span::styled(
+            format!("{} ", tool_symbol(state.status)),
+            Style::default().fg(tool_status_color(state.status, theme)),
+        ),
+        Span::styled(
+            format!("{} WaitDelegate", tool_verb(state.status)),
+            Style::default().fg(theme.brand).bold(),
+        ),
+    ]
+}
+
+fn wait_delegate_args(arguments: Option<&str>) -> (Vec<String>, Option<u64>) {
+    let Some(value) =
+        arguments.and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+    else {
+        return (Vec::new(), None);
+    };
+    let ids = value
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    let timeout_ms = value.get("timeout_ms").and_then(serde_json::Value::as_u64);
+    (ids, timeout_ms)
+}
+
+fn format_wait_duration(timeout_ms: u64) -> String {
+    if timeout_ms > 0 && timeout_ms < 1_000 {
+        return "<1s".to_owned();
+    }
+    format_elapsed(timeout_ms / 1_000)
+}
+
+fn aggregate_u64(value: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+    value?.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn wait_item_status_count(details: &serde_json::Value, status: &str) -> u64 {
+    details
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some(status))
+        .count() as u64
+}
+
+fn append_count(label: &mut String, count: u64, noun: &str) {
+    if count > 0 {
+        let _ = write!(label, " · {count} {noun}");
+    }
+}
+
+fn wait_status_marker(status: &str) -> &'static str {
+    match status {
+        "completed" => "✓",
+        "failed" | "timed_out" => "✗",
+        "cancelled" => "⊘",
+        "not_found" => "?",
+        _ => "…",
+    }
+}
+
+fn wait_target_label(item: &serde_json::Value) -> String {
+    item.get("title")
+        .or_else(|| item.get("description"))
+        .or_else(|| item.get("display_name"))
+        .or_else(|| item.get("id"))
+        .or_else(|| item.get("agent_id"))
+        .or_else(|| item.get("swarm_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| truncate_arg_value(false, &one_line(value)))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown target".to_owned())
+}
+
+/// Render structured WaitDelegate target rows. Malformed/validation results
+/// return `None` so the existing generic result renderer remains the fallback.
+fn render_wait_delegate_body(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.name != "WaitDelegate" {
         return None;
     }
+    if is_pending_or_running(state.status) {
+        let (ids, _) = wait_delegate_args(state.arguments.as_deref());
+        if ids.is_empty() {
+            return None;
+        }
+        if !expanded {
+            return Some(Vec::new());
+        }
+        return Some(
+            ids.into_iter()
+                .map(|id| {
+                    palette
+                        .body_line(format!("  … {id} · waiting"))
+                        .truncate_to_width(width.saturating_sub(2).max(1))
+                })
+                .collect(),
+        );
+    }
     let details = state.details.as_ref()?;
-    let mut item_titles = Vec::new();
-    if let Some(items) = details.get("items").and_then(serde_json::Value::as_array) {
-        for item in items {
-            collect_wait_delegate_titles(item, &mut item_titles);
-        }
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some("delegate_wait") {
+        return None;
     }
-    if !item_titles.is_empty() {
-        return Some(fit_wait_delegate_titles(&item_titles, max_width));
+    let items = details.get("items").and_then(serde_json::Value::as_array)?;
+    let limit = if expanded {
+        usize::MAX
+    } else {
+        RESULT_PREVIEW_LINES
+    };
+    let mut rows = Vec::new();
+    for item in items.iter().take(limit) {
+        let status = item
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let label = wait_target_label(item);
+        let line = format!("  {} {} · {status}", wait_status_marker(status), label);
+        rows.push(
+            palette
+                .body_line(line)
+                .truncate_to_width(width.saturating_sub(2).max(1)),
+        );
     }
-    let title = details
-        .get("title")
-        .or_else(|| details.get("description"))?
-        .as_str()?
-        .trim();
-    let title = truncate_arg_value(false, &one_line(title));
-    let title = truncate_width(&title, max_width, "...", false);
-    (!title.is_empty()).then_some(title)
-}
-
-fn collect_wait_delegate_titles(value: &serde_json::Value, titles: &mut Vec<String>) {
-    if let Some(items) = value.get("items").and_then(serde_json::Value::as_array) {
-        for item in items {
-            collect_wait_delegate_titles(item, titles);
-        }
-        return;
+    if !expanded && items.len() > limit {
+        rows.push(palette.weak_line(format!(
+            "  ... ({} more targets, ctrl+o to expand)",
+            items.len() - limit
+        )));
     }
-    if let Some(title) = value
-        .get("title")
-        .or_else(|| value.get("description"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-    {
-        titles.push(one_line(title));
-    }
-}
-
-fn fit_wait_delegate_titles(titles: &[String], max_width: usize) -> String {
-    const SEPARATOR: &str = " | ";
-    let separator_width = visible_width(SEPARATOR).saturating_mul(titles.len().saturating_sub(1));
-    if separator_width >= max_width {
-        return truncate_width(&titles.join(SEPARATOR), max_width, "...", false);
-    }
-
-    let title_width = max_width - separator_width;
-    let slot_width = title_width / titles.len();
-    let remainder = title_width % titles.len();
-    titles
-        .iter()
-        .enumerate()
-        .map(|(index, title)| {
-            truncate_width(
-                title,
-                slot_width + usize::from(index < remainder),
-                "...",
-                false,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(SEPARATOR)
+    Some(rows)
 }
 
 /// Build a custom header for the `ExitPlanMode` tool card.
@@ -284,6 +444,11 @@ fn render_tool_body_with_palette(
     render_diff_details(state, expanded, width, palette)
         .or_else(|| render_write_body(state, expanded, palette))
         .or_else(|| render_edit_body(state, expanded, palette))
+        .or_else(|| {
+            (state.name == "WaitDelegate")
+                .then(|| render_wait_delegate_body(state, expanded, width, palette))
+                .flatten()
+        })
         .or_else(|| render_result_body(state, expanded, width, palette))
         .unwrap_or_default()
 }

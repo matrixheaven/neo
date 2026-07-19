@@ -8,7 +8,7 @@ use crate::token_estimate::format_elapsed;
 use super::plan_box::PlanBoxComponent;
 use super::tool_renderers::{
     is_file_write_tool, is_pending_or_running, render_streaming_preview, render_tool_body_themed,
-    tool_header_spans,
+    tool_header_spans_with_elapsed,
 };
 
 use std::path::PathBuf;
@@ -298,7 +298,7 @@ impl ToolCallComponent {
             return true;
         }
         is_pending_or_running(self.state.status)
-            && is_file_write_tool(&self.state.name)
+            && (is_file_write_tool(&self.state.name) || self.state.name == "WaitDelegate")
             && self.streaming_started_at.is_some()
     }
 }
@@ -335,11 +335,13 @@ impl ToolCallComponent {
         let mut header_spans = if self.state.name == "ExitPlanMode" {
             crate::transcript::tool_renderers::exit_plan_mode_header_spans(&self.state, theme)
         } else {
-            tool_header_spans(
+            tool_header_spans_with_elapsed(
                 &self.state,
                 theme,
                 self.workspace_dir.as_deref(),
                 header_width,
+                self.streaming_started_at
+                    .map(|started| started.elapsed().as_secs()),
             )
         };
         // While Write/Edit is streaming, show a token count chip in the header

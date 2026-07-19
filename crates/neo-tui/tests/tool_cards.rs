@@ -127,80 +127,140 @@ fn tool_call_updates_in_place_to_finished_state() {
 }
 
 #[test]
-fn wait_delegate_header_uses_result_title() {
-    let theme = TuiTheme::default();
-    let agent_id = "agent_123456789";
-    let state = ToolCallState {
-        id: "wait-1".to_owned(),
+fn wait_delegate_card_renders_running_and_final_outcomes() {
+    const WIDTH: usize = 120;
+    let arguments = json!({
+        "ids": ["agent_a", "agent_b", "swarm_c", "agent_d"],
+        "timeout_ms": 30_000
+    })
+    .to_string();
+    let mut running = ToolCallComponent::new(ToolCallState {
+        id: "wait-running".to_owned(),
         name: "WaitDelegate".to_owned(),
-        arguments: Some(serde_json::json!({ "ids": [agent_id] }).to_string()),
-        result: Some("status: completed".to_owned()),
-        details: Some(serde_json::json!({
-            "kind": "delegate_wait",
-            "outcome": "all_terminal",
-            "items": [{
-                "kind": "delegate",
-                "title": "Task 3: registry lifetime + child visibility",
-            }],
-        })),
-        status: ToolStatusKind::Succeeded,
+        arguments: Some(arguments.clone()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Pending,
         exit_code: None,
-    };
+    });
+    assert!(running.update_call_state(
+        "WaitDelegate".to_owned(),
+        Some(arguments.clone()),
+        ToolStatusKind::Running,
+    ));
+    assert!(running.has_visible_animation());
 
-    let header = plain(vec![Line::from_spans(tool_header_spans(
-        &state,
-        &theme,
-        None,
-        usize::MAX,
-    ))])
-    .remove(0);
-
+    let rows = plain(running.render(WIDTH));
+    assert_eq!(rows.len(), 1, "collapsed running card: {rows:?}");
     assert!(
-        header.contains("Used WaitDelegate · Task 3: registry lifetime + child visibility"),
-        "header: {header:?}"
+        rows[0].contains("Waiting for 4 delegates · timeout 30s · elapsed"),
+        "running header: {rows:?}"
     );
-    assert!(!header.contains(agent_id), "header: {header:?}");
-}
 
-#[test]
-fn wait_delegate_header_fits_every_swarm_item_title() {
-    const WIDTH: usize = 80;
-    let theme = TuiTheme::default();
-    let state = ToolCallState {
-        id: "wait-swarm".to_owned(),
+    running.set_expanded(true);
+    let rows = plain(running.render(WIDTH));
+    for id in ["agent_a", "agent_b", "swarm_c", "agent_d"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("{id} · waiting"))),
+            "missing {id}: {rows:?}"
+        );
+    }
+
+    let mut completed = ToolCallComponent::new(ToolCallState {
+        id: "wait-completed".to_owned(),
         name: "WaitDelegate".to_owned(),
-        arguments: Some(serde_json::json!({ "ids": ["swarm_123"] }).to_string()),
-        result: Some("status: completed".to_owned()),
-        details: Some(serde_json::json!({
+        arguments: Some(arguments.clone()),
+        result: Some("kind: delegate_wait\noutcome: all_terminal".to_owned()),
+        details: Some(json!({
             "kind": "delegate_wait",
             "outcome": "all_terminal",
-            "items": [{
-                "kind": "delegate_swarm",
-                "description": "review instruction runtime",
-                "items": [
-                    { "title": "Task 1: registry lifetime and ownership review" },
-                    { "title": "Task 2: child visibility and replay review" },
-                    { "title": "Task 3: persistence and compaction review" },
-                ],
-            }],
+            "aggregate": { "total": 4, "terminal": 4, "pending": 0, "not_found": 0 },
+            "items": [
+                { "id": "agent_a", "title": "Registry lifetime", "status": "completed" },
+                { "id": "agent_b", "title": "Provider retry", "status": "failed" },
+                { "id": "swarm_c", "description": "Shell audit", "status": "cancelled" },
+                { "id": "agent_d", "title": "Smoke test", "status": "timed_out" }
+            ]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let rows = plain(completed.render(WIDTH));
+    assert!(rows[0].contains("Wait complete · 4 terminal · 1 failed · 1 cancelled · 1 timed out"));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("✓ Registry lifetime · completed"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("✗ Provider retry · failed"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("⊘ Shell audit · cancelled"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("1 more targets, ctrl+o to expand"))
+    );
+    assert!(!rows.iter().any(|row| row.contains("kind: delegate_wait")));
+
+    completed.set_expanded(true);
+    let rows = plain(completed.render(WIDTH));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("✗ Smoke test · timed_out"))
+    );
+
+    let timeout = ToolCallState {
+        id: "wait-timeout".to_owned(),
+        name: "WaitDelegate".to_owned(),
+        arguments: Some(arguments.clone()),
+        result: Some("outcome: wait_timed_out".to_owned()),
+        details: Some(json!({
+            "kind": "delegate_wait",
+            "outcome": "wait_timed_out",
+            "aggregate": { "total": 4, "terminal": 2, "pending": 2, "not_found": 0 },
+            "items": []
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     };
-
     let header = plain(vec![Line::from_spans(tool_header_spans(
-        &state, &theme, None, WIDTH,
+        &timeout,
+        &TuiTheme::default(),
+        None,
+        WIDTH,
     ))])
     .remove(0);
+    assert_eq!(header, "◷ Wait timed out · 2/4 terminal · 2 still running");
 
-    for label in ["Task 1", "Task 2", "Task 3"] {
-        assert!(header.contains(label), "missing {label} in {header:?}");
-    }
-    assert_eq!(header.matches(" | ").count(), 2, "header: {header:?}");
-    assert_eq!(header.matches("...").count(), 3, "header: {header:?}");
+    let not_found = ToolCallState {
+        id: "wait-missing".to_owned(),
+        details: Some(json!({
+            "kind": "delegate_wait",
+            "outcome": "not_found",
+            "aggregate": { "total": 2, "terminal": 1, "pending": 0, "not_found": 1 },
+            "items": []
+        })),
+        ..timeout
+    };
+    let header = plain(vec![Line::from_spans(tool_header_spans(
+        &not_found,
+        &TuiTheme::default(),
+        None,
+        40,
+    ))])
+    .remove(0);
+    assert_eq!(header, "? Target not found · 1 unknown");
+    assert!(neo_tui::primitive::visible_width(&header) <= 40);
+
+    let rows = plain(completed.render(32));
     assert!(
-        neo_tui::primitive::visible_width(&header) <= WIDTH,
-        "header: {header:?}"
+        rows.iter()
+            .all(|row| neo_tui::primitive::visible_width(row) <= 30),
+        "narrow card overflowed: {rows:?}"
     );
 }
 
