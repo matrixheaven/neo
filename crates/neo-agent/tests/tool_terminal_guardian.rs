@@ -5,6 +5,7 @@ use neo_agent_core::{
     execute_model_bash_for_runtime,
 };
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 /// Serializes all tests in this file so they do not compete for OS resources
 /// (PTY allocations, process spawns) and trigger spurious guardian timeouts.
@@ -111,7 +112,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         .to_owned();
     assert_ne!(details["guardian_pid"], details["command_pid"]);
 
-    if let Err(e) = registry
+    let written = match registry
         .run(
             "Terminal",
             context,
@@ -123,10 +124,22 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         )
         .await
     {
-        try_stop(registry, context, &handle).await;
-        return Err(format!("terminal write: {e}"));
+        Ok(result) => result,
+        Err(e) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("terminal write: {e}"));
+        }
+    };
+    // write now yields bounded PTY output and advances read_offset.
+    let mut output = written
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if !output.contains("pty:40:8") {
+        output.push_str(&read_until(registry, context, &handle, "pty:40:8").await);
     }
-    let output = read_until(registry, context, &handle, "pty:40:8").await;
     if !output.contains("pty:40:8") {
         try_stop(registry, context, &handle).await;
         return Err(format!("terminal output: {output:?}"));
@@ -143,7 +156,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         try_stop(registry, context, &handle).await;
         return Err(format!("terminal resize: {e}"));
     }
-    if let Err(e) = registry
+    let resized_write = match registry
         .run(
             "Terminal",
             context,
@@ -151,10 +164,21 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         )
         .await
     {
-        try_stop(registry, context, &handle).await;
-        return Err(format!("write after resize: {e}"));
+        Ok(result) => result,
+        Err(e) => {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("write after resize: {e}"));
+        }
+    };
+    let mut output = resized_write
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if !output.contains("18 72") {
+        output.push_str(&read_until(registry, context, &handle, "18 72").await);
     }
-    let output = read_until(registry, context, &handle, "18 72").await;
     if !output.contains("18 72") {
         try_stop(registry, context, &handle).await;
         return Err(format!("resized output: {output:?}"));
@@ -286,18 +310,43 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
         .run(
             "Terminal",
             &context,
-            json!({ "mode": "start", "command": "printf keep-terminal-leak-tail; sleep 1" }),
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc",
+                "yield_time_ms": 500
+            }),
         )
         .await
         .expect("terminal start");
     let handle = started.details.as_ref().unwrap()["handle"]
         .as_str()
         .unwrap();
+    // Deposit output without advancing the read offset: max_output_bytes 0 keeps
+    // unread bytes available for the read under test.
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "printf keep-terminal-leak-tail\\n\n",
+                "yield_time_ms": 500,
+                "max_output_bytes": 0
+            }),
+        )
+        .await
+        .expect("deposit output");
     let read = registry
         .run(
             "Terminal",
             &context,
-            json!({ "mode": "read", "handle": handle, "max_output_bytes": 4 }),
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "max_output_bytes": 4,
+                "yield_time_ms": 0
+            }),
         )
         .await
         .expect("terminal read");
@@ -526,6 +575,36 @@ fn count_running_markers(runtime_root: &std::path::Path) -> usize {
     count
 }
 
+/// Live guardians write `.running.json` and only write `.status.json` after
+/// finalize. The running file itself is retained, so "marker disappeared"
+/// means no running marker without a final status companion remains.
+fn count_active_running_markers(runtime_root: &std::path::Path) -> usize {
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(runtime_root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            count += count_active_running_markers(&path);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(task_id) = name.strip_suffix(".running.json") else {
+            continue;
+        };
+        if !path
+            .with_file_name(format!("{task_id}.status.json"))
+            .is_file()
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
     let _guard = serial_guard().await;
@@ -647,6 +726,282 @@ async fn read_until(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     output
+}
+
+#[tokio::test]
+async fn terminal_start_write_and_read_share_incremental_bounded_output() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let subdir = workspace.path().join("subdir");
+    std::fs::create_dir_all(&subdir).expect("subdir");
+    std::fs::write(subdir.join("marker"), b"ok").expect("marker");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "cwd": "subdir",
+                "yield_time_ms": 1000,
+                "command": "test -f marker && printf initial-output; read line; printf 'reply:%s' \"$line\"; sleep 30"
+            }),
+        )
+        .await
+        .expect("terminal start");
+    let handle = started.details.as_ref().unwrap()["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+    let start_output = started.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        start_output.contains("initial-output") || started.content.contains("initial-output"),
+        "start should return initial output: content={:?} details_output={start_output:?}",
+        started.content
+    );
+    assert_eq!(
+        started.details.as_ref().unwrap()["status"],
+        "running",
+        "start yield expiry must leave the command running"
+    );
+
+    let immediate = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "yield_time_ms": 0
+            }),
+        )
+        .await
+        .expect("immediate read after start");
+    let immediate_output = immediate.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !immediate_output.contains("initial-output"),
+        "start must advance read_offset; got {immediate_output:?}"
+    );
+    assert!(
+        immediate_output.is_empty(),
+        "immediate read after start yield must be empty: {immediate_output:?}"
+    );
+
+    let written = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "hello\n",
+                "yield_time_ms": 1000
+            }),
+        )
+        .await
+        .expect("terminal write");
+    let write_output = written.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        write_output.contains("reply:hello") || written.content.contains("reply:hello"),
+        "write yield should include reply (echo is allowed): content={:?} details_output={write_output:?}",
+        written.content
+    );
+    assert_eq!(written.details.as_ref().unwrap()["written"], true);
+
+    let after_write = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "yield_time_ms": 0
+            }),
+        )
+        .await
+        .expect("immediate read after write");
+    let after_write_output = after_write.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !after_write_output.contains("reply:hello"),
+        "write must advance read_offset; got {after_write_output:?}"
+    );
+    assert!(
+        after_write_output.is_empty(),
+        "immediate read after write yield must be empty: {after_write_output:?}"
+    );
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop");
+}
+
+#[tokio::test]
+async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc",
+                "yield_time_ms": 500
+            }),
+        )
+        .await
+        .expect("terminal start");
+    let handle = started.details.as_ref().unwrap()["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "sleep 30\n",
+                "yield_time_ms": 500
+            }),
+        )
+        .await
+        .expect("write sleep");
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "\u{0003}",
+                "yield_time_ms": 1000
+            }),
+        )
+        .await
+        .expect("write ctrl-c");
+
+    let alive = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "printf control-alive\\n\n",
+                "yield_time_ms": 2000
+            }),
+        )
+        .await
+        .expect("write after ctrl-c");
+    let mut combined = alive.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if !combined.contains("control-alive") {
+        combined = read_until(&registry, &context, &handle, "control-alive").await;
+    }
+    assert!(
+        combined.contains("control-alive"),
+        "session must remain usable after Ctrl+C input: {combined:?}"
+    );
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_start_cancellation_after_registration_cleans_up_process() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let cancel = CancellationToken::new();
+    let context =
+        guarded_context(&workspace, ShellLimits::default()).with_cancel_token(cancel.clone());
+    let registry = std::sync::Arc::new(ToolRegistry::with_builtin_tools());
+    let runtime_root = context.shell_runtime.runtime_root().to_path_buf();
+
+    let start = {
+        let registry = std::sync::Arc::clone(&registry);
+        let context = context.clone();
+        tokio::spawn(async move {
+            registry
+                .run(
+                    "Terminal",
+                    &context,
+                    json!({
+                        "mode": "start",
+                        "command": "sleep 30",
+                        "yield_time_ms": 30000
+                    }),
+                )
+                .await
+        })
+    };
+
+    let mut saw_marker = false;
+    for _ in 0..200 {
+        if count_active_running_markers(&runtime_root) >= 1 {
+            saw_marker = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw_marker,
+        "start must register a running process before cancellation"
+    );
+
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(15), start)
+        .await
+        .expect("start task should finish after cancel")
+        .expect("start task join");
+    assert!(
+        matches!(result, Err(ToolError::Cancelled)),
+        "cancelled start must return Cancelled: {result:?}"
+    );
+
+    let cleaned = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if count_active_running_markers(&runtime_root) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        cleaned.is_ok(),
+        "cancellation after registration must stop the process; active markers left: {}",
+        count_active_running_markers(&runtime_root)
+    );
 }
 
 #[cfg(unix)]

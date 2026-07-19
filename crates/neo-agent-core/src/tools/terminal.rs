@@ -16,7 +16,9 @@ use super::{
 };
 use crate::session::MAIN_AGENT_ID;
 
-const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
+const TERMINAL_START_WRITE_YIELD: Duration = Duration::from_millis(250);
+const TERMINAL_READ_YIELD: Duration = Duration::from_secs(3);
+const TERMINAL_MAX_YIELD_MS: u64 = 30_000;
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -29,7 +31,9 @@ struct TerminalInput {
     command: Option<String>,
     #[schemars(description = "Terminal handle. Required except for start.")]
     handle: Option<String>,
-    #[schemars(description = "Input text. Required for write.")]
+    #[schemars(
+        description = "Input text. Required for write. May include raw control bytes such as Ctrl+C (\\u0003), Ctrl+D (\\u0004), and Ctrl+Z (\\u001a). These are raw PTY inputs, not portable signal guarantees."
+    )]
     input: Option<String>,
     #[schemars(
         description = "Working directory for the launched process. Only valid for start; rejected for other modes. Relative paths resolve against the session working directory. Supply it whenever the command works inside a nested project subtree: command text is never inspected for paths, so nested AGENTS.md instructions load only from this typed cwd."
@@ -44,11 +48,16 @@ struct TerminalInput {
         range(min = 300, max = 3600)
     )]
     timeout_secs: Option<u64>,
-    #[schemars(description = "Maximum output bytes for read and stop.")]
+    #[schemars(
+        description = "Wait for incremental PTY output after start/write or while reading. The clock starts only after admission and operation readiness; expiry returns current output with status running and never stops the command. Defaults: 250 ms for start/write, 3000 ms for read. Valid only for start/write/read. Range 0..=30000; 0 snapshots immediately after the operation is ready.",
+        range(min = 0, max = 30000)
+    )]
+    yield_time_ms: Option<u64>,
+    #[schemars(description = "Maximum output bytes for start, write, read, and stop.")]
     max_output_bytes: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TerminalMode {
     Start,
@@ -58,9 +67,22 @@ enum TerminalMode {
     Stop,
 }
 
+fn terminal_yield(mode: TerminalMode, requested: Option<u64>) -> Duration {
+    requested.map_or_else(
+        || match mode {
+            TerminalMode::Start | TerminalMode::Write => TERMINAL_START_WRITE_YIELD,
+            TerminalMode::Read => TERMINAL_READ_YIELD,
+            TerminalMode::Resize | TerminalMode::Stop => Duration::ZERO,
+        },
+        Duration::from_millis,
+    )
+}
+
 const DESCRIPTION: &str = r"Operate a real PTY session with start/write/read/resize/stop modes.
 
-Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle. Write sends input, Read returns output since the prior read, Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is bounded by the runtime limit.
+Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle plus any incremental raw PTY output collected during a short yield window. Write sends input (including raw control bytes such as \\u0003/\\u0004/\\u001a — not portable signal guarantees) and returns post-write output. Read returns output since the prior observation. Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is raw PTY bytes (echo, ANSI, CR, backspace, cursor control are not filtered) and is bounded by the runtime limit.
+
+`yield_time_ms` is valid only for start/write/read (defaults 250/250/3000 ms, range 0..=30000). The yield clock starts only after admission and operation readiness; expiry returns current output with status running and never stops the command. Omit `timeout_secs` for unlimited command lifetime.
 
 `cwd` is accepted only for start and sets the launched process's working directory. When the command works inside a nested project subtree, you must set `cwd` to that subtree: the command string is never parsed for paths, so nested AGENTS.md instructions apply only when the typed `cwd` (or path) argument names the subtree.";
 
@@ -95,11 +117,32 @@ impl Tool for TerminalTool {
                     message: "timeout_secs is valid only for start".to_owned(),
                 });
             }
+            if let Some(yield_time_ms) = input.yield_time_ms {
+                if !matches!(
+                    input.mode,
+                    TerminalMode::Start | TerminalMode::Write | TerminalMode::Read
+                ) {
+                    return Err(ToolError::InvalidInput {
+                        tool: self.name().to_owned(),
+                        message: "yield_time_ms is valid only for start, write, and read"
+                            .to_owned(),
+                    });
+                }
+                if yield_time_ms > TERMINAL_MAX_YIELD_MS {
+                    return Err(ToolError::InvalidInput {
+                        tool: self.name().to_owned(),
+                        message: format!(
+                            "yield_time_ms must be between 0 and {TERMINAL_MAX_YIELD_MS}"
+                        ),
+                    });
+                }
+            }
             let timeout = parse_shell_timeout_secs(self.name(), input.timeout_secs)?;
             let max_output_bytes = input
                 .max_output_bytes
                 .unwrap_or(ctx.max_output_bytes)
                 .min(ctx.shell_runtime.limits().max_output_bytes);
+            let yield_for = terminal_yield(input.mode, input.yield_time_ms);
             match input.mode {
                 TerminalMode::Start => {
                     start_terminal(
@@ -109,6 +152,8 @@ impl Tool for TerminalTool {
                         input.cols,
                         input.rows,
                         timeout,
+                        max_output_bytes,
+                        yield_for,
                     )
                     .await
                 }
@@ -118,6 +163,8 @@ impl Tool for TerminalTool {
                         self.name(),
                         &required_field(self.name(), input.handle, "handle")?,
                         &required_field(self.name(), input.input, "input")?,
+                        max_output_bytes,
+                        yield_for,
                     )
                     .await
                 }
@@ -127,6 +174,7 @@ impl Tool for TerminalTool {
                         self.name(),
                         &required_field(self.name(), input.handle, "handle")?,
                         max_output_bytes,
+                        yield_for,
                     )
                     .await
                 }
@@ -161,6 +209,8 @@ async fn start_terminal(
     cols: Option<u16>,
     rows: Option<u16>,
     timeout: Option<Duration>,
+    max_output_bytes: usize,
+    yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
     let cols = cols.unwrap_or(80).max(1);
     let rows = rows.unwrap_or(24).max(1);
@@ -213,32 +263,44 @@ async fn start_terminal(
     .await?;
     let guardian_pid = client.guardian_pid;
     let command_pid = client.command_pid;
+    let session = TerminalClientSession {
+        client,
+        state: Arc::new(Mutex::new(TerminalClientState {
+            read_offset: 0,
+            cols,
+            rows,
+        })),
+        read_lock: Arc::new(Mutex::new(())),
+    };
     ctx.shell_runtime
-        .insert_terminal(
-            handle.clone(),
-            TerminalClientSession {
-                client,
-                state: Arc::new(Mutex::new(TerminalClientState {
-                    read_offset: 0,
-                    cols,
-                    rows,
-                })),
-                read_lock: Arc::new(Mutex::new(())),
-            },
-        )
+        .insert_terminal(handle.clone(), session.clone())
         .await;
-    Ok(ToolResult::ok(format!(
-        "handle: {handle}\nstatus: running\ncommand: {command}\ncols: {cols}\nrows: {rows}"
-    ))
-    .with_details(json!({
-        "handle": handle,
-        "status": "running",
-        "command": command,
-        "cols": cols,
-        "rows": rows,
-        "guardian_pid": guardian_pid,
-        "command_pid": command_pid,
-    })))
+    match collect_terminal_output(
+        ctx,
+        "Terminal",
+        &handle,
+        &session,
+        max_output_bytes,
+        yield_for,
+    )
+    .await
+    {
+        Ok(mut result) => {
+            if let Some(details) = result.details.as_mut() {
+                details["command"] = json!(command);
+                details["guardian_pid"] = json!(guardian_pid);
+                details["command_pid"] = json!(command_pid);
+            }
+            Ok(result)
+        }
+        Err(ToolError::Cancelled) => {
+            if let Some(session) = ctx.shell_runtime.remove_terminal(&handle).await {
+                let _ = session.client.stop().await;
+            }
+            Err(ToolError::Cancelled)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn write_terminal(
@@ -246,21 +308,20 @@ async fn write_terminal(
     tool: &str,
     handle: &str,
     input: &str,
+    max_output_bytes: usize,
+    yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
     let session = terminal_session(ctx, tool, handle).await?;
     session
         .client
         .write_terminal(normalize_terminal_input_newlines(input).as_bytes())
         .await?;
-    Ok(
-        ToolResult::ok(format!("handle: {handle}\nstatus: running\nwritten: true")).with_details(
-            json!({
-                "handle": handle,
-                "status": "running",
-                "written": true,
-            }),
-        ),
-    )
+    let mut result =
+        collect_terminal_output(ctx, tool, handle, &session, max_output_bytes, yield_for).await?;
+    if let Some(details) = result.details.as_mut() {
+        details["written"] = json!(true);
+    }
+    Ok(result)
 }
 
 async fn read_terminal(
@@ -268,11 +329,58 @@ async fn read_terminal(
     tool: &str,
     handle: &str,
     max_output_bytes: usize,
+    yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
     let session = terminal_session(ctx, tool, handle).await?;
+    collect_terminal_output(ctx, tool, handle, &session, max_output_bytes, yield_for).await
+}
+
+async fn collect_terminal_output(
+    ctx: &ToolContext,
+    _tool: &str,
+    handle: &str,
+    session: &TerminalClientSession,
+    max_output_bytes: usize,
+    yield_for: Duration,
+) -> Result<ToolResult, ToolError> {
     let _read = session.read_lock.lock().await;
     let read_offset = session.state.lock().await.read_offset;
-    wait_for_output_quiet_period(&session.client, read_offset).await?;
+
+    if !yield_for.is_zero() && session.client.final_result().is_none() {
+        let deadline = Instant::now() + yield_for;
+        let mut last_total = 0;
+        let mut last_change = Instant::now();
+        while Instant::now() < deadline {
+            if ctx.cancel_token.is_cancelled() {
+                return Err(ToolError::Cancelled);
+            }
+            let snapshot = match session.client.read_terminal(read_offset, 0).await {
+                Ok(snapshot) => snapshot,
+                Err(_) if session.client.final_result().is_some() => break,
+                Err(error) => return Err(error),
+            };
+            if snapshot.total != last_total {
+                last_total = snapshot.total;
+                last_change = Instant::now();
+            } else if snapshot.total > read_offset
+                && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD
+            {
+                break;
+            }
+            if session.client.final_result().is_some() {
+                break;
+            }
+            tokio::select! {
+                () = ctx.cancel_token.cancelled() => return Err(ToolError::Cancelled),
+                () = tokio::time::sleep(TERMINAL_READ_POLL_INTERVAL) => {}
+            }
+        }
+    }
+
+    if ctx.cancel_token.is_cancelled() {
+        return Err(ToolError::Cancelled);
+    }
+
     let (snapshot, final_result) = if let Some(result) = session.client.final_result() {
         (
             terminal_snapshot_from_final(&result, read_offset, max_output_bytes),
@@ -341,38 +449,6 @@ async fn read_terminal(
         "handle: {handle}\nstatus: {status}\nexit_code: {exit_code_text}\noutput:\n{content}"
     ))
     .with_details(details))
-}
-
-async fn wait_for_output_quiet_period(
-    client: &GuardianClient,
-    read_offset: u64,
-) -> Result<(), ToolError> {
-    if client.final_result().is_some() {
-        return Ok(());
-    }
-    let deadline = Instant::now() + TERMINAL_READ_MAX_WAIT;
-    let mut last_total = 0;
-    let mut last_change = Instant::now();
-    while Instant::now() < deadline {
-        let snapshot = match client.read_terminal(read_offset, 0).await {
-            Ok(snapshot) => snapshot,
-            Err(_) if client.final_result().is_some() => break,
-            Err(error) => return Err(error),
-        };
-        if snapshot.total != last_total {
-            last_total = snapshot.total;
-            last_change = Instant::now();
-        } else if snapshot.total > read_offset
-            && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD
-        {
-            break;
-        }
-        if client.final_result().is_some() {
-            break;
-        }
-        tokio::time::sleep(TERMINAL_READ_POLL_INTERVAL).await;
-    }
-    Ok(())
 }
 
 async fn resize_terminal(
@@ -538,6 +614,60 @@ mod tests {
         assert_eq!(
             normalize_terminal_input_newlines("a\nb\r\nc\r"),
             "a\rb\rc\r"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_yield_is_bounded_and_mode_scoped() {
+        assert_eq!(
+            terminal_yield(TerminalMode::Start, None),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            terminal_yield(TerminalMode::Write, None),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            terminal_yield(TerminalMode::Read, None),
+            Duration::from_secs(3)
+        );
+        assert_eq!(terminal_yield(TerminalMode::Read, Some(0)), Duration::ZERO);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = ToolContext::new(temp.path())
+            .expect("tool context")
+            .with_access(crate::ToolAccess::all());
+        let over_range = TerminalTool
+            .execute(
+                &context,
+                json!({
+                    "mode": "read",
+                    "handle": "missing",
+                    "yield_time_ms": 30001
+                }),
+            )
+            .await
+            .expect_err("out-of-range yield_time_ms was accepted");
+        assert!(
+            over_range.to_string().contains("yield_time_ms"),
+            "error should name yield_time_ms: {over_range}"
+        );
+        let resize_yield = TerminalTool
+            .execute(
+                &context,
+                json!({
+                    "mode": "resize",
+                    "handle": "missing",
+                    "cols": 80,
+                    "rows": 24,
+                    "yield_time_ms": 1
+                }),
+            )
+            .await
+            .expect_err("yield_time_ms on resize was accepted");
+        assert!(
+            resize_yield.to_string().contains("yield_time_ms"),
+            "error should name yield_time_ms: {resize_yield}"
         );
     }
 
