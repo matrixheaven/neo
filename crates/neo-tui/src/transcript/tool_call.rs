@@ -58,6 +58,8 @@ const MAX_LIVE_OUTPUT_CHARS: usize = 50_000;
 impl ToolCallComponent {
     #[must_use]
     pub fn new(state: ToolCallState) -> Self {
+        let streaming_started_at =
+            matches!(state.status, ToolStatusKind::Running).then(Instant::now);
         Self {
             state,
             expanded: false,
@@ -65,7 +67,7 @@ impl ToolCallComponent {
             dropped_live_output_lines: 0,
             live_output_chars: 0,
             workspace_dir: None,
-            streaming_started_at: None,
+            streaming_started_at,
             queue: None,
         }
     }
@@ -298,7 +300,9 @@ impl ToolCallComponent {
             return true;
         }
         is_pending_or_running(self.state.status)
-            && (is_file_write_tool(&self.state.name) || self.state.name == "WaitDelegate")
+            && (is_file_write_tool(&self.state.name)
+                || self.state.name == "WaitDelegate"
+                || self.state.name == "Sleep")
             && self.streaming_started_at.is_some()
     }
 }

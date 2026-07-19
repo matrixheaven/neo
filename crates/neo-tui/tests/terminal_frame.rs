@@ -239,6 +239,41 @@ fn running_static_tool_does_not_request_an_animation_deadline() {
     assert!(frame.next_animation_deadline.is_none());
 }
 
+#[test]
+fn running_sleep_requests_animation_deadline() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(80, 12);
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "sleep-anim".to_owned(),
+        name: "Sleep".to_owned(),
+        arguments: serde_json::json!({
+            "duration_seconds": 45,
+            "reason": "wait for cooldown"
+        }),
+    });
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let running = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(
+        running.next_animation_deadline.is_some(),
+        "running Sleep must request animation deadline"
+    );
+
+    tui.transcript_mut()
+        .apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "sleep-anim".to_owned(),
+            name: "Sleep".to_owned(),
+            result: neo_agent_core::ToolResult::ok("Waited 45 seconds: wait for cooldown"),
+        });
+    let finished = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(
+        finished.next_animation_deadline.is_none(),
+        "completed Sleep must not request animation deadline"
+    );
+}
+
 fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
     transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
