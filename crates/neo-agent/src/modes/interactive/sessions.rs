@@ -144,6 +144,7 @@ impl InteractiveController {
         );
         replay_session_into_transcript(&mut transcript, loaded);
         *self.tui.transcript_mut() = transcript;
+        self.reset_captured_log_budget();
     }
 
     /// Rebuild the transcript pane from scratch with only the welcome banner,
@@ -166,6 +167,7 @@ impl InteractiveController {
             None,
         );
         *self.tui.transcript_mut() = transcript;
+        self.reset_captured_log_budget();
     }
 
     /// Reset the in-memory TUI/runtime state so the next prompt starts a fresh

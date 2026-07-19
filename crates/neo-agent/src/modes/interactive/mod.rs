@@ -246,7 +246,7 @@ pub async fn execute_tty_with_startup(
     config: &AppConfig,
     startup: StartupAction,
     options: InteractiveOptions,
-    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>>,
+    log_receiver: Option<crate::log_capture::CapturedEventReceiver>,
 ) -> Result<Option<String>> {
     if !stdout().is_terminal() {
         return Ok(Some(execute_with_startup(config, &startup, options)));
@@ -430,7 +430,9 @@ pub(crate) struct InteractiveController {
     model_capabilities: std::collections::HashMap<String, neo_ai::ModelCapabilities>,
     /// Optional receiver for captured tracing WARN/ERROR events, surfaced as
     /// transcript status lines. `None` in tests that don't exercise this path.
-    log_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>>,
+    log_event_rx: Option<crate::log_capture::CapturedEventReceiver>,
+    captured_log_status_count: usize,
+    captured_log_suppression_notified: bool,
     completion_notification: neo_tui::notify::NotificationMode,
     question_notification: neo_tui::notify::NotificationMode,
 }
@@ -842,6 +844,8 @@ impl InteractiveController {
             file_reference_store: neo_tui::paste::FileReferenceStore::new(),
             model_capabilities: std::collections::HashMap::new(),
             log_event_rx: None,
+            captured_log_status_count: 0,
+            captured_log_suppression_notified: false,
             completion_notification: neo_tui::notify::NotificationMode::Bell,
             question_notification: neo_tui::notify::NotificationMode::None,
         }

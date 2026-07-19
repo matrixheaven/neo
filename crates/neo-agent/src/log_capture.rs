@@ -1,7 +1,14 @@
 //! Forward structured WARN/ERROR tracing events to the TUI transcript.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use tokio::sync::mpsc;
 use tracing_subscriber::prelude::*;
+
+const TUI_LOG_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedEvent {
@@ -9,20 +16,50 @@ pub struct CapturedEvent {
     pub message: String,
 }
 
-pub struct CapturingLayer {
-    event_tx: mpsc::UnboundedSender<CapturedEvent>,
+pub(crate) struct CapturingLayer {
+    event_tx: mpsc::Sender<CapturedEvent>,
+    dropped_events: Arc<AtomicUsize>,
 }
 
 impl CapturingLayer {
     #[must_use]
-    pub fn new(event_tx: mpsc::UnboundedSender<CapturedEvent>) -> Self {
-        Self { event_tx }
+    fn new(event_tx: mpsc::Sender<CapturedEvent>, dropped_events: Arc<AtomicUsize>) -> Self {
+        Self {
+            event_tx,
+            dropped_events,
+        }
     }
 }
 
-pub fn setup_tui_tracing() -> Option<mpsc::UnboundedReceiver<CapturedEvent>> {
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let layer = CapturingLayer::new(event_tx);
+pub(crate) struct CapturedEventReceiver {
+    event_rx: mpsc::Receiver<CapturedEvent>,
+    dropped_events: Arc<AtomicUsize>,
+}
+
+impl CapturedEventReceiver {
+    pub(crate) fn try_recv(&mut self) -> Result<CapturedEvent, mpsc::error::TryRecvError> {
+        self.event_rx.try_recv()
+    }
+
+    pub(crate) fn take_dropped(&self) -> usize {
+        self.dropped_events.swap(0, Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn capture_channel(capacity: usize) -> (CapturingLayer, CapturedEventReceiver) {
+    let (event_tx, event_rx) = mpsc::channel(capacity);
+    let dropped_events = Arc::new(AtomicUsize::new(0));
+    (
+        CapturingLayer::new(event_tx, dropped_events.clone()),
+        CapturedEventReceiver {
+            event_rx,
+            dropped_events,
+        },
+    )
+}
+
+pub(crate) fn setup_tui_tracing() -> Option<CapturedEventReceiver> {
+    let (layer, event_rx) = capture_channel(TUI_LOG_CHANNEL_CAPACITY);
     let default_filter = "neo=info,neo_agent_core=info,rmcp=off,warn";
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
@@ -47,9 +84,17 @@ where
         if level > &tracing::Level::WARN {
             return;
         }
+        let permit = match self.event_tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return,
+        };
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        let _ = self.event_tx.send(CapturedEvent {
+        permit.send(CapturedEvent {
             level: level.as_str().to_owned(),
             message: visitor.format_message(),
         });
@@ -116,11 +161,21 @@ impl tracing::field::Visit for MessageVisitor {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
     use super::*;
 
-    fn capture() -> (CapturingLayer, mpsc::UnboundedReceiver<CapturedEvent>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (CapturingLayer::new(tx), rx)
+    struct CountedDebug(Arc<AtomicUsize>);
+
+    impl fmt::Debug for CountedDebug {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            formatter.write_str("counted")
+        }
+    }
+
+    fn capture() -> (CapturingLayer, CapturedEventReceiver) {
+        capture_channel(8)
     }
 
     #[test]
@@ -129,7 +184,7 @@ mod tests {
         let _guard = tracing_subscriber::registry().with(layer).set_default();
         tracing::warn!(server_id = "linear", "MCP server unavailable");
 
-        let event = rx.blocking_recv().expect("warning should be captured");
+        let event = rx.try_recv().expect("warning should be captured");
         assert_eq!(event.level, "WARN");
         assert!(event.message.contains("MCP server unavailable"));
         assert!(event.message.contains("server_id=linear"));
@@ -141,7 +196,7 @@ mod tests {
         let _guard = tracing_subscriber::registry().with(layer).set_default();
         tracing::error!("critical failure");
 
-        let event = rx.blocking_recv().expect("error should be captured");
+        let event = rx.try_recv().expect("error should be captured");
         assert_eq!(event.level, "ERROR");
         assert!(event.message.contains("critical failure"));
     }
@@ -161,10 +216,23 @@ mod tests {
 
         neo_agent_core::emit_repaired_tool_arguments_warning("Bash", "repaired required fields");
 
-        let event = rx.blocking_recv().expect("warning should be captured");
+        let event = rx.try_recv().expect("warning should be captured");
         assert_eq!(event.level, "WARN");
         assert!(event.message.contains("tool arguments repaired"));
         assert!(event.message.contains("tool_name=Bash"));
         assert!(event.message.contains("warning=repaired required fields"));
+    }
+
+    #[test]
+    fn capturing_layer_drops_events_when_channel_is_full() {
+        let (layer, mut rx) = capture_channel(1);
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+        let debug_calls = Arc::new(AtomicUsize::new(0));
+        tracing::warn!("first");
+        tracing::warn!(value = ?CountedDebug(debug_calls.clone()), "second");
+
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(rx.take_dropped(), 1);
+        assert_eq!(debug_calls.load(Ordering::Relaxed), 0);
     }
 }

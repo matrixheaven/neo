@@ -97,7 +97,7 @@ fn init_stderr_tracing() {
 
 async fn dispatch(
     cli: Cli,
-    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
+    log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
     let mut overrides = ConfigOverrides::from_cli(&cli);
     if let Some(config_path) = &mut overrides.config_path
@@ -174,7 +174,7 @@ async fn dispatch_command(
     session_options: RunSessionOptions,
     resume_picker: bool,
     interactive_options: modes::interactive::InteractiveOptions,
-    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
+    log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
     match command {
         Some(Command::ProcessGuard) => {
@@ -219,7 +219,7 @@ async fn dispatch_resume_command(
     config: &AppConfig,
     interactive_options: modes::interactive::InteractiveOptions,
     session_id: Option<String>,
-    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
+    log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
     if io::stdout().is_terminal() {
         let startup = session_id.map_or(
@@ -477,7 +477,7 @@ async fn dispatch_default_command(
     config: &AppConfig,
     resume_picker: bool,
     interactive_options: modes::interactive::InteractiveOptions,
-    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
+    log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
     if config.defaults.mode.eq_ignore_ascii_case("rpc") {
         return rpc::server::execute(config).await;
