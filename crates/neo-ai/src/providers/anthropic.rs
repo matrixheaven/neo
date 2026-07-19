@@ -81,8 +81,9 @@ fn headers(
     extra_headers: &BTreeMap<String, String>,
 ) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
-    let api_key = HeaderValue::from_str(api_key)
+    let mut api_key = HeaderValue::from_str(api_key)
         .map_err(|err| ProviderError::Header(format!("invalid x-api-key header: {err}")))?;
+    api_key.set_sensitive(true);
     headers.insert(HeaderName::from_static("x-api-key"), api_key);
     headers.insert(
         HeaderName::from_static("anthropic-version"),
@@ -90,6 +91,10 @@ fn headers(
     );
 
     super::common::http::inject_extra_headers(&mut headers, extra_headers)?;
+    headers
+        .get_mut("x-api-key")
+        .expect("x-api-key header is always present")
+        .set_sensitive(true);
 
     Ok(headers)
 }
@@ -803,6 +808,21 @@ fn stop_reason(reason: &str) -> StopReason {
 mod tests {
     use super::*;
     use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, RequestOptions, ToolCall};
+
+    #[test]
+    fn api_key_header_remains_sensitive_when_overridden() {
+        let extra_headers = BTreeMap::from([
+            ("x-api-key".to_owned(), "override-key".to_owned()),
+            ("x-test".to_owned(), "ordinary".to_owned()),
+        ]);
+
+        let headers = headers("api-key", &extra_headers).unwrap();
+        let api_key = headers.get("x-api-key").unwrap();
+
+        assert_eq!(api_key, "override-key");
+        assert!(api_key.is_sensitive());
+        assert!(!headers.get("x-test").unwrap().is_sensitive());
+    }
 
     #[test]
     fn request_body_maps_cache_retention_to_all_breakpoints() {

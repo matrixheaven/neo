@@ -100,10 +100,23 @@ struct OpenAiImage {
 
 fn headers(api_key: &str) -> Result<HeaderMap, AiError> {
     let mut headers = HeaderMap::new();
-    let authorization =
+    let mut authorization =
         HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| AiError::Protocol {
             message: format!("invalid authorization header: {err}"),
         })?;
+    authorization.set_sensitive(true);
     headers.insert(AUTHORIZATION, authorization);
     Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_header_is_sensitive() {
+        let headers = headers("secret-key").unwrap();
+
+        assert!(headers.get(AUTHORIZATION).unwrap().is_sensitive());
+    }
 }
