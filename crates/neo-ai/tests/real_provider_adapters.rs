@@ -395,6 +395,29 @@ async fn openai_image_generation_client_serializes_request_and_decodes_base64_re
 }
 
 #[tokio::test]
+async fn openai_image_generation_client_preserves_rate_limit_details() {
+    let body = json!({ "error": { "message": "slow down" } }).to_string();
+    let server = MockServer::start(vec![format!(
+        "HTTP/1.1 429 Too Many Requests\r\nretry-after: 7\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )]);
+    let client = OpenAiImagesClient::new(server.url, "test-key");
+
+    let error = client
+        .generate_image(image_generation_request())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::RateLimit {
+            retry_after: Some(delay),
+            message
+        } if delay == Duration::from_secs(7) && message.contains("slow down")
+    ));
+}
+
+#[tokio::test]
 async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-1" } }),

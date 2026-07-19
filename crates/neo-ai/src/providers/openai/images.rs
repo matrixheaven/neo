@@ -3,6 +3,8 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::providers::common::error::ProviderError;
+use crate::providers::common::http::http_status_error;
 use crate::{
     AiError, ImageData, ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponse,
     ImageGenerationResponseImage,
@@ -46,14 +48,10 @@ impl ImageGenerationClient for OpenAiImagesClient {
             .json(&body)
             .send()
             .await
-            .map_err(|err| AiError::Transport {
-                message: format!("transport error: {err}"),
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(AiError::Protocol {
-                message: format!("http status {}", status.as_u16()),
-            });
+            .map_err(ProviderError::Transport)
+            .map_err(ProviderError::into_ai_error)?;
+        if !response.status().is_success() {
+            return Err(http_status_error(response).await.into_ai_error());
         }
         let response = response
             .json::<OpenAiImagesResponse>()
