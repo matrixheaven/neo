@@ -1818,6 +1818,7 @@ impl LiveCancelRegistration {
 
 impl Drop for LiveCancelRegistration {
     fn drop(&mut self) {
+        self.token.cancel();
         let mut state = self
             .runtime
             .state
@@ -3103,14 +3104,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_cancel_guard_does_not_remove_replaced_token() {
+    async fn live_cancel_guard_cancels_own_token_without_removing_replacement() {
         let runtime = MultiAgentRuntime::new();
         let parent = CancellationToken::new();
         let first = runtime.register_live_cancel("agent_test", &parent);
+        let first_token = first.token();
         let second = runtime.register_live_cancel("agent_test", &parent);
+        let second_token = second.token();
 
         drop(first);
 
+        assert!(
+            first_token.is_cancelled(),
+            "dropping a live-cancel guard should stop its parent bridge"
+        );
+        assert!(
+            !second_token.is_cancelled(),
+            "dropping an old live-cancel guard must not cancel a newer run token"
+        );
         assert!(
             runtime
                 .state
@@ -3123,6 +3134,10 @@ mod tests {
 
         drop(second);
 
+        assert!(
+            second_token.is_cancelled(),
+            "dropping the active live-cancel guard should stop its parent bridge"
+        );
         assert!(
             !runtime
                 .state
