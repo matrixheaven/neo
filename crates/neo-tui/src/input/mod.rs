@@ -72,6 +72,11 @@ impl InputParser {
         self.cursor_positions.pop_front()
     }
 
+    /// Discard cursor reports that predate a new terminal geometry probe.
+    pub fn discard_cursor_positions(&mut self) {
+        self.cursor_positions.clear();
+    }
+
     /// Feed raw stdin bytes through the raw input parser.
     ///
     /// This is the primary entry point for the raw-stdin event loop. It
@@ -312,6 +317,13 @@ mod tests {
         assert_eq!(parser.take_cursor_position(), Some((33, 11)));
         assert_eq!(parser.take_cursor_position(), None);
         assert_eq!(parser.feed_bytes(b"x"), vec![InputEvent::Insert('x')]);
+    }
+
+    #[test]
+    fn cursor_position_report_rejects_zero_based_wire_coordinates() {
+        let mut parser = InputParser::new();
+        assert!(parser.feed_bytes(b"\x1b[0;4R").is_empty());
+        assert_eq!(parser.take_cursor_position(), None);
     }
 
     #[test]

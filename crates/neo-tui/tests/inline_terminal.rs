@@ -57,7 +57,7 @@ fn committed_kitty_image_outlives_live_ownership() {
         "live cleanup deleted the image after it entered committed history"
     );
 
-    terminal.resize(100, 20);
+    terminal.resize_for_test(100, 20);
     let mut later_cleanup = Vec::new();
     terminal
         .render_to(

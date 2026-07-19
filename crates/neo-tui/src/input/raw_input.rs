@@ -213,10 +213,10 @@ fn parse_cursor_position_report(sequence: &str) -> Option<(u16, u16)> {
     }
     let row_one_based = row_text.parse::<u16>().ok()?;
     let col_one_based = col_text.parse::<u16>().ok()?;
-    Some((
-        col_one_based.saturating_sub(1),
-        row_one_based.saturating_sub(1),
-    ))
+    if row_one_based == 0 || col_one_based == 0 {
+        return None;
+    }
+    Some((col_one_based - 1, row_one_based - 1))
 }
 
 fn is_complete_osc_sequence(data: &str) -> SequenceStatus {

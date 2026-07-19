@@ -11,6 +11,7 @@ fn live_growth_at_terminal_bottom_preserves_unchanged_prefix() {
     renderer
         .render_to(
             &mut initial,
+            0u16,
             vec!["live-a".to_owned(), "live-b".to_owned()],
             None,
         )
@@ -21,6 +22,7 @@ fn live_growth_at_terminal_bottom_preserves_unchanged_prefix() {
     renderer
         .render_to(
             &mut grown,
+            0u16,
             vec![
                 "live-a".to_owned(),
                 "live-b".to_owned(),
@@ -39,7 +41,7 @@ fn live_growth_at_terminal_bottom_preserves_unchanged_prefix() {
 }
 
 #[test]
-fn ambiguous_resize_starts_fresh_anchor_without_erasing_unknown_rows() {
+fn width_resize_redraws_at_absolute_observed_origin() {
     let mut terminal = InlineTerminal::for_test(12, 4);
     terminal
         .render_to(
@@ -52,7 +54,7 @@ fn ambiguous_resize_starts_fresh_anchor_without_erasing_unknown_rows() {
         )
         .expect("initial live frame");
 
-    terminal.resize(6, 4);
+    terminal.resize_for_test(6, 4);
     let mut pane = TranscriptPane::new(6, 4);
     pane.push_status("done");
     let update = pane.render_terminal_update(6, 4);
@@ -70,12 +72,16 @@ fn ambiguous_resize_starts_fresh_anchor_without_erasing_unknown_rows() {
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 
     assert!(
-        output.contains("\r\n\r\x1b[2Knew-a"),
-        "ambiguous geometry must establish a fresh line: {output:?}"
+        output.contains("\x1b[3;1H\x1b[2Knew-a"),
+        "output: {output:?}"
+    );
+    assert!(
+        output.contains("\x1b[4;1H\x1b[2Knew-b"),
+        "output: {output:?}"
     );
     assert!(
         !output.contains("\x1b[J"),
-        "ambiguous geometry must not erase unknown rows: {output:?}"
+        "resize must not use a relative erase: {output:?}"
     );
     assert!(
         !output.contains("\x1b[1A"),
@@ -84,7 +90,7 @@ fn ambiguous_resize_starts_fresh_anchor_without_erasing_unknown_rows() {
 }
 
 #[test]
-fn height_resize_never_reuses_unverifiable_anchor() {
+fn height_resize_redraws_live_with_absolute_cup() {
     let live = vec!["same-a".to_owned(), "same-b".to_owned()];
     let mut terminal = InlineTerminal::for_test(12, 4);
     terminal
@@ -94,7 +100,7 @@ fn height_resize_never_reuses_unverifiable_anchor() {
         )
         .expect("initial live frame");
 
-    terminal.resize(12, 3);
+    terminal.resize_for_test(12, 3);
     let mut output = Vec::new();
     terminal
         .render_to(&mut output, &TerminalFrame::new(Vec::new(), live, None))
@@ -102,8 +108,12 @@ fn height_resize_never_reuses_unverifiable_anchor() {
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 
     assert!(
-        output.contains("\r\n\r\x1b[2Ksame-a"),
-        "height resize must establish a fresh line: {output:?}"
+        output.contains("\x1b[1;1H\x1b[2Ksame-a"),
+        "output: {output:?}"
+    );
+    assert!(
+        output.contains("\x1b[2;1H\x1b[2Ksame-b"),
+        "output: {output:?}"
     );
     assert!(!output.contains("\x1b[J"), "output: {output:?}");
     assert!(!output.contains("\x1b[1A"), "output: {output:?}");
@@ -113,12 +123,12 @@ fn height_resize_never_reuses_unverifiable_anchor() {
 fn unchanged_live_frame_emits_no_bytes() {
     let mut renderer = LiveRenderer::new(80, 24);
     renderer
-        .render_to(&mut Vec::new(), vec!["live".to_owned()], None)
+        .render_to(&mut Vec::new(), 0u16, vec!["live".to_owned()], None)
         .expect("first live render");
 
     let mut second = Vec::new();
     renderer
-        .render_to(&mut second, vec!["live".to_owned()], None)
+        .render_to(&mut second, 0u16, vec!["live".to_owned()], None)
         .expect("unchanged live render");
 
     assert!(second.is_empty());
@@ -129,7 +139,7 @@ fn logical_cursor_state_controls_hardware_cursor_visibility() {
     let mut renderer = LiveRenderer::new(80, 24);
     let mut hidden = Vec::new();
     renderer
-        .render_to(&mut hidden, vec!["live".to_owned()], None)
+        .render_to(&mut hidden, 0u16, vec!["live".to_owned()], None)
         .expect("render without a logical cursor");
     assert!(
         String::from_utf8(hidden)
@@ -141,6 +151,7 @@ fn logical_cursor_state_controls_hardware_cursor_visibility() {
     renderer
         .render_to(
             &mut shown,
+            0u16,
             vec!["live".to_owned()],
             Some(CursorPos { row: 0, col: 0 }),
         )
@@ -158,6 +169,7 @@ fn changed_live_row_clears_only_that_row() {
     renderer
         .render_to(
             &mut Vec::new(),
+            0u16,
             vec!["old".to_owned(), "unchanged".to_owned()],
             None,
         )
@@ -167,6 +179,7 @@ fn changed_live_row_clears_only_that_row() {
     renderer
         .render_to(
             &mut output,
+            0u16,
             vec!["new".to_owned(), "unchanged".to_owned()],
             None,
         )
@@ -185,6 +198,7 @@ fn replacing_live_kitty_image_deletes_only_its_image_id() {
     renderer
         .render_to(
             &mut Vec::new(),
+            0u16,
             vec!["\x1b_Ga=T,f=100,i=41,r=1;payload\x1b\\".to_owned()],
             None,
         )
@@ -192,7 +206,7 @@ fn replacing_live_kitty_image_deletes_only_its_image_id() {
 
     let mut output = Vec::new();
     renderer
-        .render_to(&mut output, vec!["text replacement".to_owned()], None)
+        .render_to(&mut output, 0u16, vec!["text replacement".to_owned()], None)
         .expect("replace live image");
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 
@@ -205,13 +219,14 @@ fn invalid_live_dimensions_do_not_advance_renderer_state() {
     let mut renderer = LiveRenderer::new(5, 2);
     assert!(
         renderer
-            .render_to(&mut Vec::new(), vec!["too-wide".to_owned()], None)
+            .render_to(&mut Vec::new(), 0u16, vec!["too-wide".to_owned()], None)
             .is_err()
     );
     assert!(
         renderer
             .render_to(
                 &mut Vec::new(),
+                0u16,
                 vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
                 None,
             )
@@ -220,7 +235,7 @@ fn invalid_live_dimensions_do_not_advance_renderer_state() {
 
     let mut valid = Vec::new();
     renderer
-        .render_to(&mut valid, vec!["valid".to_owned()], None)
+        .render_to(&mut valid, 0u16, vec!["valid".to_owned()], None)
         .expect("valid frame after rejected frames");
     assert!(String::from_utf8(valid).unwrap().contains("valid"));
 }

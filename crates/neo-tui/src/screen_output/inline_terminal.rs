@@ -365,14 +365,19 @@ impl InlineTerminal {
         }
 
         let live_height = self.live.previous_line_count().min(usize::from(height)) as u16;
-        // Place the live viewport so it ends at or above the observed cursor
-        // when possible, otherwise pin it to the bottom of the new screen.
+        let cursor_offset = self
+            .geometry
+            .cursor_row
+            .saturating_sub(self.geometry.live_top);
+        // Keep the observed hardware cursor on the same logical live row. The
+        // composer cursor is not necessarily on the final live row because the
+        // footer and completion rows may follow it.
         let live_top = if live_height == 0 {
             cursor_row.min(height.saturating_sub(1))
         } else {
             let max_top = height.saturating_sub(live_height);
             cursor_row
-                .saturating_sub(live_height.saturating_sub(1))
+                .saturating_sub(cursor_offset.min(live_height.saturating_sub(1)))
                 .min(max_top)
         };
 
@@ -735,6 +740,32 @@ mod tests {
             .render_to(&mut redraw, 0, vec!["live".to_owned()], None)
             .expect("live redraw after resize");
         assert!(String::from_utf8(redraw).unwrap().contains("live"));
+    }
+
+    #[test]
+    fn resize_preserves_the_logical_cursor_row_inside_live_viewport() {
+        let mut terminal = InlineTerminal::for_test_with_cursor(80, 24, 0, 5);
+        terminal
+            .render_to(
+                &mut Vec::new(),
+                &TerminalFrame::new(
+                    Vec::new(),
+                    vec![
+                        "todo".to_owned(),
+                        "composer".to_owned(),
+                        "footer".to_owned(),
+                    ],
+                    Some(CursorPos { row: 1, col: 0 }),
+                ),
+            )
+            .expect("initial frame");
+
+        terminal
+            .resize(80, 20, 0, 8, 1)
+            .expect("height resize with observed cursor");
+
+        assert_eq!(terminal.geometry.live_top, 7);
+        assert_eq!(terminal.geometry.cursor_row, 8);
     }
 
     #[test]

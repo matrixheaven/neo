@@ -136,6 +136,7 @@ impl RawStdinEvents {
         #[cfg(not(windows))]
         {
             // Request CPR through stdout; the matching reply arrives on raw stdin.
+            self.parser.discard_cursor_positions();
             {
                 let mut stdout = std::io::stdout().lock();
                 stdout.write_all(CSI_REQUEST_CURSOR)?;
@@ -184,6 +185,11 @@ impl RawStdinEvents {
         }
         let generation = self.geometry.next_generation();
         let (cursor_col, cursor_row) = self.observe_cursor_for_size(current.0, current.1)?;
+        if size().ok().filter(|size| size.0 > 0 && size.1 > 0) != Some(current) {
+            // The CPR belongs to a screen that changed while the probe was in
+            // flight. Keep last_size unchanged so the next poll probes again.
+            return Ok(None);
+        }
         self.geometry
             .publish(current.0, current.1, cursor_col, cursor_row, generation);
         self.last_size = Some(current);
@@ -292,13 +298,8 @@ impl NeoTerminal {
             neo_tui::terminal_image::ImageProtocolPreference::Auto,
             std::io::stdout().is_terminal(),
         );
-        let (cols, rows) = size()?;
-        let cols = cols.max(1);
-        let rows = rows.max(1);
         // Seed the initial observation before the background stdin reader starts.
-        let (cursor_col, cursor_row) = crossterm::cursor::position().unwrap_or((0, 0));
-        let cursor_col = cursor_col.min(cols.saturating_sub(1));
-        let cursor_row = cursor_row.min(rows.saturating_sub(1));
+        let (cols, rows, cursor_col, cursor_row) = observe_terminal_geometry()?;
         let geometry = GeometryObservation::new(cols, rows, cursor_col, cursor_row);
         let tui = InlineTerminal::enter(cols, rows, capabilities, cursor_col, cursor_row)?;
         Ok((
@@ -309,10 +310,6 @@ impl NeoTerminal {
             },
             geometry,
         ))
-    }
-
-    pub(super) fn geometry(&self) -> GeometryObservation {
-        self.geometry.clone()
     }
 
     pub(super) fn draw_tui(
@@ -362,12 +359,7 @@ impl NeoTerminal {
     pub(super) fn reenter(&mut self) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
-        let (cols, rows) = size()?;
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        let (cursor_col, cursor_row) = crossterm::cursor::position().unwrap_or((0, 0));
-        let cursor_col = cursor_col.min(cols.saturating_sub(1));
-        let cursor_row = cursor_row.min(rows.saturating_sub(1));
+        let (cols, rows, cursor_col, cursor_row) = observe_terminal_geometry()?;
         let generation = self.geometry.next_generation();
         self.geometry
             .publish(cols, rows, cursor_col, cursor_row, generation);
@@ -381,6 +373,26 @@ impl NeoTerminal {
         self.tui.leave(&mut output)?;
         Ok(())
     }
+}
+
+fn observe_terminal_geometry() -> std::io::Result<(u16, u16, u16, u16)> {
+    for _ in 0..2 {
+        let (cols, rows) = size()?;
+        if cols == 0 || rows == 0 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "terminal reported zero-sized geometry",
+            ));
+        }
+        let (cursor_col, cursor_row) = crossterm::cursor::position()?;
+        if size()? == (cols, rows) && cursor_col < cols && cursor_row < rows {
+            return Ok((cols, rows, cursor_col, cursor_row));
+        }
+    }
+    Err(std::io::Error::new(
+        ErrorKind::InvalidData,
+        "terminal geometry changed while observing cursor position",
+    ))
 }
 
 const MAX_TERMINAL_TITLE_CHARS: usize = 32;
