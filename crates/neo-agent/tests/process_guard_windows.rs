@@ -28,7 +28,12 @@ async fn windows_terminal_stop_closes_job_with_descendant() {
         .run(
             "Terminal",
             &context,
-            json!({ "mode": "start", "command": descendant_command(&pid_file) }),
+            json!({
+                "mode": "start",
+                "command": descendant_command(&pid_file),
+                // Answer CSI 6n before any default yield window races process exit.
+                "yield_time_ms": 0
+            }),
         )
         .await
         .expect("terminal start");
@@ -60,7 +65,12 @@ async fn windows_terminal_guardian_loss_closes_job_with_descendant() {
         .run(
             "Terminal",
             &context,
-            json!({ "mode": "start", "command": descendant_command(&pid_file) }),
+            json!({
+                "mode": "start",
+                "command": descendant_command(&pid_file),
+                // Answer CSI 6n before any default yield window races process exit.
+                "yield_time_ms": 0
+            }),
         )
         .await
         .expect("terminal start");
@@ -96,7 +106,8 @@ async fn windows_terminal_natural_exit_closes_job_with_descendant() {
             &context,
             json!({
                 "mode": "start",
-                "command": natural_exit_descendant_command(&pid_file)
+                "command": natural_exit_descendant_command(&pid_file),
+                "yield_time_ms": 0
             }),
         )
         .await
