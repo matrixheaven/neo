@@ -2728,7 +2728,11 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
         .to_owned();
 
     let waited = registry
-        .run("WaitDelegate", &ctx, serde_json::json!({ "id": swarm_id }))
+        .run(
+            "WaitDelegate",
+            &ctx,
+            serde_json::json!({ "ids": [swarm_id] }),
+        )
         .await
         .expect("wait should read completed swarm");
     let output = registry
@@ -2743,8 +2747,12 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
     let foreground_details = foreground.details.as_ref().unwrap();
     let waited_details = waited.details.as_ref().unwrap();
     let output_details = output.details.as_ref().unwrap();
+    assert_eq!(waited_details["kind"], "delegate_wait");
+    assert_eq!(waited_details["outcome"], "all_terminal");
+    assert_eq!(waited_details["aggregate"]["total"], 1);
+    let waited_swarm = &waited_details["items"][0];
 
-    for details in [foreground_details, waited_details, output_details] {
+    for details in [foreground_details, waited_swarm, output_details] {
         assert_eq!(details["kind"], "delegate_swarm");
         assert_eq!(details["summary_scope"], "swarm_items");
         assert!(
@@ -2768,8 +2776,10 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
 }
 
 #[tokio::test]
-async fn wait_delegate_timeout_preserves_running_status_with_wait_timed_out_outcome() {
+async fn wait_delegate_timeout_preserves_completed_partial_results() {
     let runtime = MultiAgentRuntime::new();
+    let completed = runtime.start_foreground_delegate_for_test("already completed");
+    let _ = runtime.complete_delegate_for_test(&completed.id, "finished summary");
     let running = runtime.start_foreground_delegate_for_test("still running");
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext::new(dir.path())
@@ -2782,7 +2792,7 @@ async fn wait_delegate_timeout_preserves_running_status_with_wait_timed_out_outc
             "WaitDelegate",
             &ctx,
             serde_json::json!({
-                "id": running.id.as_str(),
+                "ids": [completed.id.as_str(), running.id.as_str()],
                 "timeout_ms": 1
             }),
         )
@@ -2792,8 +2802,14 @@ async fn wait_delegate_timeout_preserves_running_status_with_wait_timed_out_outc
     let details = result.details.as_ref().expect("wait details");
     assert_eq!(details["kind"], "delegate_wait");
     assert_eq!(details["outcome"], "wait_timed_out");
-    assert_eq!(details["status"], "running");
-    assert_eq!(details["id"], running.id.as_str());
+    assert_eq!(details["aggregate"]["total"], 2);
+    assert_eq!(details["aggregate"]["terminal"], 1);
+    assert_eq!(details["aggregate"]["pending"], 1);
+    assert_eq!(details["items"][0]["id"], completed.id.as_str());
+    assert_eq!(details["items"][0]["status"], "completed");
+    assert_eq!(details["items"][0]["summary"], "finished summary");
+    assert_eq!(details["items"][1]["id"], running.id.as_str());
+    assert_eq!(details["items"][1]["status"], "running");
     assert!(result.content.contains("Call WaitDelegate again"));
     assert!(!result.content.contains("Sleep"));
     assert!(!result.content.contains("ListDelegates"));
@@ -2908,6 +2924,25 @@ fn multi_agent_tool_descriptions_explain_contract_without_docs() {
             .contains("delegate itself reached timed_out"),
         "{}",
         wait.description
+    );
+    assert!(
+        wait.description.contains("one global"),
+        "{}",
+        wait.description
+    );
+    let wait_schema = wait
+        .input_schema
+        .get("schema")
+        .unwrap_or(&wait.input_schema);
+    let required = wait_schema["required"].as_array().expect("required fields");
+    assert!(required.iter().any(|field| field == "ids"), "{wait_schema}");
+    assert!(
+        wait_schema["properties"].get("ids").is_some(),
+        "{wait_schema}"
+    );
+    assert!(
+        wait_schema["properties"].get("id").is_none(),
+        "{wait_schema}"
     );
 
     let swarm = spec("DelegateSwarm");

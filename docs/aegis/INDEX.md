@@ -7,6 +7,8 @@ Entries are workspace records, not authoritative runtime decisions.
 | --- | --- | --- | --- |
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-terminal-live-viewport-isolation.md | Terminal Live Viewport Isolation Implementation Plan |
 | 2026-07-19 | spec | docs/aegis/specs/2026-07-19-terminal-live-viewport-isolation-design.md | Terminal Live Viewport Isolation Design |
+| 2026-07-19 | plan | docs/aegis/plans/2026-07-19-wait-delegate-batch-wait.md | WaitDelegate Batch Wait Implementation Plan |
+| 2026-07-19 | spec | docs/aegis/specs/2026-07-19-wait-delegate-batch-wait-brief.md | WaitDelegate Batch Wait Spec Brief |
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-terminal-bounded-yield.md | Terminal Raw PTY and Bounded Yield Implementation Plan |
 | 2026-07-19 | spec | docs/aegis/specs/2026-07-19-terminal-bounded-yield-design.md | Terminal Raw PTY and Bounded Yield |
 | 2026-07-18 | spec | docs/aegis/specs/2026-07-18-aegis-dual-host-install-design.md | Aegis dual-host install and Neo skill discovery |

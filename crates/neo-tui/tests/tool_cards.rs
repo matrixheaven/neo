@@ -133,11 +133,15 @@ fn wait_delegate_header_uses_result_title() {
     let state = ToolCallState {
         id: "wait-1".to_owned(),
         name: "WaitDelegate".to_owned(),
-        arguments: Some(serde_json::json!({ "id": agent_id }).to_string()),
+        arguments: Some(serde_json::json!({ "ids": [agent_id] }).to_string()),
         result: Some("status: completed".to_owned()),
         details: Some(serde_json::json!({
             "kind": "delegate_wait",
-            "title": "Task 3: registry lifetime + child visibility",
+            "outcome": "all_terminal",
+            "items": [{
+                "kind": "delegate",
+                "title": "Task 3: registry lifetime + child visibility",
+            }],
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
@@ -165,16 +169,20 @@ fn wait_delegate_header_fits_every_swarm_item_title() {
     let state = ToolCallState {
         id: "wait-swarm".to_owned(),
         name: "WaitDelegate".to_owned(),
-        arguments: Some(serde_json::json!({ "id": "swarm_123" }).to_string()),
+        arguments: Some(serde_json::json!({ "ids": ["swarm_123"] }).to_string()),
         result: Some("status: completed".to_owned()),
         details: Some(serde_json::json!({
-            "kind": "delegate_swarm",
-            "description": "review instruction runtime",
-            "items": [
-                { "title": "Task 1: registry lifetime and ownership review" },
-                { "title": "Task 2: child visibility and replay review" },
-                { "title": "Task 3: persistence and compaction review" },
-            ],
+            "kind": "delegate_wait",
+            "outcome": "all_terminal",
+            "items": [{
+                "kind": "delegate_swarm",
+                "description": "review instruction runtime",
+                "items": [
+                    { "title": "Task 1: registry lifetime and ownership review" },
+                    { "title": "Task 2: child visibility and replay review" },
+                    { "title": "Task 3: persistence and compaction review" },
+                ],
+            }],
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,

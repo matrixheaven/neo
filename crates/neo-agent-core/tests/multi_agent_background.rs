@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, oneshot};
 
 fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
-    let harness = FakeHarness::from_turns([vec![
+    let turn_done = vec![
         AiStreamEvent::MessageStart {
-            id: "msg_1".to_owned(),
+            id: "msg_x".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
@@ -33,7 +33,8 @@ fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
-    ]]);
+    ];
+    let harness = FakeHarness::from_turns((0..10).map(|_| turn_done.clone()));
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext::new(dir.path())
         .unwrap()
@@ -113,7 +114,7 @@ async fn swarm_text_deltas_are_bounded_and_background_updates_stay_ordered() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": task_id, "timeout_ms": 5_000 }),
+            serde_json::json!({ "ids": [task_id], "timeout_ms": 5_000 }),
         )
         .await
         .expect("background swarm should complete");
@@ -554,14 +555,21 @@ async fn restored_running_delegate_is_reported_lost_with_resume_hint() {
     );
 
     let waited = registry
-        .run("WaitDelegate", &ctx, json!({ "id": id, "timeout_ms": 1 }))
+        .run(
+            "WaitDelegate",
+            &ctx,
+            json!({ "ids": [id], "timeout_ms": 1 }),
+        )
         .await
         .expect("WaitDelegate should return restored delegate");
     assert_eq!(
         waited
             .details
             .as_ref()
-            .and_then(|details| details.get("resume_hint"))
+            .and_then(|details| details.get("items"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("resume_hint"))
             .and_then(serde_json::Value::as_str),
         Some(format!("Delegate(resume=\"{id}\", task=\"continue\")").as_str())
     );
@@ -650,7 +658,7 @@ async fn wait_delegate_times_out_without_completion() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent.id.as_str(), "timeout_ms": 1 }),
+            serde_json::json!({ "ids": [agent.id.as_str()], "timeout_ms": 1 }),
         )
         .await
         .expect("wait should return timeout result");
@@ -722,7 +730,7 @@ async fn interrupt_delegate_rejects_completed_agent_without_mutating_state() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent_id, "timeout_ms": 1 }),
+            serde_json::json!({ "ids": [agent_id], "timeout_ms": 1 }),
         )
         .await
         .expect("completed delegate remains queryable");
@@ -1159,7 +1167,7 @@ async fn task_stop_completed_delegate_returns_already_completed_error() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent_id, "timeout_ms": 5000 }),
+            serde_json::json!({ "ids": [agent_id], "timeout_ms": 5000 }),
         )
         .await
         .expect("delegate should complete");
@@ -1180,7 +1188,7 @@ async fn task_stop_completed_delegate_returns_already_completed_error() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent_id, "timeout_ms": 1 }),
+            serde_json::json!({ "ids": [agent_id], "timeout_ms": 1 }),
         )
         .await
         .expect("completed delegate remains queryable");
@@ -1442,11 +1450,15 @@ async fn wait_and_task_output_return_swarm_aggregate_and_items() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": swarm_id, "timeout_ms": 5000 }),
+            serde_json::json!({ "ids": [swarm_id], "timeout_ms": 5000 }),
         )
         .await
         .expect("wait succeeds");
-    assert!(waited.content.contains("kind: swarm"), "{}", waited.content);
+    assert!(
+        waited.content.contains("kind: delegate_swarm"),
+        "{}",
+        waited.content
+    );
     assert!(waited.content.contains("aggregate:"), "{}", waited.content);
     assert!(waited.content.contains("items:"), "{}", waited.content);
 
@@ -1705,7 +1717,7 @@ async fn interrupt_delegate_stops_background_child_stream() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent_id, "timeout_ms": 5000 }),
+            serde_json::json!({ "ids": [agent_id], "timeout_ms": 5000 }),
         )
         .await
         .expect("wait should return result");
@@ -1771,7 +1783,7 @@ async fn task_stop_stops_background_delegate_stream_before_finalizing_record() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": agent_id, "timeout_ms": 5000 }),
+            serde_json::json!({ "ids": [agent_id], "timeout_ms": 5000 }),
         )
         .await
         .expect("wait should return result");
@@ -1849,7 +1861,7 @@ async fn interrupt_delegate_stops_running_swarm_children() {
         .run(
             "WaitDelegate",
             &ctx,
-            serde_json::json!({ "id": swarm_id, "timeout_ms": 10000 }),
+            serde_json::json!({ "ids": [swarm_id], "timeout_ms": 10000 }),
         )
         .await
         .expect("wait should return result");

@@ -56,7 +56,7 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | `Delegate` | Delegate a bounded subtask to a sub-agent; by default waits in the foreground for the result. |
 | `DelegateSwarm` | Dispatch multiple related subtasks in parallel and aggregate ordered results. |
 | `ListDelegates` | List sub-agents / swarms and their current status. |
-| `WaitDelegate` | Wait for a delegate/swarm to reach a terminal state (completed/failed/...). |
+| `WaitDelegate` | Wait for all delegate/swarm IDs in `ids` to reach terminal states under one global timeout; timeout results retain completed and unfinished item snapshots. |
 | `InterruptDelegate` | Interrupt and cancel a running delegate/swarm. |
 | `MessageDelegate` | Send a message to a running delegate. |
 

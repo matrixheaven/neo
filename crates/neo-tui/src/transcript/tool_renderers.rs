@@ -74,16 +74,12 @@ fn wait_delegate_title(state: &ToolCallState, max_width: usize) -> Option<String
         return None;
     }
     let details = state.details.as_ref()?;
-    let item_titles = details
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("title").and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(one_line)
-        .collect::<Vec<_>>();
+    let mut item_titles = Vec::new();
+    if let Some(items) = details.get("items").and_then(serde_json::Value::as_array) {
+        for item in items {
+            collect_wait_delegate_titles(item, &mut item_titles);
+        }
+    }
     if !item_titles.is_empty() {
         return Some(fit_wait_delegate_titles(&item_titles, max_width));
     }
@@ -95,6 +91,24 @@ fn wait_delegate_title(state: &ToolCallState, max_width: usize) -> Option<String
     let title = truncate_arg_value(false, &one_line(title));
     let title = truncate_width(&title, max_width, "...", false);
     (!title.is_empty()).then_some(title)
+}
+
+fn collect_wait_delegate_titles(value: &serde_json::Value, titles: &mut Vec<String>) {
+    if let Some(items) = value.get("items").and_then(serde_json::Value::as_array) {
+        for item in items {
+            collect_wait_delegate_titles(item, titles);
+        }
+        return;
+    }
+    if let Some(title) = value
+        .get("title")
+        .or_else(|| value.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        titles.push(one_line(title));
+    }
 }
 
 fn fit_wait_delegate_titles(titles: &[String], max_width: usize) -> String {
@@ -455,6 +469,9 @@ fn render_result_preview(
     width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Vec<Line> {
+    if !expanded {
+        return Vec::new();
+    }
     let limit = if expanded {
         usize::MAX
     } else {

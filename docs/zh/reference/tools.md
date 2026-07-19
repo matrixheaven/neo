@@ -56,7 +56,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `Delegate` | 把有界子任务委派给一个子 agent；默认前台等待结果。 |
 | `DelegateSwarm` | 并行派发多个相关子任务并汇总有序结果。 |
 | `ListDelegates` | 列出子 agent / swarm 及其当前状态。 |
-| `WaitDelegate` | 等待某个 delegate/swarm 达到终态（completed/failed/...）。 |
+| `WaitDelegate` | 在一个全局超时内等待 `ids` 中的所有 delegate/swarm 达到终态；超时结果保留已完成结果和未完成目标的当前快照。 |
 | `InterruptDelegate` | 中断并取消运行中的 delegate/swarm。 |
 | `MessageDelegate` | 向运行中的 delegate 发送消息。 |
 

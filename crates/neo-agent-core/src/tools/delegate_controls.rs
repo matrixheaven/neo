@@ -1,13 +1,14 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use base64::Engine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
-use crate::multi_agent::{AgentLifecycleState, SwarmSnapshot};
+use crate::multi_agent::AgentLifecycleState;
 
 #[derive(Debug, Clone, Copy)]
 enum DelegateTerminalAction {
@@ -528,12 +529,103 @@ impl Tool for ListDelegatesTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WaitDelegateInput {
-    #[schemars(description = "The agent or swarm ID to wait for.")]
-    id: String,
     #[schemars(
-        description = "Maximum time to wait in milliseconds. Defaults to 30000 (30s). Returns outcome=wait_timed_out if the target has not finished."
+        description = "Non-empty unique agent and/or swarm IDs to wait for. Use an array with one item for a single target."
+    )]
+    ids: Vec<String>,
+    #[schemars(
+        description = "One global maximum wait in milliseconds for all targets. Defaults to 30000 (30s). Returns outcome=wait_timed_out with partial results if any target has not finished."
     )]
     timeout_ms: Option<u64>,
+}
+
+struct WaitTargetSnapshot {
+    details: Value,
+    found: bool,
+    terminal: bool,
+}
+
+fn wait_target_snapshot(ctx: &ToolContext, id: &str) -> WaitTargetSnapshot {
+    if id.starts_with("swarm_")
+        && let Some(swarm) = ctx.multi_agent.swarm_snapshot(id)
+    {
+        return WaitTargetSnapshot {
+            details: super::multi_agent_format::swarm_details(&swarm),
+            found: true,
+            terminal: swarm.state.is_terminal(),
+        };
+    }
+    if id.starts_with("agent_")
+        && let Some(agent) = ctx.multi_agent.agent_snapshot(id)
+    {
+        return WaitTargetSnapshot {
+            details: super::multi_agent_format::agent_details(
+                "delegate",
+                &agent,
+                Some(agent.context),
+                super::multi_agent_format::SummaryScope::CurrentRun,
+                true,
+                true,
+                false,
+            ),
+            found: true,
+            terminal: agent.state.is_terminal(),
+        };
+    }
+    WaitTargetSnapshot {
+        details: json!({
+            "kind": "delegate_target",
+            "id": id,
+            "status": "not_found",
+        }),
+        found: false,
+        terminal: false,
+    }
+}
+
+fn wait_delegate_result(snapshots: Vec<WaitTargetSnapshot>, outcome: &'static str) -> ToolResult {
+    let total = snapshots.len();
+    let terminal = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.terminal)
+        .count();
+    let not_found = snapshots.iter().filter(|snapshot| !snapshot.found).count();
+    let pending = total.saturating_sub(terminal + not_found);
+    let items = snapshots
+        .into_iter()
+        .map(|snapshot| snapshot.details)
+        .collect::<Vec<_>>();
+    let mut content = format!(
+        "kind: delegate_wait\noutcome: {outcome}\naggregate: total={total} terminal={terminal} pending={pending} not_found={not_found}\nitems:"
+    );
+    for item in &items {
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("unknown");
+        let kind = item
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("delegate_target");
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let _ = write!(content, "\n- id: {id}\n  kind: {kind}\n  status: {status}");
+    }
+    if outcome == "wait_timed_out" {
+        content.push_str(
+            "\nnext_step: Some targets are still running. Call WaitDelegate again with the unfinished IDs and a larger timeout_ms.",
+        );
+    }
+    ToolResult::ok(content).with_details(json!({
+        "kind": "delegate_wait",
+        "outcome": outcome,
+        "aggregate": {
+            "total": total,
+            "terminal": terminal,
+            "pending": pending,
+            "not_found": not_found,
+        },
+        "items": items,
+    }))
 }
 
 pub struct WaitDelegateTool;
@@ -544,150 +636,47 @@ impl Tool for WaitDelegateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Canonical blocking wait for a known delegate agent or swarm to reach a terminal state (completed, failed, \
-         cancelled, timed_out). A wait timeout returns outcome=\"wait_timed_out\" while preserving \
-         the target's current status; this differs from a case where the delegate itself reached timed_out. \
-         For swarms, terminal results use the same structured shape as DelegateSwarm and TaskOutput."
+        "Canonical blocking wait for one or more known delegate agents or swarms. Pass every target in ids; \
+         the call returns when all targets are terminal (completed, failed, cancelled, timed_out) or one global \
+         timeout expires. A wait timeout returns outcome=\"wait_timed_out\" with completed results and current \
+         unfinished snapshots; this differs from a case where the delegate itself reached timed_out."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         schema::<WaitDelegateInput>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: WaitDelegateInput = parse_input(self.name(), input)?;
+            if input.ids.is_empty() {
+                return Ok(ToolResult::error(
+                    "ids must contain at least one agent or swarm ID",
+                ));
+            }
+            let mut seen = HashSet::with_capacity(input.ids.len());
+            if let Some(duplicate) = input.ids.iter().find(|id| !seen.insert(id.as_str())) {
+                return Ok(ToolResult::error(format!(
+                    "ids must not contain duplicate target `{duplicate}`"
+                )));
+            }
             let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(30_000));
             let deadline = std::time::Instant::now() + timeout;
 
-            // Pre-check: if the ID doesn't exist anywhere, return immediately.
-            let exists = if input.id.starts_with("swarm_") {
-                ctx.multi_agent.swarm_snapshot(&input.id).is_some()
-                    || ctx.background_tasks.snapshot(&input.id).await.is_ok()
-            } else if input.id.starts_with("agent_") {
-                ctx.multi_agent.agent_snapshot(&input.id).is_some()
-                    || ctx.background_tasks.snapshot(&input.id).await.is_ok()
-            } else {
-                ctx.background_tasks.snapshot(&input.id).await.is_ok()
-            };
-            if !exists {
-                return Ok(ToolResult::ok(format!(
-                    "id: {}\nstatus: not_found\nnext_step: No delegate or background task with this ID exists. Check the ID or use ListDelegates to see available delegates.",
-                    input.id,
-                ))
-                .with_details(json!({
-                    "kind": "delegate_wait",
-                    "task_id": input.id,
-                    "outcome": "not_found",
-                })));
-            }
-
-            // Route by ID prefix.
-            if input.id.starts_with("swarm_") {
-                loop {
-                    if let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.id)
-                        && swarm.state.is_terminal()
-                    {
-                        return Ok(format_swarm_result(&swarm));
-                    }
-                    // Also check background task state.
-                    if let Ok(task_snap) = ctx.background_tasks.snapshot(&input.id).await
-                        && !task_snap.status.is_active()
-                        && let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.id)
-                    {
-                        return Ok(format_swarm_result(&swarm));
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        let mut details = json!({
-                            "kind": "delegate_wait",
-                            "id": input.id,
-                            "task_id": input.id,
-                            "status": "running",
-                            "outcome": "wait_timed_out",
-                        });
-                        if let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.id) {
-                            details["status"] = json!(swarm.state.as_str());
-                            details["aggregate"] = json!(swarm.aggregate);
-                        }
-                        return Ok(ToolResult::ok(format!(
-                            "id: {}\nstatus: {}\noutcome: wait_timed_out\nnext_step: The swarm is still running. Call WaitDelegate again with a larger timeout_ms.",
-                            input.id,
-                            details["status"].as_str().unwrap_or("running"),
-                        ))
-                        .with_details(details));
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-
             loop {
-                // Check runtime state by searching agents list for matching ID.
-                let agents = ctx.multi_agent.list_agents(true);
-                if let Some(snapshot) = agents.iter().find(|a| a.id.as_str() == input.id).cloned()
-                    && snapshot.state.is_terminal()
-                {
-                    let state_label = snapshot.state.as_str();
-                    let summary = snapshot
-                        .outcome
-                        .as_ref()
-                        .map(|o| o.summary.clone())
-                        .unwrap_or_default();
-                    let mut details = super::multi_agent_format::agent_details(
-                        "delegate_wait",
-                        &snapshot,
-                        Some(snapshot.context),
-                        super::multi_agent_format::SummaryScope::CurrentRun,
-                        true,
-                        true,
-                        false,
-                    );
-                    details["kind"] = json!("delegate_wait");
-                    details["agent"] = json!(super::multi_agent_format::model_safe_agent_snapshot(
-                        &snapshot
-                    ));
-                    details["outcome"] = json!(state_label);
-                    return Ok(ToolResult::ok(format!(
-                        "id: {}\nstatus: {}\nsummary: {}",
-                        snapshot.id.as_str(),
-                        state_label,
-                        summary,
-                    ))
-                    .with_details(details));
+                let snapshots = input
+                    .ids
+                    .iter()
+                    .map(|id| wait_target_snapshot(ctx, id))
+                    .collect::<Vec<_>>();
+                if snapshots.iter().any(|snapshot| !snapshot.found) {
+                    return Ok(wait_delegate_result(snapshots, "not_found"));
                 }
-
-                // Also check background task state.
-                if let Ok(task_snap) = ctx.background_tasks.snapshot(&input.id).await
-                    && !task_snap.status.is_active()
-                {
-                    return Ok(ToolResult::ok(format!(
-                        "id: {}\nstatus: {}\noutcome: completed",
-                        input.id,
-                        task_snap.status.as_str(),
-                    ))
-                    .with_details(json!({
-                        "kind": "delegate_wait",
-                        "task_id": input.id,
-                        "outcome": task_snap.status.as_str(),
-                    })));
+                if snapshots.iter().all(|snapshot| snapshot.terminal) {
+                    return Ok(wait_delegate_result(snapshots, "all_terminal"));
                 }
-
                 if std::time::Instant::now() >= deadline {
-                    return Ok(ToolResult::ok(format!(
-                        "id: {}\nstatus: running\noutcome: wait_timed_out\nnext_step: The delegate is still running. Call WaitDelegate again with a larger timeout_ms.",
-                        input.id,
-                    ))
-                    .with_details(json!({
-                        "kind": "delegate_wait",
-                        "id": input.id,
-                        "task_id": input.id,
-                        "status": "running",
-                        "outcome": "wait_timed_out",
-                        "next_steps": [
-                            "The delegate is still running.",
-                            "Call WaitDelegate again with a larger timeout_ms."
-                        ],
-                    })));
+                    return Ok(wait_delegate_result(snapshots, "wait_timed_out"));
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -915,35 +904,6 @@ impl Tool for MessageDelegateTool {
 }
 
 // ---------------------------------------------------------------------------
-// Swarm result formatting helper
-// ---------------------------------------------------------------------------
-
-/// Format a swarm snapshot as a rich tool result with aggregate and per-child items.
-fn format_swarm_result(swarm: &SwarmSnapshot) -> ToolResult {
-    let mut content = format!(
-        "kind: swarm\nswarm_id: {}\nstatus: {}\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}\nitems:",
-        swarm.swarm_id,
-        swarm.state.as_str(),
-        swarm.aggregate.total,
-        swarm.aggregate.queued,
-        swarm.aggregate.running,
-        swarm.aggregate.completed,
-        swarm.aggregate.failed,
-        swarm.aggregate.cancelled,
-        swarm.aggregate.timed_out,
-    );
-    for child in &swarm.children {
-        let _ = writeln!(
-            content,
-            "\n- index: {} agent_id: {} status: {}",
-            child.item_index,
-            child.agent.id.as_str(),
-            child.agent.state.as_str(),
-        );
-    }
-    ToolResult::ok(content).with_details(super::multi_agent_format::swarm_details(swarm))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +912,47 @@ mod tests {
     fn test_context() -> ToolContext {
         let dir = tempfile::tempdir().expect("temp dir");
         ToolContext::new(dir.path()).expect("tool context")
+    }
+
+    #[tokio::test]
+    async fn wait_delegate_validates_ids_and_returns_unknown_targets() {
+        let ctx = test_context();
+        let tool = WaitDelegateTool;
+
+        for (input, expected) in [
+            (json!({"ids": []}), "at least one"),
+            (
+                json!({"ids": ["agent_same", "agent_same"]}),
+                "duplicate target",
+            ),
+        ] {
+            let result = tool
+                .execute(&ctx, input)
+                .await
+                .expect("validation should return a tool result");
+            assert!(result.is_error);
+            assert!(result.content.contains(expected), "{}", result.content);
+        }
+
+        let completed = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("completed target");
+        let _ = ctx
+            .multi_agent
+            .complete_delegate_for_test(&completed.id, "done");
+        let result = tool
+            .execute(
+                &ctx,
+                json!({"ids": [completed.id.as_str(), "agent_missing"]}),
+            )
+            .await
+            .expect("unknown targets should return immediately");
+        let details = result.details.expect("wait details");
+        assert_eq!(details["outcome"], "not_found");
+        assert_eq!(details["aggregate"]["terminal"], 1);
+        assert_eq!(details["aggregate"]["not_found"], 1);
+        assert_eq!(details["items"][0]["status"], "completed");
+        assert_eq!(details["items"][1]["status"], "not_found");
     }
 
     #[tokio::test]
@@ -1274,7 +1275,7 @@ mod tests {
         );
 
         let waited = WaitDelegateTool
-            .execute(&ctx, json!({"id": agent.id.as_str(), "timeout_ms": 1}))
+            .execute(&ctx, json!({"ids": [agent.id.as_str()], "timeout_ms": 1}))
             .await
             .expect("wait delegate");
         assert_queue_metadata_cleared(
