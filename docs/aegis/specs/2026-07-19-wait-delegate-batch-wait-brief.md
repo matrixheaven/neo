@@ -44,4 +44,3 @@ without turning the presentation-only `DelegateGroup` into a runtime entity.
 - A global timeout returns both completed and still-running target snapshots.
 - The generated schema requires `ids` and no longer exposes `id`.
 - Single-agent and single-swarm calls use the same batch envelope.
-
