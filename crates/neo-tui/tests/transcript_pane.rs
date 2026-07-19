@@ -127,11 +127,10 @@ fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
     assert!(history.contains("complete paragraph 0"));
     assert!(!live.contains("complete paragraph 0"));
     assert!(live.contains("mutable tail"));
-    assert!(update.live.len() <= 4, "live rows must fit above chrome");
 }
 
 #[test]
-fn long_unstable_assistant_tail_is_truncated_inside_live_budget() {
+fn long_unstable_assistant_tail_reports_overflow_without_omission() {
     let mut pane = TranscriptPane::new(30, 8);
     pane.start_assistant_message();
     pane.append_assistant_delta(&"unfinished ".repeat(80));
@@ -145,8 +144,11 @@ fn long_unstable_assistant_tail_is_truncated_inside_live_budget() {
         .join("\n");
 
     assert!(update.history.is_empty());
-    assert!(update.live.len() <= 4, "live rows must fit above chrome");
-    assert!(live.contains("earlier rows omitted"));
+    assert!(update.live_overflow);
+    assert!(update.has_live_frontier);
+    assert!(update.live.len() > 4, "complete live source exceeds budget");
+    assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
+    assert!(live.contains("unfinished"), "live:\n{live}");
 }
 
 #[test]
@@ -181,7 +183,7 @@ fn consecutive_streaming_tool_cards_keep_each_header_when_live_budget_truncates(
     assert!(live.contains("one.rs"), "live:\n{live}");
     assert!(live.contains("two.rs"), "live:\n{live}");
     assert!(live.contains("latest-output"), "live:\n{live}");
-    assert!(update.live.len() <= 4, "live rows: {:#?}", update.live);
+    assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
 }
 
 #[test]

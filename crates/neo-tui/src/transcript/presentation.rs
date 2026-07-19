@@ -52,6 +52,8 @@ pub struct TranscriptTerminalUpdate {
     pub history: Vec<FinalizedBlock>,
     pub live: Vec<String>,
     pub has_visible_animation: bool,
+    pub live_overflow: bool,
+    pub has_live_frontier: bool,
 }
 
 const MAX_DIAGNOSTICS: usize = 32;
@@ -59,84 +61,48 @@ const MAX_DIAGNOSTICS: usize = 32;
 #[derive(Debug, Clone)]
 struct LiveBlock {
     lines: Vec<String>,
-    header_indices: Vec<usize>,
     animated_line_indices: Vec<usize>,
-    pinned_line_indices: Vec<usize>,
     separator_before: bool,
-    atomic: bool,
 }
 
 impl LiveBlock {
     fn without_header(lines: Vec<String>, animated: bool, separator_before: bool) -> Self {
-        let atomic = lines
-            .iter()
-            .any(|line| super::pane::ansi_line_is_image(line));
         Self {
             animated_line_indices: (animated && !lines.is_empty())
                 .then_some(0)
                 .into_iter()
                 .collect(),
             lines,
-            header_indices: Vec::new(),
-            pinned_line_indices: Vec::new(),
             separator_before,
-            atomic,
         }
     }
 
     fn with_header(
         lines: Vec<String>,
         animated: bool,
-        pin_first_header: bool,
+        _pin_first_header: bool,
         separator_before: bool,
     ) -> Self {
-        let atomic = lines
-            .iter()
-            .any(|line| super::pane::ansi_line_is_image(line));
-        let header_indices = (!lines.is_empty()).then_some(0).into_iter().collect();
-        let pinned_line_indices = (pin_first_header && !lines.is_empty())
-            .then_some(0)
-            .into_iter()
-            .collect();
         Self {
             animated_line_indices: (animated && !lines.is_empty())
                 .then_some(0)
                 .into_iter()
                 .collect(),
             lines,
-            header_indices,
-            pinned_line_indices,
             separator_before,
-            atomic,
         }
     }
 
     fn with_detected_headers(
         lines: Vec<String>,
         animated_line_indices: Vec<usize>,
-        pinned_line_indices: Vec<usize>,
+        _pinned_line_indices: Vec<usize>,
         separator_before: bool,
     ) -> Self {
-        let atomic = lines
-            .iter()
-            .any(|line| super::pane::ansi_line_is_image(line));
-        let mut header_indices = Vec::new();
-        let mut after_separator = true;
-        for (index, line) in lines.iter().enumerate() {
-            if line.is_empty() {
-                after_separator = true;
-            } else if after_separator {
-                header_indices.push(index);
-                after_separator = false;
-            }
-        }
         Self {
             lines,
-            header_indices,
             animated_line_indices,
-            pinned_line_indices,
             separator_before,
-            atomic,
         }
     }
 }
@@ -383,7 +349,9 @@ impl TranscriptPresentation {
             index += 1;
         }
         update.history = pending_history;
-        let (live, has_visible_animation) = fit_live_blocks(live_blocks, live_budget, theme);
+        let (live, has_visible_animation) = compose_live_blocks(live_blocks);
+        update.live_overflow = live.len() > live_budget;
+        update.has_live_frontier = commit_blocked;
         update.live = live;
         update.has_visible_animation = has_visible_animation;
         update
@@ -546,43 +514,15 @@ fn render_tool_entries(
     }
 }
 
-#[derive(Debug)]
-struct FittedLine {
-    text: String,
-    animated: bool,
-    pinned: bool,
-}
-
-#[derive(Debug)]
-struct FittedLiveBlock {
-    headers: Vec<FittedLine>,
-    body: Vec<FittedLine>,
-    tail_len: usize,
-    show_omission: bool,
-    separator_before: bool,
-}
-
-impl FittedLiveBlock {
-    fn is_pinned(&self) -> bool {
-        self.headers.iter().any(|line| line.pinned)
-    }
-}
-
-impl From<LiveBlock> for FittedLiveBlock {
-    fn from(block: LiveBlock) -> Self {
-        let mut is_header = vec![false; block.lines.len()];
-        for &index in &block.header_indices {
-            if let Some(slot) = is_header.get_mut(index) {
-                *slot = true;
-            }
+fn compose_live_blocks(blocks: Vec<LiveBlock>) -> (Vec<String>, bool) {
+    let mut has_visible_animation = false;
+    let mut lines = Vec::new();
+    for block in blocks {
+        if block.lines.is_empty() {
+            continue;
         }
-        let mut is_internal_separator = vec![false; block.lines.len()];
-        for &header_index in block.header_indices.iter().skip(1) {
-            let mut index = header_index;
-            while index > 0 && block.lines[index - 1].is_empty() {
-                index -= 1;
-                is_internal_separator[index] = true;
-            }
+        if block.separator_before {
+            lines.push(String::new());
         }
         let mut is_animated = vec![false; block.lines.len()];
         for index in block.animated_line_indices {
@@ -590,295 +530,19 @@ impl From<LiveBlock> for FittedLiveBlock {
                 *slot = true;
             }
         }
-        let mut is_pinned = vec![false; block.lines.len()];
-        for index in block.pinned_line_indices {
-            if let Some(slot) = is_pinned.get_mut(index) {
-                *slot = true;
-            }
-        }
-        let mut headers = Vec::new();
-        let mut body = Vec::new();
-        for (index, line) in block.lines.into_iter().enumerate() {
-            let line = FittedLine {
-                text: line,
-                animated: is_animated[index],
-                pinned: is_pinned[index],
-            };
-            if is_header[index] {
-                headers.push(line);
-            } else if !is_internal_separator[index] {
-                body.push(line);
-            }
-        }
-        Self {
-            headers,
-            body,
-            tail_len: 0,
-            show_omission: false,
-            separator_before: block.separator_before,
+        for (line, animated) in block.lines.into_iter().zip(is_animated) {
+            has_visible_animation |= animated;
+            lines.push(line);
         }
     }
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "bounded fitting keeps header, separator, image, and animation accounting together"
-)]
-fn fit_live_blocks(
-    mut blocks: Vec<LiveBlock>,
-    budget: usize,
-    theme: &TuiTheme,
-) -> (Vec<String>, bool) {
-    blocks.retain(|block| !block.lines.is_empty());
-    if budget == 0 || blocks.is_empty() {
-        return (Vec::new(), false);
-    }
-    let mut full_height = blocks
-        .iter()
-        .map(|block| block.lines.len() + usize::from(block.separator_before))
-        .sum::<usize>();
-    if full_height > budget {
-        let prefix_separator_after_atomic_removal = blocks
-            .iter()
-            .position(|block| !block.atomic)
-            .filter(|&index| index > 0)
-            .and_then(|_| blocks.first().map(|block| block.separator_before));
-        blocks.retain(|block| !block.atomic);
-        if blocks.is_empty() {
-            return (Vec::new(), false);
-        }
-        if let Some(separator_before) = prefix_separator_after_atomic_removal
-            && let Some(first) = blocks.first_mut()
-        {
-            // The first retained block no longer has a visible predecessor.
-            // Preserve only the external history boundary from the removed
-            // prefix; an internal separator belonged to the omitted image.
-            first.separator_before = separator_before;
-        }
-        full_height = blocks
-            .iter()
-            .map(|block| block.lines.len() + usize::from(block.separator_before))
-            .sum();
-    }
-    if full_height <= budget {
-        let mut has_visible_animation = false;
-        let mut lines = Vec::with_capacity(full_height);
-        for block in blocks {
-            if block.separator_before {
-                lines.push(String::new());
-            }
-            let mut is_animated = vec![false; block.lines.len()];
-            for index in block.animated_line_indices {
-                if let Some(slot) = is_animated.get_mut(index) {
-                    *slot = true;
-                }
-            }
-            for (line, animated) in block.lines.into_iter().zip(is_animated) {
-                has_visible_animation |= animated;
-                lines.push(line);
-            }
-        }
-        return (lines, has_visible_animation);
-    }
-
-    let mut fitted = blocks
-        .into_iter()
-        .map(FittedLiveBlock::from)
-        .collect::<Vec<_>>();
-    let header_count = fitted
-        .iter()
-        .map(|block| block.headers.len())
-        .sum::<usize>();
-    let separator_count = fitted
-        .iter()
-        .map(|block| usize::from(block.separator_before) + block.headers.len().saturating_sub(1))
-        .sum::<usize>();
-    if header_count.saturating_add(separator_count) > budget {
-        let mut selected_headers = fitted
-            .iter()
-            .map(|block| vec![false; block.headers.len()])
-            .collect::<Vec<_>>();
-        let mut selected_blocks = vec![false; fitted.len()];
-        let mut suppress_separator = vec![false; fitted.len()];
-        let mut remaining = budget;
-        // Running headers are the live anchors for their cards. Reserve them
-        // in canonical order before backfilling with newer deferred headers.
-        for block_index in 0..fitted.len() {
-            for (header_index, selected) in selected_headers[block_index].iter_mut().enumerate() {
-                if !fitted[block_index].headers[header_index].pinned || *selected {
-                    continue;
-                }
-                let cost = if selected_blocks[block_index] {
-                    2
-                } else {
-                    1 + usize::from(fitted[block_index].separator_before)
-                };
-                if cost <= remaining {
-                    *selected = true;
-                    selected_blocks[block_index] = true;
-                    remaining -= cost;
-                }
-            }
-        }
-        for block_index in (0..fitted.len()).rev() {
-            for (header_index, selected) in
-                selected_headers[block_index].iter_mut().enumerate().rev()
-            {
-                if fitted[block_index].headers[header_index].pinned || *selected {
-                    continue;
-                }
-                let cost = if selected_blocks[block_index] {
-                    2
-                } else {
-                    1 + usize::from(fitted[block_index].separator_before)
-                };
-                if cost <= remaining {
-                    *selected = true;
-                    selected_blocks[block_index] = true;
-                    remaining -= cost;
-                }
-            }
-        }
-        if !selected_blocks.iter().any(|selected| *selected) && budget > 0 {
-            // A one-row live surface cannot also carry an external separator.
-            // Keep the earliest live header visible and spend that row on the
-            // card itself; normal-sized surfaces retain the separator above.
-            let first_header = fitted.iter().enumerate().find_map(|(block_index, block)| {
-                block
-                    .headers
-                    .iter()
-                    .position(|header| header.pinned)
-                    .or_else(|| (!block.headers.is_empty()).then_some(0))
-                    .map(|header_index| (block_index, header_index))
-            });
-            if let Some((block_index, header_index)) = first_header {
-                selected_headers[block_index][header_index] = true;
-                selected_blocks[block_index] = true;
-                suppress_separator[block_index] = true;
-                remaining = 0;
-            }
-        }
-        let mut lines = Vec::with_capacity(budget - remaining);
-        let mut animated = false;
-        for (block_index, block) in fitted.into_iter().enumerate() {
-            if !selected_blocks[block_index] {
-                continue;
-            }
-            if block.separator_before && !suppress_separator[block_index] {
-                lines.push(String::new());
-            }
-            let mut wrote_header = false;
-            for (line, selected) in block
-                .headers
-                .into_iter()
-                .zip(selected_headers[block_index].iter().copied())
-            {
-                if selected {
-                    if wrote_header {
-                        lines.push(String::new());
-                    }
-                    animated |= line.animated;
-                    lines.push(line.text);
-                    wrote_header = true;
-                }
-            }
-        }
-        return (lines, animated);
-    }
-
-    let mut remaining = budget - header_count - separator_count;
-    for pinned in [true, false] {
-        for block in fitted
-            .iter_mut()
-            .rev()
-            .filter(|block| block.is_pinned() == pinned && !block.body.is_empty())
-        {
-            if remaining == 0 {
-                break;
-            }
-            block.show_omission = true;
-            remaining -= 1;
-        }
-        for block in fitted
-            .iter_mut()
-            .rev()
-            .filter(|block| block.is_pinned() == pinned && block.show_omission)
-        {
-            let retainable = block.body.len().saturating_sub(1);
-            block.tail_len = retainable.min(remaining);
-            remaining -= block.tail_len;
-            if pinned && block.tail_len + 1 == block.body.len() {
-                block.show_omission = false;
-                block.tail_len = block.body.len();
-            }
-        }
-    }
-
-    let mut lines = Vec::with_capacity(budget);
-    let mut has_visible_animation = false;
-    for mut block in fitted {
-        let mut block_lines = Vec::new();
-        for header in block.headers {
-            if !block_lines.is_empty() {
-                block_lines.push(FittedLine {
-                    text: String::new(),
-                    animated: false,
-                    pinned: false,
-                });
-            }
-            block_lines.push(header);
-        }
-        if block.show_omission {
-            if block.tail_len == 0 && !block.body.is_empty() {
-                // The budget is too tight for an omission hint; show the single
-                // most recent content line instead.
-                block_lines.push(block.body.pop().expect("non-empty body"));
-            } else {
-                block_lines.push(FittedLine {
-                    text: omission_line(block.body.len().saturating_sub(block.tail_len), theme),
-                    animated: false,
-                    pinned: false,
-                });
-            }
-        }
-        block_lines.extend(
-            block
-                .body
-                .into_iter()
-                .rev()
-                .take(block.tail_len)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev(),
-        );
-        if block_lines.is_empty() {
-            continue;
-        }
-        if block.separator_before {
-            lines.push(String::new());
-        }
-        for line in block_lines {
-            has_visible_animation |= line.animated;
-            lines.push(line.text);
-        }
-    }
-    lines.truncate(budget);
     (lines, has_visible_animation)
-}
-
-fn omission_line(omitted: usize, theme: &TuiTheme) -> String {
-    crate::primitive::Line::styled(
-        format!("  ... {omitted} earlier rows omitted"),
-        crate::primitive::Style::default().fg(theme.text_muted),
-    )
-    .to_ansi()
 }
 
 #[cfg(test)]
 mod tests {
     use neo_agent_core::multi_agent::MultiAgentRuntime;
 
-    use super::{LiveBlock, TranscriptPresentation, fit_live_blocks};
+    use super::TranscriptPresentation;
     use crate::primitive::theme::TuiTheme;
     use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
     use crate::transcript::{TranscriptBlockId, TranscriptEntry, TranscriptPane, TranscriptStore};
@@ -944,213 +608,39 @@ mod tests {
         assert!(blocks[0].contains("background task"));
         assert!(blocks[1].contains("later status"));
         assert!(completed_update.live.is_empty());
+        assert!(!completed_update.has_live_frontier);
     }
 
     #[test]
-    fn living_card_header_survives_extreme_live_budget() {
+    fn live_overflow_preserves_complete_rows() {
         let runtime = MultiAgentRuntime::new();
-        let running = runtime.start_foreground_delegate_for_test("pinned delegate");
+        let running = runtime.start_foreground_delegate_for_test("overflow living card");
         let mut pane = TranscriptPane::new(80, 12);
         pane.set_live_chrome_height(0);
         pane.transcript_mut().upsert_delegate(1, running);
-        pane.push_status("old status");
-        pane.push_status("recent status");
-        pane.push_status("latest status");
-
-        let update = pane.render_terminal_update(80, 3);
-        let live = update.live.join("\n");
-
-        let delegate = live
-            .find("pinned delegate")
-            .expect("living delegate header");
-        let latest = live.find("latest status").expect("latest deferred header");
-        assert!(!live.contains("old status"));
-        assert!(!live.contains("recent status"));
-        assert!(delegate < latest);
-        assert!(update.live[1].is_empty());
-        assert!(update.has_visible_animation);
-        assert_eq!(update.live.len(), 3);
-    }
-
-    #[test]
-    fn living_card_body_outranks_later_deferred_result_body() {
-        let theme = TuiTheme::default();
-        let living = LiveBlock::with_header(
-            vec![
-                "delegate".to_owned(),
-                "delegate tool one".to_owned(),
-                "delegate tool two".to_owned(),
-            ],
-            true,
-            true,
-            false,
-        );
-        let deferred = LiveBlock::with_header(
-            vec![
-                "wait delegate".to_owned(),
-                "status".to_owned(),
-                "summary".to_owned(),
-                "latest result".to_owned(),
-            ],
-            false,
-            false,
-            true,
-        );
-
-        let (lines, _) = fit_live_blocks(vec![living, deferred], 6, &theme);
-
-        assert_eq!(
-            lines,
-            vec![
-                "delegate",
-                "delegate tool one",
-                "delegate tool two",
-                "",
-                "wait delegate",
-                "latest result",
-            ]
-        );
-    }
-
-    #[test]
-    fn all_running_card_headers_outrank_deferred_static_headers() {
-        let runtime = MultiAgentRuntime::new();
-        let first = runtime.start_foreground_delegate_for_test("first live delegate");
-        let second = runtime.start_foreground_delegate_for_test("second live delegate");
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        pane.transcript_mut().upsert_delegate(1, first);
-        pane.transcript_mut().upsert_delegate(2, second);
-        pane.push_status("deferred status");
+        for index in 0..12 {
+            pane.push_status(&format!("deferred status {index}"));
+        }
 
         let update = pane.render_terminal_update(80, 4);
         let live = update.live.join("\n");
 
-        assert!(live.contains("first live delegate"), "live: {live}");
-        assert!(live.contains("second live delegate"), "live: {live}");
-        assert!(!live.contains("deferred status"), "live: {live}");
-    }
-
-    #[test]
-    fn truncated_static_header_does_not_inherit_hidden_tool_animation() {
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
-            turn: 1,
-            id: "static-read".to_owned(),
-            name: "Read".to_owned(),
-            arguments: serde_json::json!({ "path": "static-header.txt" }),
-        });
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
-            turn: 1,
-            id: "static-read".to_owned(),
-            name: "Read".to_owned(),
-            result: neo_agent_core::ToolResult::ok("done"),
-        });
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
-            turn: 1,
-            id: "first-live-tool".to_owned(),
-            name: "Bash".to_owned(),
-            arguments: serde_json::json!({ "command": "first-live-command" }),
-        });
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
-            turn: 1,
-            id: "animated-write".to_owned(),
-            name: "Write".to_owned(),
-        });
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
-            turn: 1,
-            id: "animated-write".to_owned(),
-            json_fragment: serde_json::json!({
-                "path": "hidden-animated-header.txt",
-                "content": "content"
-            })
-            .to_string(),
-        });
-
-        let update = pane.render_terminal_update(80, 1);
-        let live = update.live.join("\n");
-
-        assert!(!live.contains("static-header.txt"));
-        assert!(live.contains("first-live-command"));
-        assert!(!live.contains("hidden-animated-header.txt"));
-        assert!(!update.has_visible_animation);
-    }
-
-    #[test]
-    fn truncated_live_block_preserves_ack_boundary_separator() {
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        pane.push_status("committed owner");
-        let committed = pane.render_terminal_update(80, 12);
-        pane.acknowledge_history(&committed.history);
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
-            turn: 1,
-            id: "bounded-thinking".to_owned(),
-        });
-        pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
-            turn: 1,
-            text: "bounded thinking body".to_owned(),
-        });
-
-        let update = pane.render_terminal_update(80, 2);
-
-        assert_eq!(update.live.len(), 2);
-        assert!(update.live[0].is_empty());
-        assert!(update.live[1].contains("thinking..."));
-    }
-
-    #[test]
-    fn pinned_live_header_survives_when_only_one_row_fits() {
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        pane.push_status("committed owner");
-        let committed = pane.render_terminal_update(80, 12);
-        pane.acknowledge_history(&committed.history);
-
-        let runtime = MultiAgentRuntime::new();
-        pane.transcript_mut().upsert_delegate(
-            1,
-            runtime.start_foreground_delegate_for_test("one-row live"),
-        );
-
-        let update = pane.render_terminal_update(80, 1);
-        assert_eq!(update.live.len(), 1);
-        assert!(
-            update.live[0].contains("one-row live"),
-            "{:#?}",
-            update.live
-        );
-    }
-
-    #[test]
-    fn truncated_tool_headers_preserve_internal_entry_separator() {
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        for (id, command) in [
-            ("first-tool", "first-command"),
-            ("second-tool", "second-command"),
-        ] {
-            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
-                turn: 1,
-                id: id.to_owned(),
-                name: "Bash".to_owned(),
-                arguments: serde_json::json!({ "command": command }),
-            });
-            pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
-                turn: 1,
-                id: id.to_owned(),
-                name: "Bash".to_owned(),
-                partial_result: neo_agent_core::ToolResult::ok(format!("{command}-output")),
-            });
+        assert!(update.live_overflow);
+        assert!(update.has_live_frontier);
+        assert!(live.contains("overflow living card"), "live:\n{live}");
+        for index in 0..12 {
+            assert!(
+                live.contains(&format!("deferred status {index}")),
+                "missing deferred status {index} in complete live source:\n{live}"
+            );
         }
-
-        let update = pane.render_terminal_update(80, 3);
-
-        assert_eq!(update.live.len(), 3);
-        assert!(update.live[0].contains("first-command"));
-        assert!(update.live[1].is_empty());
-        assert!(update.live[2].contains("second-command"));
+        assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
+        let living = live.find("overflow living card").expect("living card");
+        let first_deferred = live.find("deferred status 0").expect("first deferred");
+        let last_deferred = live.find("deferred status 11").expect("last deferred");
+        assert!(living < first_deferred);
+        assert!(first_deferred < last_deferred);
+        assert!(update.live.len() > 4);
     }
 
     #[test]
@@ -1178,48 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn truncation_never_emits_partial_terminal_image() {
-        let blocks = vec![
-            LiveBlock::with_header(
-                vec![
-                    "\x1b_Gf=100;image-payload\x1b\\".to_owned(),
-                    String::new(),
-                    String::new(),
-                ],
-                false,
-                true,
-                false,
-            ),
-            LiveBlock::with_header(vec!["later block".to_owned()], false, false, true),
-        ];
-
-        let (lines, _) = fit_live_blocks(blocks, 3, &TuiTheme::default());
-
-        if let Some(image_row) = lines.iter().position(|line| line.contains("\x1b_G")) {
-            assert_eq!(lines.get(image_row + 1), Some(&String::new()));
-            assert_eq!(lines.get(image_row + 2), Some(&String::new()));
-            assert!(!lines.iter().any(|line| line.contains("later block")));
-        }
-    }
-
-    #[test]
-    fn omitted_atomic_block_does_not_consume_successor_live_budget() {
-        let blocks = vec![
-            LiveBlock::with_header(
-                vec!["\x1b_Gf=100;image-payload\x1b\\".to_owned()],
-                false,
-                true,
-                false,
-            ),
-            LiveBlock::with_header(vec!["later live header".to_owned()], false, false, true),
-        ];
-
-        let (lines, _) = fit_live_blocks(blocks, 1, &TuiTheme::default());
-
-        assert_eq!(lines, vec!["later live header"]);
-    }
-
-    #[test]
     fn suppressed_living_tool_blocks_later_history_until_visibility_is_resolved() {
         let mut pane = TranscriptPane::new(80, 12);
         pane.transcript_mut()
@@ -1232,6 +680,7 @@ mod tests {
             suppressed.history.is_empty(),
             "a transiently suppressed live entry must still block later commits"
         );
+        assert!(suppressed.has_live_frontier);
 
         pane.transcript_mut().unsuppress_tool_run("delegate-tool");
         let visible = pane.render_terminal_update(80, 12);
@@ -1271,6 +720,7 @@ mod tests {
         assert!(history.contains("later status"));
         assert!(!history.contains("Delegate"));
         assert!(released.live.is_empty());
+        assert!(!released.has_live_frontier);
     }
 
     #[test]
@@ -1298,6 +748,7 @@ mod tests {
         let running = pane.render_terminal_update(80, 12);
         assert!(running.history.is_empty());
         assert!(!running.live.is_empty());
+        assert!(running.has_live_frontier);
 
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1312,6 +763,7 @@ mod tests {
             &finished.history[0].id,
             TranscriptBlockId::Entries(ids) if ids.len() == 2
         ));
+        assert!(!finished.has_live_frontier);
     }
 
     #[test]
@@ -1348,42 +800,5 @@ mod tests {
         }
 
         assert_eq!(presentation.diagnostics.len(), 1);
-    }
-
-    #[test]
-    fn truncated_live_blocks_keep_each_header_and_omission_row() {
-        let blocks = vec![
-            LiveBlock::with_header(
-                vec![
-                    "tool one".to_owned(),
-                    "one-a".to_owned(),
-                    "one-b".to_owned(),
-                    "one-c".to_owned(),
-                ],
-                true,
-                false,
-                false,
-            ),
-            LiveBlock::with_header(
-                vec![
-                    "tool two".to_owned(),
-                    "two-a".to_owned(),
-                    "two-b".to_owned(),
-                    "two-c".to_owned(),
-                ],
-                true,
-                false,
-                false,
-            ),
-        ];
-
-        let (lines, animated) = fit_live_blocks(blocks, 7, &TuiTheme::default());
-        let text = lines.join("\n");
-
-        assert!(animated);
-        assert!(text.contains("tool one"));
-        assert!(text.contains("tool two"));
-        assert_eq!(text.matches("earlier rows omitted").count(), 2);
-        assert!(lines.len() <= 7);
     }
 }
