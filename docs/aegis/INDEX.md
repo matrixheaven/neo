@@ -72,3 +72,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-19 | spec | docs/aegis/specs/2026-07-19-transcript-overflow-tool-results-design.md | Automatic Transcript Overflow and Tool Result Presentation |
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-transcript-overflow-tool-results.md | Automatic Transcript Overflow and Tool Result Presentation |
 | 2026-07-20 | spec | docs/aegis/specs/2026-07-20-bash-terminal-tool-card-brief.md | Bash and Terminal Tool Call Presentation Spec Brief |
+| 2026-07-20 | plan | docs/aegis/plans/2026-07-20-bash-terminal-tool-card.md | Bash and Terminal Tool Call Presentation Implementation Plan |
