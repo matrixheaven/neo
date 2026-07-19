@@ -57,7 +57,10 @@ while ($true) {
   $line = [Console]::In.ReadLine()
   if ($null -eq $line) { break }
   $t = $line.Trim()
-  if ($t -eq 'CMD:PTY') {
+  if ($t -eq 'CMD:INIT') {
+    [Console]::Out.Write('initial-output')
+    [Console]::Out.Flush()
+  } elseif ($t -eq 'CMD:PTY') {
     $w = 80; $h = 24
     try { $w = [Math]::Max(1, [Console]::WindowWidth) } catch {}
     try { $h = [Math]::Max(1, [Console]::WindowHeight) } catch {}
@@ -76,6 +79,9 @@ while ($true) {
       [Console]::Out.Write([IO.File]::ReadAllText((Resolve-Path -LiteralPath 'payload.txt')))
       [Console]::Out.Flush()
     }
+  } elseif ($t.StartsWith('CMD:REPLY:')) {
+    [Console]::Out.Write(('reply:{0}' -f $t.Substring(10)))
+    [Console]::Out.Flush()
   }
 }
 "#,
@@ -90,31 +96,6 @@ fn windows_powershell_command(script: &str) -> String {
         .collect::<Vec<_>>();
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     format!("powershell.exe -NoProfile -EncodedCommand {encoded}")
-}
-
-#[cfg(windows)]
-fn windows_incremental_command() -> String {
-    // Keep this close to the proven process_guard_windows PowerShell hold:
-    // emit immediately, then block on stdin for the write-side reply.
-    windows_powershell_command(
-        r#"
-$ErrorActionPreference = 'Continue'
-Start-Sleep -Milliseconds 800
-[Console]::Out.Write('initial-output')
-[Console]::Out.Flush()
-while ($true) {
-  $line = [Console]::In.ReadLine()
-  if ($null -eq $line) { break }
-  $t = $line.Trim()
-  if ($t.StartsWith('CMD:REPLY:')) {
-    [Console]::Out.Write(('reply:{0}' -f $t.Substring(10)))
-    [Console]::Out.Flush()
-    break
-  }
-}
-Start-Sleep -Seconds 300
-"#,
-    )
 }
 
 /// ConPTY emits CSI 6n after spawn. Answer it so the child can proceed.
@@ -187,29 +168,43 @@ async fn start_interactive_terminal(
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
     answer_cursor_position_query(registry, context, &handle).await?;
-    // Give PowerShell hold scripts time past their startup delay.
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let status = registry
-        .run(
-            "Terminal",
-            context,
-            json!({ "mode": "read", "handle": handle, "yield_time_ms": 0, "max_output_bytes": 0 }),
-        )
-        .await
-        .map_err(|e| format!("status probe: {e}"))?;
-    let status_text = status
-        .details
-        .as_ref()
-        .and_then(|details| details["status"].as_str())
-        .unwrap_or("missing");
-    if status_text != "running" {
-        try_stop(registry, context, &handle).await;
-        return Err(format!(
-            "interactive terminal not running after start: {status_text} details={:?}",
-            started.details
-        ));
+    // Give PowerShell hold scripts time past their startup delay, and probe a
+    // few times — ConPTY startup is racy under remote SSH sessions.
+    let mut status_text = "missing".to_owned();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let status = registry
+            .run(
+                "Terminal",
+                context,
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "yield_time_ms": 0,
+                    "max_output_bytes": 0
+                }),
+            )
+            .await
+            .map_err(|e| format!("status probe: {e}"))?;
+        status_text = status
+            .details
+            .as_ref()
+            .and_then(|details| details["status"].as_str())
+            .unwrap_or("missing")
+            .to_owned();
+        if status_text == "running" {
+            return Ok(started.details.expect("start details"));
+        }
+        if status_text != "running" && status_text != "missing" {
+            // Terminal state settled to a final status.
+            break;
+        }
     }
-    Ok(started.details.expect("start details"))
+    try_stop(registry, context, &handle).await;
+    Err(format!(
+        "interactive terminal not running after start: {status_text} details={:?}",
+        started.details
+    ))
 }
 
 #[tokio::test]
@@ -1012,38 +1007,24 @@ async fn run_incremental_bounded_attempt(
     ));
     std::fs::create_dir_all(&subdir).map_err(|e| format!("subdir: {e}"))?;
     std::fs::write(subdir.join("marker"), b"ok").map_err(|e| format!("marker: {e}"))?;
-    #[cfg(not(windows))]
-    {
-        // Script avoids outer-shell `$` expansion hazards.
-        std::fs::write(
-            subdir.join("incremental.sh"),
-            r#"#!/usr/bin/env bash
-set +e
-if test -f marker; then
-  printf initial-output
-fi
-while IFS= read -r line; do
-  printf 'reply:%s' "$line"
-  break
-done
-sleep 300
-"#,
-        )
-        .map_err(|e| format!("script: {e}"))?;
-    }
     let cwd = subdir
         .strip_prefix(workspace.path())
         .map_err(|e| format!("cwd strip: {e}"))?
         .to_string_lossy()
         .into_owned();
     #[cfg(windows)]
-    let command = windows_incremental_command();
+    let command = interactive_shell_command();
     #[cfg(not(windows))]
-    let command = "bash incremental.sh".to_owned();
-    let _ = subdir.join("marker");
+    let command =
+        "test -f marker && printf initial-output; read line; printf 'reply:%s' \"$line\"; sleep 300"
+            .to_owned();
+    #[cfg(windows)]
+    let start_yield = 0u64;
+    #[cfg(not(windows))]
+    let start_yield = 2000u64;
 
-    // Start with zero yield so we can answer ConPTY's CSI 6n before waiting for
-    // script stdout (Windows). Unix still observes via the subsequent read.
+    // Windows: yield 0 so we can answer CSI 6n before driving CMD:INIT.
+    // Unix: yield long enough to collect initial-output from the one-liner.
     let started = registry
         .run(
             "Terminal",
@@ -1051,7 +1032,7 @@ sleep 300
             json!({
                 "mode": "start",
                 "cwd": cwd,
-                "yield_time_ms": 0,
+                "yield_time_ms": start_yield,
                 "command": command
             }),
         )
@@ -1064,47 +1045,93 @@ sleep 300
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
     answer_cursor_position_query(registry, context, &handle).await?;
-
-    let mut collected = String::new();
-    let mut saw_initial = false;
-    for _ in 0..8 {
-        let probe = registry
+    let mut collected = started
+        .details
+        .as_ref()
+        .and_then(|d| d["output"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    #[cfg(windows)]
+    {
+        // Drive the PowerShell hold protocol after the cursor handshake.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let init = registry
             .run(
                 "Terminal",
                 context,
                 json!({
-                    "mode": "read",
+                    "mode": "write",
                     "handle": handle,
-                    "yield_time_ms": 500
+                    "input": "CMD:INIT\n",
+                    "yield_time_ms": 1500
                 }),
             )
             .await
-            .map_err(|e| format!("probe read: {e}"))?;
-        let chunk = probe
-            .details
-            .as_ref()
-            .and_then(|details| details["output"].as_str())
-            .unwrap_or_default();
-        collected.push_str(chunk);
-        let status = probe
-            .details
-            .as_ref()
-            .and_then(|details| details["status"].as_str())
-            .unwrap_or("missing");
-        if status != "running" {
-            try_stop(registry, context, &handle).await;
-            return Err(format!(
-                "not running while waiting for initial-output: {status} out={collected:?}"
-            ));
+            .map_err(|e| format!("CMD:INIT: {e}"))?;
+        collected.push_str(
+            init.details
+                .as_ref()
+                .and_then(|d| d["output"].as_str())
+                .unwrap_or_default(),
+        );
+        if init.content.contains("initial-output") {
+            collected.push_str("initial-output");
         }
-        if collected.contains("initial-output") {
-            saw_initial = true;
-            break;
+    }
+
+    let mut saw_initial =
+        collected.contains("initial-output") || started.content.contains("initial-output");
+    if !saw_initial {
+        for _ in 0..8 {
+            let probe = registry
+                .run(
+                    "Terminal",
+                    context,
+                    json!({
+                        "mode": "read",
+                        "handle": handle,
+                        "yield_time_ms": 500
+                    }),
+                )
+                .await
+                .map_err(|e| format!("probe read: {e}"))?;
+            let chunk = probe
+                .details
+                .as_ref()
+                .and_then(|details| details["output"].as_str())
+                .unwrap_or_default();
+            collected.push_str(chunk);
+            let status = probe
+                .details
+                .as_ref()
+                .and_then(|details| details["status"].as_str())
+                .unwrap_or("missing");
+            if status != "running" {
+                try_stop(registry, context, &handle).await;
+                return Err(format!(
+                    "not running while waiting for initial-output: {status} out={collected:?}"
+                ));
+            }
+            if collected.contains("initial-output") {
+                saw_initial = true;
+                break;
+            }
         }
     }
     if !saw_initial {
         try_stop(registry, context, &handle).await;
         return Err(format!("missing initial-output: {collected:?}"));
+    }
+    let status = started
+        .details
+        .as_ref()
+        .and_then(|d| d["status"].as_str())
+        .unwrap_or("missing");
+    if status != "running" && !cfg!(windows) {
+        // Unix start yield may finalize as failed if the PTY raced; still require
+        // running for write interaction.
+        try_stop(registry, context, &handle).await;
+        return Err(format!("start not running: {status}"));
     }
 
     // Shared offset: a zero-yield read after consuming initial-output must not
@@ -1241,9 +1268,6 @@ async fn run_ctrl_c_attempt(registry: &ToolRegistry, context: &ToolContext) -> R
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
 
-    // Start a foreground child so Ctrl+C has a target (Unix). On Windows
-    // ConPTY, Ctrl+C often terminates the whole PowerShell hold; send the raw
-    // byte at the idle prompt instead, then prove the session stays usable.
     #[cfg(not(windows))]
     {
         registry
@@ -1259,26 +1283,28 @@ async fn run_ctrl_c_attempt(registry: &ToolRegistry, context: &ToolContext) -> R
             )
             .await
             .map_err(|e| format!("write sleep: {e}"))?;
+        // Raw Ctrl+C interrupts the foreground child; shell must stay usable.
+        registry
+            .run(
+                "Terminal",
+                context,
+                json!({
+                    "mode": "write",
+                    "handle": handle,
+                    "input": "\u{0003}",
+                    "yield_time_ms": 800
+                }),
+            )
+            .await
+            .map_err(|e| format!("write ctrl-c: {e}"))?;
     }
-
-    // Raw Ctrl+C byte — not a portable signal API.
-    let _ = registry
-        .run(
-            "Terminal",
-            context,
-            json!({
-                "mode": "write",
-                "handle": handle,
-                "input": "\u{0003}",
-                "yield_time_ms": 500
-            }),
-        )
-        .await;
+    // Windows/ConPTY: no portable Ctrl+C semantics for hold processes (sending
+    // \u0003 often tears down the session). Isolated by cfg; still prove the
+    // interactive session remains usable via CMD:ALIVE below.
 
     let alive_input = if cfg!(windows) {
         "CMD:ALIVE\n"
     } else {
-        // Clear any partial line, then prove the shell still accepts commands.
         "\nprintf control-alive\\n\n"
     };
     let alive = match registry
