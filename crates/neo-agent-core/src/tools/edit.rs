@@ -70,7 +70,7 @@ impl Tool for EditTool {
         Box::pin(async move {
             ctx.ensure_file_write_allowed()?;
             let input: EditInput = parse_input(self.name(), input)?;
-            let path = ctx.resolve_workspace_path(&input.path)?;
+            let path = ctx.resolve_parent_for_write(&input.path)?;
             let content = tokio::fs::read_to_string(&path).await?;
             let occurrences = content.matches(&input.old).count();
             if occurrences == 0 {
@@ -100,4 +100,50 @@ fn edit_details(input: &EditInput, before: &str, after: &str) -> serde_json::Val
         "replace_all": input.replace_all,
         "diff": unified_diff(&path, before, after),
     })
+}
+
+#[cfg(test)]
+mod workspace_policy_tests {
+    use super::*;
+    use crate::{
+        ToolAccess, ToolContext, WorkspaceAccessPolicy, WorkspaceAccessRoot,
+        WorkspaceAccessRootKind,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn edit_denies_read_only_added_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let added = tempfile::tempdir().expect("added");
+        let path = added.path().join("existing.txt");
+        std::fs::write(&path, "before").expect("seed file");
+        let policy = WorkspaceAccessPolicy::with_roots(
+            primary.path(),
+            [WorkspaceAccessRoot {
+                path: added.path().canonicalize().expect("canonical added"),
+                kind: WorkspaceAccessRootKind::Added,
+                read: true,
+                write: false,
+            }],
+        )
+        .expect("policy");
+        let ctx = ToolContext::new(primary.path())
+            .expect("context")
+            .with_workspace_policy(policy)
+            .with_access(ToolAccess::all());
+
+        let err = EditTool
+            .execute(
+                &ctx,
+                json!({ "path": path, "old": "before", "new": "after" }),
+            )
+            .await
+            .expect_err("edit denied");
+
+        assert!(matches!(
+            err,
+            crate::tools::ToolError::PathOutsideWorkspace { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(path).expect("read file"), "before");
+    }
 }
