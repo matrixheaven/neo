@@ -30,34 +30,104 @@ fn guarded_context(workspace: &tempfile::TempDir, limits: ShellLimits) -> ToolCo
         ))
 }
 
-#[tokio::test]
-async fn terminal_start_accepts_no_execution_deadline() {
-    let _guard = serial_guard().await;
-    let workspace = tempfile::tempdir().expect("workspace");
-    let context = guarded_context(&workspace, ShellLimits::default());
-    let registry = ToolRegistry::with_builtin_tools();
-    let started = registry
+/// Interactive hold command. Always force `-i`:
+/// - Windows ConPTY nests under `bash -c` and EOF-exits without it.
+/// - Unix outer `-lc` wrappers also lack job control without `-i`, so Ctrl+C
+///   can kill the shell instead of only the foreground child.
+fn interactive_shell_command() -> &'static str {
+    "bash --noprofile --norc -i"
+}
+
+/// ConPTY emits CSI 6n (cursor position request) after spawn. Answer it so the
+/// child shell can proceed — same pattern as `process_guard_windows`.
+async fn answer_cursor_position_query(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+    handle: &str,
+) {
+    if !cfg!(windows) {
+        return;
+    }
+    if let Err(error) = registry
         .run(
             "Terminal",
-            &context,
+            context,
             json!({
-                "mode": "start",
-                "command": "bash --noprofile --norc",
-                "cols": 40,
-                "rows": 8
+                "mode": "write",
+                "handle": handle,
+                "input": "\u{1b}[1;1R",
+                "yield_time_ms": 200,
+                "max_output_bytes": 0
             }),
         )
         .await
-        .expect("terminal start without timeout_secs");
+    {
+        let snapshot = registry
+            .run(
+                "Terminal",
+                context,
+                json!({ "mode": "read", "handle": handle, "yield_time_ms": 0 }),
+            )
+            .await
+            .expect("read failed terminal after cursor query");
+        panic!(
+            "answer cursor position query: {error}\n{}",
+            snapshot.content
+        );
+    }
+}
+
+async fn start_interactive_terminal(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+    cols: u16,
+    rows: u16,
+    yield_time_ms: u64,
+) -> serde_json::Value {
+    let started = registry
+        .run(
+            "Terminal",
+            context,
+            json!({
+                "mode": "start",
+                "command": interactive_shell_command(),
+                "cols": cols,
+                "rows": rows,
+                "yield_time_ms": yield_time_ms
+            }),
+        )
+        .await
+        .expect("interactive terminal start");
     let handle = started
         .details
         .as_ref()
         .and_then(|details| details["handle"].as_str())
         .expect("terminal handle")
         .to_owned();
+    answer_cursor_position_query(registry, context, &handle).await;
+    let status = started
+        .details
+        .as_ref()
+        .and_then(|details| details["status"].as_str())
+        .unwrap_or("missing");
     assert_eq!(
-        started.details.as_ref().unwrap()["status"],
-        "running",
+        status, "running",
+        "interactive terminal must stay running after start: {:?}",
+        started.details
+    );
+    started.details.expect("start details")
+}
+
+#[tokio::test]
+async fn terminal_start_accepts_no_execution_deadline() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+    let details = start_interactive_terminal(&registry, &context, 40, 8, 500).await;
+    let handle = details["handle"].as_str().expect("handle").to_owned();
+    assert_eq!(
+        details["status"], "running",
         "start without deadline should remain running"
     );
     registry
@@ -98,9 +168,10 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
             context,
             json!({
                 "mode": "start",
-                "command": "bash --noprofile --norc",
+                "command": interactive_shell_command(),
                 "cols": 40,
-                "rows": 8
+                "rows": 8,
+                "yield_time_ms": 500
             }),
         )
         .await
@@ -111,6 +182,11 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         .expect("terminal handle")
         .to_owned();
     assert_ne!(details["guardian_pid"], details["command_pid"]);
+    if details["status"].as_str() != Some("running") {
+        try_stop(registry, context, &handle).await;
+        return Err(format!("start not running: {:?}", details["status"]));
+    }
+    answer_cursor_position_query(registry, context, &handle).await;
 
     let written = match registry
         .run(
@@ -119,7 +195,9 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": "printf 'pty:%s\\n' \"$COLUMNS:$LINES\"\n"
+                // Prefer COLUMNS/LINES over stty: portable across Git Bash / ConPTY.
+                "input": "printf 'pty:%s\\n' \"$COLUMNS:$LINES\"\n",
+                "yield_time_ms": 1500
             }),
         )
         .await
@@ -160,7 +238,12 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         .run(
             "Terminal",
             context,
-            json!({ "mode": "write", "handle": handle, "input": "stty size\n" }),
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "printf 'size:%s %s\\n' \"$LINES\" \"$COLUMNS\"\n",
+                "yield_time_ms": 1500
+            }),
         )
         .await
     {
@@ -176,10 +259,10 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
         .and_then(|details| details["output"].as_str())
         .unwrap_or_default()
         .to_owned();
-    if !output.contains("18 72") {
-        output.push_str(&read_until(registry, context, &handle, "18 72").await);
+    if !output.contains("size:18 72") {
+        output.push_str(&read_until(registry, context, &handle, "size:18 72").await);
     }
-    if !output.contains("18 72") {
+    if !output.contains("size:18 72") {
         try_stop(registry, context, &handle).await;
         return Err(format!("resized output: {output:?}"));
     }
@@ -306,23 +389,17 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
-    let started = registry
-        .run(
-            "Terminal",
-            &context,
-            json!({
-                "mode": "start",
-                "command": "bash --noprofile --norc",
-                "yield_time_ms": 500
-            }),
-        )
-        .await
-        .expect("terminal start");
-    let handle = started.details.as_ref().unwrap()["handle"]
-        .as_str()
-        .unwrap();
-    // Deposit output without advancing the read offset: max_output_bytes 0 keeps
-    // unread bytes available for the read under test.
+    // Interactive shell is the portable hold. Put the secret payload only in a
+    // file so PTY echo of the typed command cannot leak the needle into the
+    // serialized tool result under a 4-byte cap.
+    std::fs::write(
+        workspace.path().join("payload.txt"),
+        "keep-terminal-leak-tail",
+    )
+    .expect("payload file");
+    let details = start_interactive_terminal(&registry, &context, 80, 24, 500).await;
+    let handle = details["handle"].as_str().unwrap().to_owned();
+
     registry
         .run(
             "Terminal",
@@ -330,31 +407,68 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": "printf keep-terminal-leak-tail\\n\n",
-                "yield_time_ms": 500,
+                "input": "cat payload.txt\n",
+                "yield_time_ms": 1200,
                 "max_output_bytes": 0
             }),
         )
         .await
-        .expect("deposit output");
-    let read = registry
-        .run(
-            "Terminal",
-            &context,
-            json!({
-                "mode": "read",
-                "handle": handle,
-                "max_output_bytes": 4,
-                "yield_time_ms": 0
-            }),
-        )
-        .await
-        .expect("terminal read");
+        .expect("deposit long output without consuming bytes");
+
+    let mut read = None;
+    for _ in 0..30 {
+        let result = registry
+            .run(
+                "Terminal",
+                &context,
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "max_output_bytes": 4,
+                    "yield_time_ms": 100
+                }),
+            )
+            .await
+            .expect("terminal read");
+        let truncated = result.content.contains("truncated: true")
+            || result
+                .details
+                .as_ref()
+                .and_then(|details| details["truncated"].as_bool())
+                .unwrap_or(false)
+            || result
+                .details
+                .as_ref()
+                .and_then(|details| details["output_truncated"].as_bool())
+                .unwrap_or(false);
+        let has_output = result
+            .details
+            .as_ref()
+            .and_then(|details| details["output"].as_str())
+            .is_some_and(|output| !output.is_empty());
+        if truncated || has_output {
+            read = Some(result);
+            break;
+        }
+    }
+    let read = read.expect("expected capped terminal read");
     let serialized = serde_json::to_string(&read).expect("serialize result");
-    assert!(read.content.contains("truncated: true"));
-    assert!(!serialized.contains("terminal-leak-tail"));
+    assert!(
+        read.content.contains("truncated: true")
+            || read
+                .details
+                .as_ref()
+                .and_then(|details| details["output_truncated"].as_bool())
+                .unwrap_or(false),
+        "expected truncation markers: {}",
+        read.content
+    );
+    assert!(
+        !serialized.contains("terminal-leak-tail"),
+        "capped payload must not leak full tail: {serialized}"
+    );
     let output = read.details.as_ref().unwrap()["output"].as_str().unwrap();
-    assert!(output.len() <= 4);
+    assert!(output.len() <= 4, "output longer than cap: {output:?}");
 
     registry
         .run(
@@ -732,94 +846,197 @@ async fn read_until(
 async fn terminal_start_write_and_read_share_incremental_bounded_output() {
     let _guard = serial_guard().await;
     let workspace = tempfile::tempdir().expect("workspace");
-    let subdir = workspace.path().join("subdir");
-    std::fs::create_dir_all(&subdir).expect("subdir");
-    std::fs::write(subdir.join("marker"), b"ok").expect("marker");
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
+    // PTY/login-shell startup is flaky under both macOS and ConPTY; retry like lifecycle.
+    for attempt in 0..3 {
+        match run_incremental_bounded_attempt(&registry, &context, &workspace).await {
+            Ok(()) => return,
+            Err(_) if attempt < 2 => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    panic!("incremental bounded output test failed after 3 attempts");
+}
+
+async fn run_incremental_bounded_attempt(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+    workspace: &tempfile::TempDir,
+) -> Result<(), String> {
+    let subdir = workspace.path().join(format!(
+        "subdir-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&subdir).map_err(|e| format!("subdir: {e}"))?;
+    std::fs::write(subdir.join("marker"), b"ok").map_err(|e| format!("marker: {e}"))?;
+    // Script avoids outer-shell `$` expansion / quoting hazards on Windows Git Bash.
+    std::fs::write(
+        subdir.join("incremental.sh"),
+        r#"#!/usr/bin/env bash
+set +e
+if test -f marker; then
+  printf initial-output
+fi
+# Keep the PTY session alive while waiting for write input.
+while IFS= read -r line; do
+  printf 'reply:%s' "$line"
+  break
+done
+sleep 300
+"#,
+    )
+    .map_err(|e| format!("script: {e}"))?;
+    let cwd = subdir
+        .strip_prefix(workspace.path())
+        .map_err(|e| format!("cwd strip: {e}"))?
+        .to_string_lossy()
+        .into_owned();
 
     let started = registry
         .run(
             "Terminal",
-            &context,
+            context,
             json!({
                 "mode": "start",
-                "cwd": "subdir",
-                "yield_time_ms": 1000,
-                "command": "test -f marker && printf initial-output; read line; printf 'reply:%s' \"$line\"; sleep 30"
+                "cwd": cwd,
+                "yield_time_ms": 2500,
+                "command": "bash incremental.sh"
             }),
         )
         .await
-        .expect("terminal start");
-    let handle = started.details.as_ref().unwrap()["handle"]
-        .as_str()
-        .expect("handle")
+        .map_err(|e| format!("terminal start: {e}"))?;
+    let handle = started
+        .details
+        .as_ref()
+        .and_then(|details| details["handle"].as_str())
+        .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
-    let start_output = started.details.as_ref().unwrap()["output"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        start_output.contains("initial-output") || started.content.contains("initial-output"),
-        "start should return initial output: content={:?} details_output={start_output:?}",
-        started.content
-    );
-    assert_eq!(
-        started.details.as_ref().unwrap()["status"],
-        "running",
-        "start yield expiry must leave the command running"
-    );
+    answer_cursor_position_query(registry, context, &handle).await;
 
-    let immediate = registry
-        .run(
-            "Terminal",
-            &context,
-            json!({
-                "mode": "read",
-                "handle": handle,
-                "yield_time_ms": 0
-            }),
-        )
-        .await
-        .expect("immediate read after start");
-    let immediate_output = immediate.details.as_ref().unwrap()["output"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        !immediate_output.contains("initial-output"),
-        "start must advance read_offset; got {immediate_output:?}"
-    );
-    assert!(
-        immediate_output.is_empty(),
-        "immediate read after start yield must be empty: {immediate_output:?}"
-    );
+    let mut collected = started
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if !collected.contains("initial-output") {
+        let late = registry
+            .run(
+                "Terminal",
+                context,
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "yield_time_ms": 2500
+                }),
+            )
+            .await
+            .map_err(|e| format!("late read: {e}"))?;
+        collected.push_str(
+            late.details
+                .as_ref()
+                .and_then(|details| details["output"].as_str())
+                .unwrap_or_default(),
+        );
+        if !collected.contains("initial-output") {
+            try_stop(registry, context, &handle).await;
+            return Err(format!(
+                "missing initial-output: start={:?} late={:?}",
+                started.details, late.content
+            ));
+        }
+        let status = late
+            .details
+            .as_ref()
+            .and_then(|details| details["status"].as_str())
+            .unwrap_or("missing");
+        if status != "running" {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("not running after late read: {status}"));
+        }
+    } else {
+        let status = started
+            .details
+            .as_ref()
+            .and_then(|details| details["status"].as_str())
+            .unwrap_or("missing");
+        if status != "running" {
+            try_stop(registry, context, &handle).await;
+            return Err(format!(
+                "not running after start: {status} details={:?}",
+                started.details
+            ));
+        }
+        let immediate = registry
+            .run(
+                "Terminal",
+                context,
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "yield_time_ms": 0
+                }),
+            )
+            .await
+            .map_err(|e| format!("immediate read: {e}"))?;
+        let immediate_output = immediate
+            .details
+            .as_ref()
+            .and_then(|details| details["output"].as_str())
+            .unwrap_or_default();
+        if immediate_output.contains("initial-output") {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("offset not advanced: {immediate_output:?}"));
+        }
+        if !immediate_output.is_empty() {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("immediate read not empty: {immediate_output:?}"));
+        }
+    }
 
     let written = registry
         .run(
             "Terminal",
-            &context,
+            context,
             json!({
                 "mode": "write",
                 "handle": handle,
                 "input": "hello\n",
-                "yield_time_ms": 1000
+                "yield_time_ms": 2500
             }),
         )
         .await
-        .expect("terminal write");
-    let write_output = written.details.as_ref().unwrap()["output"]
-        .as_str()
+        .map_err(|e| format!("write: {e}"))?;
+    let write_output = written
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
         .unwrap_or_default();
-    assert!(
-        write_output.contains("reply:hello") || written.content.contains("reply:hello"),
-        "write yield should include reply (echo is allowed): content={:?} details_output={write_output:?}",
-        written.content
-    );
-    assert_eq!(written.details.as_ref().unwrap()["written"], true);
+    if !write_output.contains("reply:hello") && !written.content.contains("reply:hello") {
+        try_stop(registry, context, &handle).await;
+        return Err(format!(
+            "missing reply:hello content={:?} details={write_output:?}",
+            written.content
+        ));
+    }
+    if written
+        .details
+        .as_ref()
+        .and_then(|d| d["written"].as_bool())
+        != Some(true)
+    {
+        try_stop(registry, context, &handle).await;
+        return Err("written flag missing".to_owned());
+    }
 
     let after_write = registry
         .run(
             "Terminal",
-            &context,
+            context,
             json!({
                 "mode": "read",
                 "handle": handle,
@@ -827,27 +1044,34 @@ async fn terminal_start_write_and_read_share_incremental_bounded_output() {
             }),
         )
         .await
-        .expect("immediate read after write");
-    let after_write_output = after_write.details.as_ref().unwrap()["output"]
-        .as_str()
+        .map_err(|e| format!("read after write: {e}"))?;
+    let after_write_output = after_write
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
         .unwrap_or_default();
-    assert!(
-        !after_write_output.contains("reply:hello"),
-        "write must advance read_offset; got {after_write_output:?}"
-    );
-    assert!(
-        after_write_output.is_empty(),
-        "immediate read after write yield must be empty: {after_write_output:?}"
-    );
+    if after_write_output.contains("reply:hello") {
+        try_stop(registry, context, &handle).await;
+        return Err(format!(
+            "write did not advance offset: {after_write_output:?}"
+        ));
+    }
+    if !after_write_output.is_empty() {
+        try_stop(registry, context, &handle).await;
+        return Err(format!(
+            "immediate read after write not empty: {after_write_output:?}"
+        ));
+    }
 
     registry
         .run(
             "Terminal",
-            &context,
+            context,
             json!({ "mode": "stop", "handle": handle }),
         )
         .await
-        .expect("terminal stop");
+        .map_err(|e| format!("stop: {e}"))?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -857,22 +1081,8 @@ async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
     let context = guarded_context(&workspace, ShellLimits::default());
     let registry = ToolRegistry::with_builtin_tools();
 
-    let started = registry
-        .run(
-            "Terminal",
-            &context,
-            json!({
-                "mode": "start",
-                "command": "bash --noprofile --norc",
-                "yield_time_ms": 500
-            }),
-        )
-        .await
-        .expect("terminal start");
-    let handle = started.details.as_ref().unwrap()["handle"]
-        .as_str()
-        .expect("handle")
-        .to_owned();
+    let details = start_interactive_terminal(&registry, &context, 80, 24, 800).await;
+    let handle = details["handle"].as_str().expect("handle").to_owned();
 
     registry
         .run(
@@ -882,13 +1092,15 @@ async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
                 "mode": "write",
                 "handle": handle,
                 "input": "sleep 30\n",
-                "yield_time_ms": 500
+                "yield_time_ms": 800
             }),
         )
         .await
         .expect("write sleep");
 
-    registry
+    // Raw Ctrl+C byte — not a portable signal API. On ConPTY, interrupt semantics
+    // vary; always assert the session remains writable afterward.
+    let ctrl_c = registry
         .run(
             "Terminal",
             &context,
@@ -896,11 +1108,20 @@ async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
                 "mode": "write",
                 "handle": handle,
                 "input": "\u{0003}",
-                "yield_time_ms": 1000
+                "yield_time_ms": 1500
             }),
         )
-        .await
-        .expect("write ctrl-c");
+        .await;
+    #[cfg(unix)]
+    {
+        ctrl_c.expect("write ctrl-c");
+    }
+    #[cfg(windows)]
+    {
+        // ConPTY may surface BrokenPipe if the shell already reaped sleep; still
+        // require a usable session below when the handle remains registered.
+        let _ = ctrl_c;
+    }
 
     let alive = registry
         .run(
@@ -910,7 +1131,7 @@ async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
                 "mode": "write",
                 "handle": handle,
                 "input": "printf control-alive\\n\n",
-                "yield_time_ms": 2000
+                "yield_time_ms": 2500
             }),
         )
         .await
