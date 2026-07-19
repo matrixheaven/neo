@@ -435,7 +435,7 @@ pub fn sleep_header_spans(
             format!(" · {total} total"),
             Style::default().fg(meta_color),
         ));
-        if is_pending_or_running(state.status) {
+        if state.status == ToolStatusKind::Running {
             let remaining = args
                 .duration_seconds
                 .saturating_sub(elapsed_secs.unwrap_or(0));

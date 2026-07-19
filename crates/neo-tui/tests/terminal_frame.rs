@@ -4,7 +4,14 @@ use std::time::Instant;
 use neo_tui::NeoTui;
 use neo_tui::primitive::{strip_ansi, visible_width};
 use neo_tui::shell::{NeoChromeState, PromptEdit};
-use neo_tui::transcript::{CHROME_GUTTER, TranscriptBrowserState, TranscriptEntry, TranscriptPane};
+use neo_tui::tasks_browser::TaskBrowserState;
+use neo_tui::terminal_image::{
+    ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities,
+};
+use neo_tui::transcript::{
+    CHROME_GUTTER, TranscriptBrowserState, TranscriptEntry, TranscriptImageAttachment,
+    TranscriptPane, TranscriptViewport,
+};
 
 #[test]
 fn terminal_frame_acknowledges_history_without_replaying_live_chrome() {
@@ -319,7 +326,10 @@ fn automatic_transcript_overflow_is_bounded_and_preserves_source_and_chrome() {
         "cursor must stay inside the bounded frame: {:?}",
         frame.cursor
     );
-    assert!(text.contains("[ask]") || text.contains("ask"), "chrome missing: {text}");
+    assert!(
+        text.contains("[ask]") || text.contains("ask"),
+        "chrome missing: {text}"
+    );
     assert!(!text.contains("earlier rows omitted"), "frame: {text}");
 
     // Follow-tail keeps the latest source rows reachable without scrolling.
@@ -369,7 +379,10 @@ fn manual_review_reuses_latched_automatic_alternate_surface() {
 
     tui.chrome_mut().open_transcript_browser(false);
     let manual = tui.render_terminal_frame_at(40, 8, Instant::now());
-    assert!(tui.automatic_overflow_active(), "manual review must not release latch");
+    assert!(
+        tui.automatic_overflow_active(),
+        "manual review must not release latch"
+    );
     assert!(manual.review_surface);
     assert!(manual.history.is_empty());
 
@@ -378,4 +391,105 @@ fn manual_review_reuses_latched_automatic_alternate_surface() {
     assert!(tui.automatic_overflow_active());
     assert!(restored.review_surface);
     assert!(restored.history.is_empty());
+}
+
+#[test]
+fn blocking_overlay_keeps_latched_automatic_alternate_surface() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(40, 8);
+    push_overflowing_live_suffix(&mut transcript);
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let automatic = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active());
+    assert!(automatic.review_surface);
+
+    tui.chrome_mut()
+        .push_task_browser_overlay(TaskBrowserState::new());
+    let overlay = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active());
+    assert!(overlay.review_surface);
+    assert!(overlay.history.is_empty());
+
+    tui.chrome_mut().close_focused_overlay();
+    let restored = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active());
+    assert!(restored.review_surface);
+    assert!(restored.history.is_empty());
+}
+
+#[test]
+fn blocking_overlay_reuses_manual_alternate_surface() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(40, 8);
+    transcript.push_status("manual-review-history");
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    tui.chrome_mut().open_transcript_browser(false);
+    let manual = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(manual.review_surface);
+    assert!(!tui.automatic_overflow_active());
+
+    tui.chrome_mut()
+        .push_task_browser_overlay(TaskBrowserState::new());
+    let overlay = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(overlay.review_surface);
+    assert!(overlay.history.is_empty());
+
+    tui.chrome_mut().close_focused_overlay();
+    let restored = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(restored.review_surface);
+    assert!(restored.history.is_empty());
+
+    tui.chrome_mut().open_help_panel(Vec::new());
+    let dialog = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(dialog.review_surface);
+    assert!(dialog.history.is_empty());
+}
+
+#[test]
+fn automatic_viewport_falls_back_instead_of_splitting_kitty_image() {
+    let mut transcript = TranscriptPane::new(40, 6);
+    transcript.set_image_render_policy(ImageRenderPolicy::new(
+        ImageProtocolPreference::Kitty,
+        false,
+    ));
+    transcript.set_image_capabilities(TerminalImageCapabilities::default().with_kitty(true));
+    transcript.push_user_message_with_images(
+        "look",
+        vec![TranscriptImageAttachment::new(
+            "image-1",
+            "image/png",
+            1_184,
+            650,
+            "[image #1 (1184x650)]",
+            vec![
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+                0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92,
+                0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            ],
+        )],
+    );
+    let mut viewport = TranscriptViewport::new();
+
+    let _ = transcript.render_viewport_rows(&mut viewport, 40, 6);
+    viewport.scroll_up(usize::MAX);
+    let rows = transcript.render_viewport_rows(&mut viewport, 40, 6);
+    let text = rows
+        .iter()
+        .map(|row| strip_ansi(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rows.len() <= 6);
+    assert!(
+        !rows.iter().any(|row| row.contains("\x1b_G")),
+        "rows: {rows:#?}"
+    );
+    assert!(
+        text.contains("[image #1 (1184x650)]"),
+        "fallback missing: {text}"
+    );
 }

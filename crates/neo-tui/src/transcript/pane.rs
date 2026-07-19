@@ -863,9 +863,15 @@ impl TranscriptPane {
         let mut snapshot = self.clone();
         snapshot.width = width;
         snapshot.height = height;
-        let rows = snapshot.render_body_lines(width);
+        let mut rows = snapshot.render_body_lines(width);
         viewport.sync(rows.len(), height);
-        let range = viewport.visible_row_range(rows.len(), height);
+        let mut range = viewport.visible_row_range(rows.len(), height);
+        if viewport_splits_terminal_image(&rows, &range) {
+            snapshot.set_image_capabilities(TerminalImageCapabilities::default());
+            rows = snapshot.render_body_lines(width);
+            viewport.sync(rows.len(), height);
+            range = viewport.visible_row_range(rows.len(), height);
+        }
         rows[range].to_vec()
     }
 
@@ -1523,6 +1529,20 @@ fn ansi_line_is_blank(line: &str) -> bool {
 
 pub(super) fn ansi_line_is_image(line: &str) -> bool {
     line.contains("\x1b_G") || line.contains("\x1b]1337;File=")
+}
+
+fn viewport_splits_terminal_image(rows: &[String], range: &std::ops::Range<usize>) -> bool {
+    rows.iter().enumerate().any(|(start, row)| {
+        if !ansi_line_is_image(row) {
+            return false;
+        }
+        let end = rows
+            .iter()
+            .skip(start + 1)
+            .position(|row| !ansi_line_is_blank(row))
+            .map_or(rows.len(), |offset| start + 1 + offset);
+        range.start < end && start < range.end && (range.start > start || range.end < end)
+    })
 }
 
 fn content_display_text(content: &[Content]) -> String {

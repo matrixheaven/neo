@@ -76,6 +76,7 @@ impl ToolCallComponent {
         let mut changed = self.state.arguments != arguments;
         if let Some(args) = &arguments
             && !args.is_empty()
+            && self.state.name != "Sleep"
             && self.streaming_started_at.is_none()
         {
             self.streaming_started_at = Some(Instant::now());
@@ -299,10 +300,12 @@ impl ToolCallComponent {
         if self.state.status == ToolStatusKind::Queued {
             return true;
         }
+        if self.state.name == "Sleep" {
+            return self.state.status == ToolStatusKind::Running
+                && self.streaming_started_at.is_some();
+        }
         is_pending_or_running(self.state.status)
-            && (is_file_write_tool(&self.state.name)
-                || self.state.name == "WaitDelegate"
-                || self.state.name == "Sleep")
+            && (is_file_write_tool(&self.state.name) || self.state.name == "WaitDelegate")
             && self.streaming_started_at.is_some()
     }
 }

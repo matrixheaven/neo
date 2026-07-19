@@ -150,10 +150,20 @@ impl NeoTui {
         height: usize,
         now: Instant,
     ) -> TerminalFrame {
+        let manual_review_open = self
+            .chrome
+            .find_overlay_by_kind(|kind| matches!(kind, OverlayKind::TranscriptBrowser(_)))
+            .is_some();
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
-            return TerminalFrame::new(Vec::new(), lines, None);
+            return TerminalFrame::with_surface(
+                Vec::new(),
+                lines,
+                None,
+                self.automatic_overflow.is_some() || manual_review_open,
+                None,
+            );
         }
 
         let chrome_render =
@@ -236,10 +246,11 @@ impl NeoTui {
         if update.live.len() > height {
             update.live.truncate(height);
         }
-        TerminalFrame::with_animation_deadline(
+        TerminalFrame::with_surface(
             update.history,
             update.live,
             cursor,
+            manual_review_open,
             next_animation_deadline,
         )
     }

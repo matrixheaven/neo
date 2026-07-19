@@ -2769,14 +2769,51 @@ fn list_delegates_renders_structured_rows_without_opaque_cursor() {
         text.contains("aggregate") && text.contains("total=3"),
         "swarm aggregate missing: {text}"
     );
-    assert!(!text.contains("opaque-cursor-value"), "cursor leaked: {text}");
-    assert!(!text.contains("next_cursor:"), "raw next_cursor leaked: {text}");
-    assert!(!text.contains("cursor_query"), "cursor_query leaked: {text}");
+    assert!(
+        !text.contains("opaque-cursor-value"),
+        "cursor leaked: {text}"
+    );
+    assert!(
+        !text.contains("next_cursor:"),
+        "raw next_cursor leaked: {text}"
+    );
+    assert!(
+        !text.contains("cursor_query"),
+        "cursor_query leaked: {text}"
+    );
 }
 
 #[test]
 fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
     let mut pane = TranscriptPane::new(80, 16);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "sleep-1".to_owned(),
+        name: "Sleep".to_owned(),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "sleep-1".to_owned(),
+        json_fragment: r#"{"duration_seconds":30,"reason":"backoff before retry"}"#.to_owned(),
+    });
+
+    let pending = pane.render_terminal_update(80, 16);
+    let pending_text = pending
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        pending_text.contains("30s total"),
+        "pending total missing: {pending_text}"
+    );
+    assert!(
+        !pending_text.contains(" remaining"),
+        "countdown must not start before Sleep execution: {pending_text}"
+    );
+    assert!(!pending.has_visible_animation);
+
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "sleep-1".to_owned(),
