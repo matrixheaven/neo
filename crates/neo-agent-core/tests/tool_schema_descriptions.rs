@@ -1,6 +1,81 @@
 use neo_agent_core::ToolRegistry;
 use serde_json::Value;
 
+#[test]
+fn terminal_write_input_schema_is_ordered_parts_only() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let terminal = registry
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "Terminal")
+        .expect("Terminal spec");
+    let input = terminal.input_schema["properties"]
+        .get("input")
+        .expect("Terminal must expose an `input` property");
+
+    assert!(
+        schema_has_type(&terminal.input_schema, input, "array"),
+        "Terminal input must be an array: {input}"
+    );
+    assert!(
+        !schema_has_type(&terminal.input_schema, input, "string"),
+        "Terminal input must not retain a scalar string alternative: {input}"
+    );
+
+    let items = resolve_ref(
+        &terminal.input_schema,
+        input.get("items").expect("Terminal input array items"),
+    );
+    let variants = items
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("Terminal input items must use exactly-one-of variants");
+    assert_eq!(variants.len(), 2, "unexpected input variants: {items}");
+    for property in ["text", "control"] {
+        let variant = variants
+            .iter()
+            .map(|variant| resolve_ref(&terminal.input_schema, variant))
+            .find(|variant| schema_exposes_property(&terminal.input_schema, variant, property))
+            .unwrap_or_else(|| panic!("Terminal input items must expose `{property}`: {items}"));
+        let properties = variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("Terminal input variant properties");
+        assert_eq!(
+            properties.len(),
+            1,
+            "`{property}` variant must expose exactly one property: {variant}"
+        );
+        let required = variant
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("Terminal input variant required properties");
+        assert_eq!(
+            required,
+            &[Value::String(property.to_owned())],
+            "`{property}` must be the only required property: {variant}"
+        );
+        assert_eq!(
+            variant.get("additionalProperties"),
+            Some(&Value::Bool(false)),
+            "`{property}` variant must reject extra properties: {variant}"
+        );
+    }
+
+    let description = input["description"]
+        .as_str()
+        .expect("Terminal input description");
+    assert!(description.contains("Ordered"), "{description}");
+    assert!(description.contains("0..=31"), "{description}");
+    assert!(description.contains("127"), "{description}");
+    let compact_description = description.split_whitespace().collect::<String>();
+    assert!(
+        compact_description.contains("[{\"text\":")
+            && compact_description.contains("},{\"control\":"),
+        "Terminal input description must include a mixed text/control example: {description}"
+    );
+}
+
 /// Terminal(start) exposes a typed `cwd` and both shell tools require it for
 /// nested scopes, because command strings are never parsed for paths.
 #[test]
@@ -126,4 +201,38 @@ fn resolve_ref<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
         }
     }
     node
+}
+
+fn schema_has_type(root: &Value, node: &Value, expected: &str) -> bool {
+    let node = resolve_ref(root, node);
+    node.get("type").is_some_and(|kind| {
+        kind == expected
+            || kind
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == expected))
+    }) || ["oneOf", "anyOf", "allOf"].iter().any(|keyword| {
+        node.get(keyword)
+            .and_then(Value::as_array)
+            .is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(|schema| schema_has_type(root, schema, expected))
+            })
+    })
+}
+
+fn schema_exposes_property(root: &Value, node: &Value, expected: &str) -> bool {
+    let node = resolve_ref(root, node);
+    node.get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| properties.contains_key(expected))
+        || ["oneOf", "anyOf", "allOf"].iter().any(|keyword| {
+            node.get(keyword)
+                .and_then(Value::as_array)
+                .is_some_and(|schemas| {
+                    schemas
+                        .iter()
+                        .any(|schema| schema_exposes_property(root, schema, expected))
+                })
+        })
 }

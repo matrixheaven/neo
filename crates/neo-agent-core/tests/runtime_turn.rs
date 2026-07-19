@@ -7967,7 +7967,7 @@ fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
                 json!({
                     "mode": "write",
                     "handle": handle,
-                    "input": "printf terminal-event-ok\\n\n"
+                    "input": [{"text": "printf terminal-event-ok\\n\n"}]
                 }),
             )
         }

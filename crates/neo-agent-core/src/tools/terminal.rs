@@ -31,9 +31,9 @@ struct TerminalInput {
     #[schemars(description = "Terminal handle. Required except for start.")]
     handle: Option<String>,
     #[schemars(
-        description = "Input text. Required for write. Control keys must decode to one control character: Ctrl+C is U+0003, Ctrl+D is U+0004, and Ctrl+Z is U+001A. Do not send printable escape text such as backslash-u-0-0-0-3. These are raw PTY inputs, not portable signal guarantees."
+        description = "Ordered terminal input parts. Required and non-empty for write. Each part is exactly one text string or one control byte. Example: [{\"text\":\"command\"},{\"control\":3}]. Text newlines become carriage returns; control accepts 0..=31 or 127. Common values: Ctrl+C=3, Ctrl+D=4, Ctrl+Z=26, Escape=27."
     )]
-    input: Option<String>,
+    input: Option<Vec<TerminalInputPart>>,
     #[schemars(
         description = "Working directory for the launched process. Only valid for start; rejected for other modes. Relative paths resolve against the session working directory. Supply it whenever the command works inside a nested project subtree: command text is never inspected for paths, so nested AGENTS.md instructions load only from this typed cwd."
     )]
@@ -54,6 +54,15 @@ struct TerminalInput {
     yield_time_ms: Option<u64>,
     #[schemars(description = "Maximum output bytes for start, write, read, and stop.")]
     max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TerminalInputPart {
+    #[schemars(description = "UTF-8 text. LF and CRLF become carriage returns.")]
+    Text(String),
+    #[schemars(description = "Exact control byte. Accepted values: 0..=31 or 127.")]
+    Control(u8),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -77,13 +86,13 @@ fn terminal_yield(mode: TerminalMode, requested: Option<u64>) -> Duration {
     )
 }
 
-const DESCRIPTION: &str = r"Operate a real PTY session with start/write/read/resize/stop modes.
+const DESCRIPTION: &str = r#"Operate a real PTY session with start/write/read/resize/stop modes.
 
-Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle plus any incremental raw PTY output collected during a short yield window. Write sends input, including single control characters such as Ctrl+C (U+0003), Ctrl+D (U+0004), and Ctrl+Z (U+001A); printable escape text is sent literally, and control input has no portable signal guarantee. Read returns output since the prior observation. Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines sent by Write are translated to carriage returns. Output is raw PTY bytes (echo, ANSI, CR, backspace, cursor control are not filtered) and is bounded by the runtime limit.
+Use Terminal for interactive or persistent commands; use Bash for one-shot commands. Start returns a handle plus any incremental raw PTY output collected during a short yield window. Write accepts ordered text and control-byte parts in one call, for example [{"text":"command"},{"control":3}]. Common control values are Ctrl+C=3, Ctrl+D=4, Ctrl+Z=26, and Escape=27. Printable escape text stays literal, and control input has no portable signal guarantee. Read returns output since the prior observation. Resize changes PTY dimensions, and Stop terminates the full process tree. Newlines in Write text parts are translated to carriage returns. Output is raw PTY bytes (echo, ANSI, CR, backspace, cursor control are not filtered) and is bounded by the runtime limit.
 
 `yield_time_ms` is valid only for start/write/read (defaults 250/250/3000 ms, range 0..=30000). The yield clock starts only after admission and operation readiness; expiry returns current output with status running and never stops the command. Omit `timeout_secs` for unlimited command lifetime.
 
-`cwd` is accepted only for start and sets the launched process's working directory. When the command works inside a nested project subtree, you must set `cwd` to that subtree: the command string is never parsed for paths, so nested AGENTS.md instructions apply only when the typed `cwd` (or path) argument names the subtree.";
+`cwd` is accepted only for start and sets the launched process's working directory. When the command works inside a nested project subtree, you must set `cwd` to that subtree: the command string is never parsed for paths, so nested AGENTS.md instructions apply only when the typed `cwd` (or path) argument names the subtree."#;
 
 pub struct TerminalTool;
 
@@ -114,6 +123,12 @@ impl Tool for TerminalTool {
                 return Err(ToolError::InvalidInput {
                     tool: self.name().to_owned(),
                     message: "timeout_secs is valid only for start".to_owned(),
+                });
+            }
+            if input.input.is_some() && input.mode != TerminalMode::Write {
+                return Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: "`input` is only valid for mode `write`".to_owned(),
                 });
             }
             if let Some(yield_time_ms) = input.yield_time_ms {
@@ -305,15 +320,13 @@ async fn write_terminal(
     ctx: &ToolContext,
     tool: &str,
     handle: &str,
-    input: &str,
+    input: &[TerminalInputPart],
     max_output_bytes: usize,
     yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
+    let bytes = encode_terminal_input(tool, input)?;
     let session = terminal_session(ctx, tool, handle).await?;
-    session
-        .client
-        .write_terminal(normalize_terminal_input_newlines(input).as_bytes())
-        .await?;
+    session.client.write_terminal(&bytes).await?;
     let mut result = collect_terminal_output(
         ctx,
         TerminalMode::Write,
@@ -593,22 +606,44 @@ fn unknown_terminal(tool: &str, handle: &str) -> ToolError {
     }
 }
 
-fn normalize_terminal_input_newlines(input: &str) -> String {
-    let mut normalized = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\r' => {
-                normalized.push('\r');
-                if chars.peek() == Some(&'\n') {
-                    let _ = chars.next();
+fn encode_terminal_input(tool: &str, parts: &[TerminalInputPart]) -> Result<Vec<u8>, ToolError> {
+    if parts.is_empty() {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "`input` must be non-empty for mode `write`".to_owned(),
+        });
+    }
+
+    let mut encoded = Vec::new();
+    for part in parts {
+        match part {
+            TerminalInputPart::Text(text) => {
+                let mut bytes = text.as_bytes().iter().copied().peekable();
+                while let Some(byte) = bytes.next() {
+                    match byte {
+                        b'\r' if bytes.peek() == Some(&b'\n') => {
+                            encoded.push(b'\r');
+                            let _ = bytes.next();
+                        }
+                        b'\n' => encoded.push(b'\r'),
+                        _ => encoded.push(byte),
+                    }
                 }
             }
-            '\n' => normalized.push('\r'),
-            _ => normalized.push(ch),
+            TerminalInputPart::Control(control) if matches!(control, 0..=31 | 127) => {
+                encoded.push(*control);
+            }
+            TerminalInputPart::Control(control) => {
+                return Err(ToolError::InvalidInput {
+                    tool: tool.to_owned(),
+                    message: format!(
+                        "`control` must be between 0 and 31 or equal to 127, got {control}"
+                    ),
+                });
+            }
         }
     }
-    normalized
+    Ok(encoded)
 }
 
 fn cap_utf8(content: &str, max_bytes: usize) -> (String, bool) {
@@ -632,13 +667,70 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn terminal_input_preserves_control_bytes_and_normalizes_line_endings() {
+    fn terminal_input_encodes_ordered_text_and_control_bytes() {
         assert_eq!(
-            normalize_terminal_input_newlines("\0\u{1}\u{3}\u{4}\t\n\r\n\u{1a}\u{1b}\u{7f}")
-                .as_bytes(),
-            b"\0\x01\x03\x04\t\r\r\x1a\x1b\x7f"
+            encode_terminal_input(
+                "Terminal",
+                &[
+                    TerminalInputPart::Text("alpha\n".to_owned()),
+                    TerminalInputPart::Control(3),
+                    TerminalInputPart::Text("\\u0003\r\nomega".to_owned()),
+                    TerminalInputPart::Control(27),
+                    TerminalInputPart::Control(127),
+                ],
+            )
+            .expect("valid ordered input"),
+            b"alpha\r\x03\\u0003\romega\x1b\x7f"
         );
-        assert_eq!(normalize_terminal_input_newlines(r"\u0003"), r"\u0003");
+    }
+
+    #[tokio::test]
+    async fn terminal_input_is_non_empty_validated_and_write_scoped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = ToolContext::new(temp.path())
+            .expect("tool context")
+            .with_access(crate::ToolAccess::all());
+
+        for (input, expected) in [
+            (json!({"mode": "write", "handle": "missing"}), "input"),
+            (
+                json!({"mode": "write", "handle": "missing", "input": []}),
+                "input",
+            ),
+            (
+                json!({
+                    "mode": "write",
+                    "handle": "missing",
+                    "input": [{"text": "data", "control": 3}]
+                }),
+                "input",
+            ),
+            (
+                json!({"mode": "write", "handle": "missing", "input": [{}]}),
+                "input",
+            ),
+            (
+                json!({"mode": "write", "handle": "missing", "input": [{"control": 32}]}),
+                "control",
+            ),
+            (
+                json!({"mode": "write", "handle": "missing", "input": "\\u0003"}),
+                "input",
+            ),
+            (
+                json!({"mode": "read", "handle": "missing", "input": [{"text": "data"}]}),
+                "input",
+            ),
+        ] {
+            let error = TerminalTool
+                .execute(&context, input)
+                .await
+                .expect_err("invalid Terminal input was accepted");
+            assert!(
+                error.to_string().contains(expected),
+                "error should name {expected}: {error}"
+            );
+        }
     }
 
     #[tokio::test]

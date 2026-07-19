@@ -248,7 +248,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": size_query,
+                "input": [{ "text": size_query }],
                 "yield_time_ms": 1500
             }),
         )
@@ -301,7 +301,7 @@ async fn run_one_attempt(registry: &ToolRegistry, context: &ToolContext) -> Resu
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": "CMD:SIZE:72:18\n",
+                "input": [{ "text": "CMD:SIZE:72:18\n" }],
                 "yield_time_ms": 1500
             }),
         )
@@ -865,7 +865,7 @@ async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
                 json!({
                     "mode": "write",
                     "handle": write_handle,
-                    "input": format!("x\n{}", "x".repeat(2 * 1024 * 1024))
+                    "input": [{ "text": format!("x\n{}", "x".repeat(2 * 1024 * 1024)) }]
                 }),
             )
             .await
@@ -1075,7 +1075,7 @@ async fn run_incremental_bounded_attempt(
             json!({
                 "mode": "write",
                 "handle": handle,
-                "input": "hello\n",
+                "input": [{ "text": "hello\n" }],
                 "yield_time_ms": 2500
             }),
         )
@@ -1168,6 +1168,64 @@ async fn terminal_ctrl_c_interrupts_command_and_keeps_session_usable() {
         .expect("Ctrl+C session usability");
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn terminal_write_sends_ordered_text_and_control_in_one_call() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = guarded_context(&workspace, ShellLimits::default());
+    let registry = ToolRegistry::with_builtin_tools();
+    let details = start_terminal_command(
+        &registry,
+        &context,
+        "IFS= read -r value; printf 'received:%s' \"$value\"".to_owned(),
+        80,
+        24,
+        100,
+    )
+    .await
+    .expect("start ordered input terminal");
+    let handle = details["handle"]
+        .as_str()
+        .expect("terminal handle")
+        .to_owned();
+
+    let written = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": [
+                    { "text": "ordered-payload" },
+                    // The first Ctrl+D submits canonical buffered text; the
+                    // second, on an empty buffer, ends the shell `read`.
+                    { "control": 4 },
+                    { "control": 4 }
+                ],
+                "yield_time_ms": 2500
+            }),
+        )
+        .await
+        .expect("write ordered text and Ctrl+D");
+    let mut output = written
+        .details
+        .as_ref()
+        .and_then(|details| details["output"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if !output.contains("received:ordered-payload") {
+        output
+            .push_str(&read_until(&registry, &context, &handle, "received:ordered-payload").await);
+    }
+    assert!(
+        output.contains("received:ordered-payload"),
+        "ordered text/control input was not delivered in one write: {output:?}"
+    );
+    try_stop(&registry, &context, &handle).await;
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn terminal_windows_session_remains_usable_without_signal_guarantee() {
@@ -1202,9 +1260,9 @@ async fn run_session_usability_attempt(
         .to_owned();
 
     #[cfg(windows)]
-    let alive_input = "CMD:ALIVE\n";
+    let alive_input = json!([{ "text": "CMD:ALIVE" }, { "control": 13 }]);
     #[cfg(not(windows))]
-    let alive_input = "\u{0003}";
+    let alive_input = json!([{ "control": 3 }]);
     let alive = match registry
         .run(
             "Terminal",
