@@ -203,44 +203,7 @@ impl PromptHistoryStore {
 /// Best-effort ISO-8601 UTC timestamp for diagnostics. File order remains the
 /// primary ordering; `created_at` is informational.
 fn now_iso8601() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    let secs = u64::try_from(duration / 1000).unwrap_or_default();
-    let millis = u32::try_from(duration % 1000).unwrap_or_default();
-
-    // Days since epoch → civil date (Howard Hinnant's algorithm). Good enough
-    // for diagnostics; no chrono dependency needed.
-    let days = secs / 86_400;
-    let (year, month, day) = civil_from_days(days);
-    let day_secs = secs % 86_400;
-    let hour = day_secs / 3600;
-    let minute = (day_secs % 3600) / 60;
-    let second = day_secs % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-}
-
-/// Convert days since the Unix epoch (1970-01-01) into a (year, month, day).
-/// Source: Howard Hinnant, "`civil_from_days`".
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
-fn civil_from_days(z: u64) -> (i32, u32, u32) {
-    let z = z as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year as i32, m as u32, d as u32)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]
@@ -265,6 +228,24 @@ mod tests {
         assert!(!store.append(None, "   ").unwrap());
         // Non-blank, non-duplicate is appended.
         assert!(store.append(Some("session-1"), "second prompt").unwrap());
+
+        let record: PromptHistoryRecord = serde_json::from_str(
+            fs::read_to_string(store.path())
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(record.created_at.ends_with('Z'));
+        chrono::DateTime::parse_from_rfc3339(&record.created_at).unwrap();
+        let millis = record
+            .created_at
+            .split_once('.')
+            .and_then(|(_, fraction)| fraction.strip_suffix('Z'))
+            .unwrap();
+        assert_eq!(millis.len(), 3);
+        assert!(millis.bytes().all(|byte| byte.is_ascii_digit()));
 
         let loaded = store.load_recent().unwrap();
         assert_eq!(loaded, vec!["first prompt", "second prompt"]);
@@ -364,14 +345,5 @@ mod tests {
     fn prompt_history_store_load_returns_empty_when_file_missing() {
         let (_keep, store) = tmp_store(500);
         assert!(store.load_recent().unwrap().is_empty());
-    }
-
-    #[test]
-    fn civil_from_days_matches_known_epoch_dates() {
-        // 1970-01-01 is day 0.
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 2024-01-01 is a known leap-year boundary.
-        let days = (2024 - 1970) as u64 * 365 + 13; // approx with leap days
-        let _ = civil_from_days(days);
     }
 }
