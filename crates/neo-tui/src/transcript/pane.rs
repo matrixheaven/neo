@@ -681,6 +681,7 @@ impl TranscriptPane {
 
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {
         self.tool_output_expanded = expanded;
+        self.body_cache = None;
         for index in 0..self.transcript.entries().len() {
             self.transcript
                 .mutate_entry(index, |entry| entry.set_expanded(expanded));

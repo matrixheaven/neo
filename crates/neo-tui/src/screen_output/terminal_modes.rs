@@ -1,8 +1,8 @@
 use std::io::{Write, stdout};
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -54,13 +54,13 @@ pub(super) fn write_leave_output(
 
 pub(super) fn write_enter_review_output(output: &mut dyn Write) -> std::io::Result<()> {
     let mut output = output;
-    queue!(&mut output, EnterAlternateScreen, EnableMouseCapture)?;
+    queue!(&mut output, EnterAlternateScreen)?;
     output.flush()
 }
 
 pub(super) fn write_leave_review_output(output: &mut dyn Write) -> std::io::Result<()> {
     let mut output = output;
-    queue!(&mut output, DisableMouseCapture, LeaveAlternateScreen)?;
+    queue!(&mut output, LeaveAlternateScreen)?;
     output.flush()
 }
 
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn review_modes_are_symmetric() {
+    fn review_modes_preserve_terminal_mouse_selection() {
         let mut enter = Vec::new();
         write_enter_review_output(&mut enter).expect("review enter output");
         let mut leave = Vec::new();
@@ -323,12 +323,11 @@ mod tests {
         let leave = String::from_utf8(leave).expect("review leave is UTF-8");
         assert!(enter.contains("?1049h"));
         assert!(leave.contains("?1049l"));
-        assert!(enter.contains("?1000h"));
-        assert!(leave.contains("?1000l"));
         assert!(!format!("{enter}{leave}").contains("\x1b[2J"));
         assert!(!format!("{enter}{leave}").contains("\x1b[3J"));
-        let mouse_off = leave.find("?1000l").expect("mouse capture disabled");
-        let alternate_off = leave.find("?1049l").expect("alternate screen left");
-        assert!(mouse_off < alternate_off);
+        for mouse_mode in ["?1000", "?1002", "?1003", "?1006"] {
+            assert!(!enter.contains(mouse_mode));
+            assert!(!leave.contains(mouse_mode));
+        }
     }
 }
