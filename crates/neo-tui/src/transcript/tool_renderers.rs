@@ -60,15 +60,25 @@ pub fn tool_header_spans_with_elapsed(
     if state.name == "WaitDelegate" {
         return wait_delegate_header_spans(state, theme, elapsed_secs, header_width);
     }
+    if state.name == "Sleep" {
+        return sleep_header_spans(state, theme, elapsed_secs, header_width);
+    }
     if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
         let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
         spans.push(Span::styled(" (", Style::default().fg(meta_color)));
         spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
         spans.push(Span::styled(")", Style::default().fg(meta_color)));
     }
-    let chip = result_chip(state);
-    if !chip.is_empty() {
-        spans.push(Span::styled(chip, Style::default().fg(meta_color)));
+    if let Some(chip) = list_delegates_header_chip(state) {
+        spans.push(Span::styled(
+            format!(" · {chip}"),
+            Style::default().fg(meta_color),
+        ));
+    } else {
+        let chip = result_chip(state);
+        if !chip.is_empty() {
+            spans.push(Span::styled(chip, Style::default().fg(meta_color)));
+        }
     }
     spans
 }
@@ -232,6 +242,243 @@ fn wait_target_label(item: &serde_json::Value) -> String {
         .map(|value| truncate_arg_value(false, &one_line(value)))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown target".to_owned())
+}
+
+fn list_delegates_header_chip(state: &ToolCallState) -> Option<String> {
+    if state.name != "ListDelegates" {
+        return None;
+    }
+    let details = state.details.as_ref()?;
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some("delegate_list") {
+        return None;
+    }
+    let count = details.get("count").and_then(serde_json::Value::as_u64)?;
+    let total = details.get("total").and_then(serde_json::Value::as_u64)?;
+    Some(format!("{count} of {total}"))
+}
+
+/// Structured ListDelegates body from `details.kind == "delegate_list"`.
+/// Never exposes opaque pagination cursors. Falls back to generic rendering
+/// when details are missing or malformed.
+fn render_list_delegates_body(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.name != "ListDelegates" {
+        return None;
+    }
+    let details = state.details.as_ref()?;
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some("delegate_list") {
+        return None;
+    }
+    let delegates = details
+        .get("delegates")
+        .and_then(serde_json::Value::as_array)?;
+    let content_width = width.saturating_sub(2).max(1);
+    let mut rows = Vec::new();
+    if delegates.is_empty() {
+        rows.push(
+            palette
+                .weak_line("  No delegates found".to_owned())
+                .truncate_to_width(content_width),
+        );
+    } else {
+        let limit = if expanded {
+            delegates.len()
+        } else {
+            RESULT_PREVIEW_LINES.min(delegates.len())
+        };
+        for (index, row) in delegates.iter().take(limit).enumerate() {
+            let is_last = index + 1 == limit && (expanded || limit >= delegates.len());
+            let branch = if is_last { "└─" } else { "├─" };
+            let kind = row
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("agent");
+            let line = match kind {
+                "swarm" => {
+                    let description = row
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .map(one_line)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "swarm".to_owned());
+                    let status = row
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    format!("  {branch} {description} · {status}")
+                }
+                _ => {
+                    let name = row
+                        .get("display_name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(one_line)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "agent".to_owned());
+                    let status = row
+                        .get("status")
+                        .or_else(|| row.get("current_status"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let title = row
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(one_line)
+                        .filter(|value| !value.is_empty());
+                    match title {
+                        Some(title) => format!("  {branch} {name} · {status} · {title}"),
+                        None => format!("  {branch} {name} · {status}"),
+                    }
+                }
+            };
+            rows.push(
+                palette
+                    .body_line(line)
+                    .truncate_to_width(content_width),
+            );
+            if kind == "swarm"
+                && let Some(aggregate_line) = list_delegates_swarm_aggregate_line(row)
+            {
+                let child_branch = if is_last { "   " } else { "│  " };
+                rows.push(
+                    palette
+                        .weak_line(format!("  {child_branch}{aggregate_line}"))
+                        .truncate_to_width(content_width),
+                );
+            }
+        }
+        if !expanded && delegates.len() > limit {
+            rows.push(palette.weak_line(format!(
+                "  ... ({} more, ctrl+o to expand)",
+                delegates.len() - limit
+            )));
+        }
+    }
+    if let Some(steps) = details
+        .get("next_steps")
+        .and_then(serde_json::Value::as_array)
+    {
+        for step in steps {
+            if let Some(text) = step.as_str().map(one_line).filter(|value| !value.is_empty()) {
+                rows.push(
+                    palette
+                        .weak_line(format!("  next: {text}"))
+                        .truncate_to_width(content_width),
+                );
+            }
+        }
+    }
+    Some(rows)
+}
+
+fn list_delegates_swarm_aggregate_line(row: &serde_json::Value) -> Option<String> {
+    let aggregate = row.get("aggregate")?;
+    let total = aggregate_u64(Some(aggregate), "total").unwrap_or(0);
+    let running = aggregate_u64(Some(aggregate), "running").unwrap_or(0);
+    let completed = aggregate_u64(Some(aggregate), "completed").unwrap_or(0);
+    let failed = aggregate_u64(Some(aggregate), "failed").unwrap_or(0);
+    let cancelled = aggregate_u64(Some(aggregate), "cancelled").unwrap_or(0);
+    let timed_out = aggregate_u64(Some(aggregate), "timed_out").unwrap_or(0);
+    let queued = aggregate_u64(Some(aggregate), "queued").unwrap_or(0);
+    Some(format!(
+        "aggregate total={total} queued={queued} running={running} completed={completed} failed={failed} cancelled={cancelled} timed_out={timed_out}"
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SleepArguments {
+    pub duration_seconds: u64,
+    pub reason: String,
+}
+
+#[must_use]
+pub fn parse_sleep_arguments(arguments: Option<&str>) -> Option<SleepArguments> {
+    let value = serde_json::from_str::<serde_json::Value>(arguments?).ok()?;
+    let duration_seconds = value.get("duration_seconds")?.as_u64()?;
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(one_line)?;
+    Some(SleepArguments {
+        duration_seconds,
+        reason,
+    })
+}
+
+/// Semantic Sleep header: total duration and, while running, remaining time.
+#[must_use]
+pub fn sleep_header_spans(
+    state: &ToolCallState,
+    theme: &TuiTheme,
+    elapsed_secs: Option<u64>,
+    max_width: usize,
+) -> Vec<Span> {
+    let symbol = tool_symbol(state.status);
+    let verb = tool_verb(state.status);
+    let status_color = tool_status_color(state.status, theme);
+    let name_color = theme.brand;
+    let meta_color = theme.text_muted;
+
+    let mut spans = vec![
+        Span::styled(format!("{symbol} "), Style::default().fg(status_color)),
+        Span::styled(format!("{verb} "), Style::default().fg(status_color)),
+        Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
+    ];
+    if let Some(args) = parse_sleep_arguments(state.arguments.as_deref()) {
+        let total = format_elapsed(args.duration_seconds);
+        spans.push(Span::styled(
+            format!(" · {total} total"),
+            Style::default().fg(meta_color),
+        ));
+        if is_pending_or_running(state.status) {
+            let remaining = args
+                .duration_seconds
+                .saturating_sub(elapsed_secs.unwrap_or(0));
+            spans.push(Span::styled(
+                format!(" · {} remaining", format_elapsed(remaining)),
+                Style::default().fg(meta_color),
+            ));
+        }
+    }
+    let _ = max_width;
+    spans
+}
+
+/// Sleep body: reason while running/success; retain generic errors on failure.
+fn render_sleep_body(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.name != "Sleep" {
+        return None;
+    }
+    let args = parse_sleep_arguments(state.arguments.as_deref())?;
+    let content_width = width.saturating_sub(2).max(1);
+    let mut rows = vec![
+        palette
+            .body_line(format!("  {}", args.reason))
+            .truncate_to_width(content_width),
+    ];
+    match state.status {
+        ToolStatusKind::Succeeded => {
+            // Suppress the generic "Waited ..." success body; reason remains.
+            Some(rows)
+        }
+        ToolStatusKind::Failed | ToolStatusKind::Cancelled => {
+            if let Some(mut error_rows) = render_result_body(state, expanded, width, palette) {
+                rows.append(&mut error_rows);
+            }
+            Some(rows)
+        }
+        ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running => Some(rows),
+    }
 }
 
 /// Render structured WaitDelegate target rows. Malformed/validation results
@@ -449,6 +696,8 @@ fn render_tool_body_with_palette(
                 .then(|| render_wait_delegate_body(state, expanded, width, palette))
                 .flatten()
         })
+        .or_else(|| render_list_delegates_body(state, expanded, width, palette))
+        .or_else(|| render_sleep_body(state, expanded, width, palette))
         .or_else(|| render_result_body(state, expanded, width, palette))
         .unwrap_or_default()
 }

@@ -2698,3 +2698,144 @@ fn finalized_instruction_card_does_not_drift_after_later_updates() {
         Some(Finalization::Finalized)
     );
 }
+
+#[test]
+fn list_delegates_renders_structured_rows_without_opaque_cursor() {
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "list-1".to_owned(),
+        name: "ListDelegates".to_owned(),
+        arguments: serde_json::json!({}),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "list-1".to_owned(),
+        name: "ListDelegates".to_owned(),
+        result: neo_agent_core::ToolResult::ok(
+            "total: 5\nnext_cursor: opaque-cursor-value\n- agent rows...",
+        )
+        .with_details(serde_json::json!({
+            "kind": "delegate_list",
+            "count": 2,
+            "total": 5,
+            "next_cursor": "opaque-cursor-value",
+            "cursor_query": { "offset": 2 },
+            "delegates": [
+                {
+                    "kind": "agent",
+                    "display_name": "Pascal",
+                    "status": "running",
+                    "title": "implement overflow viewport"
+                },
+                {
+                    "kind": "swarm",
+                    "description": "parallel research swarm",
+                    "status": "running",
+                    "aggregate": {
+                        "total": 3,
+                        "queued": 0,
+                        "running": 2,
+                        "completed": 1,
+                        "failed": 0,
+                        "cancelled": 0,
+                        "timed_out": 0
+                    }
+                }
+            ]
+        })),
+    });
+
+    let update = pane.render_terminal_update(80, 24);
+    let text = update
+        .live
+        .iter()
+        .chain(update.history.iter().flat_map(|block| block.lines.iter()))
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("2 of 5"), "count/total missing: {text}");
+    assert!(text.contains("Pascal"), "agent name missing: {text}");
+    assert!(
+        text.contains("implement overflow viewport"),
+        "agent title missing: {text}"
+    );
+    assert!(
+        text.contains("parallel research swarm"),
+        "swarm description missing: {text}"
+    );
+    assert!(
+        text.contains("aggregate") && text.contains("total=3"),
+        "swarm aggregate missing: {text}"
+    );
+    assert!(!text.contains("opaque-cursor-value"), "cursor leaked: {text}");
+    assert!(!text.contains("next_cursor:"), "raw next_cursor leaked: {text}");
+    assert!(!text.contains("cursor_query"), "cursor_query leaked: {text}");
+}
+
+#[test]
+fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
+    let mut pane = TranscriptPane::new(80, 16);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "sleep-1".to_owned(),
+        name: "Sleep".to_owned(),
+        arguments: serde_json::json!({
+            "duration_seconds": 30,
+            "reason": "backoff before retry"
+        }),
+    });
+
+    let running = pane.render_terminal_update(80, 16);
+    let running_text = running
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        running_text.contains("30s total"),
+        "total missing while running: {running_text}"
+    );
+    assert!(
+        running_text.contains("remaining"),
+        "remaining missing while running: {running_text}"
+    );
+    assert!(
+        running_text.contains("backoff before retry"),
+        "reason missing while running: {running_text}"
+    );
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "sleep-1".to_owned(),
+        name: "Sleep".to_owned(),
+        result: neo_agent_core::ToolResult::ok("Waited 30 seconds: backoff before retry"),
+    });
+    let finished = pane.render_terminal_update(80, 16);
+    let finished_text = finished
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .chain(finished.live.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        finished_text.contains("30s total"),
+        "total missing after success: {finished_text}"
+    );
+    assert!(
+        finished_text.contains("backoff before retry"),
+        "reason missing after success: {finished_text}"
+    );
+    assert!(
+        !finished_text.contains("Waited 30 seconds"),
+        "generic Waited body should be suppressed: {finished_text}"
+    );
+    assert!(
+        !finished_text.contains(" remaining"),
+        "remaining should hide after success: {finished_text}"
+    );
+}
