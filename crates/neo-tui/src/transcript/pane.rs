@@ -18,6 +18,7 @@ use crate::transcript::{
 
 use super::entry::RetryStatusData;
 use super::presentation::{FinalizedBlock, TranscriptPresentation, TranscriptTerminalUpdate};
+use super::store::TranscriptViewport;
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
@@ -845,6 +846,26 @@ impl TranscriptPane {
         let rows = snapshot.render_body_lines(width);
         state.viewport.sync(rows.len(), height);
         let range = state.viewport.visible_row_range(rows.len(), height);
+        rows[range].to_vec()
+    }
+
+    /// Source-preserving viewport render for automatic overflow.
+    ///
+    /// Clones the pane so the real dirty flag, expansion state, and history
+    /// ledger are never consumed. Does not force tool output expansion.
+    #[must_use]
+    pub fn render_viewport_rows(
+        &mut self,
+        viewport: &mut TranscriptViewport,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
+        let mut snapshot = self.clone();
+        snapshot.width = width;
+        snapshot.height = height;
+        let rows = snapshot.render_body_lines(width);
+        viewport.sync(rows.len(), height);
+        let range = viewport.visible_row_range(rows.len(), height);
         rows[range].to_vec()
     }
 

@@ -238,3 +238,109 @@ fn running_static_tool_does_not_request_an_animation_deadline() {
 
     assert!(frame.next_animation_deadline.is_none());
 }
+
+fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "overflow-live-tool".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "overflow-living-command" }),
+    });
+    let body = (0..40)
+        .map(|index| format!("overflow-source-sentinel-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
+        turn: 1,
+        id: "overflow-live-tool".to_owned(),
+        name: "Bash".to_owned(),
+        partial_result: neo_agent_core::ToolResult::ok(body),
+    });
+}
+
+#[test]
+fn automatic_transcript_overflow_is_bounded_and_preserves_source_and_chrome() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(40, 8);
+    push_overflowing_live_suffix(&mut transcript);
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let frame = tui.render_terminal_frame_at(40, 8, Instant::now());
+    let text = frame
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(tui.automatic_overflow_active());
+    assert!(frame.review_surface);
+    assert!(frame.history.is_empty());
+    assert!(frame.live.len() <= 8, "frame height: {}", frame.live.len());
+    assert!(
+        frame
+            .cursor
+            .is_some_and(|cursor| cursor.row < frame.live.len() && cursor.row < 8),
+        "cursor must stay inside the bounded frame: {:?}",
+        frame.cursor
+    );
+    assert!(text.contains("[ask]") || text.contains("ask"), "chrome missing: {text}");
+    assert!(!text.contains("earlier rows omitted"), "frame: {text}");
+
+    // Follow-tail keeps the latest source rows reachable without scrolling.
+    // Card-local preview limits remain; this only proves presentation source
+    // is viewported without presentation-level omission.
+    assert!(
+        text.contains("overflow-source-sentinel") || text.contains("Using Bash"),
+        "expected overflow source in viewport: {text}"
+    );
+
+    // Scroll toward the top so the living tool header becomes visible.
+    for _ in 0..20 {
+        tui.scroll_automatic_overflow_up(4);
+    }
+    let scrolled = tui.render_terminal_frame_at(40, 8, Instant::now());
+    let scrolled_text = scrolled
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrolled.review_surface);
+    assert!(scrolled.live.len() <= 8);
+    assert!(
+        scrolled_text.contains("Using Bash") || scrolled_text.contains("overflow-living"),
+        "early source must become reachable via viewport scroll: {scrolled_text}"
+    );
+    assert!(!scrolled_text.contains("earlier rows omitted"));
+    // Scrolling away from the tail must change the visible window.
+    assert_ne!(
+        text.lines().take(3).collect::<Vec<_>>(),
+        scrolled_text.lines().take(3).collect::<Vec<_>>(),
+        "scroll should move the viewport window"
+    );
+}
+
+#[test]
+fn manual_review_reuses_latched_automatic_alternate_surface() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = TranscriptPane::new(40, 8);
+    push_overflowing_live_suffix(&mut transcript);
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let automatic = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active());
+    assert!(automatic.review_surface);
+
+    tui.chrome_mut().open_transcript_browser(false);
+    let manual = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active(), "manual review must not release latch");
+    assert!(manual.review_surface);
+    assert!(manual.history.is_empty());
+
+    tui.chrome_mut().close_transcript_browser();
+    let restored = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(tui.automatic_overflow_active());
+    assert!(restored.review_surface);
+    assert!(restored.history.is_empty());
+}

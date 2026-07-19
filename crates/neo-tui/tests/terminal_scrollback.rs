@@ -655,6 +655,165 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
 }
 
 #[test]
+fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_once() {
+    let height = 10u16;
+    let width = 80u16;
+    let mut screen = vt100::Parser::new(height, width, 512);
+    let shell_first = "shell-overflow-first-sentinel";
+    let shell_last = "shell-overflow-last-sentinel";
+    screen.process(format!("{shell_first}\r\n").as_bytes());
+    for row in 1..20 {
+        screen.process(format!("shell-overflow-row-{row:02}\r\n").as_bytes());
+    }
+    screen.process(format!("{shell_last}\r\n").as_bytes());
+
+    let mut inline = InlineTerminal::for_test_with_cursor(width, height, 0, height - 1);
+    let mut output = Vec::new();
+
+    let chrome = NeoChromeState::new("neo", "session", "model", ".");
+    let mut transcript = TranscriptPane::new(usize::from(width), usize::from(height));
+    transcript.push_status("pre-overflow-history-sentinel");
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let primary = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    render_and_process(&mut inline, &mut screen, &primary, &mut output);
+    tui.acknowledge_history(&primary);
+
+    // Living tool establishes the commit frontier and overflows the body budget.
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "overflow-live".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({ "command": "overflow-live-command" }),
+        });
+    let live_body = (0..30)
+        .map(|index| format!("overflow-live-sentinel-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "overflow-live".to_owned(),
+            name: "Bash".to_owned(),
+            partial_result: ToolResult::ok(live_body),
+        });
+    // Finalized later status must wait behind the frontier and stay unacked
+    // while automatic overflow owns the alternate surface.
+    tui.transcript_mut()
+        .push_status("deferred-alpha-overflow-sentinel");
+
+    let overflow = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(tui.automatic_overflow_active());
+    assert!(overflow.review_surface);
+    assert!(overflow.history.is_empty());
+    render_and_process(&mut inline, &mut screen, &overflow, &mut output);
+    tui.acknowledge_history(&overflow);
+
+    // Another deferred finalized entry while still latched.
+    tui.transcript_mut()
+        .push_status("deferred-beta-overflow-sentinel");
+    let still_overflow = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(tui.automatic_overflow_active());
+    assert!(still_overflow.review_surface);
+    assert!(still_overflow.history.is_empty());
+    render_and_process(&mut inline, &mut screen, &still_overflow, &mut output);
+    tui.acknowledge_history(&still_overflow);
+
+    // Clear the frontier so the latch releases and deferred history appends once.
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "overflow-live".to_owned(),
+            name: "Bash".to_owned(),
+            result: ToolResult::ok("overflow-live-finished"),
+        });
+    let released = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(!tui.automatic_overflow_active());
+    assert!(!released.review_surface);
+    render_and_process(&mut inline, &mut screen, &released, &mut output);
+    tui.acknowledge_history(&released);
+
+    let retained = all_terminal_rows(&mut screen);
+    let output_text = String::from_utf8_lossy(&output);
+
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains(shell_first))
+            .count(),
+        1,
+        "shell first must remain once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains(shell_last))
+            .count(),
+        1,
+        "shell last must remain once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("pre-overflow-history-sentinel"))
+            .count(),
+        1,
+        "pre-overflow history must remain once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("deferred-alpha-overflow-sentinel"))
+            .count(),
+        1,
+        "deferred history must append exactly once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("deferred-beta-overflow-sentinel"))
+            .count(),
+        1,
+        "second deferred history must append exactly once: {retained:#?}"
+    );
+    // Intermediate alternate-surface live body rows must not leak into primary
+    // scrollback as duplicates after release. Collapsed tool preview may omit
+    // most body lines entirely; any that remain may appear at most once.
+    for index in 0..30 {
+        let needle = format!("overflow-live-sentinel-{index:02}");
+        let count = retained.iter().filter(|row| row.contains(&needle)).count();
+        assert!(
+            count <= 1,
+            "live sentinel duplicated after release ({needle} x{count}): {retained:#?}"
+        );
+    }
+
+    let enter_count = output_text.matches("?1049h").count();
+    let leave_count = output_text.matches("?1049l").count();
+    assert_eq!(enter_count, 1, "expected one alternate enter: {output_text}");
+    assert_eq!(leave_count, 1, "expected one alternate leave: {output_text}");
+    assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
+
+    let pre = retained
+        .iter()
+        .position(|row| row.contains("pre-overflow-history-sentinel"))
+        .expect("pre-overflow history present");
+    let deferred = retained
+        .iter()
+        .position(|row| row.contains("deferred-alpha-overflow-sentinel"))
+        .expect("deferred history present");
+    let second = retained
+        .iter()
+        .position(|row| row.contains("deferred-beta-overflow-sentinel"))
+        .expect("second deferred history present");
+    assert!(
+        pre < deferred && deferred < second,
+        "history order broken: {retained:#?}"
+    );
+}
+
+#[test]
 fn review_acknowledgement_does_not_advance_normal_history_ledger() {
     let chrome = NeoChromeState::new("neo", "session", "model", ".");
     let mut transcript = TranscriptPane::new(80, 12);
