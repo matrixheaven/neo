@@ -904,10 +904,11 @@ fn scheduling_class_for_preparation(
     {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if matches!(
-        tool_call.name.as_ref(),
-        "Bash" | "Terminal" | "Write" | "Edit"
-    ) {
+    let name = tool_call.name.as_ref();
+    // ShellScheduler owns concurrency for commands that acquire admission.
+    if matches!(name, "Write" | "Edit")
+        || (name == "Terminal" && !uses_shell_admission(name, arguments))
+    {
         return ToolSchedulingClass::Exclusive;
     }
     ToolSchedulingClass::ParallelSafe
@@ -1470,5 +1471,102 @@ mod tests {
         let model_visible = format!("{} {:?}", result.content, result.details);
         assert!(!model_visible.contains("position"));
         assert!(!model_visible.contains("waiting_ms"));
+    }
+
+    #[tokio::test]
+    async fn parallel_shell_batch_reaches_shared_admission_for_every_call() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime = ShellRuntime::new(
+            ShellLimits {
+                max_active_commands: 1,
+                ..ShellLimits::default()
+            },
+            PathBuf::from("missing-guardian"),
+            workspace.path().join("runtime"),
+        );
+        let held = runtime
+            .acquire(
+                ShellAdmissionRequest {
+                    owner: "hold".to_owned(),
+                    class: ShellAdmissionClass::AgentForeground,
+                },
+                None,
+            )
+            .await;
+        let config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel)
+            .with_shell_runtime(runtime);
+        let model: Arc<dyn ModelClient> =
+            Arc::new(neo_ai::providers::fake::FakeModelClient::new(Vec::new()));
+        let registry = Arc::new(ToolRegistry::with_builtin_tools());
+        let calls = [
+            AgentToolCall {
+                id: "call-1".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"printf one"}"#.into(),
+            },
+            AgentToolCall {
+                id: "call-2".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"printf two"}"#.into(),
+            },
+            AgentToolCall {
+                id: "call-3".into(),
+                name: "Terminal".into(),
+                raw_arguments: r#"{"mode":"start","command":"printf three"}"#.into(),
+            },
+        ];
+        let cancel = CancellationToken::new();
+        let supervisor = ProcessSupervisor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+        let run = execute_tool_calls(
+            &config,
+            model,
+            registry,
+            None,
+            1,
+            &calls,
+            &mut emitter,
+            &cancel,
+            &supervisor,
+        );
+        tokio::pin!(run);
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(1));
+        tokio::pin!(deadline);
+        let mut queued_ids = Vec::new();
+        while queued_ids.len() < calls.len() {
+            tokio::select! {
+                event = rx.recv() => {
+                    let event = event.expect("event channel").expect("runtime event");
+                    match event {
+                        AgentEvent::ToolExecutionQueued { id, .. } => queued_ids.push(id),
+                        AgentEvent::ToolExecutionStarted { id, .. } => {
+                            panic!("shell call {id} started while capacity was held")
+                        }
+                        _ => {}
+                    }
+                }
+                result = &mut run => panic!(
+                    "shell batch returned before every call queued: ok={}",
+                    result.is_ok()
+                ),
+                () = &mut deadline => panic!(
+                    "only {} of {} shell calls reached admission",
+                    queued_ids.len(),
+                    calls.len()
+                ),
+            }
+        }
+        queued_ids.sort();
+        assert_eq!(queued_ids, ["call-1", "call-2", "call-3"]);
+
+        cancel.cancel();
+        let results = run.await.expect("tool dispatch cancellation");
+        assert_eq!(results.results.len(), calls.len());
+        drop(held);
     }
 }
