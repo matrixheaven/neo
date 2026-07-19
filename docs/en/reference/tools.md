@@ -21,7 +21,7 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 | Tool | Purpose |
 | --- | --- |
 | `Bash` | Execute `bash` (Git Bash on Windows) commands in the workspace; supports pipes, background tasks, optional `timeout_secs`, and cancellation. Omit `timeout_secs` for no timeout; explicit values must be `300..=3600`. After a timeout, increase or double it and retry. If it is already `3600` or duration is uncertain, omit it. |
-| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. `timeout_secs` is valid only for `mode=start`; omit it for no timeout, otherwise use `300..=3600`. After a timeout, increase or double it and retry. If it is already `3600` or duration is uncertain, omit it. |
+| `Terminal` | Drive a real PTY session: start / write / read / resize / stop. Suited to long-running interactive processes. `start` / `write` / `read` share one optional `yield_time_ms` (defaults 250 / 250 / 3000 ms, range `0..=30000`) that waits for incremental **raw PTY** output after admission and operation readiness; expiry returns current output with `status: running` and never stops the command. Admission queue wait stays unbounded and keeps the tool call pending. `timeout_secs` is valid only for `mode=start`; omit it for no command deadline, otherwise use `300..=3600`. After a timeout, increase or double it and retry. If it is already `3600` or duration is uncertain, omit it. Echo, ANSI, CR, and cursor control are not filtered. Write may send raw control bytes such as Ctrl+C (`\u0003`), Ctrl+D (`\u0004`), and Ctrl+Z (`\u001a`) without portable signal guarantees. |
 
 ## Network
 
