@@ -1,11 +1,69 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IsTerminal, Read, Write};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::terminal::size;
 use neo_tui::input::{InputEvent, InputParser, KeybindingsManager};
 use neo_tui::screen_output::InlineTerminal;
+
+/// Shared absolute geometry observation between the raw stdin owner and the
+/// interactive terminal. Cloneable; no process-global state.
+#[derive(Debug, Clone)]
+pub(super) struct GeometryObservation {
+    inner: Arc<Mutex<GeometryState>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeometryState {
+    width: u16,
+    height: u16,
+    cursor_col: u16,
+    cursor_row: u16,
+    generation: u64,
+}
+
+impl GeometryObservation {
+    fn new(width: u16, height: u16, cursor_col: u16, cursor_row: u16) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(GeometryState {
+                width: width.max(1),
+                height: height.max(1),
+                cursor_col,
+                cursor_row,
+                generation: 0,
+            })),
+        }
+    }
+
+    fn snapshot(&self) -> GeometryState {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish(&self, width: u16, height: u16, cursor_col: u16, cursor_row: u16, generation: u64) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.width = width.max(1);
+        state.height = height.max(1);
+        state.cursor_col = cursor_col;
+        state.cursor_row = cursor_row;
+        state.generation = generation;
+    }
+
+    fn next_generation(&self) -> u64 {
+        let state = self.snapshot();
+        state.generation.saturating_add(1)
+    }
+}
+
+const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const CSI_REQUEST_CURSOR: &[u8] = b"\x1b[6n";
 
 pub(crate) trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
@@ -31,10 +89,11 @@ pub(super) struct RawStdinEvents {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     disconnected: bool,
     last_size: Option<(u16, u16)>,
+    geometry: GeometryObservation,
 }
 
 impl RawStdinEvents {
-    pub(super) fn new(keybindings: KeybindingsManager) -> Self {
+    pub(super) fn new(keybindings: KeybindingsManager, geometry: GeometryObservation) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         // Spawn a background thread that blocks on raw stdin reads and forwards
         // byte chunks through the channel. The thread exits on EOF or read error
@@ -46,19 +105,100 @@ impl RawStdinEvents {
             let mut stdin = std::io::stdin();
             read_stdin_chunks(&mut stdin, |chunk| tx.send(chunk.to_vec()).is_ok());
         });
+        let last_size = {
+            let snap = geometry.snapshot();
+            Some((snap.width, snap.height))
+        };
         Self {
             parser: InputParser::with_keybindings(keybindings),
             pending: VecDeque::new(),
             rx,
             disconnected: false,
-            last_size: size().ok(),
+            last_size,
+            geometry,
         }
+    }
+
+    fn drain_parser_into_pending(&mut self, bytes: &[u8]) {
+        // feed_bytes never yields CPR as InputEvent; it is stored on the parser.
+        self.pending.extend(self.parser.feed_bytes(bytes));
+    }
+
+    fn observe_cursor_for_size(&mut self, width: u16, height: u16) -> Result<(u16, u16)> {
+        #[cfg(windows)]
+        {
+            let _ = (width, height);
+            let (col, row) = crossterm::cursor::position().map_err(|error| {
+                anyhow::anyhow!("failed to read console cursor position: {error}")
+            })?;
+            return Ok((col, row));
+        }
+        #[cfg(not(windows))]
+        {
+            // Request CPR through stdout; the matching reply arrives on raw stdin.
+            {
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(CSI_REQUEST_CURSOR)?;
+                stdout.flush()?;
+            }
+            let deadline = Instant::now() + CURSOR_PROBE_TIMEOUT;
+            loop {
+                if let Some((col, row)) = self.parser.take_cursor_position() {
+                    if col >= width || row >= height {
+                        anyhow::bail!(
+                            "cursor position report ({col},{row}) outside screen {width}x{height}"
+                        );
+                    }
+                    return Ok((col, row));
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    anyhow::bail!("timed out waiting for cursor position report");
+                }
+                match self.rx.recv_timeout(remaining) {
+                    Ok(bytes) => {
+                        self.drain_parser_into_pending(&bytes);
+                        while let Ok(more) = self.rx.try_recv() {
+                            self.drain_parser_into_pending(&more);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        anyhow::bail!("timed out waiting for cursor position report");
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        self.disconnected = true;
+                        anyhow::bail!("stdin reader closed while waiting for cursor position");
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_resize(&mut self) -> Result<Option<InputEvent>> {
+        let current = match size() {
+            Ok(size) if size.0 > 0 && size.1 > 0 => size,
+            _ => return Ok(None),
+        };
+        if self.last_size == Some(current) {
+            return Ok(None);
+        }
+        let generation = self.geometry.next_generation();
+        let (cursor_col, cursor_row) = self.observe_cursor_for_size(current.0, current.1)?;
+        self.geometry
+            .publish(current.0, current.1, cursor_col, cursor_row, generation);
+        self.last_size = Some(current);
+        Ok(Some(InputEvent::Resize {
+            columns: current.0,
+            rows: current.1,
+        }))
     }
 }
 
 impl Default for RawStdinEvents {
     fn default() -> Self {
-        Self::new(KeybindingsManager::default())
+        let (cols, rows) = size().unwrap_or((80, 24));
+        let geometry = GeometryObservation::new(cols.max(1), rows.max(1), 0, 0);
+        Self::new(KeybindingsManager::default(), geometry)
     }
 }
 
@@ -87,10 +227,10 @@ impl TerminalEvents for RawStdinEvents {
         if !timeout.is_zero() {
             match self.rx.recv_timeout(timeout) {
                 Ok(bytes) => {
-                    self.pending.extend(self.parser.feed_bytes(&bytes));
+                    self.drain_parser_into_pending(&bytes);
                     // Drain any more immediately available bytes
                     while let Ok(more_bytes) = self.rx.try_recv() {
-                        self.pending.extend(self.parser.feed_bytes(&more_bytes));
+                        self.drain_parser_into_pending(&more_bytes);
                     }
                     got_data = true;
                 }
@@ -108,32 +248,12 @@ impl TerminalEvents for RawStdinEvents {
             self.pending.extend(self.parser.flush_timeout());
         }
 
-        if let Some(event) = self.poll_resize() {
+        if let Some(event) = self.poll_resize()? {
             self.pending.push_back(event);
         }
 
         Ok(self.pending.pop_front())
     }
-}
-
-impl RawStdinEvents {
-    fn poll_resize(&mut self) -> Option<InputEvent> {
-        resize_event_for_size(&mut self.last_size, size().ok()?)
-    }
-}
-
-fn resize_event_for_size(
-    last_size: &mut Option<(u16, u16)>,
-    current_size: (u16, u16),
-) -> Option<InputEvent> {
-    if *last_size == Some(current_size) {
-        return None;
-    }
-    *last_size = Some(current_size);
-    Some(InputEvent::Resize {
-        columns: current_size.0,
-        rows: current_size.1,
-    })
 }
 
 fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> bool) {
@@ -152,24 +272,47 @@ fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> 
     }
 }
 
-/// Create the platform-appropriate input backend.
-pub(super) fn input_events(keybindings: KeybindingsManager) -> impl TerminalEvents {
-    RawStdinEvents::new(keybindings)
+/// Create the platform-appropriate input backend paired with geometry ownership.
+pub(super) fn input_events(
+    keybindings: KeybindingsManager,
+    geometry: GeometryObservation,
+) -> impl TerminalEvents {
+    RawStdinEvents::new(keybindings, geometry)
 }
+
 pub(super) struct NeoTerminal {
     tui: InlineTerminal,
     title: Option<String>,
+    geometry: GeometryObservation,
 }
 
 impl NeoTerminal {
-    pub(super) fn enter() -> Result<Self> {
+    pub(super) fn enter() -> Result<(Self, GeometryObservation)> {
         let capabilities = super::detect_terminal_capabilities(
             neo_tui::terminal_image::ImageProtocolPreference::Auto,
             std::io::stdout().is_terminal(),
         );
         let (cols, rows) = size()?;
-        let tui = InlineTerminal::enter(cols.max(1), rows.max(1), capabilities)?;
-        Ok(Self { tui, title: None })
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        // Seed the initial observation before the background stdin reader starts.
+        let (cursor_col, cursor_row) = crossterm::cursor::position().unwrap_or((0, 0));
+        let cursor_col = cursor_col.min(cols.saturating_sub(1));
+        let cursor_row = cursor_row.min(rows.saturating_sub(1));
+        let geometry = GeometryObservation::new(cols, rows, cursor_col, cursor_row);
+        let tui = InlineTerminal::enter(cols, rows, capabilities, cursor_col, cursor_row)?;
+        Ok((
+            Self {
+                tui,
+                title: None,
+                geometry: geometry.clone(),
+            },
+            geometry,
+        ))
+    }
+
+    pub(super) fn geometry(&self) -> GeometryObservation {
+        self.geometry.clone()
     }
 
     pub(super) fn draw_tui(
@@ -178,15 +321,27 @@ impl NeoTerminal {
         animation_due: bool,
     ) -> Result<Option<std::time::Instant>> {
         self.sync_title(tui.chrome().terminal_title())?;
-        let (cols, rows) = size()?;
-        if cols == 0 || rows == 0 {
-            return Ok(None);
-        }
+        let snap = self.geometry.snapshot();
+        let (cols, rows) = if snap.width > 0 && snap.height > 0 {
+            (snap.width, snap.height)
+        } else {
+            let (cols, rows) = size()?;
+            if cols == 0 || rows == 0 {
+                return Ok(None);
+            }
+            (cols, rows)
+        };
         let now = std::time::Instant::now();
         if animation_due {
             tui.advance_animation_at(now);
         }
-        self.tui.resize(cols, rows);
+        self.tui.resize(
+            cols,
+            rows,
+            snap.cursor_col.min(cols.saturating_sub(1)),
+            snap.cursor_row.min(rows.saturating_sub(1)),
+            snap.generation,
+        )?;
         let frame = tui.render_terminal_frame_at(usize::from(cols), usize::from(rows), now);
         let mut output = std::io::stdout().lock();
         self.tui.render_to(&mut output, &frame)?;
@@ -207,7 +362,17 @@ impl NeoTerminal {
     pub(super) fn reenter(&mut self) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
-        self.tui.resume()?;
+        let (cols, rows) = size()?;
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let (cursor_col, cursor_row) = crossterm::cursor::position().unwrap_or((0, 0));
+        let cursor_col = cursor_col.min(cols.saturating_sub(1));
+        let cursor_row = cursor_row.min(rows.saturating_sub(1));
+        let generation = self.geometry.next_generation();
+        self.geometry
+            .publish(cols, rows, cursor_col, cursor_row, generation);
+        self.tui
+            .resume(cols, rows, cursor_col, cursor_row, generation)?;
         Ok(())
     }
 
@@ -308,17 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn terminal_size_changes_emit_resize_events() {
-        let mut last_size = Some((80, 24));
+    fn terminal_resize_waits_for_matching_cursor_generation() {
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        // Simulate a resize observation: generation advances only with cursor.
+        let generation = geometry.next_generation();
+        assert_eq!(generation, 1);
+        geometry.publish(100, 40, 3, 7, generation);
+        let snap = geometry.snapshot();
+        assert_eq!(snap.width, 100);
+        assert_eq!(snap.height, 40);
+        assert_eq!(snap.cursor_col, 3);
+        assert_eq!(snap.cursor_row, 7);
+        assert_eq!(snap.generation, 1);
 
-        assert_eq!(resize_event_for_size(&mut last_size, (80, 24)), None);
-        assert_eq!(
-            resize_event_for_size(&mut last_size, (100, 40)),
-            Some(InputEvent::Resize {
-                columns: 100,
-                rows: 40,
-            })
+        // A later observation must carry a higher generation; InlineTerminal
+        // rejects stale ones.
+        let mut terminal = InlineTerminal::for_test_with_cursor(80, 24, 0, 0);
+        assert!(terminal.resize(100, 40, 3, 7, 1).is_ok());
+        assert!(
+            terminal.resize(120, 50, 0, 0, 1).is_err(),
+            "stale generation must fail closed"
         );
-        assert_eq!(resize_event_for_size(&mut last_size, (100, 40)), None);
+        assert!(terminal.resize(120, 50, 0, 0, 2).is_ok());
     }
 }

@@ -12,6 +12,7 @@ use super::types::CursorPos;
 
 const SYNCHRONIZED_OUTPUT_START: &str = "\x1b[?2026h";
 const SYNCHRONIZED_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+const RESET_SCROLL_REGION: &[u8] = b"\x1b[r";
 
 #[derive(Debug, Clone)]
 pub struct TerminalFrame {
@@ -72,22 +73,56 @@ impl TerminalFrame {
     }
 }
 
+/// Absolute normal-screen geometry owned solely by [`InlineTerminal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalScreenGeometry {
+    width: u16,
+    height: u16,
+    generation: u64,
+    /// Zero-based top row of the mutable live viewport.
+    live_top: u16,
+    /// Absolute hardware cursor (column, row), zero-based.
+    cursor_col: u16,
+    cursor_row: u16,
+}
+
 #[derive(Debug)]
 pub struct InlineTerminal {
     synchronized_output: bool,
+    geometry: NormalScreenGeometry,
     live: LiveRenderer,
     saved_normal_live: Option<LiveRenderer>,
+    saved_normal_geometry: Option<NormalScreenGeometry>,
     modes: Option<TerminalModeGuard>,
     review_surface: bool,
 }
 
 impl InlineTerminal {
     #[must_use]
-    pub fn new(width: u16, height: u16, capabilities: TerminalCapabilities) -> Self {
+    pub fn new(
+        width: u16,
+        height: u16,
+        capabilities: TerminalCapabilities,
+        cursor_col: u16,
+        cursor_row: u16,
+    ) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let cursor_col = cursor_col.min(width.saturating_sub(1));
+        let cursor_row = cursor_row.min(height.saturating_sub(1));
         Self {
             synchronized_output: capabilities.ansi.synchronized_output,
+            geometry: NormalScreenGeometry {
+                width,
+                height,
+                generation: 0,
+                live_top: cursor_row,
+                cursor_col,
+                cursor_row,
+            },
             live: LiveRenderer::new(width, height),
             saved_normal_live: None,
+            saved_normal_geometry: None,
             modes: None,
             review_surface: false,
         }
@@ -97,16 +132,32 @@ impl InlineTerminal {
         width: u16,
         height: u16,
         capabilities: TerminalCapabilities,
+        cursor_col: u16,
+        cursor_row: u16,
     ) -> std::io::Result<Self> {
         let modes = TerminalModeGuard::enter(capabilities)?;
-        let mut terminal = Self::new(width, height, capabilities);
+        let mut terminal = Self::new(width, height, capabilities, cursor_col, cursor_row);
         terminal.modes = Some(modes);
         Ok(terminal)
     }
 
+    /// Test constructor. Starts at absolute cursor `(0, 0)`.
+    /// Shell-seeded harnesses should use [`Self::for_test_with_cursor`].
     #[must_use]
     pub fn for_test(width: u16, height: u16) -> Self {
-        Self::new(width, height, TerminalCapabilities::default())
+        Self::for_test_with_cursor(width, height, 0, 0)
+    }
+
+    /// Test constructor with an explicit zero-based absolute cursor.
+    #[must_use]
+    pub fn for_test_with_cursor(width: u16, height: u16, cursor_col: u16, cursor_row: u16) -> Self {
+        Self::new(
+            width,
+            height,
+            TerminalCapabilities::default(),
+            cursor_col,
+            cursor_row,
+        )
     }
 
     pub fn render_to(
@@ -119,6 +170,7 @@ impl InlineTerminal {
         let mut transaction = Vec::new();
         // Keep the primary live anchor while the alternate review screen owns the renderer.
         let saved_normal_live = entering_review.then(|| self.live.clone());
+        let saved_normal_geometry = entering_review.then_some(self.geometry);
 
         if entering_review {
             append_review_transition(&mut transaction, &mut self.modes, true)?;
@@ -131,6 +183,7 @@ impl InlineTerminal {
         } else {
             flatten_history(&frame.history)
         };
+
         let mut next_live = if leaving_review {
             self.saved_normal_live
                 .clone()
@@ -138,28 +191,92 @@ impl InlineTerminal {
         } else {
             self.live.clone()
         };
+        let mut next_geometry = if leaving_review {
+            self.saved_normal_geometry.unwrap_or(self.geometry)
+        } else {
+            self.geometry
+        };
+        // Origin that currently owns mutable rows on the physical screen.
+        let previous_live_top = next_geometry.live_top;
+        let previous_live_rows = next_live.previous_line_count();
+
         if entering_review {
             next_live.reset();
-        } else if leaving_review {
-            transaction.extend_from_slice(next_live.clear_for_history_redraw().as_bytes());
+            // Alternate screen starts at the top-left of a fresh buffer.
+            next_geometry.live_top = 0;
+            next_geometry.cursor_col = 0;
+            next_geometry.cursor_row = 0;
         }
+
+        // Target live top for the incoming frame (before history insertion moves
+        // content). Used to detect origin moves that require erasing the old
+        // absolute viewport.
+        let projected_live_top =
+            projected_live_top(&next_geometry, frame.live.len()).unwrap_or(next_geometry.live_top);
+
+        // Erase previously drawn live-owned rows at their absolute origin before
+        // any scroll that could carry them into native scrollback.
+        if previous_live_rows > 0
+            && (!history_lines.is_empty()
+                || leaving_review
+                || projected_live_top != previous_live_top)
+        {
+            transaction.extend_from_slice(next_live.clear_at_origin(previous_live_top).as_bytes());
+        }
+
         if !history_lines.is_empty() {
-            if !leaving_review {
-                transaction.extend_from_slice(next_live.clear_for_history_redraw().as_bytes());
+            if let Err(error) =
+                append_protected_history(&mut transaction, &mut next_geometry, &history_lines)
+            {
+                let _ = output.write_all(RESET_SCROLL_REGION);
+                let _ = output.flush();
+                return Err(error);
             }
-            let mut history = String::new();
-            append_history_lines(&mut history, &history_lines);
-            transaction.extend_from_slice(history.as_bytes());
+        }
+
+        // Reconcile live height: shrink clears released rows; grow makes room above.
+        if let Err(error) = reconcile_live_viewport(
+            &mut transaction,
+            &mut next_geometry,
+            frame.live.len(),
+            previous_live_rows,
+        ) {
+            let _ = output.write_all(RESET_SCROLL_REGION);
+            let _ = output.flush();
+            return Err(error);
         }
 
         let mut live_bytes = Vec::new();
-        if let Err(error) = next_live.render_to(&mut live_bytes, frame.live.clone(), frame.cursor) {
+        if let Err(error) = next_live.render_to(
+            &mut live_bytes,
+            next_geometry.live_top,
+            frame.live.clone(),
+            frame.cursor,
+        ) {
+            let _ = output.write_all(RESET_SCROLL_REGION);
+            let _ = output.flush();
             return Err(error);
         }
         transaction.extend_from_slice(&live_bytes);
+
+        // Track absolute hardware cursor after the live draw.
+        let live_len = frame.live.len() as u16;
+        if let Some(cursor) = frame.cursor {
+            next_geometry.cursor_row = next_geometry
+                .live_top
+                .saturating_add(u16::try_from(cursor.row).unwrap_or(u16::MAX));
+            next_geometry.cursor_col = u16::try_from(cursor.col).unwrap_or(u16::MAX);
+        } else if live_len > 0 {
+            next_geometry.cursor_row = next_geometry.live_top.saturating_add(live_len - 1);
+            next_geometry.cursor_col = 0;
+        }
+
         if transaction.is_empty() {
             return Ok(());
         }
+
+        // Ensure scroll margins are reset at the end of every successful body.
+        transaction.extend_from_slice(RESET_SCROLL_REGION);
 
         let transaction = if self.synchronized_output {
             format!(
@@ -172,26 +289,31 @@ impl InlineTerminal {
             transaction
         };
         if let Err(error) = output.write_all(&transaction).and_then(|()| output.flush()) {
+            let _ = output.write_all(RESET_SCROLL_REGION);
             if self.synchronized_output {
                 let _ = output.write_all(SYNCHRONIZED_OUTPUT_END);
-                let _ = output.flush();
             }
+            let _ = output.flush();
             if entering_review || leaving_review {
                 recover_review_transition(&mut self.modes, output, entering_review);
             }
             return Err(error);
         }
 
+        // Commit geometry and renderer cache only after a successful flush.
         self.live = next_live;
+        self.geometry = next_geometry;
         if entering_review {
             self.review_surface = true;
             self.saved_normal_live = saved_normal_live;
+            self.saved_normal_geometry = saved_normal_geometry;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(true);
             }
         } else if leaving_review {
             self.review_surface = false;
             self.saved_normal_live = None;
+            self.saved_normal_geometry = None;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
             }
@@ -199,11 +321,90 @@ impl InlineTerminal {
         Ok(())
     }
 
-    pub fn resize(&mut self, width: u16, height: u16) {
+    /// Resize with a cursor observation tagged by size generation.
+    ///
+    /// Stale or out-of-bounds observations fail closed with `InvalidData`.
+    /// Same generation and size is a no-op so steady-state frames do not
+    /// recompute the absolute live viewport from a stale cursor snapshot.
+    pub fn resize(
+        &mut self,
+        width: u16,
+        height: u16,
+        cursor_col: u16,
+        cursor_row: u16,
+        generation: u64,
+    ) -> std::io::Result<()> {
+        let width = width.max(1);
+        let height = height.max(1);
+        if generation < self.geometry.generation {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "stale geometry generation {generation} < {}",
+                    self.geometry.generation
+                ),
+            ));
+        }
+        if generation == self.geometry.generation {
+            if width == self.geometry.width && height == self.geometry.height {
+                return Ok(());
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "geometry generation {generation} already observed for {}x{}, not {width}x{height}",
+                    self.geometry.width, self.geometry.height
+                ),
+            ));
+        }
+        if cursor_col >= width || cursor_row >= height {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cursor ({cursor_col},{cursor_row}) outside screen {width}x{height}"),
+            ));
+        }
+
+        let live_height = self.live.previous_line_count().min(usize::from(height)) as u16;
+        // Place the live viewport so it ends at or above the observed cursor
+        // when possible, otherwise pin it to the bottom of the new screen.
+        let live_top = if live_height == 0 {
+            cursor_row.min(height.saturating_sub(1))
+        } else {
+            let max_top = height.saturating_sub(live_height);
+            cursor_row
+                .saturating_sub(live_height.saturating_sub(1))
+                .min(max_top)
+        };
+
+        self.geometry = NormalScreenGeometry {
+            width,
+            height,
+            generation,
+            live_top,
+            cursor_col,
+            cursor_row,
+        };
         self.live.resize(width, height);
         if let Some(saved) = &mut self.saved_normal_live {
             saved.resize(width, height);
         }
+        if let Some(saved_geo) = &mut self.saved_normal_geometry {
+            saved_geo.width = width;
+            saved_geo.height = height;
+            saved_geo.generation = generation;
+        }
+        Ok(())
+    }
+
+    /// Apply a resize without generation checks (test helper).
+    pub fn resize_for_test(&mut self, width: u16, height: u16) {
+        let generation = self.geometry.generation.saturating_add(1);
+        let cursor_row = self
+            .geometry
+            .cursor_row
+            .min(height.saturating_sub(1).max(0));
+        let cursor_col = self.geometry.cursor_col.min(width.saturating_sub(1).max(0));
+        let _ = self.resize(width, height, cursor_col, cursor_row, generation);
     }
 
     pub fn suspend_prepare(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
@@ -213,13 +414,19 @@ impl InlineTerminal {
             append_review_transition(&mut transition, &mut self.modes, false)?;
             if let Some(saved) = self.saved_normal_live.as_ref() {
                 let mut saved = saved.clone();
-                transition.extend_from_slice(saved.clear_for_history_redraw().as_bytes());
+                let live_top = self
+                    .saved_normal_geometry
+                    .map_or(self.geometry.live_top, |geo| geo.live_top);
+                transition.extend_from_slice(saved.clear_at_origin(live_top).as_bytes());
             }
+            transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
+                let _ = output.write_all(RESET_SCROLL_REGION);
                 recover_review_transition(&mut self.modes, output, false);
                 return Err(error);
             }
             self.saved_normal_live = None;
+            self.saved_normal_geometry = None;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
             }
@@ -237,12 +444,32 @@ impl InlineTerminal {
         result
     }
 
-    pub fn resume(&mut self) -> std::io::Result<()> {
+    pub fn resume(
+        &mut self,
+        width: u16,
+        height: u16,
+        cursor_col: u16,
+        cursor_row: u16,
+        generation: u64,
+    ) -> std::io::Result<()> {
         if let Some(modes) = &mut self.modes {
             modes.resume()?;
         }
         self.live.reset();
+        self.resize(width, height, cursor_col, cursor_row, generation)?;
         Ok(())
+    }
+
+    /// Resume without a fresh observation (test helper defaults generation bump).
+    pub fn resume_for_test(&mut self) -> std::io::Result<()> {
+        let generation = self.geometry.generation.saturating_add(1);
+        self.resume(
+            self.geometry.width,
+            self.geometry.height,
+            self.geometry.cursor_col,
+            self.geometry.cursor_row,
+            generation,
+        )
     }
 
     pub fn leave(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
@@ -251,13 +478,19 @@ impl InlineTerminal {
             append_review_transition(&mut transition, &mut self.modes, false)?;
             if let Some(saved) = self.saved_normal_live.as_ref() {
                 let mut saved = saved.clone();
-                transition.extend_from_slice(saved.clear_for_history_redraw().as_bytes());
+                let live_top = self
+                    .saved_normal_geometry
+                    .map_or(self.geometry.live_top, |geo| geo.live_top);
+                transition.extend_from_slice(saved.clear_at_origin(live_top).as_bytes());
             }
+            transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
+                let _ = output.write_all(RESET_SCROLL_REGION);
                 recover_review_transition(&mut self.modes, output, false);
                 return Err(error);
             }
             self.saved_normal_live = None;
+            self.saved_normal_geometry = None;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
             }
@@ -280,16 +513,155 @@ impl InlineTerminal {
     }
 
     fn clear_live_to(&mut self, output: &mut dyn Write, show_cursor: bool) -> std::io::Result<()> {
+        let previous_live_rows = self.live.previous_line_count() as u16;
         let mut next_live = self.live.clone();
-        let mut transaction = next_live.clear_for_history_redraw();
+        let mut transaction = next_live.clear_at_origin(self.geometry.live_top);
+        // After clearing the live viewport, park the cursor on the first cleared
+        // row (immediately below finalized history). If the live zone reached
+        // the bottom of the screen, step one row past the last history line by
+        // emitting a final CRLF so the shell prompt lands below Neo output.
+        let mut cursor_row = self
+            .geometry
+            .live_top
+            .min(self.geometry.height.saturating_sub(1));
+        if previous_live_rows > 0
+            && self.geometry.live_top.saturating_add(previous_live_rows) >= self.geometry.height
+        {
+            // Live occupied the bottom of the screen; scroll one line so the
+            // cursor rests below the last finalized Neo row.
+            transaction.push_str(&format!("\x1b[{};1H\r\n", u32::from(self.geometry.height)));
+            cursor_row = self.geometry.height.saturating_sub(1);
+        }
+        // Reset margins first — some terminals (and the vt100 harness) home the
+        // cursor when applying CSI r — then restore the absolute leave cursor.
+        transaction.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
+        let ansi_row = u32::from(cursor_row).saturating_add(1);
+        transaction.push_str(&format!("\x1b[{ansi_row};1H"));
         if show_cursor {
             transaction.push_str("\x1b[?25h");
         }
         output.write_all(transaction.as_bytes())?;
         output.flush()?;
         self.live = next_live;
+        self.geometry.cursor_row = cursor_row;
+        self.geometry.cursor_col = 0;
+        self.geometry.live_top = cursor_row;
         Ok(())
     }
+}
+
+/// Insert finalized history inside a DECSTBM region after the live viewport
+/// has been cleared at its absolute origin.
+///
+/// Precondition: live-owned rows are blank. The region spans the full screen so
+/// scrolled history enters native scrollback on real terminals and on the
+/// vt100 harness (which discards rows scrolled out of a partial region). Mutable
+/// chrome cannot re-enter the region because it was erased first and is redrawn
+/// only after margins reset.
+fn append_protected_history(
+    transaction: &mut Vec<u8>,
+    geometry: &mut NormalScreenGeometry,
+    lines: &[String],
+) -> std::io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+
+    let region_bottom = geometry.height.max(1);
+    let mut body = String::new();
+    body.push_str(&format!("\x1b[1;{region_bottom}r"));
+    body.push_str(&format!("\x1b[{region_bottom};1H"));
+    for line in lines {
+        body.push_str("\r\n");
+        body.push_str(line);
+    }
+    body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
+    transaction.extend_from_slice(body.as_bytes());
+    // History consumed the bottom of the screen; reconcile re-establishes the
+    // bounded live viewport at the absolute bottom before the live redraw.
+    geometry.live_top = geometry.height;
+    geometry.cursor_row = geometry.height.saturating_sub(1);
+    geometry.cursor_col = 0;
+    Ok(())
+}
+
+fn projected_live_top(geometry: &NormalScreenGeometry, live_len: usize) -> std::io::Result<u16> {
+    let live_len = u16::try_from(live_len).unwrap_or(u16::MAX);
+    if live_len > geometry.height {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "live frame has {live_len} rows but terminal height is {}",
+                geometry.height
+            ),
+        ));
+    }
+    if live_len == 0 {
+        return Ok(geometry.live_top.min(geometry.height.saturating_sub(1)));
+    }
+    let max_top = geometry.height.saturating_sub(live_len);
+    Ok(geometry.live_top.min(max_top))
+}
+
+/// Grow or shrink the live viewport without scrolling populated live rows.
+///
+/// When establishing a viewport over shell content (no prior live rows), scroll
+/// the full screen enough to push covered rows into native scrollback before
+/// absolute live paints overwrite them. When live already occupies the screen,
+/// only the history region above the current live top may scroll.
+fn reconcile_live_viewport(
+    transaction: &mut Vec<u8>,
+    geometry: &mut NormalScreenGeometry,
+    live_len: usize,
+    previous_live_rows: usize,
+) -> std::io::Result<()> {
+    let live_len = u16::try_from(live_len).unwrap_or(u16::MAX);
+    if live_len > geometry.height {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "live frame has {live_len} rows but terminal height is {}",
+                geometry.height
+            ),
+        ));
+    }
+    if live_len == 0 {
+        return Ok(());
+    }
+
+    let max_top = geometry.height.saturating_sub(live_len);
+    if geometry.live_top <= max_top {
+        return Ok(());
+    }
+
+    // Need more room above the bottom of the screen.
+    let mut body = String::new();
+    if previous_live_rows == 0 {
+        // No mutable live yet: full-screen scroll by `live_len` so every row
+        // that the new live zone will cover enters native scrollback. Using
+        // only `cursor_row - max_top` is one short when the cursor sits on the
+        // bottom row, and the last shell line is then 2K-erased in place.
+        let need = live_len;
+        let bottom = geometry.height;
+        body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
+        body.push_str(&format!("\x1b[{bottom};1H"));
+        for _ in 0..need {
+            body.push_str("\r\n");
+        }
+    } else if geometry.live_top > 0 {
+        // Live already drawn: only the history region above live may scroll.
+        let need = geometry.live_top - max_top;
+        let region_bottom = geometry.live_top; // one-based bottom of history region
+        body.push_str(&format!("\x1b[1;{region_bottom}r"));
+        body.push_str(&format!("\x1b[{region_bottom};1H"));
+        for _ in 0..need {
+            body.push_str("\r\n");
+        }
+        body.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
+    }
+    transaction.extend_from_slice(body.as_bytes());
+    geometry.live_top = max_top;
+    Ok(())
 }
 
 fn append_review_transition(
@@ -338,14 +710,6 @@ fn flatten_history(blocks: &[FinalizedBlock]) -> Vec<String> {
     lines
 }
 
-fn append_history_lines(output: &mut String, lines: &[String]) {
-    for line in lines {
-        output.push('\r');
-        output.push_str(line);
-        output.push_str("\r\n");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -358,15 +722,17 @@ mod tests {
         let mut terminal = InlineTerminal::for_test(80, 12);
         terminal
             .live
-            .render_to(&mut Vec::new(), vec!["live".to_owned()], None)
+            .render_to(&mut Vec::new(), 0, vec!["live".to_owned()], None)
             .expect("initial live frame");
 
-        terminal.resize(50, 8);
+        terminal
+            .resize(50, 8, 0, 0, 1)
+            .expect("resize with fresh generation");
 
         let mut redraw = Vec::new();
         terminal
             .live
-            .render_to(&mut redraw, vec!["live".to_owned()], None)
+            .render_to(&mut redraw, 0, vec!["live".to_owned()], None)
             .expect("live redraw after resize");
         assert!(String::from_utf8(redraw).unwrap().contains("live"));
     }

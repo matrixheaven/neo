@@ -74,6 +74,9 @@ pub enum RawEvent {
     Key(String),
     /// Bracketed paste content.
     Paste(String),
+    /// Cursor-position report (`CSI row ; col R`) as zero-based coordinates.
+    /// Terminal protocol state — never prompt input.
+    CursorPosition { column: u16, row: u16 },
 }
 
 // ===========================================================================
@@ -195,6 +198,25 @@ pub(super) fn parse_sgr_mouse_button(data: &str) -> Option<u16> {
         .split(';')
         .next()
         .and_then(|button| button.parse().ok())
+}
+
+/// Parse a complete one-based CPR (`ESC [ <row> ; <column> R`) into zero-based
+/// `(column, row)`. Returns `None` for any other CSI form.
+fn parse_cursor_position_report(sequence: &str) -> Option<(u16, u16)> {
+    let payload = sequence.strip_prefix("\x1b[")?.strip_suffix('R')?;
+    if payload.is_empty() || payload.contains(|c: char| !(c.is_ascii_digit() || c == ';')) {
+        return None;
+    }
+    let (row_text, col_text) = payload.split_once(';')?;
+    if row_text.is_empty() || col_text.is_empty() || col_text.contains(';') {
+        return None;
+    }
+    let row_one_based = row_text.parse::<u16>().ok()?;
+    let col_one_based = col_text.parse::<u16>().ok()?;
+    Some((
+        col_one_based.saturating_sub(1),
+        row_one_based.saturating_sub(1),
+    ))
 }
 
 fn is_complete_osc_sequence(data: &str) -> SequenceStatus {
@@ -474,6 +496,11 @@ impl RawInputParser {
     }
 
     fn emit_data_sequence(&mut self, sequence: &str, events: &mut Vec<RawEvent>) {
+        if let Some((column, row)) = parse_cursor_position_report(sequence) {
+            events.push(RawEvent::CursorPosition { column, row });
+            return;
+        }
+
         // Kitty printable dedup
         let raw_codepoint = if sequence.chars().count() == 1 {
             sequence.chars().next().map(|c| c as i32)

@@ -2,6 +2,7 @@ pub mod key_id;
 pub mod keybinding;
 pub mod raw_input;
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 pub use key_id::{KeyId, KeyIdError};
@@ -41,6 +42,8 @@ pub struct InputParser {
     raw_parser: RawInputParser,
     /// Pending ESC timestamp for the raw input path (no `KeyEvent` available).
     raw_pending_esc: Option<Instant>,
+    /// Zero-based CPR observations queued as terminal protocol state.
+    cursor_positions: VecDeque<(u16, u16)>,
 }
 
 impl InputParser {
@@ -50,6 +53,7 @@ impl InputParser {
             keybindings: None,
             raw_parser: RawInputParser::new(),
             raw_pending_esc: None,
+            cursor_positions: VecDeque::new(),
         }
     }
 
@@ -59,7 +63,13 @@ impl InputParser {
             keybindings: Some(keybindings),
             raw_parser: RawInputParser::new(),
             raw_pending_esc: None,
+            cursor_positions: VecDeque::new(),
         }
+    }
+
+    /// Take the next zero-based CPR observation, if any.
+    pub fn take_cursor_position(&mut self) -> Option<(u16, u16)> {
+        self.cursor_positions.pop_front()
     }
 
     /// Feed raw stdin bytes through the raw input parser.
@@ -105,6 +115,10 @@ impl InputParser {
         match event {
             RawEvent::Paste(text) => vec![InputEvent::Paste(text)],
             RawEvent::Key(seq) => self.convert_key_sequence(&seq),
+            RawEvent::CursorPosition { column, row } => {
+                self.cursor_positions.push_back((column, row));
+                Vec::new()
+            }
         }
     }
 
@@ -288,6 +302,17 @@ mod tests {
     // ======================================================================
     // Raw input (feed_bytes) tests
     // ======================================================================
+
+    #[test]
+    fn cursor_position_report_is_internal_and_chunk_safe() {
+        let mut parser = InputParser::new();
+        // CPR split across chunks must never surface as prompt input.
+        assert!(parser.feed_bytes(b"\x1b[12;").is_empty());
+        assert!(parser.feed_bytes(b"34R").is_empty());
+        assert_eq!(parser.take_cursor_position(), Some((33, 11)));
+        assert_eq!(parser.take_cursor_position(), None);
+        assert_eq!(parser.feed_bytes(b"x"), vec![InputEvent::Insert('x')]);
+    }
 
     #[test]
     fn raw_ctrl_c_produces_interrupt() {

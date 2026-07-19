@@ -84,73 +84,162 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
 }
 
 #[test]
-fn history_commit_does_not_leave_ghost_live_rows_above_terminal_bottom() {
-    let mut screen = vt100::Parser::new(12, 80, 128);
-    screen.process(b"shell-before-neo\r\n");
-    let mut inline = InlineTerminal::for_test(80, 12);
+fn history_commit_never_moves_live_chrome_into_native_scrollback() {
+    // Seed more than one screen of shell rows so later history commits can
+    // push material into native scrollback rather than only the visible page.
+    let height = 10u16;
+    let width = 80u16;
+    let mut screen = vt100::Parser::new(height, width, 512);
+    let shell_first = "shell-scrollback-first-sentinel";
+    let shell_last = "shell-scrollback-last-sentinel";
+    screen.process(format!("{shell_first}\r\n").as_bytes());
+    for row in 1..24 {
+        screen.process(format!("shell-scrollback-row-{row:02}\r\n").as_bytes());
+    }
+    // Seed the last shell sentinel so pre-Neo content occupies the bottom of
+    // the screen; Neo must not leave mutable chrome beside it in scrollback.
+    screen.process(format!("{shell_last}\r\n").as_bytes());
+
+    // After 25 shell lines on a 10-row screen the cursor sits at the bottom.
+    let mut inline = InlineTerminal::for_test_with_cursor(width, height, 0, height - 1);
+    let mut output = Vec::new();
+    // Unique obsolete Todo/composer chrome that must never enter scrollback.
     render_and_process(
         &mut inline,
         &mut screen,
         &TerminalFrame::new(
             Vec::new(),
             vec![
-                "old-live-row-0".to_owned(),
-                "old-live-row-1".to_owned(),
-                "old-composer".to_owned(),
+                "obsolete-todo-sentinel".to_owned(),
+                "obsolete-todo-body".to_owned(),
+                "obsolete-composer-sentinel".to_owned(),
             ],
             None,
         ),
-        &mut Vec::new(),
+        &mut output,
     );
 
-    let mut pane = TranscriptPane::new(80, 12);
-    pane.push_status("new-committed-history");
-    let update = pane.render_terminal_update(80, 12);
+    // Height resize through both the vt100 harness and InlineTerminal so the
+    // absolute geometry generation advances the way a real reflow does.
+    resize_vt100(&mut screen, 8, width);
+    inline.resize_for_test(width, 8);
     render_and_process(
         &mut inline,
         &mut screen,
         &TerminalFrame::new(
-            update.history,
-            vec!["new-live-row".to_owned(), "new-composer".to_owned()],
+            Vec::new(),
+            vec![
+                "obsolete-todo-sentinel".to_owned(),
+                "obsolete-composer-sentinel".to_owned(),
+            ],
             None,
         ),
-        &mut Vec::new(),
+        &mut output,
     );
 
-    let visible = visible_rows(&screen);
+    // Commit finalized history one block at a time (realistic ack cadence) so
+    // the protected history region must scroll repeatedly without ever moving
+    // the mutable live chrome.
+    let mut pane = TranscriptPane::new(usize::from(width), 8);
+    let committed = (0..12)
+        .map(|index| format!("committed-history-sentinel-{index:02}"))
+        .collect::<Vec<_>>();
+    let current_live = vec![
+        "current-todo-sentinel".to_owned(),
+        "current-composer-sentinel".to_owned(),
+    ];
+    for line in &committed {
+        pane.push_status(line);
+        let update = pane.render_terminal_update(usize::from(width), 8);
+        render_and_process(
+            &mut inline,
+            &mut screen,
+            &TerminalFrame::new(update.history.clone(), current_live.clone(), None),
+            &mut output,
+        );
+        pane.acknowledge_history(&update.history);
+    }
+
+    let retained = all_terminal_rows(&mut screen);
+    let output_text = String::from_utf8_lossy(&output);
     assert!(
-        visible.iter().all(|row| !row.contains("old-live-row")),
-        "obsolete live rows remained after history commit: {visible:#?}"
+        retained.iter().all(|row| {
+            !row.contains("obsolete-todo-sentinel") && !row.contains("obsolete-composer-sentinel")
+        }),
+        "obsolete live chrome entered native scrollback: {retained:#?}"
     );
     assert_eq!(
-        visible
+        retained
             .iter()
-            .filter(|row| row.contains("new-live-row") || row.contains("new-composer"))
+            .filter(|row| row.contains("current-composer-sentinel"))
             .count(),
-        2,
-        "current live surface must appear exactly once: {visible:#?}"
+        1,
+        "current composer must appear exactly once: {retained:#?}"
     );
-    let history_row = visible
-        .iter()
-        .position(|row| row.contains("new-committed-history"))
-        .expect("committed history remains visible");
-    let live_row = visible
-        .iter()
-        .position(|row| row.contains("new-live-row"))
-        .expect("live row remains visible");
-    let composer_row = visible
-        .iter()
-        .position(|row| row.contains("new-composer"))
-        .expect("composer remains visible");
-    assert!(
-        history_row < live_row && live_row < composer_row,
-        "history, live content, and composer must remain ordered: {visible:#?}"
-    );
-    assert!(
-        visible[composer_row + 1..]
+    assert_eq!(
+        retained
             .iter()
-            .all(|row| row.trim().is_empty()),
-        "old content must not survive below the composer: {visible:#?}"
+            .filter(|row| row.contains("current-todo-sentinel"))
+            .count(),
+        1,
+        "current todo must appear exactly once: {retained:#?}"
+    );
+    // Deep pre-Neo shell rows were scrolled by ordinary full-screen newlines
+    // during seeding; they must still be present after Neo history commits.
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains(shell_first))
+            .count(),
+        1,
+        "first shell sentinel must remain exactly once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains(shell_last))
+            .count(),
+        1,
+        "last shell sentinel must remain exactly once: {retained:#?}"
+    );
+    for line in &committed {
+        assert_eq!(
+            retained
+                .iter()
+                .filter(|row| row.contains(line.as_str()))
+                .count(),
+            1,
+            "committed history sentinel must remain exactly once ({line}): {retained:#?}"
+        );
+    }
+    assert!(
+        output_text.contains("\x1b[1;") && output_text.contains('r'),
+        "protected history insert must set a DECSTBM region: missing in output"
+    );
+    assert!(
+        output_text.contains("\x1b[r"),
+        "scroll region must be reset after protected history insert"
+    );
+    assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
+    let first_history = retained
+        .iter()
+        .position(|row| row.contains(&committed[0]))
+        .expect("first committed history present");
+    let last_history = retained
+        .iter()
+        .position(|row| row.contains(committed.last().expect("committed non-empty")))
+        .expect("last committed history present on surface");
+    let todo_row = retained
+        .iter()
+        .position(|row| row.contains("current-todo-sentinel"))
+        .expect("current todo present");
+    let composer_row = retained
+        .iter()
+        .position(|row| row.contains("current-composer-sentinel"))
+        .expect("current composer present");
+    assert!(
+        first_history < last_history && last_history < todo_row && todo_row < composer_row,
+        "history then current live chrome order: {retained:#?}"
     );
 }
 
@@ -169,7 +258,7 @@ fn suspend_resume_preserves_committed_history() {
         "live-suspend-row-1".to_owned(),
     ];
     let frame = TerminalFrame::new(update.history, live.clone(), None);
-    let mut inline = InlineTerminal::for_test(80, 12);
+    let mut inline = InlineTerminal::for_test_with_cursor(80, 12, 0, 11);
     let mut initial = Vec::new();
     inline
         .render_to(&mut initial, &frame)
@@ -197,7 +286,7 @@ fn suspend_resume_preserves_committed_history() {
     );
 
     screen.process(b"shell-during-suspend-sentinel\r\n");
-    inline.resume().expect("resume terminal modes");
+    inline.resume_for_test().expect("resume terminal modes");
     let resumed_frame = TerminalFrame::new(Vec::new(), live, None);
     let mut resumed = Vec::new();
     inline
@@ -237,7 +326,7 @@ fn leave_clears_obsolete_live_and_places_cursor_below_final_output() {
         "obsolete-live-row-1".to_owned(),
     ];
     let first_frame = TerminalFrame::new(first_update.history, obsolete_live.clone(), None);
-    let mut inline = InlineTerminal::for_test(80, 12);
+    let mut inline = InlineTerminal::for_test_with_cursor(80, 12, 0, 11);
     let mut initial = Vec::new();
     inline
         .render_to(&mut initial, &first_frame)
@@ -306,7 +395,7 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     }
     let committed_update = pane.render_terminal_update(80, 12);
     let committed_frame = TerminalFrame::new(committed_update.history, Vec::new(), None);
-    let mut inline = InlineTerminal::for_test(80, 12);
+    let mut inline = InlineTerminal::for_test_with_cursor(80, 12, 0, 11);
     let mut output = Vec::new();
     render_and_process(&mut inline, &mut screen, &committed_frame, &mut output);
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "initial commit");
@@ -549,7 +638,7 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
     assert_eq!(
         primary_after_review_rows
             .iter()
-            .filter(|row| row.contains("review-committed-tool"))
+            .filter(|row| row.contains("Used Read (review-committed-tool)"))
             .count(),
         1,
         "committed tool must remain exactly once in native scrollback: {primary_after_review_rows:#?}"
@@ -675,7 +764,7 @@ fn resize_and_render(
     live_rows: usize,
 ) {
     resize_vt100(screen, rows, cols);
-    inline.resize(cols, rows);
+    inline.resize_for_test(cols, rows);
     let live = (0..live_rows)
         .map(|row| format!("{live_prefix}-row-{row}"))
         .collect::<Vec<_>>();

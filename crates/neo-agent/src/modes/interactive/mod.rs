@@ -258,12 +258,13 @@ pub async fn execute_tty_with_startup(
         controller.set_log_event_receiver(rx);
     }
 
-    let terminal = RefCell::new(NeoTerminal::enter()?);
+    let (neo_terminal, geometry) = NeoTerminal::enter()?;
+    let terminal = RefCell::new(neo_terminal);
     let lifecycle_result = run_tty_lifecycle_with_event_factory(
         &mut controller,
         config,
         &startup,
-        input_events,
+        move |keybindings| input_events(keybindings, geometry),
         |tui, animation_due| terminal.borrow_mut().draw_tui(tui, animation_due),
         || terminal.borrow_mut().suspend(),
     )

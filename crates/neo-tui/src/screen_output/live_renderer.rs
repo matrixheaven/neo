@@ -7,16 +7,18 @@ use crate::primitive::visible_width;
 use super::kitty_image::{collect_kitty_image_ids, delete_kitty_images};
 use super::types::CursorPos;
 
+/// Bounded live-frame diff renderer.
+///
+/// Geometry ownership lives in [`super::InlineTerminal`]. This type only diffs
+/// row contents and emits absolute CUP sequences within a supplied origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveRenderer {
     width: u16,
     height: u16,
     previous_lines: Vec<String>,
     previous_cursor: Option<CursorPos>,
-    hardware_cursor_row: usize,
     previous_kitty_image_ids: BTreeSet<u32>,
     full_redraw_pending: bool,
-    fresh_anchor_pending: bool,
 }
 
 impl LiveRenderer {
@@ -27,10 +29,8 @@ impl LiveRenderer {
             height,
             previous_lines: Vec::new(),
             previous_cursor: None,
-            hardware_cursor_row: 0,
             previous_kitty_image_ids: BTreeSet::new(),
             full_redraw_pending: false,
-            fresh_anchor_pending: false,
         }
     }
 
@@ -38,23 +38,11 @@ impl LiveRenderer {
         if self.width == width && self.height == height {
             return;
         }
-        let width_changed = self.width != width;
-        let height_changed = self.height != height;
-        let anchor_is_recoverable = !height_changed
-            && self.previous_lines.len() <= usize::from(height)
-            && self.previous_kitty_image_ids.is_empty()
-            && (!width_changed
-                || self
-                    .previous_lines
-                    .iter()
-                    .all(|line| visible_width(line) < usize::from(width)));
         self.width = width;
         self.height = height;
-        if !self.previous_lines.is_empty() && (!anchor_is_recoverable || self.fresh_anchor_pending)
-        {
-            self.full_redraw_pending = false;
-            self.fresh_anchor_pending = true;
-        } else {
+        // Width/height changes invalidate cached rows. Absolute CUP redraws the
+        // live viewport; do not emit CRLF to establish a relative anchor.
+        if !self.previous_lines.is_empty() {
             self.full_redraw_pending = true;
         }
     }
@@ -66,6 +54,7 @@ impl LiveRenderer {
     pub fn render_to(
         &mut self,
         output: &mut dyn Write,
+        origin_row: u16,
         lines: Vec<String>,
         cursor: Option<CursorPos>,
     ) -> std::io::Result<()> {
@@ -91,15 +80,28 @@ impl LiveRenderer {
                 ),
             ));
         }
+        let origin = usize::from(origin_row);
+        if origin.saturating_add(lines.len()) > usize::from(self.height) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "live frame origin {origin_row} with {} rows exceeds terminal height {}",
+                    lines.len(),
+                    self.height
+                ),
+            ));
+        }
         if !self.full_redraw_pending
-            && !self.fresh_anchor_pending
             && self.previous_lines == lines
             && self.previous_cursor == cursor
         {
             return Ok(());
         }
 
-        let previous_lines = if self.full_redraw_pending || self.fresh_anchor_pending {
+        // Retain the prior line count for absolute clears even when the diff
+        // baseline is forced empty by a full redraw.
+        let previous_line_count = self.previous_lines.len();
+        let previous_lines = if self.full_redraw_pending {
             &[][..]
         } else {
             self.previous_lines.as_slice()
@@ -118,21 +120,21 @@ impl LiveRenderer {
         } else {
             previous_lines.len().max(lines.len())
         };
-        let append_start = first_changed == previous_lines.len()
-            && first_changed > 0
-            && lines.len() > previous_lines.len();
         let kitty_image_ids = collect_kitty_image_ids(&lines);
         let mut bytes = String::new();
-        let mut hardware_cursor_row = self.hardware_cursor_row;
-        if self.fresh_anchor_pending {
+
+        if self.full_redraw_pending {
             bytes.push_str(&delete_kitty_images(&self.previous_kitty_image_ids));
-            bytes.push_str("\r\n");
-            hardware_cursor_row = 0;
-        } else if self.full_redraw_pending {
-            bytes.push_str(&delete_kitty_images(&self.previous_kitty_image_ids));
-            push_vertical_move(&mut bytes, hardware_cursor_row, 0);
-            bytes.push_str("\r\x1b[J");
-            hardware_cursor_row = 0;
+            // Clear every previously live-owned row at the absolute origin.
+            let clear_rows = previous_line_count.max(lines.len()).max(1);
+            for row in 0..clear_rows {
+                let screen_row = origin.saturating_add(row);
+                if screen_row >= usize::from(self.height) {
+                    break;
+                }
+                push_absolute_move(&mut bytes, screen_row, 0);
+                bytes.push_str("\x1b[2K");
+            }
         } else {
             bytes.push_str(&delete_kitty_images(
                 &self
@@ -144,23 +146,10 @@ impl LiveRenderer {
         }
 
         if first_changed < render_rows {
-            let move_target = if append_start {
-                first_changed - 1
-            } else {
-                first_changed
-            };
-            push_vertical_move(&mut bytes, hardware_cursor_row, move_target);
-            hardware_cursor_row = move_target;
-            if append_start {
-                bytes.push_str("\r\n");
-                hardware_cursor_row = hardware_cursor_row.saturating_add(1);
-            }
             for row in first_changed..render_rows {
-                if row > first_changed {
-                    bytes.push_str("\r\n");
-                    hardware_cursor_row = hardware_cursor_row.saturating_add(1);
-                }
-                bytes.push_str("\r\x1b[2K");
+                let screen_row = origin.saturating_add(row);
+                push_absolute_move(&mut bytes, screen_row, 0);
+                bytes.push_str("\x1b[2K");
                 if let Some(line) = lines.get(row) {
                     bytes.push_str(line);
                 }
@@ -169,14 +158,9 @@ impl LiveRenderer {
 
         let target_row =
             cursor.map_or_else(|| lines.len().saturating_sub(1), |position| position.row);
-        push_vertical_move(&mut bytes, hardware_cursor_row, target_row);
-        hardware_cursor_row = target_row;
-        if let Some(cursor) = cursor {
-            bytes.push('\r');
-            if cursor.col > 0 {
-                let _ = write!(bytes, "\x1b[{}C", cursor.col);
-            }
-        }
+        let target_col = cursor.map_or(0, |position| position.col);
+        let absolute_row = origin.saturating_add(target_row);
+        push_absolute_move(&mut bytes, absolute_row, target_col);
         bytes.push_str(if cursor.is_some() {
             "\x1b[?25h"
         } else {
@@ -187,45 +171,48 @@ impl LiveRenderer {
         output.flush()?;
         self.previous_lines = lines;
         self.previous_cursor = cursor;
-        self.hardware_cursor_row = hardware_cursor_row;
         self.previous_kitty_image_ids = kitty_image_ids;
         self.full_redraw_pending = false;
-        self.fresh_anchor_pending = false;
         Ok(())
     }
 
-    pub(crate) fn clear_for_history_redraw(&mut self) -> String {
+    /// Emit absolute clears for the previously drawn live rows at `origin_row`.
+    pub(crate) fn clear_at_origin(&mut self, origin_row: u16) -> String {
         let mut output = String::new();
         output.push_str(&delete_kitty_images(&self.previous_kitty_image_ids));
-        if self.fresh_anchor_pending {
-            output.push_str("\r\n");
-        } else {
-            push_vertical_move(&mut output, self.hardware_cursor_row, 0);
-            output.push_str("\r\x1b[J");
+        let origin = usize::from(origin_row);
+        let clear_rows = self.previous_lines.len();
+        for row in 0..clear_rows {
+            let screen_row = origin.saturating_add(row);
+            if screen_row >= usize::from(self.height) {
+                break;
+            }
+            push_absolute_move(&mut output, screen_row, 0);
+            output.push_str("\x1b[2K");
         }
         self.previous_lines.clear();
         self.previous_cursor = None;
-        self.hardware_cursor_row = 0;
         self.previous_kitty_image_ids.clear();
         self.full_redraw_pending = false;
-        self.fresh_anchor_pending = false;
         output
     }
 
     pub(crate) fn reset(&mut self) {
         self.previous_lines.clear();
         self.previous_cursor = None;
-        self.hardware_cursor_row = 0;
         self.previous_kitty_image_ids.clear();
         self.full_redraw_pending = false;
-        self.fresh_anchor_pending = false;
+    }
+
+    #[must_use]
+    pub(crate) fn previous_line_count(&self) -> usize {
+        self.previous_lines.len()
     }
 }
 
-fn push_vertical_move(output: &mut String, from: usize, to: usize) {
-    if to > from {
-        let _ = write!(output, "\x1b[{}B", to - from);
-    } else if from > to {
-        let _ = write!(output, "\x1b[{}A", from - to);
-    }
+/// Emit CUP using one-based ANSI coordinates from zero-based geometry.
+fn push_absolute_move(output: &mut String, row: usize, col: usize) {
+    let ansi_row = row.saturating_add(1);
+    let ansi_col = col.saturating_add(1);
+    let _ = write!(output, "\x1b[{ansi_row};{ansi_col}H");
 }
