@@ -24,8 +24,8 @@ use crate::instructions::{
     InstructionReconcileKind, InstructionReconcileRequest,
 };
 use crate::skills::SkillStoreHandle;
-use crate::tools::PreparedEdit;
 use crate::tools::execute_model_bash_for_runtime;
+use crate::tools::{PreparedEdit, PreparedWrite};
 use crate::{
     AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ResourceLimitDetail,
     SkillInvocationOutcome, SkillInvocationSource, ToolAccess, ToolContext, ToolError,
@@ -572,9 +572,47 @@ async fn prepare_edit_calls(
     }
 }
 
-/// Recheck every authorized prepared Edit. Stale targets become terminal
-/// results with zero writes.
-async fn recheck_prepared_edits(
+/// Prepare every successfully parsed Write call without side effects. Failures
+/// replace the prepared call with a terminal `prepare_failed` result so Ask
+/// mode never opens an approval dialog and no bytes or directories are written.
+async fn prepare_write_calls(
+    tool_context: &ToolContext,
+    registry: &ToolRegistry,
+    prepared: &mut [(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+) {
+    if !registry.has_canonical_prepared_write() {
+        return;
+    }
+    for (tool_call, parsed) in prepared.iter_mut() {
+        let Ok(prepared_call) = parsed else {
+            continue;
+        };
+        if prepared_call.name != "Write" {
+            continue;
+        }
+        // Prepare with write access only for path resolution; no writes occur.
+        let prepare_ctx = tool_context.clone().with_access(ToolAccess {
+            file_write: true,
+            ..ToolAccess::none()
+        });
+        match PreparedWrite::prepare(&prepare_ctx, &prepared_call.arguments).await {
+            Ok(write) => {
+                prepared_call.execution = PreparedExecution::Write(write);
+            }
+            Err(result) => {
+                *parsed = Err(result);
+            }
+        }
+        let _ = tool_call;
+    }
+}
+
+/// Recheck every authorized prepared mutation (Edit or Write). Stale targets
+/// become terminal results with zero writes.
+async fn recheck_prepared_mutations(
     tool_context: &ToolContext,
     authorized: &mut [AuthorizedToolCall<'_>],
 ) {
@@ -585,10 +623,12 @@ async fn recheck_prepared_edits(
         let Some(prepared) = entry.prepared.as_ref() else {
             continue;
         };
-        let PreparedExecution::Edit(edit) = &prepared.execution else {
-            continue;
+        let recheck = match &prepared.execution {
+            PreparedExecution::Edit(edit) => edit.recheck_all(tool_context).await,
+            PreparedExecution::Write(write) => write.recheck_all(tool_context).await,
+            PreparedExecution::Direct => continue,
         };
-        if let Err(result) = edit.recheck_all(tool_context).await {
+        if let Err(result) = recheck {
             entry.outcome = AuthorizedToolCallOutcome::Terminal(result);
         }
     }
@@ -780,6 +820,7 @@ pub(super) async fn execute_tool_calls(
     )?;
     let mut prepared = prepared;
     prepare_edit_calls(&tool_context, registry.as_ref(), &mut prepared).await;
+    prepare_write_calls(&tool_context, registry.as_ref(), &mut prepared).await;
 
     // Phase 4 — authorize the full batch (dialogs await sequentially).
     // Consumes `prepared` so Allow can write Plan/Goal context onto
@@ -843,9 +884,9 @@ pub(super) async fn execute_tool_calls(
         }
     }
 
-    // Phase 6 — recheck every prepared Edit target after approval and instruction
-    // recheck. Stale targets become terminal results with zero writes.
-    recheck_prepared_edits(&tool_context, &mut authorized).await;
+    // Phase 6 — recheck every prepared Edit and Write target after approval and
+    // instruction recheck. Stale targets become terminal results with zero writes.
+    recheck_prepared_mutations(&tool_context, &mut authorized).await;
 
     // Phase 7 — schedule and execute the authorized batch.
     let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
@@ -1079,36 +1120,52 @@ async fn execute_authorized_sequential(
                 arguments: arguments.as_ref().clone(),
             });
         }
-        let mut result = if let PreparedExecution::Edit(edit) = &prepared_call.execution {
-            // Emit verified planned projection before the first commit.
-            emitter.emit(AgentEvent::ToolExecutionUpdate {
-                turn,
-                id: tool_call.id.to_string(),
-                name: tool_call.name.to_string(),
-                partial_result: edit.prepared_update(),
-            });
-            let progress_sink = sink;
-            let progress_id = tool_call.id.to_string();
-            let progress_name = tool_call.name.to_string();
-            let mut on_progress = move |update: ToolResult| {
-                progress_sink.emit_event(AgentEvent::ToolExecutionUpdate {
-                    turn,
-                    id: progress_id.clone(),
-                    name: progress_name.clone(),
-                    partial_result: update,
-                });
-            };
-            edit.commit(&context, cancel_token, &mut on_progress).await
-        } else {
-            run_tool_with_cancel(
-                skills,
-                registry.as_ref(),
-                tool_call,
-                arguments.as_ref(),
-                &context,
-                cancel_token,
-            )
-            .await
+        let mut result = match &prepared_call.execution {
+            PreparedExecution::Edit(_) | PreparedExecution::Write(_) => {
+                // Emit the verified planned projection before the first commit,
+                // then drive the ordered per-file commit with progress updates.
+                // Edit and Write expose identical prepared_update/commit shapes.
+                macro_rules! commit_prepared_mutation {
+                    ($prepared:expr) => {{
+                        emitter.emit(AgentEvent::ToolExecutionUpdate {
+                            turn,
+                            id: tool_call.id.to_string(),
+                            name: tool_call.name.to_string(),
+                            partial_result: $prepared.prepared_update(),
+                        });
+                        let progress_sink = sink;
+                        let progress_id = tool_call.id.to_string();
+                        let progress_name = tool_call.name.to_string();
+                        let mut on_progress = move |update: ToolResult| {
+                            progress_sink.emit_event(AgentEvent::ToolExecutionUpdate {
+                                turn,
+                                id: progress_id.clone(),
+                                name: progress_name.clone(),
+                                partial_result: update,
+                            });
+                        };
+                        $prepared
+                            .commit(&context, cancel_token, &mut on_progress)
+                            .await
+                    }};
+                }
+                match &prepared_call.execution {
+                    PreparedExecution::Edit(edit) => commit_prepared_mutation!(edit),
+                    PreparedExecution::Write(write) => commit_prepared_mutation!(write),
+                    PreparedExecution::Direct => unreachable!("guarded by outer match"),
+                }
+            }
+            PreparedExecution::Direct => {
+                run_tool_with_cancel(
+                    skills,
+                    registry.as_ref(),
+                    tool_call,
+                    arguments.as_ref(),
+                    &context,
+                    cancel_token,
+                )
+                .await
+            }
         };
         executed_any = true;
         if !cancel_token.is_cancelled() {
@@ -1491,7 +1548,7 @@ mod tests {
 
     use super::{
         EventEmitter, PreparedExecution, execute_tool_calls, prepare_edit_calls,
-        prepare_tool_calls_for_execution, run_tool_with_cancel,
+        prepare_tool_calls_for_execution, prepare_write_calls, run_tool_with_cancel,
     };
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
@@ -1530,6 +1587,30 @@ mod tests {
             _input: serde_json::Value,
         ) -> ToolFuture<'a> {
             Box::pin(async { Ok(crate::ToolResult::ok("custom edit ran")) })
+        }
+    }
+
+    struct CustomWrite;
+
+    impl Tool for CustomWrite {
+        fn name(&self) -> &'static str {
+            "Write"
+        }
+
+        fn description(&self) -> &'static str {
+            "custom write"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _ctx: &'a ToolContext,
+            _input: serde_json::Value,
+        ) -> ToolFuture<'a> {
+            Box::pin(async { Ok(crate::ToolResult::ok("custom write ran")) })
         }
     }
 
@@ -1592,6 +1673,39 @@ mod tests {
             .await
             .expect("custom Edit");
         assert_eq!(result.content, "custom edit ran");
+    }
+
+    #[tokio::test]
+    async fn noncanonical_write_calls_stay_on_direct_registry_execution() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path()).expect("context");
+        let calls = [AgentToolCall {
+            id: "write".into(),
+            name: "Write".into(),
+            raw_arguments: "{}".into(),
+        }];
+
+        let unregistered = ToolRegistry::new();
+        let mut prepared = prepare_tool_calls_for_execution(&calls, &unregistered.specs());
+        prepare_write_calls(&context, &unregistered, &mut prepared).await;
+        assert!(matches!(
+            prepared[0].1.as_ref().expect("parsed").execution,
+            PreparedExecution::Direct
+        ));
+
+        let mut custom = ToolRegistry::with_builtin_tools();
+        custom.register(CustomWrite);
+        let mut prepared = prepare_tool_calls_for_execution(&calls, &custom.specs());
+        prepare_write_calls(&context, &custom, &mut prepared).await;
+        assert!(matches!(
+            prepared[0].1.as_ref().expect("parsed").execution,
+            PreparedExecution::Direct
+        ));
+        let result = custom
+            .run("Write", &context, json!({}))
+            .await
+            .expect("custom Write");
+        assert_eq!(result.content, "custom write ran");
     }
 
     #[tokio::test]

@@ -4700,7 +4700,8 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
+                raw_arguments: json!({ "files": [{ "path": "approved.txt", "content": "ok" }] })
+                    .to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -4733,7 +4734,8 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
+                raw_arguments: json!({ "files": [{ "path": "approved.txt", "content": "ok" }] })
+                    .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7184,7 +7186,8 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "path": "other.txt", "content": "x" }).to_string(),
+                raw_arguments: json!({ "files": [{ "path": "other.txt", "content": "x" }] })
+                    .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7256,8 +7259,10 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 raw_arguments: json!({
-                    "path": plan_path,
-                    "content": "# Plan\n\nUse Write, not Bash."
+                    "files": [{
+                        "path": plan_path,
+                        "content": "# Plan\n\nUse Write, not Bash."
+                    }]
                 })
                 .to_string(),
             },
@@ -7591,7 +7596,8 @@ async fn yolo_mode_approves_write_without_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "path": "yolo.txt", "content": "yolo" }).to_string(),
+                raw_arguments: json!({ "files": [{ "path": "yolo.txt", "content": "yolo" }] })
+                    .to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -8915,7 +8921,7 @@ async fn approval_requests_only_offer_runtime_supported_actions() {
 
     let write = collect_approval_request_for_tool(
         "Write",
-        json!({ "path": "approved.txt", "content": "ok" }),
+        json!({ "files": [{ "path": "approved.txt", "content": "ok" }] }),
         workspace.path(),
     )
     .await;
@@ -10489,7 +10495,7 @@ async fn one_new_scope_defers_every_call_in_a_parallel_mixed_batch() {
             (
                 "call_write",
                 "Write",
-                json!({ "path": "nested/new.txt", "content": "created" }),
+                json!({ "files": [{ "path": "nested/new.txt", "content": "created" }] }),
             ),
             ("call_grep", "Grep", json!({ "pattern": "hello" })),
         ]),
@@ -10566,7 +10572,7 @@ async fn first_read_write_and_nested_cwd_shell_each_defer_before_execution() {
         ("Read", json!({ "path": "nested/data.txt" }), None),
         (
             "Write",
-            json!({ "path": "nested/created.txt", "content": "created" }),
+            json!({ "files": [{ "path": "nested/created.txt", "content": "created" }] }),
             Some("nested/created.txt"),
         ),
         (
@@ -10660,7 +10666,7 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
         tool_call_turn(&[(
             "write_1",
             "Write",
-            json!({ "path": "nested/approved.txt", "content": "approved" }),
+            json!({ "files": [{ "path": "nested/approved.txt", "content": "approved" }] }),
         )]),
         end_turn_events("done"),
     ]);
@@ -11224,8 +11230,10 @@ async fn post_tool_instruction_update_compacts_before_fresh_admission() {
             "write_agents",
             "Write",
             json!({
-                "path": agents_path.to_string_lossy(),
-                "content": updated_rules,
+                "files": [{
+                    "path": agents_path.to_string_lossy(),
+                    "content": updated_rules,
+                }],
             }),
         )]),
         end_turn_events("summary output"),
@@ -11497,6 +11505,372 @@ async fn runtime_edit_emits_prepared_then_per_file_progress_updates() {
             Some(AgentEvent::ToolExecutionFinished { .. })
         ),
         "finished last"
+    );
+}
+
+fn batch_write_arguments(files: &[(&str, &str)]) -> serde_json::Value {
+    json!({
+        "files": files.iter().map(|(path, content)| {
+            json!({ "path": path, "content": content })
+        }).collect::<Vec<_>>()
+    })
+}
+
+#[tokio::test]
+async fn runtime_write_approval_uses_verified_batch_projection() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("existing.txt"), "old\n").expect("seed");
+    let args = batch_write_arguments(&[
+        ("existing.txt", "new content\n"),
+        ("created.txt", "fresh\n"),
+    ]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("write_1", "Write", args)]),
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler(|request| {
+                assert_eq!(request.operation, PermissionOperation::FileWrite);
+                match &request.presentation {
+                    ApprovalPresentation::Write { title, write } => {
+                        assert_eq!(title, "Write 2 files?");
+                        assert_eq!(write.files, 2);
+                        assert_eq!(write.created, 1);
+                        assert_eq!(write.overwritten, 1);
+                        assert_eq!(write.changes.len(), 2);
+                        assert!(matches!(
+                            write.changes[1].preview,
+                            neo_agent_core::WriteApprovalPreview::Created { .. }
+                        ));
+                        assert!(matches!(
+                            write.changes[0].preview,
+                            neo_agent_core::WriteApprovalPreview::Overwritten { .. }
+                        ));
+                    }
+                    other => panic!("expected Write presentation, got {other:?}"),
+                }
+                assert!(request.options.iter().any(|option| matches!(
+                    &option.action,
+                    ApprovalAction::PermitForSession { scope }
+                        if scope.label == "Approve writes to these 2 files for this session"
+                            && scope.keys.len() == 2
+                )));
+                permit_once(request)
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write files"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished {
+                id, name, result, ..
+            } if id == "write_1" && name == "Write" => Some(result),
+            _ => None,
+        })
+        .expect("finished write");
+    assert!(!finished.is_error, "{}", finished.content);
+    let details = finished.details.as_ref().expect("details");
+    assert_eq!(details["status"], "committed");
+    assert_eq!(details["files"], 2);
+    assert_eq!(details["created"], 1);
+    assert_eq!(details["overwritten"], 1);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("existing.txt")).expect("read"),
+        "new content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("created.txt")).expect("read"),
+        "fresh\n"
+    );
+}
+
+#[tokio::test]
+async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("stale.txt"), "before\n").expect("seed");
+    let args = batch_write_arguments(&[
+        ("stale.txt", "planned overwrite\n"),
+        ("appeared.txt", "planned create\n"),
+    ]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("write_stale", "Write", args)]),
+        final_done_turn(),
+    ]);
+    let path = workspace.path().join("stale.txt");
+    let appeared = workspace.path().join("appeared.txt");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler({
+                let path = path.clone();
+                let appeared = appeared.clone();
+                move |request| {
+                    std::fs::write(&path, "changed externally\n").expect("stale");
+                    std::fs::write(&appeared, "appeared externally\n").expect("appeared");
+                    permit_once(request)
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write stale"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, result, .. } if id == "write_stale" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("finished");
+    assert!(finished.is_error);
+    let details = finished.details.as_ref().expect("details");
+    assert_eq!(details["status"], "stale");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionUpdate {
+                partial_result,
+                ..
+            } if partial_result.details.as_ref().is_some_and(|d| d.get("kind") == Some(&json!("write_progress")))
+        )),
+        "no commit progress after stale"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "changed externally\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&appeared).expect("read"),
+        "appeared externally\n"
+    );
+}
+
+#[tokio::test]
+async fn runtime_write_emits_prepared_and_ordered_progress_updates() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let args = batch_write_arguments(&[("a.txt", "aaa\n"), ("b.txt", "bbb\n")]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("write_prog", "Write", args)]),
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(workspace.path())
+            .expect("workspace"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let write_events: Vec<_> = events
+        .iter()
+        .filter(|event| match event {
+            AgentEvent::ToolExecutionStarted { id, .. }
+            | AgentEvent::ToolExecutionUpdate { id, .. }
+            | AgentEvent::ToolExecutionFinished { id, .. } => id == "write_prog",
+            _ => false,
+        })
+        .collect();
+    assert!(
+        matches!(
+            write_events.first(),
+            Some(AgentEvent::ToolExecutionStarted { .. })
+        ),
+        "started first: {write_events:?}"
+    );
+    let kinds: Vec<_> = write_events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => partial_result
+                .details
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|k| k.as_str())
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds.first().map(String::as_str), Some("write_prepared"));
+    let progress: Vec<_> = kinds.iter().filter(|k| *k == "write_progress").collect();
+    assert_eq!(progress.len(), 2, "one progress per file");
+    assert!(
+        matches!(
+            write_events.last(),
+            Some(AgentEvent::ToolExecutionFinished { .. })
+        ),
+        "finished last"
+    );
+}
+
+#[tokio::test]
+async fn runtime_plan_mode_allows_only_single_active_plan_write_target() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace.path().canonicalize().expect("workspace");
+    let plans_dir = main_agent_plans_dir(&workspace_sessions_dir(
+        &home.path().join("sessions"),
+        &workspace_root,
+    ));
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root.clone());
+    set_config_permission_mode(&mut config, PermissionMode::Yolo);
+    let plan_path = {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        let data = pm.enter(&plans_dir, true).expect("enter plan mode");
+        std::fs::write(&data.path, "draft\n").expect("seed plan");
+        data.path
+    };
+    let plan_mode = Arc::clone(&config.plan_mode);
+    let extra = workspace_root.join("extra.txt");
+
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "write_single",
+            "Write",
+            json!({ "files": [{ "path": plan_path, "content": "# Final plan\n" }] }),
+        )]),
+        tool_call_turn(&[(
+            "write_multi",
+            "Write",
+            json!({ "files": [
+                { "path": plan_path, "content": "# Changed\n" },
+                { "path": extra, "content": "should not appear\n" }
+            ] }),
+        )]),
+        final_done_turn(),
+    ]);
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("plan writes"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { id, result, .. }
+                if id == "write_single" && !result.is_error
+        )),
+        "single plan-file write succeeds"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { id, result, .. }
+                if id == "write_multi" && result.is_error && result.content.contains("plan mode")
+        )),
+        "multi-target batch denied by plan guard"
+    );
+    assert!(!extra.exists(), "extra file must not be created");
+    assert_eq!(
+        std::fs::read_to_string(&plan_path).expect("read plan"),
+        "# Final plan\n"
+    );
+    assert!(plan_mode.read().expect("lock").is_active());
+}
+
+#[tokio::test]
+async fn runtime_write_session_scope_requires_complete_prepared_target_set() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let args_ab = batch_write_arguments(&[("a.txt", "a1\n"), ("b.txt", "b1\n")]);
+    let args_ab2 = batch_write_arguments(&[("a.txt", "a2\n"), ("b.txt", "b2\n")]);
+    let args_ac = batch_write_arguments(&[("a.txt", "a3\n"), ("c.txt", "c3\n")]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("w1", "Write", args_ab)]),
+        tool_call_turn(&[("w2", "Write", args_ab2)]),
+        tool_call_turn(&[("w3", "Write", args_ac)]),
+        final_done_turn(),
+    ]);
+    let approval_count = Arc::new(Mutex::new(0usize));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler({
+                let count = Arc::clone(&approval_count);
+                move |request| {
+                    *count.lock().expect("count") += 1;
+                    permit_for_session(request)
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("session scope"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    assert_eq!(
+        *approval_count.lock().expect("count"),
+        2,
+        "turn 2 reuses session grant; turn 3 introduces c.txt requiring fresh approval"
+    );
+    for id in ["w1", "w2", "w3"] {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolExecutionFinished { id: eid, result, .. }
+                    if eid == id && !result.is_error
+            )),
+            "{id} committed"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
+        "a3\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("b.txt")).expect("b"),
+        "b2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("c.txt")).expect("c"),
+        "c3\n"
     );
 }
 

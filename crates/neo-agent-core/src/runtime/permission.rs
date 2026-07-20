@@ -7,22 +7,21 @@ use super::events::EventPublisher;
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
 use super::tool_arguments::{ApprovalExecutionContext, PreparedExecution, PreparedToolCall};
 use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
-use crate::approval::EditApprovalPresentation;
+use crate::approval::{EditApprovalPresentation, WriteApprovalPresentation};
 use crate::permissions::{
-    ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
-    SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
+    ApprovalRuleStore, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
+    command_might_be_dangerous, is_known_safe_command,
 };
-use crate::tools::PreparedEdit;
 use crate::tools::normalize_path;
 use crate::tools::plan_mode::{
     ExitPlanModeInput, ExitPlanModeOption, ExitPlanModeSuggestion, prevalidate_exit_plan_mode,
 };
 use crate::tools::{ExitGoalModeArgs, prevalidate_exit_goal_mode};
+use crate::tools::{PreparedEdit, PreparedWrite};
 use crate::{
     AgentEvent, AgentToolCall, ApprovalAction, ApprovalCancelReason, ApprovalOption,
     ApprovalPresentation, ApprovalRequest, ApprovalResolution, PermissionMode, PermissionOperation,
     PlanModeGuard, PlanSelection, ToolAccess, ToolResult, check_plan_mode_guard,
-    is_active_plan_file_path,
 };
 
 pub(super) enum PermissionPreparation {
@@ -164,23 +163,19 @@ fn check_plan_guard(
 ) -> Option<PermissionPreparation> {
     let plan_mode = config.plan_mode.read().ok()?;
     if plan_mode.is_active() {
-        if tool_call.name.as_ref() == "Edit"
-            && matches!(
-                &prepared_call.execution,
-                PreparedExecution::Edit(edit)
-                    if plan_mode
-                        .plan_file_path()
-                        .is_some_and(|path| edit.all_resolved_targets_match(path))
-            )
-        {
+        let targets_match_plan_file = match &prepared_call.execution {
+            PreparedExecution::Edit(edit) => plan_mode
+                .plan_file_path()
+                .is_some_and(|path| edit.all_resolved_targets_match(path)),
+            PreparedExecution::Write(write) => plan_mode
+                .plan_file_path()
+                .is_some_and(|path| write.all_resolved_targets_match(path)),
+            PreparedExecution::Direct => false,
+        };
+        if targets_match_plan_file {
             return None;
         }
-        match check_plan_mode_guard(
-            &plan_mode,
-            config.workspace_root.as_deref(),
-            &tool_call.name,
-            &prepared_call.arguments,
-        ) {
+        match check_plan_mode_guard(&plan_mode, &tool_call.name) {
             PlanModeGuard::Allow => {}
             PlanModeGuard::Deny { message } => {
                 return Some(PermissionPreparation::Deny(message));
@@ -318,21 +313,14 @@ fn check_plan_file_write(
     if !plan_mode.is_active() {
         return None;
     }
-    let workspace = config.workspace_root.as_deref();
-    let allowed = match tool_call.name.as_ref() {
-        "Write" => prepared_call
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .is_some_and(|path| is_active_plan_file_path(&plan_mode, workspace, path)),
-        "Edit" => matches!(
-            &prepared_call.execution,
-            PreparedExecution::Edit(edit)
-                if plan_mode
-                    .plan_file_path()
-                    .is_some_and(|path| edit.all_resolved_targets_match(path))
-        ),
-        _ => false,
+    let allowed = match &prepared_call.execution {
+        PreparedExecution::Edit(edit) => plan_mode
+            .plan_file_path()
+            .is_some_and(|path| edit.all_resolved_targets_match(path)),
+        PreparedExecution::Write(write) => plan_mode
+            .plan_file_path()
+            .is_some_and(|path| write.all_resolved_targets_match(path)),
+        PreparedExecution::Direct => false,
     };
     if allowed {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
@@ -470,6 +458,7 @@ fn ordinary_approval_presentation(
     subject: &str,
     arguments: &serde_json::Value,
     edit_presentation: Option<EditApprovalPresentation>,
+    write_presentation: Option<WriteApprovalPresentation>,
 ) -> ApprovalPresentation {
     let is_task_stop =
         operation == PermissionOperation::Shell && arguments.get("task_id").is_some();
@@ -513,6 +502,14 @@ fn ordinary_approval_presentation(
         return ApprovalPresentation::Edit {
             title: format!("Edit {n} files?"),
             edit,
+        };
+    }
+
+    if let Some(write) = write_presentation {
+        let n = write.files;
+        return ApprovalPresentation::Write {
+            title: format!("Write {n} files?"),
+            write,
         };
     }
 
@@ -741,9 +738,10 @@ fn build_ordinary_approval_request(
     session_scope: Option<SessionApprovalScope>,
     prefix_rule: Option<PrefixApprovalRule>,
 ) -> ApprovalRequest {
-    let edit_presentation = match &prepared_call.execution {
-        PreparedExecution::Edit(edit) => Some(edit.approval_presentation()),
-        PreparedExecution::Direct => None,
+    let (edit_presentation, write_presentation) = match &prepared_call.execution {
+        PreparedExecution::Edit(edit) => (Some(edit.approval_presentation()), None),
+        PreparedExecution::Write(write) => (None, Some(write.approval_presentation())),
+        PreparedExecution::Direct => (None, None),
     };
     ApprovalRequest {
         turn,
@@ -754,6 +752,7 @@ fn build_ordinary_approval_request(
             subject,
             &prepared_call.arguments,
             edit_presentation,
+            write_presentation,
         ),
         options: ordinary_approval_options(session_scope, prefix_rule),
     }
@@ -948,6 +947,7 @@ async fn resolve_approval(
                 );
                 let result = match &prepared_call.execution {
                     PreparedExecution::Edit(edit) => edit.cancelled_before_commit_result(),
+                    PreparedExecution::Write(write) => write.cancelled_before_commit_result(),
                     PreparedExecution::Direct => cancelled_tool_result(),
                 };
                 return AppliedApproval::Terminal(result);
@@ -1245,17 +1245,13 @@ fn approval_scope_for_prepared_call(
     }
     match tool_call.name.as_ref() {
         "Bash" => bash_approval_scope(config, &prepared_call.arguments),
-        "Write" => {
-            let (scope, _) = file_write_approval_scope(
-                config,
-                &prepared_call.arguments,
-                FileWriteApprovalOperation::Write,
-            );
-            (scope, None)
-        }
+        "Write" => match &prepared_call.execution {
+            PreparedExecution::Write(write) => (write_session_approval_scope(config, write), None),
+            _ => (None, None),
+        },
         "Edit" => match &prepared_call.execution {
             PreparedExecution::Edit(edit) => (edit_session_approval_scope(config, edit), None),
-            PreparedExecution::Direct => (None, None),
+            _ => (None, None),
         },
         _ => tool_approval_scope(config, &tool_call.name),
     }
@@ -1270,6 +1266,18 @@ fn edit_session_approval_scope(
     let workspace = workspace_key_root(config);
     let workspace_root = config.workspace_root.as_deref()?;
     edit.session_approval_scope(&workspace, workspace_root)
+}
+
+/// Multi-key session scope for a prepared batch Write. Omitted when the
+/// workspace root is unknown or any target cannot participate in a narrow
+/// workspace-contained FileWrite key.
+fn write_session_approval_scope(
+    config: &AgentConfig,
+    write: &PreparedWrite,
+) -> Option<SessionApprovalScope> {
+    let workspace = workspace_key_root(config);
+    let workspace_root = config.workspace_root.as_deref()?;
+    write.session_approval_scope(&workspace, workspace_root)
 }
 
 /// Build the session scope + optional prefix rule for a Bash call.
@@ -1349,53 +1357,6 @@ fn bash_approval_scope(
         };
         (Some(scope), None)
     }
-}
-
-/// Build the session scope for a Write/Edit call. Returns no prefix rule.
-fn file_write_approval_scope(
-    config: &AgentConfig,
-    arguments: &serde_json::Value,
-    operation: FileWriteApprovalOperation,
-) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
-    let Some(raw_path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
-        return (None, None);
-    };
-    if raw_path.trim().is_empty() {
-        return (None, None);
-    }
-    let workspace = workspace_key_root(config);
-    let Some(workspace_root) = config.workspace_root.as_deref() else {
-        return (None, None);
-    };
-    let resolved = if std::path::Path::new(raw_path).is_absolute() {
-        std::path::PathBuf::from(raw_path)
-    } else {
-        workspace_root.join(raw_path)
-    };
-    let normalized = normalize_path(&resolved);
-    if !normalized.starts_with(workspace_root) {
-        return (None, None);
-    }
-    let path = normalized.display().to_string();
-    let key = SessionApprovalKey::FileWrite {
-        workspace: workspace.clone(),
-        path: path.clone(),
-        operation,
-    };
-    let (verb, label) = match operation {
-        FileWriteApprovalOperation::Write => {
-            ("writes to", "Approve writes to this file for this session")
-        }
-        FileWriteApprovalOperation::Edit => {
-            ("edits to", "Approve edits to this file for this session")
-        }
-    };
-    let scope = SessionApprovalScope {
-        keys: vec![key],
-        label: label.to_owned(),
-        detail: format!("File ({verb}): {path}"),
-    };
-    (Some(scope), None)
 }
 
 /// Build the session scope for a generic tool call (MCP tools and any

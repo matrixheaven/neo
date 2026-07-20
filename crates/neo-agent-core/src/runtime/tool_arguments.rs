@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::tools::PreparedEdit;
 use crate::tools::normalize_path;
+use crate::tools::{PreparedEdit, PreparedWrite};
 use crate::{AgentToolCall, PlanSelection, ToolResult};
 use neo_ai::ToolSpec;
 
@@ -25,12 +25,14 @@ pub(super) enum ApprovalExecutionContext {
     Goal,
 }
 
-/// Narrow runtime-only prepared execution payload. Non-Edit tools stay `Direct`.
-/// Edit carries the approved staged bytes through authorization and commit.
+/// Narrow runtime-only prepared execution payload. Non-mutating tools stay
+/// `Direct`. Edit and Write each carry the approved staged bytes through
+/// authorization and commit.
 #[derive(Clone, Debug)]
 pub(super) enum PreparedExecution {
     Direct,
     Edit(Arc<PreparedEdit>),
+    Write(Arc<PreparedWrite>),
 }
 
 impl PartialEq for PreparedExecution {
@@ -38,6 +40,7 @@ impl PartialEq for PreparedExecution {
         match (self, other) {
             (Self::Direct, Self::Direct) => true,
             (Self::Edit(left), Self::Edit(right)) => Arc::ptr_eq(left, right),
+            (Self::Write(left), Self::Write(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
@@ -63,9 +66,10 @@ pub struct PreparedToolCall {
     /// mode-exit consumers read this field directly (batch-order), never via
     /// a tool-id side map.
     pub(super) approval: Option<ApprovalExecutionContext>,
-    /// Runtime-only prepared execution payload. Defaults to `Direct`; Edit
-    /// preparation replaces it with `Edit(Arc<PreparedEdit>)` after instruction
-    /// preflight and before authorization.
+    /// Runtime-only prepared execution payload. Defaults to `Direct`; Edit and
+    /// Write preparation replace it with `Edit(Arc<PreparedEdit>)` or
+    /// `Write(Arc<PreparedWrite>)` after instruction preflight and before
+    /// authorization.
     pub(super) execution: PreparedExecution,
 }
 
@@ -334,9 +338,10 @@ fn complete_value_end(raw: &str, start: usize) -> Option<usize> {
 /// A typed instruction-scope probe derived from one prepared tool call.
 ///
 /// Probes come only from typed arguments — never from shell command text,
-/// MCP payloads, or additional workspace roots. `Read`/`Write`/`Edit` probe
-/// the parent directory of the target file, `List`/`Grep`/`Find`/`Glob`
-/// probe their explicit root (defaulting to the primary workspace), and
+/// MCP payloads, or additional workspace roots. `Read` probes the parent
+/// directory of its single typed file path, `Edit`/`Write` probe the parent
+/// directory of every `files[].path`, `List`/`Grep`/`Find`/`Glob` probe their
+/// explicit root (defaulting to the primary workspace), and
 /// `Bash`/`Terminal`(start) probe the explicit `cwd` (defaulting to the
 /// primary workspace). Anything else carries no probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,8 +354,8 @@ pub struct InstructionScopeProbe {
 impl InstructionScopeProbe {
     /// Derive probes for one prepared tool call. Returns an empty collection
     /// when the tool class carries no probe or no typed path resolves inside
-    /// the primary workspace. Edit contributes one probe per distinct parent
-    /// directory of `files[].path` in declaration order.
+    /// the primary workspace. Edit and Write contribute one probe per distinct
+    /// parent directory of `files[].path` in declaration order.
     #[must_use]
     pub fn from_prepared_tool(
         name: &str,
@@ -358,8 +363,8 @@ impl InstructionScopeProbe {
         primary_workspace: &Path,
     ) -> Vec<Self> {
         match name {
-            "Edit" => edit_scope_probes(arguments, primary_workspace),
-            "Read" | "Write" => {
+            "Edit" | "Write" => files_parent_scope_probes(arguments, primary_workspace),
+            "Read" => {
                 let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
                     return Vec::new();
                 };
@@ -415,9 +420,10 @@ impl InstructionScopeProbe {
     }
 }
 
-/// Collect parent-directory probes for every Edit `files[].path`, preserving
-/// declaration order and deduplicating identical canonical directories.
-fn edit_scope_probes(
+/// Collect parent-directory probes for every `files[].path`, preserving
+/// declaration order and deduplicating identical canonical directories. Shared
+/// by Edit and Write, whose canonical schemas both carry a `files` array.
+fn files_parent_scope_probes(
     arguments: &serde_json::Value,
     primary_workspace: &Path,
 ) -> Vec<InstructionScopeProbe> {
@@ -623,25 +629,26 @@ mod tests {
         };
         let absolute = |path: &std::path::Path| path.to_string_lossy().to_string();
 
-        // Read/Write probe the parent directory of the typed file path.
-        for name in ["Read", "Write"] {
-            assert_eq!(
-                probe(name, json!({ "path": "nested/file.txt" })),
-                vec![nested.clone()],
-                "{name} relative path"
-            );
-            assert_eq!(
-                probe(name, json!({ "path": absolute(&nested.join("file.txt")) })),
-                vec![nested.clone()],
-                "{name} absolute path"
-            );
-            assert_eq!(
-                probe(name, json!({ "path": absolute(&external) })),
-                Vec::<PathBuf>::new(),
-                "{name} external absolute path"
-            );
-        }
-        // Edit probes every files[].path parent directory.
+        // Read probes the parent directory of its single typed file path.
+        assert_eq!(
+            probe("Read", json!({ "path": "nested/file.txt" })),
+            vec![nested.clone()],
+            "Read relative path"
+        );
+        assert_eq!(
+            probe(
+                "Read",
+                json!({ "path": absolute(&nested.join("file.txt")) })
+            ),
+            vec![nested.clone()],
+            "Read absolute path"
+        );
+        assert_eq!(
+            probe("Read", json!({ "path": absolute(&external) })),
+            Vec::<PathBuf>::new(),
+            "Read external absolute path"
+        );
+        // Edit and Write probe every files[].path parent directory.
         assert_eq!(
             probe(
                 "Edit",
@@ -651,6 +658,16 @@ mod tests {
             ),
             vec![nested.clone()],
             "Edit relative path"
+        );
+        assert_eq!(
+            probe(
+                "Write",
+                json!({
+                    "files": [{ "path": "nested/file.txt", "content": "body" }]
+                })
+            ),
+            vec![nested.clone()],
+            "Write relative path"
         );
         // List/Grep/Find/Glob probe the explicit root; an omitted root is the
         // primary workspace.
@@ -751,6 +768,36 @@ mod tests {
                     { "path": "a/one.txt", "replacements": [{ "old": "1", "new": "x" }] },
                     { "path": "b/two.txt", "replacements": [{ "old": "2", "new": "y" }] },
                     { "path": "a/one.txt", "replacements": [{ "old": "x", "new": "z" }] }
+                ]
+            }),
+            &workspace,
+        );
+        let directories: Vec<_> = probes
+            .into_iter()
+            .map(|probe| probe.target_directory)
+            .collect();
+        assert_eq!(directories, vec![nested_a, nested_b]);
+    }
+
+    #[test]
+    fn typed_scope_probes_cover_every_write_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested_a = workspace.join("a");
+        let nested_b = workspace.join("b");
+        std::fs::create_dir_all(&nested_a).expect("a");
+        std::fs::create_dir_all(&nested_b).expect("b");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let nested_a = workspace.join("a");
+        let nested_b = workspace.join("b");
+
+        let probes = InstructionScopeProbe::from_prepared_tool(
+            "Write",
+            &json!({
+                "files": [
+                    { "path": "a/one.txt", "content": "1\n" },
+                    { "path": "b/two.txt", "content": "2\n" },
+                    { "path": "a/three.txt", "content": "3\n" }
                 ]
             }),
             &workspace,

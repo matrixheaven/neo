@@ -32,26 +32,15 @@ pub fn is_active_plan_file_path(
 }
 
 #[must_use]
-pub fn check_plan_mode_guard(
-    plan_mode: &PlanMode,
-    workspace_root: Option<&Path>,
-    tool_name: &str,
-    args: &serde_json::Value,
-) -> PlanModeGuard {
+pub fn check_plan_mode_guard(plan_mode: &PlanMode, tool_name: &str) -> PlanModeGuard {
     if !plan_mode.is_active() {
         return PlanModeGuard::Allow;
     }
     match tool_name {
-        "Write" => {
-            if let Some(path) = args.get("path").and_then(serde_json::Value::as_str)
-                && is_active_plan_file_path(plan_mode, workspace_root, path)
-            {
-                return PlanModeGuard::Allow;
-            }
-            plan_mode_write_deny(plan_mode)
-        }
-        // Edit requires prepared resolved targets, which this raw guard does not own.
-        "Edit" => plan_mode_write_deny(plan_mode),
+        // Write and Edit resolve to prepared target sets that this raw guard does
+        // not own; the single-plan-file exception is applied on the prepared
+        // execution path. Any raw Write/Edit is denied here.
+        "Write" | "Edit" => plan_mode_write_deny(plan_mode),
         "TaskStop" | "CronCreate" | "CronDelete" => PlanModeGuard::Deny {
             message: format!("blocked by plan mode: {tool_name} is not allowed while planning"),
         },
@@ -93,7 +82,6 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn active_state(plan_path: &std::path::Path) -> PlanMode {
         let mut state = PlanMode::default();
@@ -110,77 +98,36 @@ mod tests {
     fn inactive_allows() {
         let s = PlanMode::default();
         assert!(matches!(
-            check_plan_mode_guard(&s, None, "Write", &json!({"path":"a"})),
+            check_plan_mode_guard(&s, "Write"),
             PlanModeGuard::Allow
-        ));
-    }
-    #[test]
-    fn active_denies_write() {
-        let s = active_state(Path::new("/tmp/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(&s, None, "Write", &json!({"path":"a"})),
-            PlanModeGuard::Deny { .. }
-        ));
-    }
-    #[test]
-    fn active_allows_plan_file_write() {
-        let s = active_state(Path::new("/h/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(&s, None, "Write", &json!({"path":"/h/p.md"})),
-            PlanModeGuard::Allow
-        ));
-    }
-    #[test]
-    fn active_allows_plan_file_write_with_relative_path() {
-        let s = active_state(Path::new("/ws/plans/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(
-                &s,
-                Some(Path::new("/ws")),
-                "Write",
-                &json!({"path":"plans/p.md"})
-            ),
-            PlanModeGuard::Allow
-        ));
-    }
-    #[test]
-    fn active_allows_bash() {
-        let s = active_state(Path::new("/tmp/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(&s, None, "Bash", &json!({})),
-            PlanModeGuard::Allow
-        ));
-    }
-    #[test]
-    fn active_denies_task_stop() {
-        let s = active_state(Path::new("/tmp/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(&s, None, "TaskStop", &json!({})),
-            PlanModeGuard::Deny { .. }
         ));
     }
 
     #[test]
-    fn active_plan_mode_rejects_unprepared_edit() {
-        let s = active_state(Path::new("/ws/plans/p.md"));
+    fn active_denies_write_and_edit() {
+        let s = active_state(Path::new("/tmp/p.md"));
+        for tool in ["Write", "Edit"] {
+            assert!(
+                matches!(check_plan_mode_guard(&s, tool), PlanModeGuard::Deny { .. }),
+                "{tool} must be denied by the raw guard"
+            );
+        }
+    }
+
+    #[test]
+    fn active_allows_bash() {
+        let s = active_state(Path::new("/tmp/p.md"));
         assert!(matches!(
-            check_plan_mode_guard(
-                &s,
-                Some(Path::new("/ws")),
-                "Edit",
-                &json!({
-                    "files": [
-                        {
-                            "path": "plans/p.md",
-                            "replacements": [{ "old": "a", "new": "b" }]
-                        },
-                        {
-                            "path": "/ws/plans/p.md",
-                            "replacements": [{ "old": "c", "new": "d" }]
-                        }
-                    ]
-                })
-            ),
+            check_plan_mode_guard(&s, "Bash"),
+            PlanModeGuard::Allow
+        ));
+    }
+
+    #[test]
+    fn active_denies_task_stop() {
+        let s = active_state(Path::new("/tmp/p.md"));
+        assert!(matches!(
+            check_plan_mode_guard(&s, "TaskStop"),
             PlanModeGuard::Deny { .. }
         ));
     }

@@ -19,7 +19,7 @@ async fn write_requires_mutation_permission() {
         .run(
             "Write",
             &context,
-            json!({ "path": "note.txt", "content": "nope" }),
+            json!({ "files": [{ "path": "note.txt", "content": "nope" }] }),
         )
         .await
         .expect_err("write should be denied");
