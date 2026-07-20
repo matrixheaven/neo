@@ -233,6 +233,7 @@ pub(super) async fn run_agent_turn(
             append_queued_messages(emitter, pending_messages);
         }
 
+        append_available_skills_snapshot(skills.as_ref(), emitter);
         append_runtime_reminders(&config, emitter);
         rehydrate_instruction_context_after_compaction(emitter, false).await;
 
@@ -454,6 +455,39 @@ pub(super) async fn run_agent_turn(
     process_supervisor.cleanup_all().await;
     emit_run_finished(&config, emitter, final_turn, final_stop_reason).await;
     Ok(())
+}
+
+const AVAILABLE_SKILLS_VARIANT: &str = "available_skills";
+
+pub(super) fn append_available_skills_snapshot(
+    skills: Option<&SkillStoreHandle>,
+    emitter: &mut EventEmitter,
+) {
+    let Some(skills) = skills else {
+        return;
+    };
+    let reminder = skills.with_store(|store| {
+        AgentMessage::system_reminder_with_origin(
+            store.available_skills_prompt(),
+            AVAILABLE_SKILLS_VARIANT,
+        )
+    });
+    let unchanged = emitter
+        .context
+        .messages()
+        .iter()
+        .rev()
+        .find(|message| {
+            matches!(
+                message,
+                AgentMessage::User { origin, .. }
+                    if origin.is_injection_variant(AVAILABLE_SKILLS_VARIANT)
+            )
+        })
+        .is_some_and(|latest| latest == &reminder);
+    if !unchanged {
+        emitter.emit(AgentEvent::MessageAppended { message: reminder });
+    }
 }
 
 fn next_pending_after_assistant(

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -161,11 +162,83 @@ impl SkillStore {
 
     #[must_use]
     pub fn auto_invokable(&self) -> Vec<&LoadedSkill> {
-        self.skills
+        let mut skills: Vec<_> = self
+            .skills
             .values()
             .filter(|skill| skill.manifest.auto_invokable())
-            .collect()
+            .collect();
+        skills.sort_by(|left, right| left.name.cmp(&right.name));
+        skills
     }
+
+    #[must_use]
+    pub fn available_skills_prompt(&self) -> String {
+        let skills = self.auto_invokable();
+        let mut prompt = String::from("<available_skills>\n");
+        prompt.push_str(
+            "DISREGARD any earlier skill listings. Current available skills:\n\n\
+             Skills are reusable capabilities. When a skill matches your current task, \
+             invoke it with the Skill tool instead of doing the work manually.\n\n\
+             MANDATORY: When the user mentions a task that a skill listed below could \
+             help with, or when the user explicitly asks to use a skill, your FIRST \
+             action must be a Skill tool call for that skill. Do not start any work, \
+             exploration, or planning before invoking the matching skill.\n",
+        );
+
+        let groups: [(SkillSource, &str); 3] = [
+            (SkillSource::User, "User"),
+            (SkillSource::Extra, "Extra"),
+            (SkillSource::Builtin, "Built-in"),
+        ];
+        for (source, label) in groups {
+            let group_skills: Vec<_> = skills
+                .iter()
+                .filter(|skill| skill.source == source)
+                .collect();
+            if group_skills.is_empty() {
+                continue;
+            }
+            let _ = write!(prompt, "\n### {label}\n");
+            for skill in group_skills {
+                write_available_skill(&mut prompt, skill);
+            }
+        }
+        if skills.is_empty() {
+            prompt.push_str("\nNo skills are currently available.\n");
+        }
+        prompt.push_str("</available_skills>");
+        prompt
+    }
+}
+
+fn write_available_skill(prompt: &mut String, skill: &LoadedSkill) {
+    let _ = writeln!(prompt, "- {}: {}", skill.name, skill.manifest.description);
+    if let Some(when) = &skill.manifest.when_to_use {
+        let _ = writeln!(prompt, "  When to use: {when}");
+    }
+    if skill.manifest.arguments.is_empty() {
+        return;
+    }
+    prompt.push_str("<arguments>\n");
+    for argument in &skill.manifest.arguments {
+        let _ = write!(prompt, "<arg name=\"{}\"", argument.name);
+        if argument.required {
+            prompt.push_str(" required=\"true\"");
+        }
+        if let Some(default) = &argument.default {
+            let _ = write!(prompt, " default=\"{}\"", escape_xml(default));
+        }
+        prompt.push_str(" />\n");
+    }
+    prompt.push_str("</arguments>\n");
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone, Default)]

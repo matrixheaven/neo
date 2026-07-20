@@ -487,13 +487,8 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let skill_store_handle = SkillStoreHandle::new(skill_store.clone());
-    let mut agent_config = runtime::agent_config_for_app(
-        model,
-        config,
-        approval_tx,
-        &skill_store,
-        instruction_registry,
-    )?;
+    let mut agent_config =
+        runtime::agent_config_for_app(model, config, approval_tx, instruction_registry)?;
     if let Some(session_directory) = &session_directory {
         agent_config = agent_config.with_session_directory(session_directory.clone());
     }
@@ -855,7 +850,6 @@ mod tests {
         ToolRegistry,
         harness::FakeHarness,
         session::{JsonlSessionReader, JsonlSessionWriter},
-        skills::SkillStore,
     };
     use neo_ai::{
         AiStreamEvent, ApiKind, ApiType, ChatMessage, ContentPart, ModelCapabilities, ModelSpec,
@@ -948,9 +942,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
 
-        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
-        let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
+        let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
@@ -1044,9 +1036,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
         };
 
-        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
-        let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
+        let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
 
         assert_eq!(agent_config.max_tokens, Some(64_000));
     }
@@ -1320,9 +1310,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
-        let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
+        let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -1404,9 +1392,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
-        let agent_config =
-            agent_config_for_app(model, &config, None, &skill_store, None).expect("agent config");
+        let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -1519,10 +1505,8 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
-        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
-            agent_config_for_app(model, &config, Some(approval_tx), &skill_store, None)
-                .expect("agent config");
+            agent_config_for_app(model, &config, Some(approval_tx), None).expect("agent config");
         let handler = agent_config
             .async_approval_handler
             .expect("async approval handler");

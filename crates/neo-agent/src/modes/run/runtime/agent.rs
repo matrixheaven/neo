@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
-use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, ApprovalCancelReason, ApprovalResponse, CompactionSettings, HttpConfig,
     HttpOAuthConfig, McpClient, McpConnectionManager, ProcessSupervisor, StdioConfig, ToolRegistry,
@@ -19,7 +18,6 @@ pub(crate) fn agent_config_for_app(
     model: neo_ai::ModelSpec,
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PendingApproval>>,
-    skill_store: &SkillStore,
     instruction_registry: Option<Arc<InstructionRegistry>>,
 ) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
@@ -63,7 +61,7 @@ pub(crate) fn agent_config_for_app(
     agent_config.first_event_timeout_secs = config.runtime.retry.first_event_timeout_secs;
     agent_config.stream_idle_timeout_secs = config.runtime.retry.stream_idle_timeout_secs;
     if let Some(system_prompt) =
-        resources::load_system_prompt(config.system_prompt_file.as_deref(), skill_store)?
+        resources::load_system_prompt(config.system_prompt_file.as_deref())?
     {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }

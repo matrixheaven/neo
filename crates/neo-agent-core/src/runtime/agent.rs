@@ -18,7 +18,10 @@ use super::events::*;
 use super::plan_orchestration::*;
 use super::queue::*;
 use super::skill_dispatch::*;
-use super::turn_loop::{emit_run_finished, establish_instruction_baseline, run_agent_turn};
+use super::turn_loop::{
+    append_available_skills_snapshot, emit_run_finished, establish_instruction_baseline,
+    run_agent_turn,
+};
 use crate::compaction::projection::ProjectionPlan;
 use crate::compaction::summary::run_full_compaction;
 use crate::goal::GoalManager;
@@ -227,6 +230,7 @@ impl AgentRuntime {
                 let _ = final_sender.send(emitter.context);
                 return;
             }
+            append_available_skills_snapshot(skills.as_ref(), &mut emitter);
             emitter.emit(AgentEvent::MessageAppended { message });
             if let Err(err) = run_agent_turn(
                 model,

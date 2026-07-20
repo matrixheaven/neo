@@ -8,7 +8,7 @@ use neo_agent_core::{
     Tool, ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, main_agent_plans_dir, workspace_sessions_dir},
-    skills::SkillStore,
+    skills::{SkillStore, SkillStoreHandle},
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -5600,6 +5600,112 @@ async fn ask_mode_ask_user_question_dispatches_without_approval() {
             .all(|event| !matches!(event, AgentEvent::ApprovalRequested { .. })),
         "AskUserQuestion must not be wrapped in the approval dialog"
     );
+}
+
+#[tokio::test]
+async fn runtime_appends_available_skills_snapshot_only_when_changed() {
+    let skills_dir = tempfile::tempdir().expect("skills dir");
+    for (name, description) in [("zeta", "Zeta skill"), ("alpha", "Alpha skill")] {
+        let dir = skills_dir.path().join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\nBody.\n"),
+        )
+        .expect("write skill");
+    }
+    let initial = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
+        .expect("load initial skills");
+    let handle = SkillStoreHandle::new(initial);
+    let harness =
+        FakeHarness::from_turns([final_done_turn(), final_done_turn(), final_done_turn()]);
+    let runtime = AgentRuntime::with_tools_and_skill_handle(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        ToolRegistry::new(),
+        handle.clone(),
+    );
+    let mut context = AgentContext::new();
+
+    let first = runtime
+        .run_turn(&mut context, AgentMessage::user_text("first"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("first turn");
+
+    std::fs::remove_dir_all(skills_dir.path().join("zeta")).expect("remove zeta");
+    std::fs::write(
+        skills_dir.path().join("alpha/SKILL.md"),
+        "---\nname: alpha\ndescription: Updated alpha skill\n---\nBody.\n",
+    )
+    .expect("update alpha");
+    let beta = skills_dir.path().join("beta");
+    std::fs::create_dir_all(&beta).expect("create beta");
+    std::fs::write(
+        beta.join("SKILL.md"),
+        "---\nname: beta\ndescription: Beta skill\n---\nBody.\n",
+    )
+    .expect("write beta");
+    handle.replace(
+        SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
+            .expect("reload changed skills"),
+    );
+
+    let second = runtime
+        .run_turn(&mut context, AgentMessage::user_text("second"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("second turn");
+    let third = runtime
+        .run_turn(&mut context, AgentMessage::user_text("third"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("third turn");
+
+    let snapshot_count = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::MessageAppended {
+                        message: AgentMessage::User { origin, .. },
+                    } if origin.is_injection_variant("available_skills")
+                )
+            })
+            .count()
+    };
+    assert_eq!(snapshot_count(&first), 1);
+    assert_eq!(snapshot_count(&second), 1);
+    assert_eq!(snapshot_count(&third), 0);
+
+    let snapshots = context
+        .messages()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                AgentMessage::User { origin, .. }
+                    if origin.is_injection_variant("available_skills")
+            )
+        })
+        .map(AgentMessage::text)
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert!(
+        snapshots[0].find("- alpha:").expect("alpha listing")
+            < snapshots[0].find("- zeta:").expect("zeta listing")
+    );
+    assert!(snapshots[1].contains("DISREGARD any earlier skill listings"));
+    assert!(snapshots[1].contains("- alpha: Updated alpha skill"));
+    assert!(snapshots[1].contains("- beta: Beta skill"));
+    assert!(!snapshots[1].contains("- zeta:"));
 }
 
 #[tokio::test]

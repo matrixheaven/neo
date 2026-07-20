@@ -127,3 +127,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/evidence-bundle-draft-final-scoped-verification.json | 2026-07-20-at-file-reference-transcript-projection evidence final-scoped-verification |
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/gate-input-pack.json | 2026-07-20-at-file-reference-transcript-projection gate input pack |
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/proof-bundle.md | 2026-07-20-at-file-reference-transcript-projection proof bundle |
+| 2026-07-20 | spec | docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md | Append-Only Skill Catalog Spec Brief |
+| 2026-07-20 | plan | docs/aegis/plans/2026-07-20-append-only-skill-catalog.md | Append-Only Skill Catalog Implementation Plan |
