@@ -118,7 +118,7 @@ async fn run_prompt_with_retry_notices(
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let user_message = user_message(content, MessageOrigin::User);
+    let user_message = user_message(content, MessageOrigin::User, None);
     record_session_activity(config, &session_id, &prompt_text);
     let runtime = match runtime_for_config(
         config,
@@ -170,7 +170,7 @@ async fn run_prompt_ephemeral(
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
     let mut writer = SessionEventWriter::memory();
-    let user_message = user_message(content, MessageOrigin::User);
+    let user_message = user_message(content, MessageOrigin::User, None);
     let runtime = runtime_for_config(
         config,
         None,
@@ -212,7 +212,7 @@ async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let user_message = user_message(user_content, MessageOrigin::User);
+    let user_message = user_message(user_content, MessageOrigin::User, None);
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
@@ -244,6 +244,7 @@ async fn run_prompt_in_session(
 pub async fn run_prompt_streaming(
     prompt: &[Content],
     prompt_origin: MessageOrigin,
+    prompt_display_text: Option<String>,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PendingApproval>,
@@ -259,9 +260,15 @@ pub async fn run_prompt_streaming(
     instruction_registry: Option<Arc<InstructionRegistry>>,
     compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
-    let prepared =
-        prepare_new_streaming_turn(prompt, prompt_origin, config, session_id_tx, skill_context)
-            .await?;
+    let prepared = prepare_new_streaming_turn(
+        prompt,
+        prompt_origin,
+        prompt_display_text,
+        config,
+        session_id_tx,
+        skill_context,
+    )
+    .await?;
     let prompt = prepared.prompt.clone();
     let runtime = runtime_for_config(
         config,
@@ -288,6 +295,7 @@ pub async fn run_prompt_in_session_streaming(
     session_id: &str,
     prompt: &[Content],
     prompt_origin: MessageOrigin,
+    prompt_display_text: Option<String>,
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PendingApproval>,
@@ -307,6 +315,7 @@ pub async fn run_prompt_in_session_streaming(
         session_id,
         prompt,
         prompt_origin,
+        prompt_display_text,
         config,
         session_id_tx,
         skill_context,
@@ -332,6 +341,7 @@ pub async fn run_prompt_in_session_streaming(
 async fn prepare_new_streaming_turn(
     prompt: &[Content],
     prompt_origin: MessageOrigin,
+    prompt_display_text: Option<String>,
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
@@ -347,7 +357,7 @@ async fn prepare_new_streaming_turn(
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, &session_id);
-    let user_message = user_message(prompt.to_vec(), prompt_origin);
+    let user_message = user_message(prompt.to_vec(), prompt_origin, prompt_display_text);
     record_session_activity(config, &session_id, &prompt_text);
     let session_directory = session_root_from_wire_path(&session_path)?;
     Ok(PreparedStreamingTurn {
@@ -365,6 +375,7 @@ async fn prepare_existing_streaming_turn(
     session_id: &str,
     prompt: &[Content],
     prompt_origin: MessageOrigin,
+    prompt_display_text: Option<String>,
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
@@ -384,7 +395,7 @@ async fn prepare_existing_streaming_turn(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, session_id);
-    let user_message = user_message(prompt.to_vec(), prompt_origin);
+    let user_message = user_message(prompt.to_vec(), prompt_origin, prompt_display_text);
     record_session_activity(config, session_id, &prompt_text);
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,
@@ -554,7 +565,7 @@ async fn run_prompt_with_runtime(
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    let user_message = user_message(vec![Content::text(prompt)], MessageOrigin::User);
+    let user_message = user_message(vec![Content::text(prompt)], MessageOrigin::User, None);
     finish_prompt_turn(
         user_message,
         context,
@@ -567,8 +578,16 @@ async fn run_prompt_with_runtime(
     .await
 }
 
-fn user_message(content: Vec<Content>, origin: MessageOrigin) -> AgentMessage {
-    AgentMessage::User { content, origin }
+fn user_message(
+    content: Vec<Content>,
+    origin: MessageOrigin,
+    display_text: Option<String>,
+) -> AgentMessage {
+    AgentMessage::User {
+        content,
+        display_text: display_text.map(Into::into),
+        origin,
+    }
 }
 
 async fn finish_prompt_turn(
@@ -1119,6 +1138,7 @@ mod tests {
         let message = user_message(
             vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
             origin.clone(),
+            None,
         );
 
         assert!(message.is_injection());
@@ -1126,6 +1146,7 @@ mod tests {
             message,
             AgentMessage::User {
                 content: vec![Content::text("<system-reminder>\ninit\n</system-reminder>")],
+                display_text: None,
                 origin,
             }
         );
@@ -2458,6 +2479,7 @@ mod tests {
             session_id,
             &[Content::text("continue")],
             MessageOrigin::User,
+            None,
             &config,
             None,
             None,

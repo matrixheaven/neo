@@ -184,6 +184,20 @@ pub fn parse_markers(text: &str) -> Vec<(usize, Marker)> {
     out
 }
 
+/// Replace composer markers with their compact presentation labels.
+#[must_use]
+pub fn markers_as_chips(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, marker) in parse_markers(text) {
+        out.push_str(&text[cursor..start]);
+        out.push_str(&marker.as_chip());
+        cursor = start + marker.as_placeholder().len();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
 #[must_use]
 pub fn file_reference_chip_label(
     display_name: &str,
@@ -428,6 +442,16 @@ mod tests {
 
         assert_eq!(marker.as_placeholder(), "[file #3 prompt_completion.rs]");
         assert_eq!(marker.as_chip(), "@[prompt_completion.rs]");
+    }
+
+    #[test]
+    fn markers_as_chips_preserves_text_and_compacts_file_references() {
+        let text = "compare [file #1 prompt_completion.rs] with [file #2 paste.rs]";
+
+        assert_eq!(
+            markers_as_chips(text),
+            "compare @[prompt_completion.rs] with @[paste.rs]"
+        );
     }
 
     #[test]

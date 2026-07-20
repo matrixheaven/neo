@@ -227,6 +227,19 @@ This explicitly fixes the current missing image-paste deletion affordance by mak
 
 On submit, Neo expands file reference atoms into textual context blocks. The visible chip text is not sent as-is as the only context.
 
+### Transcript Projection
+
+The submitted user message has two projections owned by one durable message:
+
+- The model projection contains the expanded file or directory snapshot.
+- The presentation projection preserves the prompt text with file markers rendered as the same compact `@[display]` chips used by the composer.
+
+The transcript, transcript copy, session replay, and human-readable transcript export must use the presentation projection. They must never replace a selected file chip with the expanded file contents. Queue and steer messages use the same contract.
+
+The durable user message stores the optional presentation text alongside the canonical expanded `content`. Provider conversion, context replay, compaction, and retries continue to consume only `content`; presentation text must not change provider-visible bytes. Older session events without presentation text fall back to their existing content projection and are not heuristically rewritten or migrated.
+
+The presentation text is derived from the resolved markerized prompt before submit-time expansion by reusing the canonical marker parser and `Marker::as_chip()`. Neo must not add a second attachment event, transcript card, or resurrect the removed `PromptSubmission` abstraction for this behavior.
+
 File expansion:
 
 ```text
@@ -324,6 +337,13 @@ Prompt expansion tests in `crates/neo-agent/src/prompt/parts.rs` or a nearby mod
 - Directory reference expands to a bounded `<directory path="...">` block.
 - Missing files produce an inline error block.
 - Binary or invalid UTF-8 files produce a metadata notice.
+
+Transcript projection tests:
+
+- A submitted file reference renders `@[display]` while the model receives the expanded `<file>` block.
+- Queue and steer messages preserve the same compact presentation text.
+- Session JSONL replay preserves the compact presentation text while provider conversion still uses expanded content.
+- Older user-message events without presentation text continue to deserialize and replay.
 
 Verification should use exact, narrow commands, for example:
 

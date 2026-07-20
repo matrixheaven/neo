@@ -16,13 +16,30 @@ use super::{FrameRequest, RunningTurn, TurnChannels, TurnRequest};
 
 impl InteractiveController {
     pub(super) fn start_turn_with_prompt(&mut self, prompt: Vec<Content>) {
-        self.start_turn_with_prompt_origin(prompt, MessageOrigin::User);
+        self.start_turn_with_prompt_projection(prompt, MessageOrigin::User, None);
+    }
+
+    pub(super) fn start_turn_with_prompt_display(
+        &mut self,
+        prompt: Vec<Content>,
+        display_text: String,
+    ) {
+        self.start_turn_with_prompt_projection(prompt, MessageOrigin::User, Some(display_text));
     }
 
     pub(super) fn start_turn_with_prompt_origin(
         &mut self,
         prompt: Vec<Content>,
         prompt_origin: MessageOrigin,
+    ) {
+        self.start_turn_with_prompt_projection(prompt, prompt_origin, None);
+    }
+
+    fn start_turn_with_prompt_projection(
+        &mut self,
+        prompt: Vec<Content>,
+        prompt_origin: MessageOrigin,
+        prompt_display_text: Option<String>,
     ) {
         if self.active_turn.is_some() {
             self.push_status("A turn is already running");
@@ -55,6 +72,7 @@ impl InteractiveController {
             self.active_model.clone(),
             self.current_reasoning.clone(),
         );
+        request.prompt_display_text = prompt_display_text;
         request.prompt_origin = prompt_origin;
         request.permission_mode = self.permission_mode;
         request.live_permission_mode = std::sync::Arc::clone(&self.live_permission_mode);

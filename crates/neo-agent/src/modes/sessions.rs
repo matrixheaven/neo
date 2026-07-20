@@ -249,7 +249,7 @@ pub(crate) async fn export_json_artifact(
 fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Result<String> {
     let export_messages = messages
         .iter()
-        .map(|message| ExportMessage::new(message_role(message), message.text()))
+        .map(|message| ExportMessage::new(message_role(message), message.presentation_text()))
         .collect();
     let conversation = ExportConversation::new(title, export_messages);
     neo_agent_core::session::export::export_html(&conversation, &HtmlExportOptions::default())
@@ -358,8 +358,30 @@ fn metadata_store(config: &AppConfig) -> SessionMetadataStore {
 
 fn format_message(message: &AgentMessage) -> String {
     let role = message_role(message);
+    let text = message.presentation_text();
 
-    format!("{role}: {}", message.text())
+    format!("{role}: {text}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_transcript_outputs_prefer_user_display_text() {
+        let message = AgentMessage::user_content_with_display(
+            [neo_agent_core::Content::text(
+                "<file path=\"src/main.rs\">snapshot</file>",
+            )],
+            "review @[main.rs]",
+        );
+
+        assert_eq!(format_message(&message), "user: review @[main.rs]");
+        let html =
+            render_messages_html("session".to_owned(), &[message]).expect("render transcript html");
+        assert!(html.contains("review @[main.rs]"), "{html}");
+        assert!(!html.contains("snapshot"), "{html}");
+    }
 }
 
 fn message_role(message: &AgentMessage) -> &'static str {

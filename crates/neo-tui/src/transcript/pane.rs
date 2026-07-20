@@ -379,8 +379,13 @@ impl TranscriptPane {
             return;
         }
         match message {
-            AgentMessage::User { content, .. } => {
-                let (text, images) = user_content_display(content);
+            AgentMessage::User {
+                content,
+                display_text,
+                ..
+            } => {
+                let (content_text, images) = user_content_display(content);
+                let text = display_text.as_deref().map_or(content_text, str::to_owned);
                 if !text.is_empty() {
                     if images.is_empty() {
                         self.replay_user_message(text);

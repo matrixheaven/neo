@@ -329,6 +329,7 @@ impl InteractiveController {
                 self.local_config.as_ref(),
                 &self.completion_root,
             )?;
+            let display_text = neo_tui::paste::markers_as_chips(&prompt);
             let content = crate::prompt::parts::expand_prompt_markers(
                 &prompt,
                 &self.paste_store,
@@ -337,7 +338,7 @@ impl InteractiveController {
                 &self.completion_root,
             );
             self.append_prompt_history(&content_to_display_text(&content));
-            self.start_turn_with_prompt(content);
+            self.start_turn_with_prompt_display(content, display_text);
         }
         Ok(())
     }

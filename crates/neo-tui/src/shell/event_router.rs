@@ -128,10 +128,11 @@ impl NeoChromeState {
                 self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
             }
             AgentEvent::SteeringQueued { message } => {
-                self.pending_input.queue_steer(message.text());
+                self.pending_input.queue_steer(message.presentation_text());
             }
             AgentEvent::FollowUpQueued { message } => {
-                self.pending_input.queue_follow_up(message.text());
+                self.pending_input
+                    .queue_follow_up(message.presentation_text());
             }
             AgentEvent::QueueDrained { kind, count } => {
                 self.pending_input.drain(kind, count);

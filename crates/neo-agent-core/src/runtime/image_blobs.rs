@@ -13,8 +13,13 @@ pub(crate) async fn resolve_image_blobs(
     let mut out = Vec::with_capacity(messages.len());
     for message in messages {
         out.push(match message {
-            AgentMessage::User { content, origin } => AgentMessage::User {
+            AgentMessage::User {
+                content,
+                display_text,
+                origin,
+            } => AgentMessage::User {
                 content: resolve_content_blobs(content, session_dir).await,
+                display_text,
                 origin,
             },
             AgentMessage::Assistant {

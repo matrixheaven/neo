@@ -61,6 +61,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     &session_id,
                     &request.prompt,
                     request.prompt_origin.clone(),
+                    request.prompt_display_text.clone(),
                     &effective_config,
                     channels.events,
                     channels.approvals,
@@ -82,6 +83,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                 let turn = crate::modes::run::run_prompt_streaming(
                     &request.prompt,
                     request.prompt_origin.clone(),
+                    request.prompt_display_text.clone(),
                     &effective_config,
                     channels.events,
                     channels.approvals,

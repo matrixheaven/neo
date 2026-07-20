@@ -87,6 +87,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-dirty-baseline-terminal-control-test.json | 2026-07-20-bash-terminal-tool-card evidence dirty-baseline-terminal-control-test |
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/resume-state-hint.json | 2026-07-20-bash-terminal-tool-card resume state hint |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-terminal-ordered-input.md | Terminal Ordered Input Implementation Plan |
+| 2026-07-20 | plan | docs/aegis/plans/2026-07-20-at-file-reference-transcript-projection.md | At File Reference Transcript Projection Implementation Plan |
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/10-intent.md | Terminal Ordered Input intent |
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/20-checkpoint.md | Terminal Ordered Input checkpoint |
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/90-evidence.md | Terminal Ordered Input evidence |
@@ -106,3 +107,19 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/gate-input-pack.json | 2026-07-20-bash-terminal-tool-card gate input pack |
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/proof-bundle.md | 2026-07-20-bash-terminal-tool-card proof bundle |
 | 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-scoped-commit.json | 2026-07-20-bash-terminal-tool-card evidence scoped-commit |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/10-intent.md | At File Reference Transcript Projection intent |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/20-checkpoint.md | At File Reference Transcript Projection checkpoint |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/90-evidence.md | At File Reference Transcript Projection evidence |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/99-reflection.md | At File Reference Transcript Projection reflection |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/task-intent-draft.json | At File Reference Transcript Projection task intent draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/baseline-read-set-hint.json | At File Reference Transcript Projection baseline read-set hint |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/baseline-usage-draft.json | At File Reference Transcript Projection baseline usage draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/impact-statement-draft.json | At File Reference Transcript Projection impact statement draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/todo-checkpoint-draft.json | At File Reference Transcript Projection todo checkpoint draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/drift-check-draft.json | At File Reference Transcript Projection drift check draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/evidence-bundle-draft-task1-owner-tests.json | 2026-07-20-at-file-reference-transcript-projection evidence task1-owner-tests |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/resume-state-hint.json | 2026-07-20-at-file-reference-transcript-projection resume state hint |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/evidence-bundle-draft-task2-task3-regressions.json | 2026-07-20-at-file-reference-transcript-projection evidence task2-task3-regressions |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/evidence-bundle-draft-final-scoped-verification.json | 2026-07-20-at-file-reference-transcript-projection evidence final-scoped-verification |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/gate-input-pack.json | 2026-07-20-at-file-reference-transcript-projection gate input pack |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/proof-bundle.md | 2026-07-20-at-file-reference-transcript-projection proof bundle |

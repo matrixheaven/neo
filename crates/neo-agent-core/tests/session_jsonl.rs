@@ -122,6 +122,37 @@ async fn jsonl_session_appends_reads_and_replays_events() {
 }
 
 #[tokio::test]
+async fn user_display_text_roundtrips_and_old_user_event_remains_readable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_content_with_display(
+            [Content::text("<file path=\"src/main.rs\">snapshot</file>")],
+            "review @[main.rs]",
+        ),
+    };
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    writer.append(&event).await.expect("append event");
+    writer.flush().await.expect("flush");
+
+    let events = JsonlSessionReader::read_all(&path)
+        .await
+        .expect("read event");
+    assert_eq!(events, vec![event]);
+    let legacy: AgentEvent = serde_json::from_str(
+        r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"legacy"}}]}}}}"#,
+    )
+    .expect("deserialize legacy user event");
+    let AgentEvent::MessageAppended { message } = legacy else {
+        panic!("expected appended message");
+    };
+    assert_eq!(message.display_text(), None);
+    assert_eq!(message.text(), "legacy");
+}
+
+#[tokio::test]
 async fn jsonl_session_reads_legacy_token_usage_without_cache_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");

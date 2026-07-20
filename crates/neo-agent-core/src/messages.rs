@@ -149,6 +149,8 @@ pub enum AgentMessage {
     },
     User {
         content: Vec<Content>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_text: Option<Arc<str>>,
         #[serde(default, skip_serializing_if = "MessageOrigin::is_user")]
         origin: MessageOrigin,
     },
@@ -201,6 +203,19 @@ impl AgentMessage {
     pub fn user_content(content: impl Into<Vec<Content>>) -> Self {
         Self::User {
             content: content.into(),
+            display_text: None,
+            origin: MessageOrigin::User,
+        }
+    }
+
+    #[must_use]
+    pub fn user_content_with_display(
+        content: impl Into<Vec<Content>>,
+        display_text: impl Into<Arc<str>>,
+    ) -> Self {
+        Self::User {
+            content: content.into(),
+            display_text: Some(display_text.into()),
             origin: MessageOrigin::User,
         }
     }
@@ -220,6 +235,7 @@ impl AgentMessage {
                 "<system-reminder>\n{}\n</system-reminder>",
                 text.as_ref().trim()
             ))],
+            display_text: None,
             origin: MessageOrigin::injection(variant),
         }
     }
@@ -228,8 +244,25 @@ impl AgentMessage {
     pub fn injection_text(text: impl Into<Arc<str>>, variant: impl Into<Arc<str>>) -> Self {
         Self::User {
             content: vec![Content::text(text)],
+            display_text: None,
             origin: MessageOrigin::injection(variant),
         }
+    }
+
+    /// Human-facing text for a user message, when it differs from model content.
+    #[must_use]
+    pub fn display_text(&self) -> Option<&str> {
+        match self {
+            Self::User { display_text, .. } => display_text.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Text intended for human-facing transcript surfaces.
+    #[must_use]
+    pub fn presentation_text(&self) -> String {
+        self.display_text()
+            .map_or_else(|| self.text(), str::to_owned)
     }
 
     #[must_use]
@@ -897,6 +930,31 @@ mod tests {
         let reminder_json = serde_json::to_value(&reminder).expect("serialize reminder");
         assert_eq!(reminder_json["User"]["origin"]["kind"], "injection");
         assert_eq!(reminder_json["User"]["origin"]["variant"], "plan_mode");
+    }
+
+    #[test]
+    fn user_display_text_roundtrips_without_changing_provider_content() {
+        let message = AgentMessage::user_content_with_display(
+            vec![Content::text("<file path=\"src/main.rs\">snapshot</file>")],
+            "review @[main.rs]",
+        );
+        let wire = serde_json::to_string(&message).expect("serialize user message");
+        let decoded: AgentMessage = serde_json::from_str(&wire).expect("deserialize user message");
+
+        assert_eq!(decoded.display_text(), Some("review @[main.rs]"));
+        assert_eq!(decoded.presentation_text(), "review @[main.rs]");
+        let ChatMessage::User { content } = decoded.to_chat_message() else {
+            panic!("expected provider user message");
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [ContentPart::Text { text }] if text == "<file path=\"src/main.rs\">snapshot</file>"
+        ));
+
+        let legacy: AgentMessage =
+            serde_json::from_str(r#"{"User":{"content":[{"Text":{"text":"legacy"}}]}}"#)
+                .expect("deserialize legacy user message");
+        assert_eq!(legacy.display_text(), None);
     }
 
     #[test]

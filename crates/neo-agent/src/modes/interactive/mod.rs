@@ -480,6 +480,7 @@ pub(crate) struct PickerCatalogs {
 #[derive(Clone)]
 pub(crate) struct TurnRequest {
     pub prompt: Vec<Content>,
+    pub prompt_display_text: Option<String>,
     pub prompt_origin: MessageOrigin,
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
@@ -522,6 +523,7 @@ impl TurnRequest {
     ) -> Self {
         Self {
             prompt,
+            prompt_display_text: None,
             prompt_origin: MessageOrigin::User,
             session_id,
             model,
@@ -1571,6 +1573,7 @@ impl InteractiveController {
             &self.file_reference_store,
             &self.completion_root,
         );
+        let transcript_text = neo_tui::paste::markers_as_chips(&prompt);
         let transcript_images = crate::prompt::parts::transcript_image_attachments(
             &prompt,
             &self.image_attachment_store,
@@ -1578,21 +1581,21 @@ impl InteractiveController {
         // Persist the resolved user prompt after prompt-template and attachment
         // expansion to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
-        let display_text = content_to_display_text(&content);
-        self.append_prompt_history(&display_text);
+        let expanded_display_text = content_to_display_text(&content);
+        self.append_prompt_history(&expanded_display_text);
         if render_local_user_message {
             if transcript_images.is_empty() {
                 self.tui
                     .transcript_mut()
-                    .push_user_message(display_text.clone());
+                    .push_user_message(transcript_text.clone());
             } else {
                 self.tui
                     .transcript_mut()
-                    .push_user_message_with_images(display_text.clone(), transcript_images);
+                    .push_user_message_with_images(transcript_text.clone(), transcript_images);
             }
-            self.pending_local_user_message_to_suppress = Some(display_text);
+            self.pending_local_user_message_to_suppress = Some(transcript_text.clone());
         }
-        self.start_turn_with_prompt(content);
+        self.start_turn_with_prompt_display(content, transcript_text);
         Ok(())
     }
 
@@ -1639,8 +1642,8 @@ impl InteractiveController {
             &self.file_reference_store,
             &self.completion_root,
         );
-        let display_text = content_to_display_text(&content);
-        let message = AgentMessage::user_content(content);
+        let display_text = neo_tui::paste::markers_as_chips(prompt);
+        let message = AgentMessage::user_content_with_display(content, display_text.clone());
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             self.tui
@@ -1713,8 +1716,8 @@ impl InteractiveController {
                 &self.file_reference_store,
                 &self.completion_root,
             );
-            let display_text = content_to_display_text(&content);
-            let message = AgentMessage::user_content(content);
+            let display_text = neo_tui::paste::markers_as_chips(&text);
+            let message = AgentMessage::user_content_with_display(content, display_text.clone());
             steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(message));
             self.tui
                 .chrome_mut()
@@ -1857,7 +1860,12 @@ impl InteractiveController {
 
     fn render_appended_user_message_if_needed(&mut self, event: &AgentEvent) {
         let AgentEvent::MessageAppended {
-            message: AgentMessage::User { content, origin },
+            message:
+                AgentMessage::User {
+                    content,
+                    display_text,
+                    origin,
+                },
         } = event
         else {
             return;
@@ -1865,7 +1873,9 @@ impl InteractiveController {
         if origin.is_injection() {
             return;
         }
-        let text = content_to_display_text(content);
+        let text = display_text
+            .as_deref()
+            .map_or_else(|| content_to_display_text(content), str::to_owned);
         if text.trim().is_empty() {
             return;
         }

@@ -4423,7 +4423,7 @@ async fn event_loop_submits_file_reference_content() {
 }
 
 #[tokio::test]
-async fn event_loop_file_reference_marker_expands_in_submitted_turn() {
+async fn event_loop_file_reference_marker_keeps_chip_in_user_transcript() {
     let temp = tempfile::tempdir().expect("tempdir");
     let src = temp.path().join("crates/neo-agent/src/modes/interactive");
     fs::create_dir_all(&src).expect("mkdir");
@@ -4506,7 +4506,126 @@ async fn event_loop_file_reference_marker_expands_in_submitted_turn() {
             "<file path=\"crates/neo-agent/src/modes/interactive/prompt_completion.rs\">\n</file> explain this file"
         )]
     );
+    assert_eq!(
+        requests[0].prompt_display_text.as_deref(),
+        Some("@[prompt_completion.rs] explain this file")
+    );
     assert_eq!(requests[0].model, None);
+    assert!(transcript_entries(&controller).iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::UserMessage { content, .. }
+            if content == "@[prompt_completion.rs] explain this file"
+    )));
+    assert!(
+        transcript_entries(&controller)
+            .iter()
+            .all(|entry| !matches!(
+                entry,
+                TranscriptEntry::UserMessage { content, .. } if content.contains("<file path=")
+            ))
+    );
+}
+
+#[tokio::test]
+async fn queued_file_reference_keeps_chip_when_appended() {
+    let mut controller = running_turn_controller().await;
+    controller.type_text("review [file #1 main.rs]");
+
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("enter while busy enqueues");
+
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["review @[main.rs]"]
+    );
+    controller.apply_turn_event(AgentEvent::FollowUpQueued {
+        message: AgentMessage::user_content_with_display(
+            [Content::text(
+                "review <file path=\"src/main.rs\">snapshot</file>",
+            )],
+            "review @[main.rs]",
+        ),
+    });
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .len(),
+        1,
+        "runtime ack must consume the compact optimistic preview"
+    );
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_content_with_display(
+            [Content::text(
+                "review <file path=\"src/main.rs\">snapshot</file>",
+            )],
+            "review @[main.rs]",
+        ),
+    });
+    assert!(transcript_entries(&controller).iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::UserMessage { content, .. } if content == "review @[main.rs]"
+    )));
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
+async fn steered_file_reference_keeps_chip_when_appended() {
+    let mut controller = running_turn_controller().await;
+    controller.type_text("inspect [file #1 lib.rs]");
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("ctrl+s steers");
+
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["inspect @[lib.rs]"]
+    );
+    controller.apply_turn_event(AgentEvent::SteeringQueued {
+        message: AgentMessage::user_content_with_display(
+            [Content::text(
+                "inspect <file path=\"src/lib.rs\">snapshot</file>",
+            )],
+            "inspect @[lib.rs]",
+        ),
+    });
+    assert_eq!(
+        controller.chrome().pending_input().pending_steers().len(),
+        1,
+        "runtime ack must consume the compact optimistic preview"
+    );
+    controller.apply_turn_event(AgentEvent::MessageAppended {
+        message: AgentMessage::user_content_with_display(
+            [Content::text(
+                "inspect <file path=\"src/lib.rs\">snapshot</file>",
+            )],
+            "inspect @[lib.rs]",
+        ),
+    });
+    assert!(transcript_entries(&controller).iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::UserMessage { content, .. } if content == "inspect @[lib.rs]"
+    )));
+
+    controller.cancel_active_turn().await.expect("cancel turn");
 }
 
 #[tokio::test]
@@ -6984,6 +7103,26 @@ fn replay_session_into_transcript_restores_aggregate_messages_when_no_detail_eve
     assert!(rendered.contains("aggregate-assistant"), "{rendered}");
     assert!(rendered.contains("aggregate.txt"), "{rendered}");
     assert!(rendered.contains("aggregate-result"), "{rendered}");
+}
+
+#[test]
+fn replay_session_into_transcript_prefers_user_display_text() {
+    let mut transcript = TranscriptPane::new(100, 20);
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_content_with_display(
+                [Content::text("<file path=\"src/main.rs\">snapshot</file>")],
+                "review @[main.rs]",
+            ),
+        },
+    ]);
+
+    replay_session_into_transcript(&mut transcript, &loaded);
+
+    assert!(matches!(
+        transcript.transcript().entries(),
+        [TranscriptEntry::UserMessage { content, .. }] if content == "review @[main.rs]"
+    ));
 }
 
 #[test]
