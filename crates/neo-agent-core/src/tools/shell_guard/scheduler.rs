@@ -630,11 +630,11 @@ mod tests {
         wait_for_queued(&scheduler, 1).await;
         let bg_a2 = spawn_waiter(&scheduler, "a", AgentBackground, "bg-a2", order.clone());
         wait_for_queued(&scheduler, 2).await;
-        let bg_b1 = spawn_waiter(&scheduler, "b", AgentBackground, "bg-b1", order.clone());
+        let bg_b = spawn_waiter(&scheduler, "b", AgentBackground, "bg-b", order.clone());
         wait_for_queued(&scheduler, 3).await;
         let fg_a1 = spawn_waiter(&scheduler, "a", AgentForeground, "fg-a1", order.clone());
         wait_for_queued(&scheduler, 4).await;
-        let fg_b1 = spawn_waiter(&scheduler, "b", AgentForeground, "fg-b1", order.clone());
+        let fg_b = spawn_waiter(&scheduler, "b", AgentForeground, "fg-b", order.clone());
         wait_for_queued(&scheduler, 5).await;
         let user = spawn_waiter(&scheduler, "user", User, "user", order.clone());
         wait_for_queued(&scheduler, 6).await;
@@ -642,13 +642,13 @@ mod tests {
         drop(held);
         drop(user.await.expect("user grant"));
         drop(fg_a1.await.expect("foreground a grant"));
-        drop(fg_b1.await.expect("foreground b grant"));
+        drop(fg_b.await.expect("foreground b grant"));
         drop(bg_a1.await.expect("background a1 grant"));
-        drop(bg_b1.await.expect("background b1 grant"));
+        drop(bg_b.await.expect("background b grant"));
         drop(bg_a2.await.expect("background a2 grant"));
         assert_eq!(
             *order.lock().expect("order lock"),
-            ["user", "fg-a1", "fg-b1", "bg-a1", "bg-b1", "bg-a2"]
+            ["user", "fg-a1", "fg-b", "bg-a1", "bg-b", "bg-a2"]
         );
     }
 

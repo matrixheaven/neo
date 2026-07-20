@@ -791,8 +791,14 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
 
     let enter_count = output_text.matches("?1049h").count();
     let leave_count = output_text.matches("?1049l").count();
-    assert_eq!(enter_count, 1, "expected one alternate enter: {output_text}");
-    assert_eq!(leave_count, 1, "expected one alternate leave: {output_text}");
+    assert_eq!(
+        enter_count, 1,
+        "expected one alternate enter: {output_text}"
+    );
+    assert_eq!(
+        leave_count, 1,
+        "expected one alternate leave: {output_text}"
+    );
     assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
 
     let pre = retained

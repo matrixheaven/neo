@@ -2512,7 +2512,7 @@ mod tests {
         let stderr = String::from_utf8(stderr).expect("plain UTF-8 notice");
         assert_eq!(
             stderr,
-            "Reconnecting 1/5 in 500ms: Network error: body closed  retry detail\n"
+            "Reconnecting 1/5 in 500ms: Network error: body closed retry detail\n"
         );
         assert!(!stderr.contains('\u{1b}'));
     }

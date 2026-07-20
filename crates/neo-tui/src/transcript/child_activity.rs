@@ -217,11 +217,11 @@ pub(super) fn bounded_tool_status_text(
 }
 
 fn compact_middle_width(text: &str, max_width: usize) -> String {
+    const SEPARATOR: &str = " … ";
     let width = visible_width(text);
     if width <= max_width {
         return text.to_owned();
     }
-    const SEPARATOR: &str = " … ";
     let separator_width = visible_width(SEPARATOR);
     if max_width <= separator_width {
         return clip_plain_to_width(text, max_width);

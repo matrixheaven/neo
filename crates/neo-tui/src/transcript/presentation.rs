@@ -619,7 +619,7 @@ mod tests {
         pane.set_live_chrome_height(0);
         pane.transcript_mut().upsert_delegate(1, running);
         for index in 0..12 {
-            pane.push_status(&format!("deferred status {index}"));
+            pane.push_status(format!("deferred status {index}"));
         }
 
         let update = pane.render_terminal_update(80, 4);

@@ -216,13 +216,9 @@ impl NeoTui {
             );
         }
 
-        if self.automatic_overflow.is_some() {
+        if let Some(viewport) = self.automatic_overflow.as_mut() {
             let body_height = height.saturating_sub(chrome_render.lines.len());
             let mut lines = {
-                let viewport = self
-                    .automatic_overflow
-                    .as_mut()
-                    .expect("automatic overflow latch is active");
                 self.transcript
                     .render_viewport_rows(viewport, width, body_height)
             };

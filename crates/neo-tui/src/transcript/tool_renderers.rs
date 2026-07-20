@@ -87,7 +87,7 @@ pub fn tool_header_spans_with_elapsed(
     spans
 }
 
-/// Render the semantic WaitDelegate header. `elapsed_secs` is intentionally
+/// Render the semantic `WaitDelegate` header. `elapsed_secs` is intentionally
 /// supplied by the live component; replayed cards have no trustworthy timer.
 #[must_use]
 pub fn wait_delegate_header_spans(
@@ -261,7 +261,7 @@ fn list_delegates_header_chip(state: &ToolCallState) -> Option<String> {
     Some(format!("{count} of {total}"))
 }
 
-/// Structured ListDelegates body from `details.kind == "delegate_list"`.
+/// Structured `ListDelegates` body from `details.kind == "delegate_list"`.
 /// Never exposes opaque pagination cursors. Falls back to generic rendering
 /// when details are missing or malformed.
 fn render_list_delegates_body(
@@ -301,41 +301,38 @@ fn render_list_delegates_body(
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("agent");
-            let line = match kind {
-                "swarm" => {
-                    let description = row
-                        .get("description")
-                        .and_then(serde_json::Value::as_str)
-                        .map(one_line)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or_else(|| "swarm".to_owned());
-                    let status = row
-                        .get("status")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    format!("  {branch} {description} · {status}")
-                }
-                _ => {
-                    let name = row
-                        .get("display_name")
-                        .and_then(serde_json::Value::as_str)
-                        .map(one_line)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or_else(|| "agent".to_owned());
-                    let status = row
-                        .get("status")
-                        .or_else(|| row.get("current_status"))
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    let title = row
-                        .get("title")
-                        .and_then(serde_json::Value::as_str)
-                        .map(one_line)
-                        .filter(|value| !value.is_empty());
-                    match title {
-                        Some(title) => format!("  {branch} {name} · {status} · {title}"),
-                        None => format!("  {branch} {name} · {status}"),
-                    }
+            let line = if kind == "swarm" {
+                let description = row
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(one_line)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "swarm".to_owned());
+                let status = row
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                format!("  {branch} {description} · {status}")
+            } else {
+                let name = row
+                    .get("display_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(one_line)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "agent".to_owned());
+                let status = row
+                    .get("status")
+                    .or_else(|| row.get("current_status"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let title = row
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(one_line)
+                    .filter(|value| !value.is_empty());
+                match title {
+                    Some(title) => format!("  {branch} {name} · {status} · {title}"),
+                    None => format!("  {branch} {name} · {status}"),
                 }
             };
             rows.push(palette.body_line(line).truncate_to_width(content_width));
@@ -485,7 +482,7 @@ fn render_sleep_body(
     }
 }
 
-/// Render structured WaitDelegate target rows. Malformed/validation results
+/// Render structured `WaitDelegate` target rows. Malformed/validation results
 /// return `None` so the existing generic result renderer remains the fallback.
 fn render_wait_delegate_body(
     state: &ToolCallState,

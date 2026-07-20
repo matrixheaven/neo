@@ -163,8 +163,7 @@ impl Tool for TerminalTool {
                         ctx,
                         &required_field(self.name(), input.command, "command")?,
                         input.cwd.as_deref(),
-                        input.cols,
-                        input.rows,
+                        (input.cols.unwrap_or(80), input.rows.unwrap_or(24)),
                         timeout,
                         max_output_bytes,
                         yield_for,
@@ -220,14 +219,14 @@ async fn start_terminal(
     ctx: &ToolContext,
     command: &str,
     cwd: Option<&str>,
-    cols: Option<u16>,
-    rows: Option<u16>,
+    size: (u16, u16),
     timeout: Option<Duration>,
     max_output_bytes: usize,
     yield_for: Duration,
 ) -> Result<ToolResult, ToolError> {
-    let cols = cols.unwrap_or(80).max(1);
-    let rows = rows.unwrap_or(24).max(1);
+    let (cols, rows) = size;
+    let cols = cols.max(1);
+    let rows = rows.max(1);
     let handle = Uuid::new_v4().to_string();
     let task_id = format!("terminal-{handle}");
     let status_dir = ctx.background_tasks.persistence_dir().map_or(

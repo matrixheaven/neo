@@ -252,7 +252,7 @@ impl InlineTerminal {
         transaction.extend_from_slice(&live_bytes);
 
         // Track absolute hardware cursor after the live draw.
-        let live_len = frame.live.len() as u16;
+        let live_len = u16::try_from(frame.live.len()).unwrap_or(u16::MAX);
         if let Some(cursor) = frame.cursor {
             next_geometry.cursor_row = next_geometry
                 .live_top
@@ -353,7 +353,8 @@ impl InlineTerminal {
             ));
         }
 
-        let live_height = self.live.previous_line_count().min(usize::from(height)) as u16;
+        let live_height = u16::try_from(self.live.previous_line_count().min(usize::from(height)))
+            .unwrap_or(u16::MAX);
         let cursor_offset = self
             .geometry
             .cursor_row
@@ -504,7 +505,7 @@ impl InlineTerminal {
     }
 
     fn clear_live_to(&mut self, output: &mut dyn Write, show_cursor: bool) -> std::io::Result<()> {
-        let previous_live_rows = self.live.previous_line_count() as u16;
+        let previous_live_rows = u16::try_from(self.live.previous_line_count()).unwrap_or(u16::MAX);
         let mut next_live = self.live.clone();
         let mut transaction = next_live.clear_at_origin(self.geometry.live_top);
         // After clearing the live viewport, park the cursor on the first cleared
@@ -520,14 +521,18 @@ impl InlineTerminal {
         {
             // Live occupied the bottom of the screen; scroll one line so the
             // cursor rests below the last finalized Neo row.
-            transaction.push_str(&format!("\x1b[{};1H\r\n", u32::from(self.geometry.height)));
+            let _ = write!(
+                transaction,
+                "\x1b[{};1H\r\n",
+                u32::from(self.geometry.height)
+            );
             cursor_row = self.geometry.height.saturating_sub(1);
         }
         // Reset margins first — some terminals (and the vt100 harness) home the
         // cursor when applying CSI r — then restore the absolute leave cursor.
         transaction.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));
         let ansi_row = u32::from(cursor_row).saturating_add(1);
-        transaction.push_str(&format!("\x1b[{ansi_row};1H"));
+        let _ = write!(transaction, "\x1b[{ansi_row};1H");
         if show_cursor {
             transaction.push_str("\x1b[?25h");
         }

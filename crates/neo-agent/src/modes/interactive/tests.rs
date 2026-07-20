@@ -4977,7 +4977,10 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(controller.tui.automatic_overflow_active());
-    assert_ne!(before, after, "pageup must move the automatic overflow viewport");
+    assert_ne!(
+        before, after,
+        "pageup must move the automatic overflow viewport"
+    );
 
     controller
         .handle_input_event(InputEvent::Insert('h'))

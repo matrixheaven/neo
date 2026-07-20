@@ -149,7 +149,7 @@ struct PersistedTaskIdentity {
 }
 
 enum PersistedTaskFiles {
-    Final(BackgroundTaskSnapshot),
+    Final(Box<BackgroundTaskSnapshot>),
     Running,
     Missing,
 }
@@ -851,7 +851,7 @@ impl BackgroundTaskManager {
                 .await;
         }
         match Self::inspect_persisted_task(root, task_id, &final_path, &running_path).await? {
-            PersistedTaskFiles::Final(snapshot) => return Ok(Some(snapshot)),
+            PersistedTaskFiles::Final(snapshot) => return Ok(Some(*snapshot)),
             PersistedTaskFiles::Missing => return Ok(None),
             PersistedTaskFiles::Running => {}
         }
@@ -876,7 +876,7 @@ impl BackgroundTaskManager {
     ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
         Ok(
             match Self::inspect_persisted_task(root, task_id, final_path, running_path).await? {
-                PersistedTaskFiles::Final(snapshot) => Some(snapshot),
+                PersistedTaskFiles::Final(snapshot) => Some(*snapshot),
                 PersistedTaskFiles::Missing => None,
                 PersistedTaskFiles::Running => Some(BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
@@ -900,7 +900,7 @@ impl BackgroundTaskManager {
         running_path: &Path,
     ) -> Result<PersistedTaskFiles, ToolError> {
         if let Some(snapshot) = Self::read_persisted_final(root, task_id, final_path).await? {
-            return Ok(PersistedTaskFiles::Final(snapshot));
+            return Ok(PersistedTaskFiles::Final(Box::new(snapshot)));
         }
         let running = Self::read_persisted_running(task_id, running_path).await?;
         Self::inspect_after_first_running(root, task_id, final_path, running_path, running).await
@@ -914,7 +914,7 @@ impl BackgroundTaskManager {
         first_running: bool,
     ) -> Result<PersistedTaskFiles, ToolError> {
         if let Some(snapshot) = Self::read_persisted_final(root, task_id, final_path).await? {
-            return Ok(PersistedTaskFiles::Final(snapshot));
+            return Ok(PersistedTaskFiles::Final(Box::new(snapshot)));
         }
         let second_running = Self::read_persisted_running(task_id, running_path).await?;
         if first_running && second_running {
