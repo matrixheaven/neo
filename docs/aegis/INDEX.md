@@ -129,3 +129,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-20 | work | docs/aegis/work/2026-07-20-at-file-reference-transcript-projection/proof-bundle.md | 2026-07-20-at-file-reference-transcript-projection proof bundle |
 | 2026-07-20 | spec | docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md | Append-Only Skill Catalog Spec Brief |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-append-only-skill-catalog.md | Append-Only Skill Catalog Implementation Plan |
+| 2026-07-21 | spec | docs/aegis/specs/2026-07-21-batch-write-design.md | Neo Batch Write Prepared Execution Design |
+| 2026-07-21 | plan | docs/aegis/plans/2026-07-21-batch-write.md | Neo Batch Write Prepared Execution Implementation Plan |
