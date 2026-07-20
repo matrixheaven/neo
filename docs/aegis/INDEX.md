@@ -74,4 +74,35 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-19 | plan | docs/aegis/plans/2026-07-19-transcript-overflow-tool-results.md | Automatic Transcript Overflow and Tool Result Presentation |
 | 2026-07-20 | spec | docs/aegis/specs/2026-07-20-bash-terminal-tool-card-brief.md | Bash and Terminal Tool Call Presentation Spec Brief |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-bash-terminal-tool-card.md | Bash and Terminal Tool Call Presentation Implementation Plan |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/10-intent.md | Bash and Terminal Tool Call Presentation intent |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/20-checkpoint.md | Bash and Terminal Tool Call Presentation checkpoint |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/90-evidence.md | Bash and Terminal Tool Call Presentation evidence |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/99-reflection.md | Bash and Terminal Tool Call Presentation reflection |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/task-intent-draft.json | Bash and Terminal Tool Call Presentation task intent draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/baseline-read-set-hint.json | Bash and Terminal Tool Call Presentation baseline read-set hint |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/baseline-usage-draft.json | Bash and Terminal Tool Call Presentation baseline usage draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/impact-statement-draft.json | Bash and Terminal Tool Call Presentation impact statement draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/todo-checkpoint-draft.json | Bash and Terminal Tool Call Presentation todo checkpoint draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/drift-check-draft.json | Bash and Terminal Tool Call Presentation drift check draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-dirty-baseline-terminal-control-test.json | 2026-07-20-bash-terminal-tool-card evidence dirty-baseline-terminal-control-test |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/resume-state-hint.json | 2026-07-20-bash-terminal-tool-card resume state hint |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-terminal-ordered-input.md | Terminal Ordered Input Implementation Plan |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/10-intent.md | Terminal Ordered Input intent |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/20-checkpoint.md | Terminal Ordered Input checkpoint |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/90-evidence.md | Terminal Ordered Input evidence |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-terminal-ordered-input/99-reflection.md | Terminal Ordered Input reflection |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/task-intent-draft.json | Terminal Ordered Input task intent draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/baseline-read-set-hint.json | Terminal Ordered Input baseline read-set hint |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/baseline-usage-draft.json | Terminal Ordered Input baseline usage draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/impact-statement-draft.json | Terminal Ordered Input impact statement draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/todo-checkpoint-draft.json | Terminal Ordered Input todo checkpoint draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-terminal-ordered-input/drift-check-draft.json | Terminal Ordered Input drift check draft |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-task1-shell-engine.json | 2026-07-20-bash-terminal-tool-card evidence task1-shell-engine |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-task2-bash-card.json | 2026-07-20-bash-terminal-tool-card evidence task2-bash-card |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-task3-terminal-card.json | 2026-07-20-bash-terminal-tool-card evidence task3-terminal-card |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-task4-delegate-shell-summary.json | 2026-07-20-bash-terminal-tool-card evidence task4-delegate-shell-summary |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-task5-fresh-verification.json | 2026-07-20-bash-terminal-tool-card evidence task5-fresh-verification |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-final-control-safety-repair.json | 2026-07-20-bash-terminal-tool-card evidence final-control-safety-repair |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/gate-input-pack.json | 2026-07-20-bash-terminal-tool-card gate input pack |
+| 2026-07-20 | work | docs/aegis/work/2026-07-20-bash-terminal-tool-card/proof-bundle.md | 2026-07-20-bash-terminal-tool-card proof bundle |
+| 2026-07-20 | artifact | docs/aegis/work/2026-07-20-bash-terminal-tool-card/evidence-bundle-draft-scoped-commit.json | 2026-07-20-bash-terminal-tool-card evidence scoped-commit |
