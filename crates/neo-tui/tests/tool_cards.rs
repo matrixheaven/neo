@@ -1209,6 +1209,39 @@ fn narrow_write_frame_expands_tabs_without_extra_border_overflow() {
 }
 
 #[test]
+fn write_frame_shrinks_to_content_width() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "write-compact-frame".to_owned(),
+        name: "Write".to_owned(),
+        arguments: Some(json!({"path": "x.rs", "content": "ok"}).to_string()),
+        result: Some("written".to_owned()),
+        details: None,
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(80));
+    let top = rows
+        .iter()
+        .position(|row| row.starts_with('╭'))
+        .expect("frame top");
+    let bottom = rows
+        .iter()
+        .position(|row| row.starts_with('╰'))
+        .expect("frame bottom");
+    let frame = &rows[top..=bottom];
+    let frame_width = neo_tui::primitive::visible_width(&frame[0]);
+
+    assert!(frame_width < 80, "{frame:?}");
+    assert!(
+        frame
+            .iter()
+            .all(|row| neo_tui::primitive::visible_width(row) == frame_width),
+        "{frame:?}"
+    );
+}
+
+#[test]
 fn transcript_pane_expansion_state_is_instance_local() {
     let mut expanded_pane = TranscriptPane::new(80, 12);
     let collapsed_pane = TranscriptPane::new(80, 12);

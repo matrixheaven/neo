@@ -823,7 +823,7 @@ pub(super) fn framed_content_width(width: usize) -> usize {
     }
 }
 
-/// Full-width rounded frame shared by Edit and Write projections.
+/// Content-width rounded frame shared by Edit and Write projections.
 pub(super) fn render_code_frame(
     header: Line,
     body: Vec<Line>,
@@ -840,18 +840,25 @@ pub(super) fn render_code_frame(
     let border = theme.map_or_else(Style::default, |theme| {
         Style::default().fg(theme.surface_border)
     });
-    let inner = framed_content_width(width);
-    let horizontal = "─".repeat(width - 2);
+    let wrapped = std::iter::once(header)
+        .chain(body)
+        .flat_map(|line| hard_wrap_line(&line, framed_content_width(width)))
+        .collect::<Vec<_>>();
+    let inner = wrapped
+        .iter()
+        .map(Line::visible_width)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let horizontal = "─".repeat(inner + 2);
     let mut rows = vec![Line::styled(format!("╭{horizontal}╮"), border)];
-    for line in std::iter::once(header).chain(body) {
-        for wrapped in hard_wrap_line(&line, inner) {
-            let padding = " ".repeat(inner.saturating_sub(wrapped.visible_width()));
-            let mut spans = vec![Span::styled("│ ", border)];
-            spans.extend(wrapped.into_spans());
-            spans.push(Span::raw(padding));
-            spans.push(Span::styled(" │", border));
-            rows.push(Line::from_spans(spans));
-        }
+    for line in wrapped {
+        let padding = " ".repeat(inner.saturating_sub(line.visible_width()));
+        let mut spans = vec![Span::styled("│ ", border)];
+        spans.extend(line.into_spans());
+        spans.push(Span::raw(padding));
+        spans.push(Span::styled(" │", border));
+        rows.push(Line::from_spans(spans));
     }
     rows.push(Line::styled(format!("╰{horizontal}╯"), border));
     rows
