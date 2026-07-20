@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::diff::unified_diff;
+use super::diff::{diff_stats, unified_diff};
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ impl Tool for WriteTool {
             ctx.ensure_file_write_allowed()?;
             let input: WriteInput = parse_input(self.name(), input)?;
             let path = ctx.resolve_parent_for_write(&input.path)?;
-            let before = match tokio::fs::read_to_string(&path).await {
+            let before = match tokio::fs::read(&path).await {
                 Ok(content) => Some(content),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
@@ -70,40 +70,33 @@ impl Tool for WriteTool {
     }
 }
 
-fn write_details(input: &WriteInput, before: Option<&str>, after: &str) -> serde_json::Value {
+fn write_details(input: &WriteInput, before: Option<&[u8]>, after: &str) -> serde_json::Value {
     let path = input.path.to_string_lossy();
     let operation = if before.is_some() {
         "overwritten"
     } else {
         "created"
     };
-    let before = before.unwrap_or_default();
-    let diff = unified_diff(&path, before, after);
-    let (added, removed) = diff_stats(&diff);
-    json!({
+    let preview_before = match before {
+        Some(bytes) => std::str::from_utf8(bytes).ok(),
+        None => Some(""),
+    };
+    let mut details = json!({
         "path": path,
         "operation": operation,
-        "diff": diff,
-        "added": added,
-        "removed": removed,
         "line_count": after.lines().count(),
-    })
-}
-
-fn diff_stats(diff: &str) -> (usize, usize) {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
+        "diff_available": preview_before.is_some(),
+    });
+    if let Some(before) = preview_before {
+        let diff = unified_diff(&path, before, after);
+        let (added, removed) = diff_stats(&diff);
+        details["diff"] = json!(diff);
+        details["added"] = json!(added);
+        details["removed"] = json!(removed);
+    } else {
+        details["diff_unavailable_reason"] = json!("existing file content is not valid UTF-8");
     }
-    (added, removed)
+    details
 }
 
 #[cfg(test)]

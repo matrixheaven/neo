@@ -89,11 +89,7 @@ async fn edit_batch_applies_ordered_replacements_across_files() {
         .with_access(neo_agent_core::ToolAccess::all());
 
     std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
-    std::fs::write(
-        workspace.path().join("src/a.txt"),
-        "one two one\nthree\n",
-    )
-    .expect("seed a");
+    std::fs::write(workspace.path().join("src/a.txt"), "one two one\nthree\n").expect("seed a");
     std::fs::write(workspace.path().join("src/b.txt"), "alpha\nbeta\n").expect("seed b");
 
     let edit = registry
@@ -175,54 +171,6 @@ async fn edit_batch_prepare_mismatch_writes_nothing() {
     assert_eq!(details["status"], "prepare_failed");
     assert_eq!(std::fs::read_to_string(&a).expect("a"), "aaa\n");
     assert_eq!(std::fs::read_to_string(&b).expect("b"), "bbb\n");
-}
-
-#[tokio::test]
-async fn edit_batch_commit_failure_reports_partial_without_rollback() {
-    use neo_agent_core::PreparedEdit;
-    use std::sync::Arc;
-    use tokio_util::sync::CancellationToken;
-
-    let workspace = tempfile::tempdir().expect("workspace");
-    let context = neo_agent_core::ToolContext::new(workspace.path())
-        .expect("context")
-        .with_access(neo_agent_core::ToolAccess::all());
-
-    std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
-    let a = workspace.path().join("src/a.txt");
-    let b = workspace.path().join("src/b.txt");
-    let c = workspace.path().join("src/c.txt");
-    std::fs::write(&a, "aaa\n").expect("seed a");
-    std::fs::write(&b, "bbb\n").expect("seed b");
-    std::fs::write(&c, "ccc\n").expect("seed c");
-
-    let prepared = PreparedEdit::prepare(
-        &context,
-        &json!({
-            "files": [
-                { "path": "src/a.txt", "replacements": [{ "old": "aaa", "new": "AAA" }] },
-                { "path": "src/b.txt", "replacements": [{ "old": "bbb", "new": "BBB" }] },
-                { "path": "src/c.txt", "replacements": [{ "old": "ccc", "new": "CCC" }] }
-            ]
-        }),
-    )
-    .await
-    .expect("prepare");
-    let prepared = Arc::clone(&prepared).with_injected_commit_failure(1);
-    let mut on_progress = |_update| {};
-    let result = prepared
-        .commit(&CancellationToken::new(), &mut on_progress)
-        .await;
-
-    assert!(result.is_error);
-    let details = result.details.expect("details");
-    assert_eq!(details["status"], "partial_commit");
-    assert_eq!(details["changes"][0]["status"], "committed");
-    assert_eq!(details["changes"][1]["status"], "failed");
-    assert_eq!(details["changes"][2]["status"], "not_attempted");
-    assert_eq!(std::fs::read_to_string(&a).expect("a"), "AAA\n");
-    assert_eq!(std::fs::read_to_string(&b).expect("b"), "bbb\n");
-    assert_eq!(std::fs::read_to_string(&c).expect("c"), "ccc\n");
 }
 
 #[tokio::test]
@@ -343,5 +291,36 @@ async fn write_tool_returns_overwritten_file_diff_details() {
     assert_eq!(
         details["diff"],
         "--- notes/list.txt\n+++ notes/list.txt\n@@ -1,3 +1,4 @@\n one\n-two\n+TWO\n three\n+four\n"
+    );
+}
+
+#[tokio::test]
+async fn write_overwrites_non_utf8_without_diff_preview() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = workspace.path().join("binary.bin");
+    std::fs::write(&path, [0xff, 0xfe]).expect("binary file");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all());
+
+    let write = registry
+        .run(
+            "Write",
+            &context,
+            json!({ "path": "binary.bin", "content": "replacement\n" }),
+        )
+        .await
+        .expect("Write");
+
+    assert!(!write.is_error);
+    assert_eq!(std::fs::read(&path).expect("read file"), b"replacement\n");
+    let details = write.details.expect("details");
+    assert_eq!(details["operation"], "overwritten");
+    assert_eq!(details["diff_available"], false);
+    assert!(details.get("diff").is_none());
+    assert_eq!(
+        details["diff_unavailable_reason"],
+        "existing file content is not valid UTF-8"
     );
 }

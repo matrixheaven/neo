@@ -1540,7 +1540,11 @@ impl MultiAgentRuntime {
                 } else {
                     AgentToolActivityPhase::Done
                 };
-                let summary = last_tool_summary(snapshot.activity.as_slice(), id);
+                let summary = result
+                    .details
+                    .as_ref()
+                    .and_then(summarize_edit_details)
+                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
                 upsert_tool_activity(
                     &mut snapshot.activity,
                     id,
@@ -1557,7 +1561,11 @@ impl MultiAgentRuntime {
                 ..
             } => {
                 changed = true;
-                let summary = last_tool_summary(snapshot.activity.as_slice(), id);
+                let summary = partial_result
+                    .details
+                    .as_ref()
+                    .and_then(summarize_edit_details)
+                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
                 upsert_tool_activity(
                     &mut snapshot.activity,
                     id,
@@ -2733,16 +2741,16 @@ fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
     } else {
         format!("{} … {}", compact_line(head), compact_line(tail))
     };
-    Some(format!(
+    Some(bounded_edit_summary(format!(
         "{} files · {} replacements · {path_part}",
         files.len(),
         replacements
-    ))
+    )))
 }
 
 fn summarize_edit_details(details: &serde_json::Value) -> Option<String> {
     let kind = details.get("kind")?.as_str()?;
-    match kind {
+    let summary = match kind {
         "edit_prepared" => {
             let files = details.get("files")?.as_u64()?;
             let replacements = details.get("replacements")?.as_u64()?;
@@ -2754,9 +2762,7 @@ fn summarize_edit_details(details: &serde_json::Value) -> Option<String> {
                 .get("removed")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            Some(format!(
-                "prepared · {files} files · {replacements} replacements · +{added} -{removed}"
-            ))
+            format!("prepared · {files} files · {replacements} replacements · +{added} -{removed}")
         }
         "edit_progress" => {
             let committed = details.get("committed")?.as_u64()?;
@@ -2765,25 +2771,98 @@ fn summarize_edit_details(details: &serde_json::Value) -> Option<String> {
                 .get("latest_path")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            Some(format!(
-                "committing {committed}/{total} · {}",
-                compact_line(latest)
-            ))
+            format!("committing {committed}/{total} · {}", compact_line(latest))
         }
         "edit" => {
             let status = details.get("status")?.as_str()?;
-            let files = details.get("files").and_then(serde_json::Value::as_u64);
+            let number = |key| {
+                details
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            let files = number("files");
+            let replacements = number("replacements");
+            let added = number("added");
+            let removed = number("removed");
+            let changes = details.get("changes").and_then(serde_json::Value::as_array);
+            let committed = changes.map_or(0, |changes| {
+                changes
+                    .iter()
+                    .filter(|change| {
+                        matches!(
+                            change.get("status").and_then(serde_json::Value::as_str),
+                            Some("committed" | "committed_unsynced")
+                        )
+                    })
+                    .count()
+            });
+            let failed_path = details
+                .get("failed_path")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    changes?
+                        .iter()
+                        .find(|change| {
+                            change.get("status").and_then(serde_json::Value::as_str)
+                                == Some("failed")
+                        })
+                        .and_then(|change| change.get("path"))
+                        .and_then(serde_json::Value::as_str)
+                });
             match status {
-                "committed" => Some(format!("committed · {} files", files.unwrap_or(0))),
-                "prepare_failed" => Some("prepare failed · zero writes".to_owned()),
-                "stale" => Some("stale · zero writes".to_owned()),
-                "partial_commit" => Some("partial commit".to_owned()),
-                "durability_uncertain" => Some("durability uncertain".to_owned()),
-                other => Some(other.to_owned()),
+                "committed" => {
+                    format!("{files} files · {replacements} replacements · +{added} -{removed}")
+                }
+                "prepare_failed" => "prepare failed · zero writes".to_owned(),
+                "stale" => "stale · zero writes".to_owned(),
+                "cancelled" => "cancelled · zero writes".to_owned(),
+                "commit_failed" => failed_path.map_or_else(
+                    || "commit failed · zero writes".to_owned(),
+                    |path| format!("commit failed · zero writes · {}", compact_line(path)),
+                ),
+                "partial_commit"
+                    if details.get("cause").and_then(serde_json::Value::as_str)
+                        == Some("cancelled") =>
+                {
+                    format!("cancelled · {committed}/{files} committed")
+                }
+                "partial_commit" => failed_path.map_or_else(
+                    || format!("partial · {committed}/{files} committed"),
+                    |path| {
+                        format!(
+                            "partial · {committed}/{files} committed · failed at {}",
+                            compact_line(path)
+                        )
+                    },
+                ),
+                "durability_uncertain" => {
+                    format!("durability uncertain · {committed}/{files} committed")
+                }
+                other => other.to_owned(),
             }
         }
-        _ => None,
+        _ => return None,
+    };
+    Some(bounded_edit_summary(summary))
+}
+
+fn bounded_edit_summary(summary: String) -> String {
+    const MAX: usize = 160;
+    const HEAD: usize = 78;
+    const SEPARATOR: &str = " … ";
+    const TAIL: usize = MAX - HEAD - 3;
+
+    let chars = summary.chars().count();
+    if chars <= MAX {
+        return summary;
     }
+    format!(
+        "{}{}{}",
+        summary.chars().take(HEAD).collect::<String>(),
+        SEPARATOR,
+        summary.chars().skip(chars - TAIL).collect::<String>()
+    )
 }
 
 const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 512;
@@ -3057,6 +3136,70 @@ mod tests {
         let summary = last_tool_summary(&activity, "e1").expect("summary");
         assert!(summary.contains("committing 2/5"), "{summary}");
         assert!(summary.contains("src/lib.rs"), "{summary}");
+    }
+
+    #[test]
+    fn live_edit_summary_uses_structured_progress_and_terminal_partial() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("edit files");
+        let started_at = Instant::now();
+        let progress = AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "e-live".to_owned(),
+            name: "Edit".to_owned(),
+            partial_result: ToolResult::ok("progress").with_details(serde_json::json!({
+                "kind": "edit_progress",
+                "committed": 1,
+                "total": 3,
+                "latest_path": "a.rs",
+                "added": 1,
+                "removed": 1
+            })),
+        };
+        runtime
+            .apply_child_event(&child.id, started_at, &progress)
+            .expect("progress update");
+        let progress_snapshot = runtime.agent_snapshot(child.id.as_str()).expect("snapshot");
+        let progress_summary =
+            last_tool_summary(&progress_snapshot.activity, "e-live").expect("progress summary");
+        assert!(
+            progress_summary.contains("committing 1/3"),
+            "{progress_summary}"
+        );
+
+        let finished = AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "e-live".to_owned(),
+            name: "Edit".to_owned(),
+            result: ToolResult::error("partial").with_details(serde_json::json!({
+                "kind": "edit",
+                "status": "partial_commit",
+                "files": 3,
+                "replacements": 3,
+                "added": 1,
+                "removed": 1,
+                "changes": [
+                    {"path":"a.rs","status":"committed"},
+                    {"path": format!("{}b.rs", "very-long-path/".repeat(20)), "status":"failed"},
+                    {"path":"c.rs","status":"not_attempted"}
+                ]
+            })),
+        };
+        runtime
+            .apply_child_event(&child.id, started_at, &finished)
+            .expect("finished update");
+        let finished_snapshot = runtime.agent_snapshot(child.id.as_str()).expect("snapshot");
+        let finished_summary =
+            last_tool_summary(&finished_snapshot.activity, "e-live").expect("finished summary");
+        assert!(
+            finished_summary.contains("partial · 1/3 committed"),
+            "{finished_summary}"
+        );
+        assert!(finished_summary.contains("failed at"), "{finished_summary}");
+        assert!(
+            finished_summary.chars().count() <= 160,
+            "{finished_summary}"
+        );
     }
 
     #[test]

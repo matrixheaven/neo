@@ -341,6 +341,8 @@ Top-level failure statuses are:
 ```text
 prepare_failed
 stale
+cancelled
+commit_failed
 partial_commit
 durability_uncertain
 ```
@@ -358,6 +360,12 @@ Errors include the exact path, file index, replacement index, expected/actual
 match count, stale reason, or I/O cause that made the call fail. Provider text
 must tell the model whether writes were zero, partial, or complete-but-unsynced
 and must not recommend blindly replaying the same Edit call.
+
+`cancelled` means cancellation was observed before the first file commit and
+therefore guarantees zero writes. Cancellation after one or more commits uses
+`partial_commit` plus `cause: "cancelled"`. `commit_failed` means the first
+atomic replacement failed before any durable write. Both statuses include the
+same ordered per-file `changes` projection used by the other terminal states.
 
 ## Progress Events
 
@@ -427,6 +435,39 @@ The stateful owner remains `ToolCallComponent`. A focused pure renderer,
 `transcript/edit_tool_presentation.rs`, owns structured extraction, batch
 summary, diff rendering, head/tail selection, failure rows, and width-safe
 wrapping. `tool_renderers.rs` only routes Edit states to the helper.
+
+### Shared Edit/Write file frame
+
+Every Edit file projection is enclosed in its own full-width rounded code
+frame. Write uses the same frame for its single-file preview so both mutation
+tools share one visual grammar:
+
+```text
+╭────────────────────────────────────────────────────╮
+│ ✓ src/model.rs                            +2 -2    │
+│ 12 - pub struct OldName {                           │
+│ 12 + pub struct NewName {                           │
+│ ... 6 changed lines hidden · ctrl+o to expand      │
+╰────────────────────────────────────────────────────╯
+```
+
+The status/path/stats row, every numbered diff row, diagnostics, and the
+collapsed omission row remain inside the frame. The omission row is
+left-aligned with the body; no detached right-side border is allowed. Global
+`Ctrl+O` is the only expansion owner: expanding reveals the complete clustered
+diff and moves the bottom border down, while collapsing restores the bounded
+frame. Each frame is independently height-derived from its visible rows.
+
+Diff line numbers are always present when source line numbers are known. Code
+tokens retain the existing Markdown-code-block syntax highlighting; removal
+and addition prefixes/line-number gutters use the existing red and green diff
+styles. A successful `✓` and `+N` use success/addition green, while `-N` uses
+removal red. Color is supplementary to the textual markers. Paths, code,
+diagnostics, and omission text hard-wrap inside the frame without truncation.
+
+Typed Edit approval renders the runtime-supplied verified projection through
+this same framed diff projection. It participates in global `Ctrl+O`; approval
+must never reconstruct or guess a diff from raw Edit arguments.
 
 ### Streaming arguments
 

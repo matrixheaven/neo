@@ -46,6 +46,21 @@ pub(super) fn unified_diff(path: &str, before: &str, after: &str) -> String {
     result
 }
 
+pub(super) fn diff_stats(diff: &str) -> (usize, usize) {
+    let mut lines = diff.lines();
+    let _old_header = lines.next();
+    let _new_header = lines.next();
+    lines.fold((0, 0), |(added, removed), line| {
+        if line.starts_with('+') {
+            (added + 1, removed)
+        } else if line.starts_with('-') {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
+}
+
 /// Convert a 0-based half-open `[start, start+len)` range into the `(line, count)`
 /// pair used in unified-diff hunk headers (`@@ -line,count +line,count @@`).
 fn hunk_range(start: usize, len: usize) -> (usize, usize) {
@@ -53,5 +68,17 @@ fn hunk_range(start: usize, len: usize) -> (usize, usize) {
         (start, 0)
     } else {
         (start + 1, len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_stats_counts_body_lines_that_resemble_headers() {
+        let diff = "--- file.txt\n+++ file.txt\n@@ -1,2 +1,2 @@\n---removed body\n+++added body\n";
+
+        assert_eq!(diff_stats(diff), (1, 1));
     }
 }

@@ -8,11 +8,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::diff::unified_diff;
+use super::diff::{diff_stats, unified_diff};
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::approval::{EditApprovalChange, EditApprovalPresentation};
 use crate::permissions::{FileWriteApprovalOperation, SessionApprovalKey, SessionApprovalScope};
-use crate::session::atomic_file::{AtomicWriteStatus, write_file_atomic_status};
+use crate::session::atomic_file::{AtomicWriteStatus, replace_existing_file_atomic_status};
 
 const fn default_expected_matches() -> usize {
     1
@@ -70,13 +70,11 @@ struct EditFingerprint {
 
 /// Runtime-only prepared Edit payload. Never serialized or persisted.
 #[derive(Debug, Clone)]
-pub struct PreparedEdit {
+pub(crate) struct PreparedEdit {
     files: Vec<PreparedEditFile>,
     replacements: usize,
     added: usize,
     removed: usize,
-    /// Test-only seam: fail the commit writer before replacement at this file index.
-    fail_commit_at: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +82,6 @@ struct PreparedEditFile {
     requested_path: PathBuf,
     resolved_path: PathBuf,
     fingerprint: EditFingerprint,
-    #[allow(dead_code)] // retained for recheck equality diagnostics and future audit
-    original: String,
     staged: String,
     replacements: usize,
     added: usize,
@@ -139,11 +135,13 @@ impl Tool for EditTool {
                 Ok(prepared) => prepared,
                 Err(result) => return Ok(result),
             };
-            if let Err(result) = prepared.recheck_all().await {
+            if let Err(result) = prepared.recheck_all(ctx).await {
                 return Ok(result);
             }
             let mut on_progress = |_update: ToolResult| {};
-            Ok(prepared.commit(&ctx.cancel_token, &mut on_progress).await)
+            Ok(prepared
+                .commit(ctx, &ctx.cancel_token, &mut on_progress)
+                .await)
         })
     }
 }
@@ -224,6 +222,16 @@ impl PreparedEdit {
                         format!("path resolution failed: {error}"),
                         "Re-read the path and submit a fresh Edit call.",
                     )
+                })?
+                .canonicalize()
+                .map_err(|error| {
+                    prepare_failed(
+                        Some(file_index),
+                        None,
+                        Some(file.path.display().to_string()),
+                        format!("failed to resolve existing target: {error}"),
+                        "Re-read the path and submit a fresh Edit call.",
+                    )
                 })?;
 
             let identity = resolved.as_os_str().to_owned();
@@ -238,54 +246,7 @@ impl PreparedEdit {
             }
 
             // Re-check resolved path (non-followed candidate already checked above).
-            let metadata = match std::fs::symlink_metadata(&resolved) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(prepare_failed(
-                        Some(file_index),
-                        None,
-                        Some(file.path.display().to_string()),
-                        format!("file does not exist: {}", resolved.display()),
-                        "Use Write to create new files, or re-read existing targets first.",
-                    ));
-                }
-                Err(error) => {
-                    return Err(prepare_failed(
-                        Some(file_index),
-                        None,
-                        Some(file.path.display().to_string()),
-                        format!(
-                            "failed to read metadata for {}: {error}",
-                            resolved.display()
-                        ),
-                        "Re-read the file and submit a fresh Edit call.",
-                    ));
-                }
-            };
-
-            if is_reparse_or_symlink(&metadata) {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    None,
-                    Some(file.path.display().to_string()),
-                    format!(
-                        "refusing symlink or reparse point target: {}",
-                        resolved.display()
-                    ),
-                    "Edit only supports existing UTF-8 regular files.",
-                ));
-            }
-            if !metadata.is_file() {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    None,
-                    Some(file.path.display().to_string()),
-                    format!("target is not a regular file: {}", resolved.display()),
-                    "Edit only supports existing UTF-8 regular files.",
-                ));
-            }
-
-            let bytes = match tokio::fs::read(&resolved).await {
+            let bytes = match read_regular_file_no_follow(&resolved) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     return Err(prepare_failed(
@@ -293,7 +254,7 @@ impl PreparedEdit {
                         None,
                         Some(file.path.display().to_string()),
                         format!("failed to read {}: {error}", resolved.display()),
-                        "Re-read the file and submit a fresh Edit call.",
+                        "Edit only supports existing UTF-8 regular files. Re-read the file and submit a fresh Edit call.",
                     ));
                 }
             };
@@ -365,7 +326,6 @@ impl PreparedEdit {
                 requested_path: file.path.clone(),
                 resolved_path: resolved,
                 fingerprint,
-                original,
                 staged,
                 replacements: file.replacements.len(),
                 added,
@@ -391,7 +351,6 @@ impl PreparedEdit {
             replacements: total_replacements,
             added,
             removed,
-            fail_commit_at: None,
         }))
     }
 
@@ -446,6 +405,14 @@ impl PreparedEdit {
         })
     }
 
+    #[must_use]
+    pub(crate) fn all_resolved_targets_match(&self, target: &Path) -> bool {
+        let Ok(target) = target.canonicalize() else {
+            return false;
+        };
+        !self.files.is_empty() && self.files.iter().all(|file| file.resolved_path == target)
+    }
+
     /// Structured `ToolExecutionUpdate` details for the verified planned projection.
     #[must_use]
     pub fn prepared_update(&self) -> ToolResult {
@@ -472,20 +439,72 @@ impl PreparedEdit {
         }))
     }
 
+    #[must_use]
+    pub(crate) fn cancelled_before_commit_result(&self) -> ToolResult {
+        ToolResult::error(
+            "Edit cancelled before the first commit. Zero writes. Re-read targets before a fresh Edit call.",
+        )
+        .with_details(json!({
+            "kind": "edit",
+            "status": "cancelled",
+            "cause": "cancelled",
+            "files": self.files.len(),
+            "replacements": self.replacements,
+            "added": 0,
+            "removed": 0,
+            "changes": self.files.iter().map(|file| file_change_json(
+                file,
+                "not_attempted",
+                file.replacements,
+                file.added,
+                file.removed,
+                Some(&file.diff),
+            )).collect::<Vec<_>>(),
+        }))
+    }
+
     /// Whole-batch fingerprint recheck. Zero writes on mismatch.
-    pub async fn recheck_all(&self) -> Result<(), ToolResult> {
+    pub async fn recheck_all(&self, context: &ToolContext) -> Result<(), ToolResult> {
         for (file_index, file) in self.files.iter().enumerate() {
-            self.recheck_file(file_index, file).await?;
+            self.recheck_file(context, file_index, file).await?;
         }
         Ok(())
     }
 
     async fn recheck_file(
         &self,
+        context: &ToolContext,
         file_index: usize,
         file: &PreparedEditFile,
     ) -> Result<(), ToolResult> {
-        let current = match read_fingerprint(&file.resolved_path).await {
+        let resolved = context
+            .resolve_parent_for_write(&file.requested_path)
+            .map_err(|error| {
+                stale_result(
+                    Some(file_index),
+                    Some(file.requested_path.display().to_string()),
+                    format!("path resolution changed after approval: {error}"),
+                )
+            })?
+            .canonicalize()
+            .map_err(|error| {
+                stale_result(
+                    Some(file_index),
+                    Some(file.requested_path.display().to_string()),
+                    format!("path resolution changed after approval: {error}"),
+                )
+            })?;
+        if resolved != file.resolved_path {
+            return Err(stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                format!(
+                    "{} resolves to a different target after approval",
+                    file.requested_path.display()
+                ),
+            ));
+        }
+        let current = match read_fingerprint(&resolved) {
             Ok(fingerprint) => fingerprint,
             Err(message) => {
                 return Err(stale_result(
@@ -511,8 +530,22 @@ impl PreparedEdit {
     /// Commit prepared files in declaration order with per-file atomic writes.
     pub async fn commit(
         &self,
+        context: &ToolContext,
         cancel_token: &CancellationToken,
         on_progress: &mut (dyn FnMut(ToolResult) + Send),
+    ) -> ToolResult {
+        self.commit_with_writer(context, cancel_token, on_progress, |_, path, content| {
+            replace_existing_file_atomic_status(path, content)
+        })
+        .await
+    }
+
+    async fn commit_with_writer(
+        &self,
+        context: &ToolContext,
+        cancel_token: &CancellationToken,
+        on_progress: &mut (dyn FnMut(ToolResult) + Send),
+        mut write_file: impl FnMut(usize, &Path, &[u8]) -> std::io::Result<AtomicWriteStatus>,
     ) -> ToolResult {
         let total = self.files.len();
         let mut changes = Vec::with_capacity(total);
@@ -522,6 +555,9 @@ impl PreparedEdit {
 
         for (file_index, file) in self.files.iter().enumerate() {
             if cancel_token.is_cancelled() {
+                if committed_count == 0 {
+                    return self.cancelled_before_commit_result();
+                }
                 // Already committed files stay committed; remaining are not_attempted.
                 for remaining in self.files.iter().skip(file_index) {
                     changes.push(file_change_json(
@@ -534,12 +570,11 @@ impl PreparedEdit {
                     ));
                 }
                 return ToolResult::error(format!(
-                    "Edit cancelled after committing {committed_count}/{total} files. \
-                     Committed content remains. Re-read remaining files before a fresh Edit call."
-                ))
-                .with_details(json!({
+                    "Edit cancelled after committing {committed_count}/{total} files. Committed content remains. Re-read remaining files before a fresh Edit call."
+                )).with_details(json!({
                     "kind": "edit",
                     "status": "partial_commit",
+                    "cause": "cancelled",
                     "files": total,
                     "replacements": self.replacements,
                     "added": cumulative_added,
@@ -548,7 +583,7 @@ impl PreparedEdit {
                 }));
             }
 
-            if let Err(result) = self.recheck_file(file_index, file).await {
+            if let Err(result) = self.recheck_file(context, file_index, file).await {
                 // Convert whole-batch stale into partial when earlier files committed.
                 if committed_count == 0 {
                     return result;
@@ -591,8 +626,7 @@ impl PreparedEdit {
                 }));
             }
 
-            let write_result =
-                self.write_file(file_index, &file.resolved_path, file.staged.as_bytes());
+            let write_result = write_file(file_index, &file.resolved_path, file.staged.as_bytes());
             match write_result {
                 Ok(AtomicWriteStatus::Durable) => {
                     committed_count += 1;
@@ -679,7 +713,7 @@ impl PreparedEdit {
                         ));
                     }
                     let status = if committed_count == 0 {
-                        "partial_commit"
+                        "commit_failed"
                     } else {
                         "partial_commit"
                     };
@@ -724,57 +758,6 @@ impl PreparedEdit {
             "removed": self.removed,
             "changes": changes,
         }))
-    }
-
-    fn write_file(
-        &self,
-        file_index: usize,
-        path: &Path,
-        content: &[u8],
-    ) -> std::io::Result<AtomicWriteStatus> {
-        if self.fail_commit_at == Some(file_index) {
-            return Err(std::io::Error::other(format!(
-                "injected commit failure at file index {file_index}"
-            )));
-        }
-        write_file_atomic_status(path, content)
-    }
-
-    /// Test support: fail the per-file commit writer before replacement at `index`.
-    /// Production runtime never calls this.
-    #[must_use]
-    pub fn with_injected_commit_failure(mut self: Arc<Self>, index: usize) -> Arc<Self> {
-        let prepared = Arc::make_mut(&mut self);
-        prepared.fail_commit_at = Some(index);
-        self
-    }
-
-    #[must_use]
-    pub fn file_count(&self) -> usize {
-        self.files.len()
-    }
-
-    #[must_use]
-    pub fn replacement_count(&self) -> usize {
-        self.replacements
-    }
-
-    #[must_use]
-    pub fn added(&self) -> usize {
-        self.added
-    }
-
-    #[must_use]
-    pub fn removed(&self) -> usize {
-        self.removed
-    }
-
-    #[must_use]
-    pub fn requested_paths(&self) -> Vec<PathBuf> {
-        self.files
-            .iter()
-            .map(|file| file.requested_path.clone())
-            .collect()
     }
 }
 
@@ -962,22 +945,6 @@ fn match_line_numbers(haystack: &str, needle: &str) -> Vec<usize> {
     lines
 }
 
-fn diff_stats(diff: &str) -> (usize, usize) {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
-
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(bytes);
     let mut out = [0u8; 32];
@@ -985,23 +952,8 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-async fn read_fingerprint(path: &Path) -> Result<EditFingerprint, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to recheck metadata for {}: {error}", path.display()))?;
-    if is_reparse_or_symlink(&metadata) {
-        return Err(format!(
-            "target became a symlink or reparse point: {}",
-            path.display()
-        ));
-    }
-    if !metadata.is_file() {
-        return Err(format!(
-            "target is no longer a regular file: {}",
-            path.display()
-        ));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
+fn read_fingerprint(path: &Path) -> Result<EditFingerprint, String> {
+    let bytes = read_regular_file_no_follow(path)
         .map_err(|error| format!("failed to recheck {}: {error}", path.display()))?;
     // Content must still be UTF-8; non-UTF-8 is treated as stale for the prepared plan.
     if String::from_utf8(bytes.clone()).is_err() {
@@ -1015,6 +967,50 @@ async fn read_fingerprint(path: &Path) -> Result<EditFingerprint, String> {
         file_kind: EditFileKind::Regular,
         sha256: sha256_bytes(&bytes),
     })
+}
+
+fn read_regular_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut file = open_no_follow(path)?;
+    let metadata = file.metadata()?;
+    if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("target is not an existing regular file: {}", path.display()),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
+    Ok(fd.into())
+}
+
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use winapi::um::winbase::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 fn is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
@@ -1081,5 +1077,309 @@ mod workspace_policy_tests {
         let details = result.details.expect("details");
         assert_eq!(details["status"], "prepare_failed");
         assert_eq!(std::fs::read_to_string(path).expect("read file"), "before");
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_first_commit_writes_nothing() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join("existing.txt");
+        let second = workspace.path().join("second.txt");
+        std::fs::write(&path, "before\n").expect("seed file");
+        std::fs::write(&second, "second\n").expect("seed second file");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        let prepared = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "existing.txt",
+                    "replacements": [{ "old": "before", "new": "after" }]
+                }, {
+                    "path": "second.txt",
+                    "replacements": [{ "old": "second", "new": "SECOND" }]
+                }]
+            }),
+        )
+        .await
+        .expect("prepare");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut on_progress = |_update| {};
+
+        let result = prepared
+            .commit_with_writer(&context, &cancel, &mut on_progress, |_, _, _| {
+                panic!("writer must not run after cancellation")
+            })
+            .await;
+
+        assert!(result.is_error);
+        let details = result.details.expect("details");
+        assert_eq!(details["status"], "cancelled");
+        assert_eq!(details["cause"], "cancelled");
+        assert_eq!(details["changes"][0]["status"], "not_attempted");
+        assert_eq!(details["changes"][1]["status"], "not_attempted");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read file"),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).expect("read second file"),
+            "second\n"
+        );
+
+        let partial_cancel = CancellationToken::new();
+        let cancel_after_write = partial_cancel.clone();
+        let result = prepared
+            .commit_with_writer(
+                &context,
+                &partial_cancel,
+                &mut on_progress,
+                move |_, path, content| {
+                    let result = replace_existing_file_atomic_status(path, content);
+                    cancel_after_write.cancel();
+                    result
+                },
+            )
+            .await;
+
+        assert!(result.is_error);
+        let details = result.details.expect("details");
+        assert_eq!(details["status"], "partial_commit");
+        assert_eq!(details["cause"], "cancelled");
+        assert_eq!(details["changes"][0]["status"], "committed");
+        assert_eq!(details["changes"][1]["status"], "not_attempted");
+        assert_eq!(std::fs::read_to_string(path).expect("read file"), "after\n");
+        assert_eq!(
+            std::fs::read_to_string(second).expect("read second file"),
+            "second\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_failure_after_first_commit_reports_partial_without_rollback() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        for (name, content) in [("a.txt", "aaa\n"), ("b.txt", "bbb\n"), ("c.txt", "ccc\n")] {
+            std::fs::write(workspace.path().join(name), content).expect("seed file");
+        }
+        let prepared = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [
+                    { "path": "a.txt", "replacements": [{ "old": "aaa", "new": "AAA" }] },
+                    { "path": "b.txt", "replacements": [{ "old": "bbb", "new": "BBB" }] },
+                    { "path": "c.txt", "replacements": [{ "old": "ccc", "new": "CCC" }] }
+                ]
+            }),
+        )
+        .await
+        .expect("prepare");
+        let mut on_progress = |_update| {};
+
+        let first_failure = prepared
+            .commit_with_writer(
+                &context,
+                &CancellationToken::new(),
+                &mut on_progress,
+                |_, _, _| Err(std::io::Error::other("first writer failure")),
+            )
+            .await;
+
+        assert!(first_failure.is_error);
+        let details = first_failure.details.expect("first failure details");
+        assert_eq!(details["status"], "commit_failed");
+        assert_eq!(details["changes"][0]["status"], "failed");
+        assert_eq!(details["changes"][1]["status"], "not_attempted");
+        assert_eq!(details["changes"][2]["status"], "not_attempted");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
+            "aaa\n"
+        );
+
+        let result = prepared
+            .commit_with_writer(
+                &context,
+                &CancellationToken::new(),
+                &mut on_progress,
+                |index, path, content| {
+                    if index == 1 {
+                        Err(std::io::Error::other("injected writer failure"))
+                    } else {
+                        replace_existing_file_atomic_status(path, content)
+                    }
+                },
+            )
+            .await;
+
+        assert!(result.is_error);
+        let details = result.details.expect("details");
+        assert_eq!(details["status"], "partial_commit");
+        assert_eq!(details["changes"][0]["status"], "committed");
+        assert_eq!(details["changes"][1]["status"], "failed");
+        assert_eq!(details["changes"][2]["status"], "not_attempted");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
+            "AAA\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("b.txt")).expect("b"),
+            "bbb\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("c.txt")).expect("c"),
+            "ccc\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recheck_rejects_requested_path_drift() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let first = workspace.path().join("first");
+        let second = workspace.path().join("second");
+        std::fs::create_dir(&first).expect("first directory");
+        std::fs::create_dir(&second).expect("second directory");
+        std::fs::write(first.join("file.txt"), "before\n").expect("first file");
+        std::fs::write(second.join("file.txt"), "before\n").expect("second file");
+        let alias = workspace.path().join("alias");
+        symlink(&first, &alias).expect("first alias");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        let prepared = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "alias/file.txt",
+                    "replacements": [{ "old": "before", "new": "after" }]
+                }]
+            }),
+        )
+        .await
+        .expect("prepare");
+
+        std::fs::remove_file(&alias).expect("remove alias");
+        symlink(&second, &alias).expect("second alias");
+        let mut on_progress = |_update| {};
+        let result = prepared
+            .commit(&context, &CancellationToken::new(), &mut on_progress)
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.details.expect("details")["status"], "stale");
+        assert_eq!(
+            std::fs::read_to_string(first.join("file.txt")).expect("first"),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("file.txt")).expect("second"),
+            "before\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        std::fs::write(workspace.path().join("file.txt"), "before\n").expect("text file");
+
+        let unknown = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "file.txt",
+                    "replacements": [{ "old": "before", "new": "after", "extra": true }]
+                }]
+            }),
+        )
+        .await
+        .expect_err("nested unknown field");
+        assert_eq!(
+            unknown.details.expect("unknown details")["status"],
+            "prepare_failed"
+        );
+
+        let duplicate = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "file.txt",
+                    "replacements": [{ "old": "before", "new": "after" }]
+                }, {
+                    "path": "./file.txt",
+                    "replacements": [{ "old": "before", "new": "AFTER" }]
+                }]
+            }),
+        )
+        .await
+        .expect_err("duplicate effective target");
+        assert_eq!(
+            duplicate.details.expect("duplicate details")["status"],
+            "prepare_failed"
+        );
+
+        std::fs::write(workspace.path().join("binary.bin"), [0xff, 0xfe]).expect("binary file");
+        let non_utf8 = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "binary.bin",
+                    "replacements": [{ "old": "before", "new": "after" }]
+                }]
+            }),
+        )
+        .await
+        .expect_err("non-UTF-8 target");
+        assert_eq!(
+            non_utf8.details.expect("non-UTF-8 details")["status"],
+            "prepare_failed"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn fifo_swap_returns_stale_without_blocking() {
+        use rustix::fs::{CWD, Mode, mkfifoat};
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join("target.txt");
+        std::fs::write(&path, "before\n").expect("text file");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        let prepared = PreparedEdit::prepare(
+            &context,
+            &json!({
+                "files": [{
+                    "path": "target.txt",
+                    "replacements": [{ "old": "before", "new": "after" }]
+                }]
+            }),
+        )
+        .await
+        .expect("prepare");
+        std::fs::remove_file(&path).expect("remove target");
+        mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).expect("create fifo");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(futures::executor::block_on(prepared.recheck_all(&context)))
+                .expect("send result");
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FIFO recheck must not block")
+            .expect_err("FIFO must be stale");
+        worker.join().expect("recheck worker");
+
+        assert_eq!(result.details.expect("details")["status"], "stale");
     }
 }

@@ -4,7 +4,7 @@ use neo_agent_core::instructions::{
 };
 use neo_agent_core::{
     ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
-    PermissionOperation,
+    EditApprovalChange, EditApprovalPresentation, PermissionOperation,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Finalization, strip_ansi, visible_width};
@@ -54,6 +54,36 @@ fn approved_resolution() -> ApprovalResolution {
         action: ApprovalAction::PermitOnce,
         label: "Approved".to_owned(),
         feedback: None,
+    }
+}
+
+fn edit_request(id: &str, prefix: &str, files: usize) -> ApprovalRequest {
+    let changes = (0..files)
+        .map(|index| EditApprovalChange {
+            path: PathBuf::from(format!("src/{prefix}_{index}.rs")),
+            replacements: 1,
+            added: 1,
+            removed: 1,
+            diff: format!(
+                "--- src/{prefix}_{index}.rs\n+++ src/{prefix}_{index}.rs\n@@ -12 +12 @@\n-old{index}\n+new{index}\n"
+            ),
+        })
+        .collect();
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::FileWrite,
+        presentation: ApprovalPresentation::Edit {
+            title: format!("Edit {files} files?"),
+            edit: EditApprovalPresentation {
+                files,
+                replacements: files,
+                added: files,
+                removed: files,
+                changes,
+            },
+        },
+        options: shell_options(),
     }
 }
 
@@ -636,6 +666,51 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
     assert!(frame.iter().any(|line| line.contains("Approved")));
     assert!(frame.iter().any(|line| line.contains("$ printf 2")));
     assert!(!frame.iter().any(|line| line.contains("queued:")));
+}
+
+#[test]
+fn transcript_pane_edit_approval_follows_global_expansion() {
+    let mut pane = TranscriptPane::new(64, 80);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: edit_request("edit-1", "verified", 4),
+    });
+
+    let collapsed = plain_frame(&mut pane, 64, 80);
+    assert!(!collapsed.iter().any(|line| line.contains("verified_2.rs")));
+    let collapsed_bottom = collapsed
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('╰'))
+        .expect("collapsed bottom frame");
+
+    pane.set_tool_output_expanded(true);
+    let expanded = plain_frame(&mut pane, 64, 80);
+    assert!(expanded.iter().any(|line| line.contains("verified_2.rs")));
+    let expanded_bottom = expanded
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('╰'))
+        .expect("expanded bottom frame");
+    assert!(expanded_bottom > collapsed_bottom);
+}
+
+#[test]
+fn queued_edit_approval_inherits_current_global_expansion() {
+    let mut pane = TranscriptPane::new(64, 80);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: edit_request("edit-1", "first", 1),
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: edit_request("edit-2", "queued", 4),
+    });
+    pane.set_tool_output_expanded(true);
+    pane.resolve_approval("edit-1", &approved_resolution());
+
+    let approval = pane
+        .transcript()
+        .approval("edit-2")
+        .expect("queued approval promoted");
+    assert!(approval.expanded);
+    let frame = plain_frame(&mut pane, 64, 80);
+    assert!(frame.iter().any(|line| line.contains("queued_2.rs")));
 }
 
 #[test]

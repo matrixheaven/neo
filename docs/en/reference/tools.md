@@ -16,6 +16,34 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 | `Find` | Locate workspace paths by a substring of their file or directory name. |
 | `Grep` | Search the contents of workspace text files using regular expressions. |
 
+### Edit staging and commit contract
+
+`Edit` accepts `files[]` in declaration order. Each file contains `path` and an
+ordered `replacements[]`; every replacement contains `old`, `new`, and optional
+`expected_matches` (default `1`). Matching and replacement use the staged result
+of the previous replacement in that file, so order is observable.
+
+Before any write, Neo resolves every target, reads every existing UTF-8 regular
+file without following link-like targets, applies the whole ordered batch in
+memory, verifies exact match counts, and builds the approval diff. Any prepare
+error fails the whole call with zero writes. In Ask mode the user approves that
+verified diff. Neo then rechecks the resolved targets and contents; a stale
+target before the first commit also produces zero writes.
+
+Files commit in the staged declaration order. Each file replacement is atomic,
+but the batch is not a cross-file transaction: after a file commits, a later
+stale check, I/O failure, durability failure, or cancellation does not roll it
+back. Structured results distinguish `committed`, `prepare_failed`, `stale`,
+`cancelled`, `commit_failed`, `partial_commit`, and `durability_uncertain`, with
+per-file `committed`, `committed_unsynced`, `failed`, or `not_attempted` states.
+
+Cancellation before the first commit writes nothing. During commit it prevents
+the next file from starting and never interrupts an in-progress atomic replace.
+`durability_uncertain` means the requested contents were installed but
+parent-directory durability could not be confirmed. Re-read affected files and
+submit a fresh `Edit`; Neo never blindly retries or rolls back a partial batch.
+Use `Write` for file creation or full-file replacement.
+
 ## Shell
 
 | Tool | Purpose |

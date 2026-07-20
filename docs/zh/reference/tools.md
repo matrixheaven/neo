@@ -16,6 +16,29 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `Find` | 按文件/目录名子串查找工作区路径。 |
 | `Grep` | 基于正则搜索工作区文本文件内容。 |
 
+### Edit 暂存与提交合同
+
+`Edit` 按声明顺序接收 `files[]`。每个文件包含 `path` 和有序的
+`replacements[]`；每条替换包含 `old`、`new` 与可选的
+`expected_matches`（默认 `1`）。同一文件内，后一条替换在前一条替换的暂存结果上
+匹配并应用，因此顺序具有可见语义。
+
+任何写入之前，Neo 会解析所有目标，以不跟随链接类目标的方式读取每个已有 UTF-8
+常规文件，在内存中应用完整有序批次，验证精确匹配数，并生成审批 diff。任一 prepare
+错误都会让整次调用以零写入失败。Ask 模式中，用户批准的是这份已验证 diff。随后 Neo
+重新检查解析后的目标与内容；首次提交前发现 stale 同样是零写入。
+
+文件按暂存后的声明顺序提交。每个文件的替换是原子的，但整批不是跨文件事务：一个文件
+提交后，后续 stale、I/O 失败、持久性失败或取消都不会回滚它。结构化结果区分
+`committed`、`prepare_failed`、`stale`、`cancelled`、`commit_failed`、
+`partial_commit` 与 `durability_uncertain`；逐文件状态为 `committed`、
+`committed_unsynced`、`failed` 或 `not_attempted`。
+
+首次提交前取消保证零写入。提交期间的取消只阻止下一个文件开始，不会中断正在进行的原子
+替换。`durability_uncertain` 表示请求内容已经安装，但无法确认父目录持久化。此时应重新
+读取受影响文件并发起新的 `Edit`；Neo 不会盲目重试或回滚部分批次。创建文件或完整替换
+文件请使用 `Write`。
+
 ## Shell
 
 | 工具 | 用途 |

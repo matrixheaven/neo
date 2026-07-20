@@ -507,6 +507,8 @@ Use the exact top-level terminal statuses from the design:
 committed
 prepare_failed
 stale
+cancelled
+commit_failed
 partial_commit
 durability_uncertain
 ```
@@ -654,16 +656,24 @@ Steps:
 13. Add focused regressions:
     - `edit_batch_applies_ordered_replacements_across_files`
     - `edit_batch_prepare_mismatch_writes_nothing`
-    - `edit_batch_commit_failure_reports_partial_without_rollback`
     - `edit_batch_rejects_legacy_schema_and_link_like_targets`
+    - `replacement_never_creates_missing_paths`
+    - `replacement_swap_fails_if_target_disappears`
+    - `prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs`
+    - `writer_failure_after_first_commit_reports_partial_without_rollback`
+    - `write_overwrites_non_utf8_without_diff_preview`
 
 Verification:
 
 ```bash
 cargo test --package neo-agent-core --test tool_files -- edit_batch_applies_ordered_replacements_across_files --exact --nocapture
 cargo test --package neo-agent-core --test tool_files -- edit_batch_prepare_mismatch_writes_nothing --exact --nocapture
-cargo test --package neo-agent-core --test tool_files -- edit_batch_commit_failure_reports_partial_without_rollback --exact --nocapture
 cargo test --package neo-agent-core --test tool_files -- edit_batch_rejects_legacy_schema_and_link_like_targets --exact --nocapture
+cargo test --package neo-agent-core --lib -- session::atomic_file::tests::replacement_never_creates_missing_paths --exact --nocapture
+cargo test --package neo-agent-core --lib -- session::atomic_file::tests::replacement_swap_fails_if_target_disappears --exact --nocapture
+cargo test --package neo-agent-core --lib -- tools::edit::tests::prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs --exact --nocapture
+cargo test --package neo-agent-core --lib -- tools::edit::tests::writer_failure_after_first_commit_reports_partial_without_rollback --exact --nocapture
+cargo test --package neo-agent-core --test tool_files -- write_overwrites_non_utf8_without_diff_preview --exact --nocapture
 ```
 
 Expected outcomes:
@@ -736,16 +746,18 @@ Steps:
 6. Add exact tests:
    - `typed_scope_probes_cover_every_edit_parent`
    - `instruction_preflight_defers_whole_edit_for_one_new_scope`
-   - `active_plan_mode_allows_edit_only_when_every_target_is_plan_file`
-   - `active_plan_mode_rejects_edit_with_any_non_plan_target`
+   - `active_plan_mode_rejects_unprepared_edit`
+   - `runtime_plan_mode_allows_editing_active_plan_file_outside_workspace`
+   - `runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_plan`
 
 Verification:
 
 ```bash
 cargo test --package neo-agent-core --lib -- runtime::tool_arguments::tests::typed_scope_probes_cover_every_edit_parent --exact --nocapture
 cargo test --package neo-agent-core --test runtime_turn -- instruction_preflight_defers_whole_edit_for_one_new_scope --exact --nocapture
-cargo test --package neo-agent-core --lib -- mode::plan_mode_guard::tests::active_plan_mode_allows_edit_only_when_every_target_is_plan_file --exact --nocapture
-cargo test --package neo-agent-core --lib -- mode::plan_mode_guard::tests::active_plan_mode_rejects_edit_with_any_non_plan_target --exact --nocapture
+cargo test --package neo-agent-core --lib -- mode::plan_mode_guard::tests::active_plan_mode_rejects_unprepared_edit --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn -- runtime_plan_mode_allows_editing_active_plan_file_outside_workspace --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn -- runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_plan --exact --nocapture
 ```
 
 Expected outcomes:
@@ -844,7 +856,9 @@ Steps:
     - `runtime_edit_approval_uses_verified_projection_and_multi_key_scope`
     - `runtime_edit_stale_after_approval_writes_nothing`
     - `runtime_edit_emits_prepared_then_per_file_progress_updates`
-    - `runtime_edit_partial_commit_is_failed_tool_result`
+    - `runtime_edit_approval_interrupt_reports_structured_zero_write_cancellation`
+    - `cancellation_before_first_commit_writes_nothing`
+    - `writer_failure_after_first_commit_reports_partial_without_rollback`
     - `approval_edit_presentation_round_trips_in_session_jsonl` when needed
 
 Verification:
@@ -853,7 +867,9 @@ Verification:
 cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_approval_uses_verified_projection_and_multi_key_scope --exact --nocapture
 cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_stale_after_approval_writes_nothing --exact --nocapture
 cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_emits_prepared_then_per_file_progress_updates --exact --nocapture
-cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_partial_commit_is_failed_tool_result --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_approval_interrupt_reports_structured_zero_write_cancellation --exact --nocapture
+cargo test --package neo-agent-core --lib -- tools::edit::tests::cancellation_before_first_commit_writes_nothing --exact --nocapture
+cargo test --package neo-agent-core --lib -- tools::edit::tests::writer_failure_after_first_commit_reports_partial_without_rollback --exact --nocapture
 ```
 
 If `session_jsonl.rs` changes, also run:
@@ -917,6 +933,8 @@ Impact And Compatibility:
 - `ToolCallComponent` remains the stateful owner.
 - Global `Ctrl+O` remains the only expansion state.
 - Approval entries gain expansion through that same state; no Edit-only toggle.
+- Edit renders one shared code frame per file; Write reuses that frame for its
+  single-file preview.
 - Other tool cards and Delegate-family cards are not redesigned.
 - Styled rows are regenerated on resize/replay and are not persisted.
 
@@ -956,24 +974,40 @@ Steps:
    - emit an explicit omitted files/replacements/changed-lines row;
    - preserve final file and final change cluster;
    - expanded mode renders every file and cluster.
-10. Hard-wrap paths, stats, code, and diagnostics so every rendered row width is
-    at most the available terminal width. Do not silently truncate semantic
-    content.
-11. Render exact distinctions from the design:
+10. Render every Edit file in its own full-width rounded code frame and route
+    Write's single-file preview through the same frame helper. Keep header,
+    numbered diff rows, diagnostics, and omission text inside the frame. The
+    omission row is left-aligned; global expansion moves the bottom border down.
+11. Restore source line numbers and existing code syntax highlighting. Style
+    successful `✓` and `+N` green and `-N` red while retaining textual markers
+    for terminals without color.
+12. Hard-wrap paths, stats, code, diagnostics, and omission text inside the
+    frame so every rendered row width is at most the available terminal width.
+    Do not silently truncate semantic content.
+13. Render exact distinctions from the design:
     - prepare and stale state say zero writes;
     - partial state styles only committed diffs as applied;
     - not-attempted changes do not use applied addition/removal styling;
     - committed-unsynced says contents were installed but durability is
       uncertain;
     - interruption says final commit state is unknown and shows last progress.
-12. Delete legacy Edit raw diff construction and the `pane.rs` fallback that
+14. Delete legacy Edit raw diff construction and the `pane.rs` fallback that
     treats top-level `new` as a path-like key.
-13. Add table-driven regressions:
+15. Add table-driven regressions:
     - `edit_batch_card_renders_collapsed_expanded_and_narrow`
     - `edit_batch_card_distinguishes_prepare_stale_partial_and_durability`
     - `edit_batch_approval_uses_global_expansion`
     - `edit_batch_progress_details_survive_interruption`
     - `diff_model_reads_ordered_edit_changes`
+    - `hunk_body_lines_that_resemble_headers_remain_changes`
+    - `edit_diff_preview_clusters_changes_with_context_and_hidden_footer`
+    - `edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails`
+    - `partial_edit_header_uses_committed_totals_only`
+    - `collapsed_edit_keeps_first_and_last_change_clusters_inside_frame`
+    - `narrow_write_frame_expands_tabs_without_extra_border_overflow`
+    - `tool_card_lines_do_not_exceed_terminal_width_after_gutter`
+    - `transcript_pane_edit_approval_follows_global_expansion`
+    - `queued_edit_approval_inherits_current_global_expansion`
 
 Verification:
 
@@ -983,6 +1017,15 @@ cargo test --package neo-tui --test tool_cards -- edit_batch_card_distinguishes_
 cargo test --package neo-tui --test tool_cards -- edit_batch_approval_uses_global_expansion --exact --nocapture
 cargo test --package neo-tui --test tool_cards -- edit_batch_progress_details_survive_interruption --exact --nocapture
 cargo test --package neo-tui --lib -- diff_model::tests::diff_model_reads_ordered_edit_changes --exact --nocapture
+cargo test --package neo-tui --lib -- diff_model::tests::hunk_body_lines_that_resemble_headers_remain_changes --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- edit_diff_preview_clusters_changes_with_context_and_hidden_footer --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- partial_edit_header_uses_committed_totals_only --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- collapsed_edit_keeps_first_and_last_change_clusters_inside_frame --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- narrow_write_frame_expands_tabs_without_extra_border_overflow --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- tool_card_lines_do_not_exceed_terminal_width_after_gutter --exact --nocapture
+cargo test --package neo-tui --test transcript_pane -- transcript_pane_edit_approval_follows_global_expansion --exact --nocapture
+cargo test --package neo-tui --test transcript_pane -- queued_edit_approval_inherits_current_global_expansion --exact --nocapture
 ```
 
 Expected outcomes:
@@ -1015,7 +1058,6 @@ Commit checkpoint: root only after exact TUI tests pass.
 Files:
 
 - Modify `crates/neo-agent-core/src/multi_agent/runtime.rs`
-- Modify `crates/neo-agent-core/tests/multi_agent_runtime.rs`
 - Modify replay-related TUI/core tests only when the direct consumer requires it
 
 Why:
@@ -1043,32 +1085,41 @@ Steps:
    replacement count, and head/tail paths from `files[]`.
 2. In `apply_tool_activity_event`, prefer structured `edit_prepared`,
    `edit_progress`, and terminal Edit details over raw arguments once present.
-3. Produce only the approved bounded forms for ongoing, success, prepare
-   failure, and partial failure. Omit missing fields instead of parsing human
-   result text.
-4. Keep Swarm's existing two-line projection and Delegate-family row budgets.
-5. Ensure child persistence stores existing events/results only. Never persist
+3. Make both live Delegate branches (`ToolExecutionUpdate` and
+   `ToolExecutionFinished`) prefer structured Edit details. Progress must show
+   `committing N/M`; terminal `partial_commit`, cancellation, first-write
+   `commit_failed`, and durability uncertainty must report truthful committed
+   counts and the failed path when present.
+4. Produce only the approved bounded forms for ongoing, success, prepare
+   failure, and partial failure. Every final Edit activity summary is strictly
+   at most 160 characters; omit missing fields instead of parsing human result
+   text.
+5. Keep Swarm's existing two-line projection and Delegate-family row budgets.
+6. Ensure child persistence stores existing events/results only. Never persist
    `PreparedEdit` or complete staged content.
-6. On replay, an unfinished Edit with progress is marked interrupted and is not
+7. On replay, an unfinished Edit with progress is marked interrupted and is not
    submitted to runtime again. Display the last recorded committed count and
    final-state uncertainty.
-7. Add exact regressions:
+8. Add exact regressions:
    - `edit_tool_summary_preserves_counts_and_head_tail_within_budget`
    - `edit_tool_summary_prefers_structured_partial_progress`
+   - `live_edit_summary_uses_structured_progress_and_terminal_partial`
    - `replayed_unfinished_edit_is_interrupted_and_not_resumed`
 
 Verification:
 
 ```bash
-cargo test --package neo-agent-core --test multi_agent_runtime -- edit_tool_summary_preserves_counts_and_head_tail_within_budget --exact --nocapture
-cargo test --package neo-agent-core --test multi_agent_runtime -- edit_tool_summary_prefers_structured_partial_progress --exact --nocapture
-cargo test --package neo-agent-core --test multi_agent_runtime -- replayed_unfinished_edit_is_interrupted_and_not_resumed --exact --nocapture
+cargo test --package neo-agent-core --lib -- multi_agent::runtime::tests::edit_tool_summary_preserves_counts_and_head_tail_within_budget --exact --nocapture
+cargo test --package neo-agent-core --lib -- multi_agent::runtime::tests::edit_tool_summary_prefers_structured_partial_progress --exact --nocapture
+cargo test --package neo-agent-core --lib -- multi_agent::runtime::tests::live_edit_summary_uses_structured_progress_and_terminal_partial --exact --nocapture
+cargo test --package neo-agent-core --lib -- multi_agent::runtime::tests::replayed_unfinished_edit_is_interrupted_and_not_resumed --exact --nocapture
 ```
 
 Expected outcomes:
 
 - summaries remain within the existing byte/row budget;
-- structured partial progress overrides raw argument intent;
+- both live structured progress and terminal partial details override raw
+  argument intent and every final Edit summary is at most 160 characters;
 - replay records interruption and makes no tool execution attempt.
 
 Repair Track:
@@ -1120,7 +1171,9 @@ Steps:
 1. Replace the Edit examples with the canonical `files[]` schema.
 2. Document ordered staged matching, exact `expected_matches`, zero-write
    prepare failure, post-approval stale checks, per-file atomic commit, partial
-   commit truthfulness, and fresh-call retry guidance.
+   commit truthfulness, declaration-order staged results, no cross-file
+   transaction or rollback, cancellation boundaries, durability uncertainty,
+   and fresh-call retry guidance.
 3. State that Edit supports existing UTF-8 regular files only and that `Write`
    owns creation and full-file replacement.
 4. State explicitly that the legacy Edit fields are not accepted, without
@@ -1214,14 +1267,29 @@ Required final commands:
 
 ```bash
 cargo test --package neo-agent-core --test tool_files -- edit_batch_applies_ordered_replacements_across_files --exact --nocapture
+cargo test --package neo-agent-core --lib -- session::atomic_file::tests::replacement_swap_fails_if_target_disappears --exact --nocapture
+cargo test --package neo-agent-core --lib -- tools::edit::tests::prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs --exact --nocapture
+cargo test --package neo-agent-core --test tool_files -- write_overwrites_non_utf8_without_diff_preview --exact --nocapture
 cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_approval_uses_verified_projection_and_multi_key_scope --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn -- runtime_edit_approval_interrupt_reports_structured_zero_write_cancellation --exact --nocapture
+cargo test --package neo-agent-core --test runtime_turn -- runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_plan --exact --nocapture
 cargo test --package neo-agent-core --test runtime_turn -- instruction_preflight_defers_whole_edit_for_one_new_scope --exact --nocapture
-cargo test --package neo-agent-core --test multi_agent_runtime -- replayed_unfinished_edit_is_interrupted_and_not_resumed --exact --nocapture
+cargo test --package neo-agent-core --lib -- multi_agent::runtime::tests::replayed_unfinished_edit_is_interrupted_and_not_resumed --exact --nocapture
+cargo test --package neo-tui --lib -- diff_model::tests::hunk_body_lines_that_resemble_headers_remain_changes --exact --nocapture
 cargo test --package neo-tui --test tool_cards -- edit_batch_card_renders_collapsed_expanded_and_narrow --exact --nocapture
 cargo test --package neo-tui --test tool_cards -- edit_batch_card_distinguishes_prepare_stale_partial_and_durability --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- collapsed_edit_keeps_first_and_last_change_clusters_inside_frame --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- narrow_write_frame_expands_tabs_without_extra_border_overflow --exact --nocapture
+cargo test --package neo-tui --test tool_cards -- tool_card_lines_do_not_exceed_terminal_width_after_gutter --exact --nocapture
+cargo test --package neo-tui --test transcript_pane -- transcript_pane_edit_approval_follows_global_expansion --exact --nocapture
+cargo test --package neo-tui --test transcript_pane -- queued_edit_approval_inherits_current_global_expansion --exact --nocapture
 git diff --check -- crates/neo-agent-core crates/neo-tui docs/en docs/zh docs/aegis
 python /Users/chenyuanhao/.codex/aegis/scripts/aegis-workspace.py check --root /Users/chenyuanhao/Workspace/neo
 ```
+
+Platform-gated source tests do not constitute Windows or Linux host evidence.
+Record cross-platform host runs only when those hosts or CI jobs actually ran.
 
 Expected outcomes:
 

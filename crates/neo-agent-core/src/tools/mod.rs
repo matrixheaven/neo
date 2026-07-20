@@ -158,8 +158,8 @@ pub use sessions::SummarizeSessionsTool;
 pub use sleep::SleepTool;
 // Re-export skill-manager tool types.
 pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
-// Re-export prepared Edit execution payload for runtime and focused tests.
-pub use edit::PreparedEdit;
+// Re-export the prepared Edit payload inside the crate for runtime dispatch.
+pub(crate) use edit::PreparedEdit;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
@@ -577,6 +577,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
     spec_cache: Mutex<Option<Vec<ToolSpec>>>,
+    canonical_prepared_edit: bool,
 }
 
 impl ToolRegistry {
@@ -602,7 +603,7 @@ impl ToolRegistry {
             Vec::new(),
         ))));
         registry.register(write::WriteTool);
-        registry.register(edit::EditTool);
+        registry.register_builtin_edit();
         registry.register(bash::BashTool);
         registry.register(background_tasks::TaskListTool);
         registry.register(background_tasks::TaskOutputTool);
@@ -625,7 +626,7 @@ impl ToolRegistry {
         registry.register(glob::GlobTool);
         registry.register(self::todo::TodoTool::with_state(todos));
         registry.register(write::WriteTool);
-        registry.register(edit::EditTool);
+        registry.register_builtin_edit();
         registry.register(bash::BashTool);
         registry.register(background_tasks::TaskListTool);
         registry.register(background_tasks::TaskOutputTool);
@@ -648,8 +649,21 @@ impl ToolRegistry {
     where
         T: Tool + 'static,
     {
+        if tool.name() == "Edit" {
+            self.canonical_prepared_edit = false;
+        }
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
         self.invalidate_specs();
+    }
+
+    fn register_builtin_edit(&mut self) {
+        self.register(edit::EditTool);
+        self.canonical_prepared_edit = true;
+    }
+
+    #[must_use]
+    pub(crate) const fn has_canonical_prepared_edit(&self) -> bool {
+        self.canonical_prepared_edit
     }
 
     pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
@@ -701,6 +715,8 @@ impl ToolRegistry {
                 filtered.tools.insert(name.clone(), Arc::clone(tool));
             }
         }
+        filtered.canonical_prepared_edit =
+            self.canonical_prepared_edit && filtered.tools.contains_key("Edit");
         filtered
     }
 }

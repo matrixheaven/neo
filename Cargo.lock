@@ -2056,6 +2056,7 @@ dependencies = [
  "win32job",
  "winapi",
  "windows-acl",
+ "winsafe",
  "xpty",
 ]
 

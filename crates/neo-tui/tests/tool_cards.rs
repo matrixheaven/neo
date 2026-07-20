@@ -911,12 +911,301 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
 
     let rows = plain(card.render(80));
     assert!(
-        rows.iter().any(|line| line.contains("1 files · 1 replacements")),
+        rows.iter()
+            .any(|line| line.contains("1 files · 1 replacements")),
         "batch summary missing: {rows:?}"
     );
     assert!(rows.iter().any(|line| line.contains("src/lib.rs")));
-    assert!(rows.iter().any(|line| line.contains("-old") || line.contains("- old")));
-    assert!(rows.iter().any(|line| line.contains("+new") || line.contains("+ new")));
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("-old") || line.contains("- old"))
+    );
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("+new") || line.contains("+ new"))
+    );
+}
+
+#[test]
+fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
+    let theme = TuiTheme::default();
+    let long_path = "src/a_very_long_directory_name/tail.rs";
+    let mut edit = ToolCallComponent::new(ToolCallState {
+        id: "edit-frame".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("edited".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "committed",
+            "files": 1,
+            "replacements": 1,
+            "added": 1,
+            "removed": 1,
+            "changes": [{
+                "path": long_path,
+                "status": "committed",
+                "replacements": 1,
+                "added": 1,
+                "removed": 1,
+                "diff": format!("--- {long_path}\n+++ {long_path}\n@@ -41 +41 @@\n-fn old() {{}}\n+fn ENDING_SENTINEL() {{}}\n")
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let edit_rows = edit.render_with_theme(32, &theme);
+    let edit_text = edit_rows
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        edit_text.contains('╭') && edit_text.contains('╰'),
+        "{edit_text}"
+    );
+    assert!(
+        edit_text.contains("tail.rs"),
+        "wrapped path tail lost: {edit_text}"
+    );
+    assert!(edit_text.contains("41 - fn old()"), "{edit_text}");
+    assert!(
+        edit_text.contains("ENDING_SENTINEL"),
+        "wrapped code tail lost: {edit_text}"
+    );
+    assert!(
+        edit_rows
+            .iter()
+            .flat_map(|line| line.spans())
+            .any(|span| { span.text() == "✓ " && span.style().fg == Some(theme.status_ok) })
+    );
+    assert!(
+        edit_rows
+            .iter()
+            .flat_map(|line| line.spans())
+            .any(|span| { span.text() == "+1" && span.style().fg == Some(theme.diff_added) })
+    );
+    assert!(
+        edit_rows
+            .iter()
+            .flat_map(|line| line.spans())
+            .any(|span| { span.text() == "-1" && span.style().fg == Some(theme.diff_removed) })
+    );
+    let removed = edit_rows
+        .iter()
+        .find(|line| line.text().contains("41 - fn old()"))
+        .expect("removed row");
+    assert!(
+        removed
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "41 " && span.style().fg == Some(theme.diff_removed) })
+    );
+    assert!(
+        removed
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "- " && span.style().fg == Some(theme.diff_removed) })
+    );
+    assert!(
+        removed.spans().iter().any(|span| {
+            span.text().contains("fn") && span.style().fg != Some(theme.diff_removed)
+        })
+    );
+    let added = edit_rows
+        .iter()
+        .find(|line| line.text().contains("41 + fn"))
+        .expect("added row");
+    assert!(
+        added
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "41 " && span.style().fg == Some(theme.diff_added) })
+    );
+    assert!(
+        added
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "+ " && span.style().fg == Some(theme.diff_added) })
+    );
+
+    let mut write = ToolCallComponent::new(ToolCallState {
+        id: "write-frame".to_owned(),
+        name: "Write".to_owned(),
+        arguments: Some(
+            json!({
+                "path": long_path,
+                "content": "fn main() { let value = ENDING_SENTINEL; }"
+            })
+            .to_string(),
+        ),
+        result: Some("written".to_owned()),
+        details: None,
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let write_text = plain(write.render(32)).join("\n");
+    assert!(
+        write_text.contains('╭') && write_text.contains('╰'),
+        "{write_text}"
+    );
+    assert!(
+        write_text.contains("tail.rs"),
+        "wrapped path tail lost: {write_text}"
+    );
+    assert!(
+        write_text.contains("ENDING_SENTINEL"),
+        "wrapped code tail lost: {write_text}"
+    );
+}
+
+#[test]
+fn partial_edit_header_uses_committed_totals_only() {
+    let theme = TuiTheme::default();
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "edit-partial-chip".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("partial".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "partial_commit",
+            "files": 2,
+            "replacements": 2,
+            "added": 1,
+            "removed": 1,
+            "changes": [
+                {"path": "done.rs", "status": "committed", "added": 1, "removed": 1, "diff": "--- done.rs\n+++ done.rs\n@@ -1 +1 @@\n-a\n+b\n"},
+                {"path": "pending.rs", "status": "not_attempted", "added": 20, "removed": 20, "diff": "--- pending.rs\n+++ pending.rs\n@@ -1 +1 @@\n-a\n+b\n"}
+            ]
+        })),
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    });
+
+    let themed = card.render_with_theme(80, &theme);
+    let rows = plain(themed.clone());
+    assert!(rows[0].contains("+1 -1"), "header: {}", rows[0]);
+    assert!(!rows[0].contains("+21 -21"), "header: {}", rows[0]);
+    assert!(
+        rows.iter().any(|row| row.contains("not_attempted")),
+        "{rows:?}"
+    );
+    let pending = themed
+        .iter()
+        .find(|line| line.text().contains("pending.rs"))
+        .expect("pending header");
+    assert!(
+        pending
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "+20" && span.style().fg == Some(theme.text_muted) })
+    );
+    assert!(
+        pending
+            .spans()
+            .iter()
+            .any(|span| { span.text() == "-20" && span.style().fg == Some(theme.text_muted) })
+    );
+}
+
+#[test]
+fn collapsed_edit_keeps_first_and_last_change_clusters_inside_frame() {
+    let diff = "--- sample.rs\n+++ sample.rs\n@@ -1,12 +1,12 @@\n first\n-\told_first\n+\tnew_first\n c3\n c4\n c5\n c6\n c7\n c8\n c9\n c10\n-old_last\n+new_last\n tail\n";
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "edit-clusters".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("edited".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "committed",
+            "files": 1,
+            "replacements": 2,
+            "added": 2,
+            "removed": 2,
+            "changes": [{
+                "path": "sample.rs",
+                "status": "committed",
+                "replacements": 2,
+                "added": 2,
+                "removed": 2,
+                "diff": diff
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let collapsed = plain(card.render(64));
+    assert!(
+        collapsed.iter().any(|row| row.contains("old_first")),
+        "{collapsed:?}"
+    );
+    assert!(
+        collapsed.iter().any(|row| row.contains("old_last")),
+        "{collapsed:?}"
+    );
+    let hidden = collapsed
+        .iter()
+        .position(|row| row.contains("diff lines hidden"))
+        .expect("omission row");
+    assert!(collapsed[hidden].starts_with("│ "), "{collapsed:?}");
+    assert!(collapsed.iter().all(|row| !row.contains('\t')));
+    assert!(
+        collapsed
+            .iter()
+            .all(|row| neo_tui::primitive::visible_width(row) <= 64)
+    );
+    let collapsed_bottom = collapsed
+        .iter()
+        .rposition(|row| row.starts_with('╰'))
+        .unwrap();
+
+    card.set_expanded(true);
+    let expanded = plain(card.render(64));
+    assert!(!expanded.iter().any(|row| row.contains("diff lines hidden")));
+    let expanded_bottom = expanded
+        .iter()
+        .rposition(|row| row.starts_with('╰'))
+        .unwrap();
+    assert!(expanded_bottom > collapsed_bottom);
+}
+
+#[test]
+fn narrow_write_frame_expands_tabs_without_extra_border_overflow() {
+    for width in 1..=6 {
+        let content = if width == 1 { "a\tb" } else { "中\tb" };
+        let mut card = ToolCallComponent::new(ToolCallState {
+            id: format!("write-{width}"),
+            name: "Write".to_owned(),
+            arguments: Some(json!({"path": "x.rs", "content": content}).to_string()),
+            result: Some("written".to_owned()),
+            details: None,
+            status: ToolStatusKind::Succeeded,
+            exit_code: None,
+        });
+        let rows = plain(card.render(width));
+        let bound = width.max(if content.contains('中') { 2 } else { 1 });
+        assert!(
+            rows.iter()
+                .all(|row| neo_tui::primitive::visible_width(row) <= bound),
+            "width={width}: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains('╭') || row.contains('│'))
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains('\t')),
+            "width={width}: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains('b')),
+            "width={width}: {rows:?}"
+        );
+    }
 }
 
 #[test]
@@ -1701,7 +1990,9 @@ fn edit_streaming_preview_shows_progress() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "edit-1".to_owned(),
-        json_fragment: r#"{"files":[{"path":"src/foo.rs","replacements":[{"old":"foo","new":"bar"}]}]}"#.to_owned(),
+        json_fragment:
+            r#"{"files":[{"path":"src/foo.rs","replacements":[{"old":"foo","new":"bar"}]}]}"#
+                .to_owned(),
     });
 
     let frame = runtime
@@ -1804,6 +2095,26 @@ fn edit_batch_card_distinguishes_prepare_stale_partial_and_durability() {
             "{status} missing {needle}: {rows:?}"
         );
     }
+
+    let mut no_path = ToolCallComponent::new(ToolCallState {
+        id: "edit-no-path".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("failed".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "prepare_failed",
+            "message": "diagnostic without path"
+        })),
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    });
+    let rows = plain(no_path.render(80));
+    let diagnostic = rows
+        .iter()
+        .find(|line| line.contains("diagnostic without path"))
+        .expect("diagnostic row");
+    assert!(diagnostic.starts_with("│ "), "{rows:?}");
 }
 
 #[test]
@@ -1865,16 +2176,17 @@ fn edit_batch_progress_details_survive_interruption() {
         status: ToolStatusKind::Running,
         exit_code: None,
     });
-    assert!(card.set_terminal_status(
-        ToolStatusKind::Failed,
-        Some("interrupted".to_owned())
-    ));
+    assert!(card.set_terminal_status(ToolStatusKind::Failed, Some("interrupted".to_owned())));
     assert!(card.state().details.is_some());
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("unknown") || line.contains("interrupted") || line.contains("committing")),
+            .any(|line| line.contains("unknown") || line.contains("interrupted")),
         "interruption should retain progress evidence: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|line| line.contains("committing")),
+        "terminal state must outrank retained progress: {rows:?}"
     );
 }
 

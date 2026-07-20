@@ -47,8 +47,31 @@ impl DiffModel {
         let mut current_file: Option<DiffFile> = None;
         let mut current_hunk: Option<DiffHunk> = None;
         let mut pending_old_path: Option<String> = None;
+        let mut hunk_remaining: Option<(usize, usize)> = None;
 
         for line in diff.lines() {
+            if hunk_remaining == Some((0, 0)) {
+                flush_hunk(&mut current_file, &mut current_hunk);
+                hunk_remaining = None;
+            }
+            if !line.starts_with("@@")
+                && let Some(diff_line) = DiffLine::parse(line)
+                && let Some(hunk) = &mut current_hunk
+            {
+                hunk.stats.add_line(&diff_line);
+                if let Some((old, new)) = &mut hunk_remaining {
+                    match diff_line {
+                        DiffLine::Context(_) => {
+                            *old = old.saturating_sub(1);
+                            *new = new.saturating_sub(1);
+                        }
+                        DiffLine::Added(_) => *new = new.saturating_sub(1),
+                        DiffLine::Removed(_) => *old = old.saturating_sub(1),
+                    }
+                }
+                hunk.lines.push(diff_line);
+                continue;
+            }
             if let Some(path) = line.strip_prefix("--- ") {
                 flush_hunk(&mut current_file, &mut current_hunk);
                 if let Some(file) = current_file.take() {
@@ -70,7 +93,7 @@ impl DiffModel {
             }
             if line.starts_with("@@") {
                 flush_hunk(&mut current_file, &mut current_hunk);
-                let (old_start, new_start) = parse_hunk_starts(line);
+                let (old_start, old_count, new_start, new_count) = parse_hunk_coordinates(line);
                 current_hunk = Some(DiffHunk {
                     header: line.to_owned(),
                     old_start,
@@ -78,18 +101,8 @@ impl DiffModel {
                     lines: Vec::new(),
                     stats: DiffStats::default(),
                 });
+                hunk_remaining = Some((old_count, new_count));
                 continue;
-            }
-
-            let Some(diff_line) = DiffLine::parse(line) else {
-                continue;
-            };
-            if current_hunk.is_none() {
-                continue;
-            }
-            if let Some(hunk) = &mut current_hunk {
-                hunk.stats.add_line(&diff_line);
-                hunk.lines.push(diff_line);
             }
         }
 
@@ -591,21 +604,22 @@ fn normalize_diff_path(path: &str) -> String {
         .to_owned()
 }
 
-fn parse_hunk_starts(header: &str) -> (usize, usize) {
+fn parse_hunk_coordinates(header: &str) -> (usize, usize, usize, usize) {
     let mut parts = header.split_whitespace();
     let _at = parts.next();
     let old_part = parts.next().unwrap_or("-1");
     let new_part = parts.next().unwrap_or("+1");
-    (
-        parse_hunk_start(old_part, '-').unwrap_or(1),
-        parse_hunk_start(new_part, '+').unwrap_or(1),
-    )
+    let (old_start, old_count) = parse_hunk_range(old_part, '-').unwrap_or((1, 1));
+    let (new_start, new_count) = parse_hunk_range(new_part, '+').unwrap_or((1, 1));
+    (old_start, old_count, new_start, new_count)
 }
 
-fn parse_hunk_start(part: &str, prefix: char) -> Option<usize> {
+fn parse_hunk_range(part: &str, prefix: char) -> Option<(usize, usize)> {
     let part = part.strip_prefix(prefix)?;
-    let start = part.split(',').next()?;
-    start.parse().ok()
+    let mut range = part.split(',');
+    let start = range.next()?.parse().ok()?;
+    let count = range.next().map_or(Some(1), |count| count.parse().ok())?;
+    Some((start, count))
 }
 
 fn fit_width(text: &str, width: usize) -> String {
@@ -643,5 +657,22 @@ mod tests {
         assert_eq!(model.files().len(), 2);
         assert_eq!(model.files()[0].new_path, "a.txt");
         assert_eq!(model.files()[1].new_path, "b.txt");
+    }
+
+    #[test]
+    fn hunk_body_lines_that_resemble_headers_remain_changes() {
+        let model = DiffModel::parse_unified(
+            "--- example.txt\n+++ example.txt\n@@ -1,2 +1,2 @@\n--- old body\n+++ new body\n tail\n",
+        )
+        .expect("model");
+
+        assert_eq!(model.files().len(), 1);
+        assert_eq!(model.stats().removed, 1);
+        assert_eq!(model.stats().added, 1);
+        assert!(matches!(
+            &model.files()[0].hunks[0].lines[..],
+            [DiffLine::Removed(old), DiffLine::Added(new), DiffLine::Context(tail)]
+                if old == "-- old body" && new == "++ new body" && tail == "tail"
+        ));
     }
 }

@@ -539,11 +539,15 @@ fn emit_synthesized_finished(
 /// mode never opens an approval dialog.
 async fn prepare_edit_calls(
     tool_context: &ToolContext,
+    registry: &ToolRegistry,
     prepared: &mut [(
         &AgentToolCall,
         Result<super::tool_arguments::PreparedToolCall, ToolResult>,
     )],
 ) {
+    if !registry.has_canonical_prepared_edit() {
+        return;
+    }
     for (tool_call, parsed) in prepared.iter_mut() {
         let Ok(prepared_call) = parsed else {
             continue;
@@ -570,7 +574,10 @@ async fn prepare_edit_calls(
 
 /// Recheck every authorized prepared Edit. Stale targets become terminal
 /// results with zero writes.
-async fn recheck_prepared_edits(authorized: &mut [AuthorizedToolCall<'_>]) {
+async fn recheck_prepared_edits(
+    tool_context: &ToolContext,
+    authorized: &mut [AuthorizedToolCall<'_>],
+) {
     for entry in authorized.iter_mut() {
         if !matches!(entry.outcome, AuthorizedToolCallOutcome::Run { .. }) {
             continue;
@@ -581,7 +588,7 @@ async fn recheck_prepared_edits(authorized: &mut [AuthorizedToolCall<'_>]) {
         let PreparedExecution::Edit(edit) = &prepared.execution else {
             continue;
         };
-        if let Err(result) = edit.recheck_all().await {
+        if let Err(result) = edit.recheck_all(tool_context).await {
             entry.outcome = AuthorizedToolCallOutcome::Terminal(result);
         }
     }
@@ -772,7 +779,7 @@ pub(super) async fn execute_tool_calls(
             .then(|| emitter.context.instruction_state().clone()),
     )?;
     let mut prepared = prepared;
-    prepare_edit_calls(&tool_context, &mut prepared).await;
+    prepare_edit_calls(&tool_context, registry.as_ref(), &mut prepared).await;
 
     // Phase 4 — authorize the full batch (dialogs await sequentially).
     // Consumes `prepared` so Allow can write Plan/Goal context onto
@@ -838,7 +845,7 @@ pub(super) async fn execute_tool_calls(
 
     // Phase 6 — recheck every prepared Edit target after approval and instruction
     // recheck. Stale targets become terminal results with zero writes.
-    recheck_prepared_edits(&mut authorized).await;
+    recheck_prepared_edits(&tool_context, &mut authorized).await;
 
     // Phase 7 — schedule and execute the authorized batch.
     let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
@@ -1091,7 +1098,7 @@ async fn execute_authorized_sequential(
                     partial_result: update,
                 });
             };
-            edit.commit(cancel_token, &mut on_progress).await
+            edit.commit(&context, cancel_token, &mut on_progress).await
         } else {
             run_tool_with_cancel(
                 skills,
@@ -1482,7 +1489,10 @@ mod tests {
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
-    use super::{EventEmitter, execute_tool_calls, run_tool_with_cancel};
+    use super::{
+        EventEmitter, PreparedExecution, execute_tool_calls, prepare_edit_calls,
+        prepare_tool_calls_for_execution, run_tool_with_cancel,
+    };
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
     use crate::tools::{
@@ -1497,6 +1507,30 @@ mod tests {
     struct CancellationSettlingTerminal {
         entered: Arc<Notify>,
         settled: Arc<AtomicBool>,
+    }
+
+    struct CustomEdit;
+
+    impl Tool for CustomEdit {
+        fn name(&self) -> &'static str {
+            "Edit"
+        }
+
+        fn description(&self) -> &'static str {
+            "custom edit"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _ctx: &'a ToolContext,
+            _input: serde_json::Value,
+        ) -> ToolFuture<'a> {
+            Box::pin(async { Ok(crate::ToolResult::ok("custom edit ran")) })
+        }
     }
 
     impl Tool for CancellationSettlingTerminal {
@@ -1525,6 +1559,39 @@ mod tests {
                 Err(ToolError::Cancelled)
             })
         }
+    }
+
+    #[tokio::test]
+    async fn noncanonical_edit_calls_stay_on_direct_registry_execution() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path()).expect("context");
+        let calls = [AgentToolCall {
+            id: "edit".into(),
+            name: "Edit".into(),
+            raw_arguments: "{}".into(),
+        }];
+
+        let unregistered = ToolRegistry::new();
+        let mut prepared = prepare_tool_calls_for_execution(&calls, &unregistered.specs());
+        prepare_edit_calls(&context, &unregistered, &mut prepared).await;
+        assert!(matches!(
+            prepared[0].1.as_ref().expect("parsed").execution,
+            PreparedExecution::Direct
+        ));
+
+        let mut custom = ToolRegistry::with_builtin_tools();
+        custom.register(CustomEdit);
+        let mut prepared = prepare_tool_calls_for_execution(&calls, &custom.specs());
+        prepare_edit_calls(&context, &custom, &mut prepared).await;
+        assert!(matches!(
+            prepared[0].1.as_ref().expect("parsed").execution,
+            PreparedExecution::Direct
+        ));
+        let result = custom
+            .run("Edit", &context, json!({}))
+            .await
+            .expect("custom Edit");
+        assert_eq!(result.content, "custom edit ran");
     }
 
     #[tokio::test]

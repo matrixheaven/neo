@@ -58,6 +58,8 @@ pub struct ApprovalPromptData {
     pub feedback_input: String,
     #[serde(default)]
     pub feedback_active: bool,
+    #[serde(default)]
+    pub expanded: bool,
     pub state: ApprovalDisplayState,
     /// UI-only queue badge for additional pending approvals waiting behind this
     /// active prompt. Not part of the protocol request/response.
@@ -486,6 +488,15 @@ impl TranscriptEntry {
                 | Self::SkillActivation { .. }
                 | Self::DelegateSwarm { .. }
                 | Self::InstructionEpoch { .. }
+        ) || matches!(
+            self,
+            Self::ApprovalPrompt(ApprovalPromptData {
+                request: ApprovalRequest {
+                    presentation: ApprovalPresentation::Edit { .. },
+                    ..
+                },
+                ..
+            })
         )
     }
 
@@ -522,6 +533,15 @@ impl TranscriptEntry {
                     return false;
                 }
                 component.set_expanded(expanded);
+                true
+            }
+            Self::ApprovalPrompt(data)
+                if matches!(data.request.presentation, ApprovalPresentation::Edit { .. }) =>
+            {
+                if data.expanded == expanded {
+                    return false;
+                }
+                data.expanded = expanded;
                 true
             }
             _ => false,
@@ -1022,8 +1042,17 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         title,
     ));
     rows.push(Line::raw(""));
-    for detail in presentation_detail_lines(&data.request.presentation) {
-        rows.extend(styled_wrap_with_indent(&detail, width, 2, 4, body));
+    if let ApprovalPresentation::Edit { edit, .. } = &data.request.presentation {
+        rows.extend(super::edit_tool_presentation::render_edit_approval(
+            edit,
+            data.expanded,
+            width,
+            theme,
+        ));
+    } else {
+        for detail in presentation_detail_lines(&data.request.presentation) {
+            rows.extend(styled_wrap_with_indent(&detail, width, 2, 4, body));
+        }
     }
     rows.push(Line::raw(""));
     if let ApprovalPresentation::Plan { markdown, path, .. } = &data.request.presentation
@@ -1114,21 +1143,7 @@ fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String>
             lines
         }
         ApprovalPresentation::Tool { details, .. } => details.clone(),
-        ApprovalPresentation::Edit { edit, .. } => {
-            let mut lines = vec![format!(
-                "verified · {} files · {} replacements · +{} -{}",
-                edit.files, edit.replacements, edit.added, edit.removed
-            )];
-            for change in &edit.changes {
-                lines.push(format!(
-                    "M {}  +{} -{}",
-                    change.path.display(),
-                    change.added,
-                    change.removed
-                ));
-            }
-            lines
-        }
+        ApprovalPresentation::Edit { .. } => Vec::new(),
         ApprovalPresentation::Plan { summary, .. } => summary
             .as_ref()
             .filter(|s| !s.trim().is_empty())
@@ -1653,6 +1668,7 @@ amigo",
             selected,
             feedback_input,
             feedback_active,
+            expanded: false,
             state: ApprovalDisplayState::Pending,
             queued_count: 0,
         }
@@ -1707,5 +1723,92 @@ amigo",
             .collect::<Vec<_>>();
         let text = lines.join("\n");
         assert!(text.contains("feedback: ▌"), "{text}");
+    }
+
+    #[test]
+    fn edit_approval_prompt_follows_global_expansion() {
+        use neo_agent_core::{
+            ApprovalAction, ApprovalOption, EditApprovalChange, EditApprovalPresentation,
+            PermissionOperation,
+        };
+
+        let changes = (0..4)
+            .map(|index| EditApprovalChange {
+                path: std::path::PathBuf::from(format!("src/file{index}.rs")),
+                replacements: 1,
+                added: 1,
+                removed: 1,
+                diff: format!(
+                    "--- src/file{index}.rs\n+++ src/file{index}.rs\n@@ -12 +12 @@\n-old{index}\n+new{index}\n"
+                ),
+            })
+            .collect();
+        let mut entry = TranscriptEntry::ApprovalPrompt(ApprovalPromptData {
+            request: ApprovalRequest {
+                turn: 1,
+                id: "edit-approval".to_owned(),
+                operation: PermissionOperation::FileWrite,
+                presentation: ApprovalPresentation::Edit {
+                    title: "Edit 4 files?".to_owned(),
+                    edit: EditApprovalPresentation {
+                        files: 4,
+                        replacements: 4,
+                        added: 4,
+                        removed: 4,
+                        changes,
+                    },
+                },
+                options: vec![ApprovalOption {
+                    label: "Allow".to_owned(),
+                    description: None,
+                    action: ApprovalAction::PermitOnce,
+                }],
+            },
+            selected: 0,
+            feedback_input: String::new(),
+            feedback_active: false,
+            expanded: false,
+            state: ApprovalDisplayState::Pending,
+            queued_count: 0,
+        });
+
+        assert!(entry.is_expandable());
+        let theme = TuiTheme::default();
+        let collapsed_lines = entry.render(64, &theme);
+        assert!(
+            collapsed_lines
+                .iter()
+                .flat_map(Line::spans)
+                .any(|span| { span.text() == "+4" && span.style().fg == Some(theme.diff_added) })
+        );
+        assert!(
+            collapsed_lines
+                .iter()
+                .flat_map(Line::spans)
+                .any(|span| { span.text() == "-4" && span.style().fg == Some(theme.diff_removed) })
+        );
+        let collapsed = collapsed_lines
+            .into_iter()
+            .map(|line| line.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(collapsed.contains("files · 1 replacements"), "{collapsed}");
+        assert!(!collapsed.contains("src/file2.rs"), "{collapsed}");
+        assert!(
+            collapsed.contains('╭') && collapsed.contains('╰'),
+            "{collapsed}"
+        );
+
+        assert!(entry.set_expanded(true));
+        let expanded = entry
+            .render(64, &TuiTheme::default())
+            .into_iter()
+            .map(|line| line.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("src/file2.rs"), "{expanded}");
+        assert!(!expanded.contains("files · 1 replacements"), "{expanded}");
+        assert!(expanded.contains("12 - old2"), "{expanded}");
+        assert!(expanded.contains("12 + new2"), "{expanded}");
     }
 }

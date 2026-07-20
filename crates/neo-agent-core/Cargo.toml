@@ -23,7 +23,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rmcp = { version = "1.8.0", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"], default-features = false }
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 sysinfo.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -44,6 +44,7 @@ uuid.workspace = true
 winapi.workspace = true
 windows-acl.workspace = true
 win32job = "2.0.3"
+winsafe = { version = "0.0.19", features = ["kernel"] }
 
 [dev-dependencies]
 oauth2 = { version = "5.0", default-features = false }

@@ -110,7 +110,7 @@ pub(super) fn permission_preparation_for_mode(
     let mode = current_permission_mode(config);
 
     // 1. Plan-mode hard guard.
-    if let Some(prep) = check_plan_guard(config, tool_call, arguments) {
+    if let Some(prep) = check_plan_guard(config, tool_call, prepared_call) {
         return prep;
     }
 
@@ -135,7 +135,7 @@ pub(super) fn permission_preparation_for_mode(
     }
 
     // 10. Plan-mode helper approvals (e.g. writing the active plan file).
-    if let Some(prep) = check_plan_file_write(config, tool_call, arguments) {
+    if let Some(prep) = check_plan_file_write(config, tool_call, prepared_call) {
         return prep;
     }
 
@@ -160,15 +160,26 @@ pub(super) fn permission_preparation_for_mode(
 fn check_plan_guard(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
 ) -> Option<PermissionPreparation> {
     let plan_mode = config.plan_mode.read().ok()?;
     if plan_mode.is_active() {
+        if tool_call.name.as_ref() == "Edit"
+            && matches!(
+                &prepared_call.execution,
+                PreparedExecution::Edit(edit)
+                    if plan_mode
+                        .plan_file_path()
+                        .is_some_and(|path| edit.all_resolved_targets_match(path))
+            )
+        {
+            return None;
+        }
         match check_plan_mode_guard(
             &plan_mode,
             config.workspace_root.as_deref(),
             &tool_call.name,
-            arguments,
+            &prepared_call.arguments,
         ) {
             PlanModeGuard::Allow => {}
             PlanModeGuard::Deny { message } => {
@@ -298,7 +309,7 @@ fn check_transition_tools(
 fn check_plan_file_write(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
 ) -> Option<PermissionPreparation> {
     if !matches!(tool_call.name.as_ref(), "Write" | "Edit") {
         return None;
@@ -309,21 +320,18 @@ fn check_plan_file_write(
     }
     let workspace = config.workspace_root.as_deref();
     let allowed = match tool_call.name.as_ref() {
-        "Write" => arguments
+        "Write" => prepared_call
+            .arguments
             .get("path")
             .and_then(|v| v.as_str())
             .is_some_and(|path| is_active_plan_file_path(&plan_mode, workspace, path)),
-        "Edit" => {
-            let Some(files) = arguments.get("files").and_then(serde_json::Value::as_array) else {
-                return None;
-            };
-            !files.is_empty()
-                && files.iter().all(|file| {
-                    file.get("path")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|path| is_active_plan_file_path(&plan_mode, workspace, path))
-                })
-        }
+        "Edit" => matches!(
+            &prepared_call.execution,
+            PreparedExecution::Edit(edit)
+                if plan_mode
+                    .plan_file_path()
+                    .is_some_and(|path| edit.all_resolved_targets_match(path))
+        ),
         _ => false,
     };
     if allowed {
@@ -938,7 +946,11 @@ async fn resolve_approval(
                         reason: ApprovalCancelReason::Interrupt,
                     },
                 );
-                return AppliedApproval::Terminal(cancelled_tool_result());
+                let result = match &prepared_call.execution {
+                    PreparedExecution::Edit(edit) => edit.cancelled_before_commit_result(),
+                    PreparedExecution::Direct => cancelled_tool_result(),
+                };
+                return AppliedApproval::Terminal(result);
             }
             response = handler(request.clone()) => response,
         }

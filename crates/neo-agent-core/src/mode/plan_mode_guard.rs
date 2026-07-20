@@ -50,23 +50,8 @@ pub fn check_plan_mode_guard(
             }
             plan_mode_write_deny(plan_mode)
         }
-        "Edit" => {
-            let Some(files) = args.get("files").and_then(serde_json::Value::as_array) else {
-                return plan_mode_write_deny(plan_mode);
-            };
-            if files.is_empty() {
-                return plan_mode_write_deny(plan_mode);
-            }
-            let all_plan = files.iter().all(|file| {
-                file.get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|path| is_active_plan_file_path(plan_mode, workspace_root, path))
-            });
-            if all_plan {
-                return PlanModeGuard::Allow;
-            }
-            plan_mode_write_deny(plan_mode)
-        }
+        // Edit requires prepared resolved targets, which this raw guard does not own.
+        "Edit" => plan_mode_write_deny(plan_mode),
         "TaskStop" | "CronCreate" | "CronDelete" => PlanModeGuard::Deny {
             message: format!("blocked by plan mode: {tool_name} is not allowed while planning"),
         },
@@ -176,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn active_plan_mode_allows_edit_only_when_every_target_is_plan_file() {
+    fn active_plan_mode_rejects_unprepared_edit() {
         let s = active_state(Path::new("/ws/plans/p.md"));
         assert!(matches!(
             check_plan_mode_guard(
@@ -191,31 +176,6 @@ mod tests {
                         },
                         {
                             "path": "/ws/plans/p.md",
-                            "replacements": [{ "old": "c", "new": "d" }]
-                        }
-                    ]
-                })
-            ),
-            PlanModeGuard::Allow
-        ));
-    }
-
-    #[test]
-    fn active_plan_mode_rejects_edit_with_any_non_plan_target() {
-        let s = active_state(Path::new("/ws/plans/p.md"));
-        assert!(matches!(
-            check_plan_mode_guard(
-                &s,
-                Some(Path::new("/ws")),
-                "Edit",
-                &json!({
-                    "files": [
-                        {
-                            "path": "plans/p.md",
-                            "replacements": [{ "old": "a", "new": "b" }]
-                        },
-                        {
-                            "path": "src/other.rs",
                             "replacements": [{ "old": "c", "new": "d" }]
                         }
                     ]

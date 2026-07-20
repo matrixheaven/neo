@@ -110,6 +110,7 @@ impl TranscriptPane {
             selected: 0,
             feedback_input: String::new(),
             feedback_active: false,
+            expanded: self.tool_output_expanded(),
             state: ApprovalDisplayState::Pending,
             queued_count: 0,
         };
@@ -156,6 +157,7 @@ impl TranscriptPane {
             return;
         };
         next.queued_count = self.queued_approvals.len();
+        next.expanded = self.tool_output_expanded();
         self.transcript.insert_approval_after_tool_or_push(next);
     }
 }

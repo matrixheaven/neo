@@ -2,10 +2,9 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
-use crate::markdown::{highlight_code_lines, lang_from_path};
+use crate::markdown::{highlight_code_lines, lang_from_path, wrap_spans};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Style, truncate_width, visible_width};
+use crate::primitive::{Color, Style, clip_plain_to_width, truncate_width, visible_width};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
@@ -661,16 +660,6 @@ impl<'a> ToolBodyPalette<'a> {
         self.styled_or_raw(text, |theme| Style::default().fg(theme.text_primary))
     }
 
-    fn diff_line(self, line: &Line) -> Line {
-        match self.theme {
-            Some(theme) => diff_body_line(&line.to_ansi(), theme),
-            None => Line::raw(format!(
-                "  {}",
-                crate::primitive::strip_ansi(&line.to_ansi())
-            )),
-        }
-    }
-
     fn styled_or_raw(self, text: String, style: impl FnOnce(&TuiTheme) -> Style) -> Line {
         match self.theme {
             Some(theme) => Line::styled(text, style(theme)),
@@ -690,7 +679,7 @@ fn render_tool_body_with_palette(
     }
 
     render_diff_details(state, expanded, width, palette)
-        .or_else(|| render_write_body(state, expanded, palette))
+        .or_else(|| render_write_body(state, expanded, width, palette))
         .or_else(|| {
             (state.name == "WaitDelegate")
                 .then(|| render_wait_delegate_body(state, expanded, width, palette))
@@ -730,6 +719,7 @@ fn render_diff_details(
 fn render_write_body(
     state: &ToolCallState,
     expanded: bool,
+    width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Option<Vec<Line>> {
     if state.name != "Write" {
@@ -737,19 +727,25 @@ fn render_write_body(
     }
 
     let (path, content) = parse_write_arguments(state.arguments.as_deref())?;
-    Some(render_write_preview(&path, &content, expanded, palette))
+    Some(render_write_preview(
+        &path, &content, expanded, width, palette,
+    ))
 }
 
 fn render_write_preview(
     path: &str,
     content: &str,
     expanded: bool,
+    width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Vec<Line> {
+    let content = expand_tabs(content);
+    let content = content.as_ref();
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
     let mut rows = Vec::new();
+    let content_width = framed_content_width(width);
 
     let highlight_path = highlight_path_for_write_preview(path, content);
     let highlighted = palette
@@ -763,17 +759,38 @@ fn render_write_preview(
     let use_highlight = !highlighted.is_empty() && highlight_path.is_some();
 
     for (index, line) in lines.iter().take(limit).enumerate() {
-        let line_num = format!("{:>4}  ", index + 1);
-        if use_highlight && let Some(highlighted_line) = highlighted.get(index) {
-            let theme = palette.theme.expect("theme present when highlighted");
-            let mut spans = vec![Span::styled(
-                line_num,
-                Style::default().fg(theme.text_muted),
-            )];
-            spans.extend(highlighted_line.clone());
-            rows.push(Line::from_spans(spans));
+        let prefix_width = if width < 7 {
+            0
         } else {
-            rows.push(palette.body_line(format!("{line_num}{line}")));
+            6.min(content_width.saturating_sub(1))
+        };
+        let code_width = content_width.saturating_sub(prefix_width).max(1);
+        let code_spans = if use_highlight {
+            highlighted.get(index).cloned().unwrap_or_default()
+        } else {
+            vec![Span::styled(
+                (*line).to_owned(),
+                palette.theme.map_or_else(Style::default, |theme| {
+                    Style::default().fg(theme.text_primary)
+                }),
+            )]
+        };
+        for (visual_index, visual) in wrap_spans(&code_spans, code_width).into_iter().enumerate() {
+            let prefix = if prefix_width == 0 {
+                String::new()
+            } else if visual_index == 0 {
+                format!("{:>4}  ", index + 1)
+            } else {
+                " ".repeat(prefix_width)
+            };
+            let mut spans = vec![Span::styled(
+                prefix,
+                palette.theme.map_or_else(Style::default, |theme| {
+                    Style::default().fg(theme.text_muted)
+                }),
+            )];
+            spans.extend(visual);
+            rows.push(Line::from_spans(spans));
         }
     }
     if limit < total {
@@ -782,7 +799,114 @@ fn render_write_preview(
             total - limit
         )));
     }
+    let header = match palette.theme {
+        Some(theme) => Line::from_spans(vec![
+            Span::styled(
+                path.to_owned(),
+                Style::default().fg(theme.text_primary).bold(),
+            ),
+            Span::styled(
+                format!(" · {total} lines"),
+                Style::default().fg(theme.text_muted),
+            ),
+        ]),
+        None => Line::raw(format!("{path} · {total} lines")),
+    };
+    render_code_frame(header, rows, width, palette.theme)
+}
+
+pub(super) fn framed_content_width(width: usize) -> usize {
+    if width < 7 {
+        width.max(1)
+    } else {
+        width.saturating_sub(4)
+    }
+}
+
+/// Full-width rounded frame shared by Edit and Write projections.
+pub(super) fn render_code_frame(
+    header: Line,
+    body: Vec<Line>,
+    width: usize,
+    theme: Option<&TuiTheme>,
+) -> Vec<Line> {
+    if width < 7 {
+        return std::iter::once(header)
+            .chain(body)
+            .flat_map(|line| hard_wrap_line(&line, width.max(1)))
+            .collect();
+    }
+
+    let border = theme.map_or_else(Style::default, |theme| {
+        Style::default().fg(theme.surface_border)
+    });
+    let inner = framed_content_width(width);
+    let horizontal = "─".repeat(width - 2);
+    let mut rows = vec![Line::styled(format!("╭{horizontal}╮"), border)];
+    for line in std::iter::once(header).chain(body) {
+        for wrapped in hard_wrap_line(&line, inner) {
+            let padding = " ".repeat(inner.saturating_sub(wrapped.visible_width()));
+            let mut spans = vec![Span::styled("│ ", border)];
+            spans.extend(wrapped.into_spans());
+            spans.push(Span::raw(padding));
+            spans.push(Span::styled(" │", border));
+            rows.push(Line::from_spans(spans));
+        }
+    }
+    rows.push(Line::styled(format!("╰{horizontal}╯"), border));
     rows
+}
+
+pub(super) fn hard_wrap_line(line: &Line, width: usize) -> Vec<Line> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut current = Vec::new();
+    let mut current_width = 0usize;
+
+    for span in line.spans() {
+        let expanded_tabs = expand_tabs(span.text());
+        let mut remaining = expanded_tabs.as_ref();
+        while !remaining.is_empty() {
+            let available = width.saturating_sub(current_width);
+            let chunk = clip_plain_to_width(remaining, available);
+            if chunk.is_empty() {
+                if !current.is_empty() {
+                    rows.push(Line::from_spans(std::mem::take(&mut current)));
+                    current_width = 0;
+                    continue;
+                }
+                let end = remaining
+                    .char_indices()
+                    .nth(1)
+                    .map_or(remaining.len(), |(index, _)| index);
+                let chunk = &remaining[..end];
+                current.push(Span::styled(chunk.to_owned(), span.style()));
+                remaining = &remaining[end..];
+                rows.push(Line::from_spans(std::mem::take(&mut current)));
+                continue;
+            }
+            current_width += visible_width(&chunk);
+            let consumed = chunk.len();
+            current.push(Span::styled(chunk, span.style()));
+            remaining = &remaining[consumed..];
+            if !remaining.is_empty() {
+                rows.push(Line::from_spans(std::mem::take(&mut current)));
+                current_width = 0;
+            }
+        }
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(Line::from_spans(current));
+    }
+    rows
+}
+
+pub(super) fn expand_tabs(text: &str) -> Cow<'_, str> {
+    if text.contains('\t') {
+        Cow::Owned(text.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn highlight_path_for_write_preview<'a>(path: &'a str, content: &str) -> Option<Cow<'a, str>> {
@@ -905,67 +1029,6 @@ fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
 
 pub(crate) fn is_file_write_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit")
-}
-
-fn render_diff_model_lines(
-    model: &DiffModel,
-    expanded: bool,
-    width: usize,
-    theme: Option<&TuiTheme>,
-) -> Vec<Line> {
-    let render_width = width.saturating_sub(2).max(1);
-    let state = DiffRenderState::new(model.clone());
-    let lines = state.render_display_lines(render_width);
-    let total = lines.len();
-    let limit = if expanded {
-        total
-    } else {
-        COMMAND_PREVIEW_LINES.min(total)
-    };
-    let mut rows = lines
-        .into_iter()
-        .take(limit)
-        .map(|line| render_diff_line(&line, theme))
-        .collect::<Vec<_>>();
-    if limit < total {
-        let message = format!(
-            "  ... ({} more diff lines, {total} total, ctrl+o to expand)",
-            total - limit
-        );
-        rows.push(match theme {
-            Some(theme) => Line::styled(message, Style::default().fg(theme.text_muted)),
-            None => Line::raw(message),
-        });
-    }
-    rows
-}
-
-fn render_diff_line(line: &DiffRenderLine, theme: Option<&TuiTheme>) -> Line {
-    let text = format!("  {}", line.text);
-    let Some(theme) = theme else {
-        return Line::raw(text);
-    };
-    let color = match line.kind {
-        DiffRenderLineKind::Summary | DiffRenderLineKind::Separator => theme.diff_hunk,
-        DiffRenderLineKind::Added => theme.diff_added,
-        DiffRenderLineKind::Removed => theme.diff_removed,
-        DiffRenderLineKind::Context => theme.diff_context,
-    };
-    Line::styled(text, Style::default().fg(color))
-}
-
-/// Render one diff body line with add/remove coloring. Indented 2 spaces,
-/// the leading `+`/`-`/` ` drives the color.
-fn diff_body_line(raw: &str, theme: &TuiTheme) -> Line {
-    let plain = crate::primitive::strip_ansi(raw);
-    let trimmed = plain.trim_start();
-    let color = match trimmed.chars().next() {
-        Some('+') => theme.diff_added,
-        Some('-') => theme.diff_removed,
-        Some('@') => theme.diff_hunk,
-        _ => theme.diff_context,
-    };
-    Line::styled(format!("  {plain}"), Style::default().fg(color))
 }
 
 fn parse_write_arguments(arguments: Option<&str>) -> Option<(String, String)> {
@@ -1098,12 +1161,21 @@ fn prefix_chars(s: &str, n: usize) -> String {
 
 fn result_chip(state: &ToolCallState) -> String {
     if state.name == "Edit"
-        && let Some(model) = state
-            .details
-            .as_ref()
-            .and_then(DiffModel::from_tool_details)
+        && let Some(details) = state.details.as_ref()
+        && matches!(
+            details.get("kind").and_then(serde_json::Value::as_str),
+            Some("edit" | "edit_progress")
+        )
     {
-        return format!(" · +{} -{}", model.stats().added, model.stats().removed);
+        let added = details
+            .get("added")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let removed = details
+            .get("removed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        return format!(" · +{added} -{removed}");
     }
     if state.name == "Write" {
         if let Some(line_count) = state
@@ -1143,7 +1215,7 @@ fn one_line(text: &str) -> String {
 pub fn render_streaming_preview(
     state: &ToolCallState,
     expanded: bool,
-    _width: usize,
+    width: usize,
     theme: &TuiTheme,
     _started_at: Option<std::time::Instant>,
 ) -> Vec<Line> {
@@ -1160,7 +1232,7 @@ pub fn render_streaming_preview(
         }
         // Reuse the final preview renderer for format consistency.
         let palette = ToolBodyPalette::themed(theme);
-        return render_write_preview(&path, &content, expanded, palette);
+        return render_write_preview(&path, &content, expanded, width, palette);
     }
 
     if state.name == "Edit" {
@@ -1171,7 +1243,7 @@ pub fn render_streaming_preview(
                 details: state.details.as_ref(),
                 result: state.result.as_deref(),
                 expanded,
-                width: _width.max(40),
+                width,
                 theme,
             },
         );
