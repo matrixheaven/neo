@@ -31,6 +31,36 @@ pub struct EditApprovalChange {
     pub diff: String,
 }
 
+/// Presentation-only projection of a prepared batch Write. Carries only the
+/// verified per-file operation, statistics, and the exact created content or
+/// overwrite diff the user is approving.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct WriteApprovalPresentation {
+    pub files: usize,
+    pub created: usize,
+    pub overwritten: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub changes: Vec<WriteApprovalChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct WriteApprovalChange {
+    pub path: PathBuf,
+    pub line_count: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub preview: WriteApprovalPreview,
+}
+
+/// Explicit created-versus-overwritten preview for a prepared Write target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum WriteApprovalPreview {
+    Created { content: String },
+    Overwritten { diff: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalPresentation {
@@ -46,6 +76,10 @@ pub enum ApprovalPresentation {
     Edit {
         title: String,
         edit: EditApprovalPresentation,
+    },
+    Write {
+        title: String,
+        write: WriteApprovalPresentation,
     },
     Plan {
         title: String,

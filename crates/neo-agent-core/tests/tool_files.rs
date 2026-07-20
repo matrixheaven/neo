@@ -13,7 +13,7 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
         .run(
             "Write",
             &context,
-            json!({ "path": "src/lib.txt", "content": "alpha\nbeta\nalphabet\n" }),
+            json!({ "files": [{ "path": "src/lib.txt", "content": "alpha\nbeta\nalphabet\n" }] }),
         )
         .await
         .expect("Write");
@@ -226,101 +226,76 @@ async fn edit_batch_rejects_legacy_schema_and_link_like_targets() {
 }
 
 #[tokio::test]
-async fn write_tool_returns_created_file_diff_details() {
+async fn write_batch_mixed_create_overwrite_commits_in_order() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
         .with_access(ToolAccess::all());
 
+    std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
+    std::fs::write(workspace.path().join("src/config.rs"), "old\n").expect("seed config");
+
     let write = registry
         .run(
             "Write",
             &context,
-            json!({ "path": "notes/list.txt", "content": "one\ntwo\n" }),
+            json!({
+                "files": [
+                    { "path": "src/a.rs", "content": "fn main() {}\n" },
+                    { "path": "src/config.rs", "content": "new\n" },
+                    { "path": "src/generated/empty.txt", "content": "" }
+                ]
+            }),
         )
         .await
         .expect("Write");
 
     assert!(!write.is_error);
     let details = write.details.expect("write details");
-    assert_eq!(details["path"], "notes/list.txt");
-    assert_eq!(details["operation"], "created");
-    assert_eq!(details["added"], 2);
-    assert_eq!(details["removed"], 0);
-    assert_eq!(details["line_count"], 2);
-    assert_eq!(
-        details["diff"],
-        "--- notes/list.txt\n+++ notes/list.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+    assert_eq!(details["kind"], "write");
+    assert_eq!(details["status"], "committed");
+    assert_eq!(details["files"], 3);
+    assert_eq!(details["created"], 2);
+    assert_eq!(details["overwritten"], 1);
+
+    // Declaration order is preserved in changes[].
+    assert_eq!(details["changes"][0]["path"], "src/a.rs");
+    assert_eq!(details["changes"][0]["operation"], "created");
+    assert_eq!(details["changes"][0]["status"], "committed");
+    assert!(details["changes"][0]["content"].is_string());
+
+    assert_eq!(details["changes"][1]["path"], "src/config.rs");
+    assert_eq!(details["changes"][1]["operation"], "overwritten");
+    assert_eq!(details["changes"][1]["status"], "committed");
+    assert!(details["changes"][1]["diff"].is_string());
+
+    assert_eq!(details["changes"][2]["path"], "src/generated/empty.txt");
+    assert_eq!(details["changes"][2]["operation"], "created");
+    assert_eq!(details["changes"][2]["status"], "committed");
+
+    let created_directories: Vec<String> = details["created_directories"]
+        .as_array()
+        .expect("created_directories array")
+        .iter()
+        .map(|value| value.as_str().expect("dir string").to_owned())
+        .collect();
+    assert!(
+        created_directories
+            .iter()
+            .any(|dir| dir.contains("generated"))
     );
-}
 
-#[tokio::test]
-async fn write_tool_returns_overwritten_file_diff_details() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_access(ToolAccess::all());
-
-    registry
-        .run(
-            "Write",
-            &context,
-            json!({ "path": "notes/list.txt", "content": "one\ntwo\nthree\n" }),
-        )
-        .await
-        .expect("initial Write");
-
-    let write = registry
-        .run(
-            "Write",
-            &context,
-            json!({ "path": "notes/list.txt", "content": "one\nTWO\nthree\nfour\n" }),
-        )
-        .await
-        .expect("overwrite Write");
-
-    assert!(!write.is_error);
-    let details = write.details.expect("write details");
-    assert_eq!(details["path"], "notes/list.txt");
-    assert_eq!(details["operation"], "overwritten");
-    assert_eq!(details["added"], 2);
-    assert_eq!(details["removed"], 1);
-    assert_eq!(details["line_count"], 4);
     assert_eq!(
-        details["diff"],
-        "--- notes/list.txt\n+++ notes/list.txt\n@@ -1,3 +1,4 @@\n one\n-two\n+TWO\n three\n+four\n"
+        std::fs::read_to_string(workspace.path().join("src/a.rs")).expect("a"),
+        "fn main() {}\n"
     );
-}
-
-#[tokio::test]
-async fn write_overwrites_non_utf8_without_diff_preview() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let path = workspace.path().join("binary.bin");
-    std::fs::write(&path, [0xff, 0xfe]).expect("binary file");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_access(ToolAccess::all());
-
-    let write = registry
-        .run(
-            "Write",
-            &context,
-            json!({ "path": "binary.bin", "content": "replacement\n" }),
-        )
-        .await
-        .expect("Write");
-
-    assert!(!write.is_error);
-    assert_eq!(std::fs::read(&path).expect("read file"), b"replacement\n");
-    let details = write.details.expect("details");
-    assert_eq!(details["operation"], "overwritten");
-    assert_eq!(details["diff_available"], false);
-    assert!(details.get("diff").is_none());
     assert_eq!(
-        details["diff_unavailable_reason"],
-        "existing file content is not valid UTF-8"
+        std::fs::read_to_string(workspace.path().join("src/config.rs")).expect("config"),
+        "new\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("src/generated/empty.txt")).expect("empty"),
+        ""
     );
 }

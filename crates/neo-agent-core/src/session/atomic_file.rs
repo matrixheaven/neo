@@ -1,4 +1,9 @@
-use std::{ffi::OsStr, fs, io, io::Write, path::Path};
+use std::{
+    ffi::OsStr,
+    fs, io,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use uuid::Uuid;
 
@@ -132,6 +137,93 @@ pub(crate) fn replace_existing_file_atomic_status(
 pub(crate) fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     validate_safe_directory(path)
+}
+
+/// Directories created by [`create_missing_directories_recording`], plus the
+/// first error that stopped creation. `created` lists only directories this
+/// call actually created, in outermost-to-innermost order, so a later failure
+/// can report exact remaining side effects.
+pub(crate) struct DirectoryCreation {
+    pub(crate) created: Vec<PathBuf>,
+    pub(crate) error: Option<io::Error>,
+}
+
+/// Create every missing directory from the nearest existing ancestor out to
+/// `dir`, recording only the directories this call created.
+///
+/// Existing components are validated as safe directories; symlinks, reparse
+/// points, and non-directories are rejected before any creation. Concurrent
+/// creation of a level is tolerated but never recorded, because Neo did not
+/// create it. Nothing is ever removed.
+pub(crate) fn create_missing_directories_recording(dir: &Path) -> DirectoryCreation {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut current = dir.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+                    return DirectoryCreation {
+                        created: Vec::new(),
+                        error: Some(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "refusing to create files under non-directory ancestor {}",
+                                current.display()
+                            ),
+                        )),
+                    };
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match current.parent() {
+                Some(parent) => {
+                    missing.push(current.clone());
+                    current = parent.to_path_buf();
+                }
+                None => {
+                    return DirectoryCreation {
+                        created: Vec::new(),
+                        error: Some(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("no existing ancestor for {}", dir.display()),
+                        )),
+                    };
+                }
+            },
+            Err(error) => {
+                return DirectoryCreation {
+                    created: Vec::new(),
+                    error: Some(error),
+                };
+            }
+        }
+    }
+
+    let mut created = Vec::new();
+    for path in missing.iter().rev() {
+        match fs::create_dir(path) {
+            Ok(()) => created.push(path.clone()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if let Err(validation) = validate_safe_directory(path) {
+                    return DirectoryCreation {
+                        created,
+                        error: Some(validation),
+                    };
+                }
+            }
+            Err(error) => {
+                return DirectoryCreation {
+                    created,
+                    error: Some(error),
+                };
+            }
+        }
+    }
+
+    DirectoryCreation {
+        created,
+        error: None,
+    }
 }
 
 pub(crate) fn validate_safe_directory_if_present(path: &Path) -> io::Result<()> {

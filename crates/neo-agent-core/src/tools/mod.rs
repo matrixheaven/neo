@@ -160,6 +160,8 @@ pub use sleep::SleepTool;
 pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
 // Re-export the prepared Edit payload inside the crate for runtime dispatch.
 pub(crate) use edit::PreparedEdit;
+// Re-export the prepared Write payload inside the crate for runtime dispatch.
+pub(crate) use write::PreparedWrite;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
@@ -578,6 +580,7 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
     spec_cache: Mutex<Option<Vec<ToolSpec>>>,
     canonical_prepared_edit: bool,
+    canonical_prepared_write: bool,
 }
 
 impl ToolRegistry {
@@ -602,7 +605,7 @@ impl ToolRegistry {
         registry.register(self::todo::TodoTool::with_state(Arc::new(Mutex::new(
             Vec::new(),
         ))));
-        registry.register(write::WriteTool);
+        registry.register_builtin_write();
         registry.register_builtin_edit();
         registry.register(bash::BashTool);
         registry.register(background_tasks::TaskListTool);
@@ -625,7 +628,7 @@ impl ToolRegistry {
         registry.register(find::FindTool);
         registry.register(glob::GlobTool);
         registry.register(self::todo::TodoTool::with_state(todos));
-        registry.register(write::WriteTool);
+        registry.register_builtin_write();
         registry.register_builtin_edit();
         registry.register(bash::BashTool);
         registry.register(background_tasks::TaskListTool);
@@ -652,6 +655,9 @@ impl ToolRegistry {
         if tool.name() == "Edit" {
             self.canonical_prepared_edit = false;
         }
+        if tool.name() == "Write" {
+            self.canonical_prepared_write = false;
+        }
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
         self.invalidate_specs();
     }
@@ -661,9 +667,19 @@ impl ToolRegistry {
         self.canonical_prepared_edit = true;
     }
 
+    fn register_builtin_write(&mut self) {
+        self.register(write::WriteTool);
+        self.canonical_prepared_write = true;
+    }
+
     #[must_use]
     pub(crate) const fn has_canonical_prepared_edit(&self) -> bool {
         self.canonical_prepared_edit
+    }
+
+    #[must_use]
+    pub(crate) const fn has_canonical_prepared_write(&self) -> bool {
+        self.canonical_prepared_write
     }
 
     pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
@@ -717,6 +733,8 @@ impl ToolRegistry {
         }
         filtered.canonical_prepared_edit =
             self.canonical_prepared_edit && filtered.tools.contains_key("Edit");
+        filtered.canonical_prepared_write =
+            self.canonical_prepared_write && filtered.tools.contains_key("Write");
         filtered
     }
 }
