@@ -55,7 +55,6 @@ pub struct TaskBrowserState {
     filter: TaskBrowserFilter,
     snapshot: TaskBrowserSnapshot,
     selected_task_id: Option<String>,
-    list_scroll: usize,
     output_scroll: usize,
     focus: TaskBrowserFocus,
     stop_confirmation_task_id: Option<String>,
@@ -69,7 +68,6 @@ impl TaskBrowserState {
             filter: TaskBrowserFilter::All,
             snapshot: TaskBrowserSnapshot::new(Vec::new()),
             selected_task_id: None,
-            list_scroll: 0,
             output_scroll: 0,
             focus: TaskBrowserFocus::List,
             stop_confirmation_task_id: None,
@@ -108,11 +106,6 @@ impl TaskBrowserState {
 
     pub fn clear_footer_message(&mut self) {
         self.footer_message = None;
-    }
-
-    #[must_use]
-    pub const fn list_scroll(&self) -> usize {
-        self.list_scroll
     }
 
     #[must_use]
@@ -218,7 +211,6 @@ impl TaskBrowserState {
             self.selected_task_id = visible_items.first().map(|item| item.id.clone());
         }
 
-        self.clamp_list_scroll();
         self.output_scroll = 0;
     }
 
@@ -226,7 +218,6 @@ impl TaskBrowserState {
         let visible_items = self.visible_items();
         if visible_items.is_empty() {
             self.selected_task_id = None;
-            self.list_scroll = 0;
             return;
         }
 
@@ -235,7 +226,6 @@ impl TaskBrowserState {
             .saturating_add_signed(delta)
             .min(visible_items.len() - 1);
         self.selected_task_id = Some(visible_items[next].id.clone());
-        self.list_scroll = next;
         self.output_scroll = 0;
     }
 
@@ -243,7 +233,6 @@ impl TaskBrowserState {
         let visible_items = self.visible_items();
         if let Some(item) = visible_items.get(index) {
             self.selected_task_id = Some(item.id.clone());
-            self.list_scroll = index;
             self.output_scroll = 0;
         }
     }
@@ -265,15 +254,6 @@ impl TaskBrowserState {
             .output_scroll
             .saturating_add_signed(delta)
             .min(line_count - 1);
-    }
-
-    fn clamp_list_scroll(&mut self) {
-        let len = self.visible_items().len();
-        if len == 0 {
-            self.list_scroll = 0;
-        } else {
-            self.list_scroll = self.list_scroll.min(len - 1);
-        }
     }
 }
 

@@ -114,14 +114,16 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
     let mut transcript = TranscriptPane::new(80, 20);
     transcript.push_status("old transcript line should be hidden");
     let mut tui = neo_tui::NeoTui::new(app, transcript);
-    let (lines, cursor) = tui.render_frame(80, 20);
-    let rendered = lines
+    let frame = tui.render_terminal_frame(80, 20);
+    assert!(frame.review_surface);
+    assert!(frame.cursor.is_none());
+    let rendered = frame
+        .live
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(cursor.is_none());
     assert!(rendered.contains("TASK BROWSER"));
     assert!(!rendered.contains("old transcript line should be hidden"));
 }

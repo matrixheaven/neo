@@ -170,10 +170,11 @@ impl<'a> TaskBrowserRenderer<'a> {
             body.extend(wrap_words(empty, width.saturating_sub(4)));
         } else {
             let max_rows = height.saturating_sub(2);
-            let start = self
-                .state
-                .list_scroll()
-                .min(visible.len().saturating_sub(1));
+            let selected = visible
+                .iter()
+                .position(|item| self.state.selected_task_id() == Some(item.id.as_str()))
+                .unwrap_or(0);
+            let start = selected.saturating_sub(max_rows.saturating_sub(1));
             for item in visible.into_iter().skip(start).take(max_rows) {
                 body.push(self.task_row(item, width.saturating_sub(4)));
             }

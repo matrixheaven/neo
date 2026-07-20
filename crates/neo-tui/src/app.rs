@@ -157,13 +157,8 @@ impl NeoTui {
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
-            return TerminalFrame::with_surface(
-                Vec::new(),
-                lines,
-                None,
-                self.automatic_overflow.is_some() || manual_review_open,
-                None,
-            );
+            // Preserve the primary live anchor while the full-screen overlay is open.
+            return TerminalFrame::with_surface(Vec::new(), lines, None, true, None);
         }
 
         let chrome_render =

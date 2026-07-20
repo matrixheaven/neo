@@ -118,7 +118,7 @@ fn task_browser_page_down_scrolls_output_when_output_focused() {
 }
 
 #[test]
-fn task_browser_renderer_uses_list_and_output_scroll_offsets() {
+fn task_browser_renderer_keeps_selection_visible_and_scrolls_output() {
     let mut items = Vec::new();
     for index in 0..18 {
         let mut task = item(&format!("bash-{index:02}"), TaskBrowserStatus::Running);
@@ -135,8 +135,12 @@ fn task_browser_renderer_uses_list_and_output_scroll_offsets() {
 
     let rendered = render_plain(&state, 120, 18).join("\n");
 
-    assert!(rendered.contains("bash-12"));
-    assert!(!rendered.contains("> ● bash-00"));
+    assert!(rendered.contains("bash-00"));
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.contains('>') && line.contains("bash-12"))
+    );
     assert!(rendered.contains("output line 10"));
     assert!(!rendered.contains("output line 0"));
 }
