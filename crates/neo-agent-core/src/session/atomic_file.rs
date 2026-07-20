@@ -95,13 +95,13 @@ pub(crate) fn validate_safe_directory(path: &Path) -> io::Result<()> {
     if is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("refusing symlinked session directory {}", path.display()),
+            format!("refusing symlinked directory {}", path.display()),
         ));
     }
     if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("session path is not a directory: {}", path.display()),
+            format!("path is not a directory: {}", path.display()),
         ));
     }
     Ok(())
@@ -116,7 +116,7 @@ pub(crate) fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()
     if is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("refusing symlinked session file {}", path.display()),
+            format!("refusing symlinked file {}", path.display()),
         ));
     }
     Ok(())

@@ -20,7 +20,8 @@ pub mod workspace_policy;
 
 pub use approval::{
     ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation,
-    ApprovalProtocolError, ApprovalRequest, ApprovalResolution, ApprovalResponse, PlanSelection,
+    ApprovalProtocolError, ApprovalRequest, ApprovalResolution, ApprovalResponse,
+    EditApprovalChange, EditApprovalPresentation, PlanSelection,
 };
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,

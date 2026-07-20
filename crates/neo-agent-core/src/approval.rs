@@ -11,6 +11,26 @@ pub struct PlanSelection {
     pub description: Option<String>,
 }
 
+/// Presentation-only projection of a prepared Edit batch. Never carries full
+/// original or staged file bodies — only paths, counts, stats, and diffs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct EditApprovalPresentation {
+    pub files: usize,
+    pub replacements: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub changes: Vec<EditApprovalChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct EditApprovalChange {
+    pub path: PathBuf,
+    pub replacements: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub diff: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalPresentation {
@@ -22,6 +42,10 @@ pub enum ApprovalPresentation {
     Tool {
         title: String,
         details: Vec<String>,
+    },
+    Edit {
+        title: String,
+        edit: EditApprovalPresentation,
     },
     Plan {
         title: String,

@@ -158,6 +158,8 @@ pub use sessions::SummarizeSessionsTool;
 pub use sleep::SleepTool;
 // Re-export skill-manager tool types.
 pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
+// Re-export prepared Edit execution payload for runtime and focused tests.
+pub use edit::PreparedEdit;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 

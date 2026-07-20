@@ -76,6 +76,7 @@ impl ApprovalPromptData {
         match &self.request.presentation {
             ApprovalPresentation::Command { title, .. }
             | ApprovalPresentation::Tool { title, .. }
+            | ApprovalPresentation::Edit { title, .. }
             | ApprovalPresentation::Plan { title, .. }
             | ApprovalPresentation::Goal { title, .. } => title.as_str(),
         }
@@ -1113,6 +1114,21 @@ fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String>
             lines
         }
         ApprovalPresentation::Tool { details, .. } => details.clone(),
+        ApprovalPresentation::Edit { edit, .. } => {
+            let mut lines = vec![format!(
+                "verified · {} files · {} replacements · +{} -{}",
+                edit.files, edit.replacements, edit.added, edit.removed
+            )];
+            for change in &edit.changes {
+                lines.push(format!(
+                    "M {}  +{} -{}",
+                    change.path.display(),
+                    change.added,
+                    change.removed
+                ));
+            }
+            lines
+        }
         ApprovalPresentation::Plan { summary, .. } => summary
             .as_ref()
             .filter(|s| !s.trim().is_empty())
