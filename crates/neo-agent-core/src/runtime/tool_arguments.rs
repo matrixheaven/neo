@@ -10,8 +10,10 @@
 //! execution run, so the model sees the failure and can retry.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::tools::normalize_path;
+use crate::tools::PreparedEdit;
 use crate::{AgentToolCall, PlanSelection, ToolResult};
 use neo_ai::ToolSpec;
 
@@ -22,6 +24,26 @@ pub(super) enum ApprovalExecutionContext {
     Plan { selection: Option<PlanSelection> },
     Goal,
 }
+
+/// Narrow runtime-only prepared execution payload. Non-Edit tools stay `Direct`.
+/// Edit carries the approved staged bytes through authorization and commit.
+#[derive(Clone, Debug)]
+pub(super) enum PreparedExecution {
+    Direct,
+    Edit(Arc<PreparedEdit>),
+}
+
+impl PartialEq for PreparedExecution {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Direct, Self::Direct) => true,
+            (Self::Edit(left), Self::Edit(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PreparedExecution {}
 
 /// A fully prepared tool call: the parsed arguments plus the raw canonical
 /// string they were derived from.
@@ -41,6 +63,10 @@ pub struct PreparedToolCall {
     /// mode-exit consumers read this field directly (batch-order), never via
     /// a tool-id side map.
     pub(super) approval: Option<ApprovalExecutionContext>,
+    /// Runtime-only prepared execution payload. Defaults to `Direct`; Edit
+    /// preparation replaces it with `Edit(Arc<PreparedEdit>)` after instruction
+    /// preflight and before authorization.
+    pub(super) execution: PreparedExecution,
 }
 
 /// Outcome of attempting to parse raw tool-call arguments.
@@ -74,6 +100,7 @@ pub fn prepare_tool_arguments(
             arguments,
             warning: None,
             approval: None,
+            execution: PreparedExecution::Direct,
         }),
         ToolArgumentsOutcome::Repaired { arguments, warning } => Ok(PreparedToolCall {
             id: tool_call.id.to_string(),
@@ -82,6 +109,7 @@ pub fn prepare_tool_arguments(
             arguments,
             warning: Some(warning),
             approval: None,
+            execution: PreparedExecution::Direct,
         }),
         ToolArgumentsOutcome::Invalid {
             message,
@@ -319,50 +347,103 @@ pub struct InstructionScopeProbe {
 }
 
 impl InstructionScopeProbe {
-    /// Derive the probe for one prepared tool call. Returns `None` when the
-    /// tool class carries no probe or the typed path resolves outside the
-    /// primary workspace.
+    /// Derive probes for one prepared tool call. Returns an empty collection
+    /// when the tool class carries no probe or no typed path resolves inside
+    /// the primary workspace. Edit contributes one probe per distinct parent
+    /// directory of `files[].path` in declaration order.
     #[must_use]
     pub fn from_prepared_tool(
         name: &str,
         arguments: &serde_json::Value,
         primary_workspace: &Path,
-    ) -> Option<Self> {
-        let target_directory = match name {
-            "Read" | "Write" | "Edit" => {
-                let path = arguments.get("path").and_then(serde_json::Value::as_str)?;
-                let resolved = resolve_probe_path(path, primary_workspace)?;
-                // File tools probe the file's parent directory.
-                probe_existing_directory(resolved.parent()?, primary_workspace)
+    ) -> Vec<Self> {
+        match name {
+            "Edit" => edit_scope_probes(arguments, primary_workspace),
+            "Read" | "Write" => {
+                let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+                    return Vec::new();
+                };
+                let Some(resolved) = resolve_probe_path(path, primary_workspace) else {
+                    return Vec::new();
+                };
+                let Some(parent) = resolved.parent() else {
+                    return Vec::new();
+                };
+                probe_existing_directory(parent, primary_workspace)
+                    .into_iter()
+                    .map(|target_directory| Self { target_directory })
+                    .collect()
             }
             "List" | "Grep" | "Find" | "Glob" => {
                 let root = arguments
                     .get("path")
                     .and_then(serde_json::Value::as_str)
                     .filter(|value| !value.trim().is_empty());
-                match root {
+                let directory = match root {
                     Some(root) => {
-                        let resolved = resolve_probe_path(root, primary_workspace)?;
+                        let Some(resolved) = resolve_probe_path(root, primary_workspace) else {
+                            return Vec::new();
+                        };
                         probe_existing_directory(&resolved, primary_workspace)
                     }
                     None => Some(primary_workspace.to_path_buf()),
-                }
+                };
+                directory
+                    .into_iter()
+                    .map(|target_directory| Self { target_directory })
+                    .collect()
             }
-            "Bash" => probe_shell_cwd(arguments, primary_workspace),
+            "Bash" => probe_shell_cwd(arguments, primary_workspace)
+                .into_iter()
+                .map(|target_directory| Self { target_directory })
+                .collect(),
             "Terminal" => {
                 let mode = arguments
                     .get("mode")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
                 if mode != "start" {
-                    return None;
+                    return Vec::new();
                 }
                 probe_shell_cwd(arguments, primary_workspace)
+                    .into_iter()
+                    .map(|target_directory| Self { target_directory })
+                    .collect()
             }
-            _ => return None,
-        }?;
-        Some(Self { target_directory })
+            _ => Vec::new(),
+        }
     }
+}
+
+/// Collect parent-directory probes for every Edit `files[].path`, preserving
+/// declaration order and deduplicating identical canonical directories.
+fn edit_scope_probes(arguments: &serde_json::Value, primary_workspace: &Path) -> Vec<InstructionScopeProbe> {
+    let Some(files) = arguments.get("files").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut probes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for file in files {
+        let Some(path) = file.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(resolved) = resolve_probe_path(path, primary_workspace) else {
+            continue;
+        };
+        let Some(parent) = resolved.parent() else {
+            continue;
+        };
+        let Some(directory) = probe_existing_directory(parent, primary_workspace) else {
+            continue;
+        };
+        let key = directory.as_os_str().to_owned();
+        if seen.insert(key) {
+            probes.push(InstructionScopeProbe {
+                target_directory: directory,
+            });
+        }
+    }
+    probes
 }
 
 /// Probe the explicit `cwd` of a shell tool, falling back to the primary
@@ -533,65 +614,78 @@ mod tests {
 
         let probe = |name: &str, arguments: serde_json::Value| {
             InstructionScopeProbe::from_prepared_tool(name, &arguments, &workspace)
+                .into_iter()
                 .map(|probe| probe.target_directory)
+                .collect::<Vec<_>>()
         };
         let absolute = |path: &std::path::Path| path.to_string_lossy().to_string();
 
-        // Read/Write/Edit probe the parent directory of the typed file path.
-        for name in ["Read", "Write", "Edit"] {
+        // Read/Write probe the parent directory of the typed file path.
+        for name in ["Read", "Write"] {
             assert_eq!(
                 probe(name, json!({ "path": "nested/file.txt" })),
-                Some(nested.clone()),
+                vec![nested.clone()],
                 "{name} relative path"
             );
             assert_eq!(
                 probe(name, json!({ "path": absolute(&nested.join("file.txt")) })),
-                Some(nested.clone()),
+                vec![nested.clone()],
                 "{name} absolute path"
             );
             assert_eq!(
                 probe(name, json!({ "path": absolute(&external) })),
-                None,
+                Vec::<PathBuf>::new(),
                 "{name} external absolute path"
             );
         }
+        // Edit probes every files[].path parent directory.
+        assert_eq!(
+            probe(
+                "Edit",
+                json!({
+                    "files": [{ "path": "nested/file.txt", "replacements": [{ "old": "a", "new": "b" }] }]
+                })
+            ),
+            vec![nested.clone()],
+            "Edit relative path"
+        );
         // List/Grep/Find/Glob probe the explicit root; an omitted root is the
         // primary workspace.
         for name in ["List", "Grep", "Find", "Glob"] {
             assert_eq!(
                 probe(name, json!({ "path": "nested" })),
-                Some(nested.clone()),
+                vec![nested.clone()],
                 "{name} explicit root"
             );
             assert_eq!(
                 probe(name, json!({})),
-                Some(workspace.clone()),
+                vec![workspace.clone()],
                 "{name} default root"
             );
             assert_eq!(
                 probe(name, json!({ "path": absolute(&external) })),
-                None,
+                Vec::<PathBuf>::new(),
                 "{name} external root"
             );
         }
         // A file-valued Grep path probes the file's parent directory.
         assert_eq!(
             probe("Grep", json!({ "pattern": "x", "path": "nested/file.txt" })),
-            Some(nested.clone())
+            vec![nested.clone()]
         );
         // Bash and Terminal(start) probe the explicit cwd, falling back to the
         // primary workspace. Command strings are never parsed for paths.
         assert_eq!(
             probe("Bash", json!({ "command": "true" })),
-            Some(workspace.clone())
+            vec![workspace.clone()]
         );
         assert_eq!(
             probe("Bash", json!({ "command": "true", "cwd": "nested" })),
-            Some(nested.clone())
+            vec![nested.clone()]
         );
         assert_eq!(
             probe("Bash", json!({ "command": "cd nested && cat AGENTS.md" })),
-            Some(workspace.clone()),
+            vec![workspace.clone()],
             "shell command text must not influence the probe"
         );
         assert_eq!(
@@ -599,18 +693,18 @@ mod tests {
                 "Bash",
                 json!({ "command": "true", "cwd": absolute(&external) })
             ),
-            None
+            Vec::<PathBuf>::new()
         );
         assert_eq!(
             probe("Terminal", json!({ "mode": "start", "command": "top" })),
-            Some(workspace.clone())
+            vec![workspace.clone()]
         );
         assert_eq!(
             probe(
                 "Terminal",
                 json!({ "mode": "start", "command": "top", "cwd": "nested" })
             ),
-            Some(nested.clone())
+            vec![nested.clone()]
         );
         for mode in ["write", "read", "resize", "stop"] {
             assert_eq!(
@@ -618,15 +712,50 @@ mod tests {
                     "Terminal",
                     json!({ "mode": mode, "handle": "h", "cwd": "nested" })
                 ),
-                None,
+                Vec::<PathBuf>::new(),
                 "Terminal {mode} adds no new probe"
             );
         }
         // Other tools and MCP-style names never probe.
         for name in ["TodoList", "Delegate", "mcp__docs__search"] {
-            assert_eq!(probe(name, json!({})), None, "{name}");
+            assert_eq!(probe(name, json!({})), Vec::<PathBuf>::new(), "{name}");
         }
         // Paths escaping the workspace never probe.
-        assert_eq!(probe("Read", json!({ "path": "../outside.txt" })), None);
+        assert_eq!(
+            probe("Read", json!({ "path": "../outside.txt" })),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn typed_scope_probes_cover_every_edit_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested_a = workspace.join("a");
+        let nested_b = workspace.join("b");
+        std::fs::create_dir_all(&nested_a).expect("a");
+        std::fs::create_dir_all(&nested_b).expect("b");
+        std::fs::write(nested_a.join("one.txt"), "1").expect("one");
+        std::fs::write(nested_b.join("two.txt"), "2").expect("two");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let nested_a = workspace.join("a");
+        let nested_b = workspace.join("b");
+
+        let probes = InstructionScopeProbe::from_prepared_tool(
+            "Edit",
+            &json!({
+                "files": [
+                    { "path": "a/one.txt", "replacements": [{ "old": "1", "new": "x" }] },
+                    { "path": "b/two.txt", "replacements": [{ "old": "2", "new": "y" }] },
+                    { "path": "a/one.txt", "replacements": [{ "old": "x", "new": "z" }] }
+                ]
+            }),
+            &workspace,
+        );
+        let directories: Vec<_> = probes
+            .into_iter()
+            .map(|probe| probe.target_directory)
+            .collect();
+        assert_eq!(directories, vec![nested_a, nested_b]);
     }
 }

@@ -3,9 +3,10 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest,
     ApprovalResponse, AskUserTool, CompactionSettings, CompactionSummary, Content, PermissionMode,
-    PermissionOperation, QueueMode, SessionApprovalKey, SessionApprovalScope, ShellCommandOrigin,
-    ShellCommandOutcome, SkillInvocationOutcome, SkillInvocationSource, StopReason, TodoEventData,
-    Tool, ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    PermissionOperation, PreparedEdit, QueueMode, SessionApprovalKey, SessionApprovalScope,
+    ShellCommandOrigin, ShellCommandOutcome, SkillInvocationOutcome, SkillInvocationSource,
+    StopReason, TodoEventData, Tool, ToolAccess, ToolContext, ToolError, ToolExecutionMode,
+    ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, main_agent_plans_dir, workspace_sessions_dir},
     skills::SkillStore,
@@ -7154,9 +7155,10 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 raw_arguments: json!({
-                    "path": plan_path,
-                    "old": "Draft.",
-                    "new": "Finalized."
+                    "files": [{
+                        "path": plan_path,
+                        "replacements": [{ "old": "Draft.", "new": "Finalized." }]
+                    }]
                 })
                 .to_string(),
             },
@@ -10162,9 +10164,10 @@ async fn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "path": target.to_string_lossy(),
-        "old": "alpha",
-        "new": "beta",
+        "files": [{
+            "path": target.to_string_lossy(),
+            "replacements": [{ "old": "alpha", "new": "beta" }]
+        }]
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -10529,9 +10532,10 @@ async fn blocked_scope_allows_read_only_diagnosis_but_blocks_mixed_mutation_batc
     let target = fixture.workspace.join("nested").join("data.txt");
     std::fs::write(&target, "body").expect("data file");
     let edit_arguments = json!({
-        "path": target.to_string_lossy(),
-        "old": "body",
-        "new": "changed",
+        "files": [{
+            "path": target.to_string_lossy(),
+            "replacements": [{ "old": "body", "new": "changed" }]
+        }]
     });
     let read_arguments = json!({ "path": target.to_string_lossy() });
     let harness = FakeHarness::from_turns([
@@ -10751,9 +10755,10 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "path": target.to_string_lossy(),
-        "old": "alpha",
-        "new": "beta",
+        "files": [{
+            "path": target.to_string_lossy(),
+            "replacements": [{ "old": "alpha", "new": "beta" }]
+        }]
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -10908,9 +10913,10 @@ async fn history_pressure_compacts_before_whole_bundle_omission() {
     let target = fixture.workspace.join("nested/target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "path": target.to_string_lossy(),
-        "old": "alpha",
-        "new": "beta",
+        "files": [{
+            "path": target.to_string_lossy(),
+            "replacements": [{ "old": "alpha", "new": "beta" }]
+        }]
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -11036,4 +11042,285 @@ async fn post_tool_instruction_update_compacts_before_fresh_admission() {
         3,
         "tool request, compaction summary, continued request"
     );
+}
+
+fn batch_edit_arguments(files: &[(&str, &str, &str)]) -> serde_json::Value {
+    json!({
+        "files": files.iter().map(|(path, old, new)| {
+            json!({
+                "path": path,
+                "replacements": [{ "old": old, "new": new }]
+            })
+        }).collect::<Vec<_>>()
+    })
+}
+
+#[tokio::test]
+async fn runtime_edit_approval_uses_verified_projection_and_multi_key_scope() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
+    std::fs::write(workspace.path().join("src/a.txt"), "aaa\n").expect("a");
+    std::fs::write(workspace.path().join("src/b.txt"), "bbb\n").expect("b");
+    let args = batch_edit_arguments(&[("src/a.txt", "aaa", "AAA"), ("src/b.txt", "bbb", "BBB")]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("edit_1", "Edit", args)]),
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler(|request| {
+                assert_eq!(request.operation, PermissionOperation::FileWrite);
+                match &request.presentation {
+                    ApprovalPresentation::Edit { title, edit } => {
+                        assert_eq!(title, "Edit 2 files?");
+                        assert_eq!(edit.files, 2);
+                        assert_eq!(edit.replacements, 2);
+                        assert_eq!(edit.changes.len(), 2);
+                    }
+                    other => panic!("expected Edit presentation, got {other:?}"),
+                }
+                assert!(request.options.iter().any(|option| matches!(
+                    &option.action,
+                    ApprovalAction::PermitForSession { scope }
+                        if scope.label == "Approve edits to these 2 files for this session"
+                            && scope.keys.len() == 2
+                )));
+                permit_once(request)
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("edit files"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let finished = events.iter().find_map(|event| match event {
+        AgentEvent::ToolExecutionFinished {
+            id,
+            name,
+            result,
+            ..
+        } if id == "edit_1" && name == "Edit" => Some(result),
+        _ => None,
+    }).expect("finished edit");
+    assert!(!finished.is_error, "{}", finished.content);
+    let details = finished.details.as_ref().expect("details");
+    assert_eq!(details["status"], "committed");
+    assert_eq!(details["files"], 2);
+    let success_diff = details["changes"][0]["diff"].as_str().expect("diff");
+    let approval = events.iter().find_map(|event| match event {
+        AgentEvent::ApprovalRequested { request } => Some(request),
+        _ => None,
+    }).expect("approval");
+    match &approval.presentation {
+        ApprovalPresentation::Edit { edit, .. } => {
+            assert_eq!(edit.changes[0].diff, success_diff);
+        }
+        other => panic!("expected Edit approval, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("src/a.txt")).expect("a"),
+        "AAA\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("src/b.txt")).expect("b"),
+        "BBB\n"
+    );
+}
+
+#[tokio::test]
+async fn runtime_edit_stale_after_approval_writes_nothing() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("stale.txt"), "before\n").expect("seed");
+    let args = batch_edit_arguments(&[("stale.txt", "before", "after")]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("edit_stale", "Edit", args)]),
+        final_done_turn(),
+    ]);
+    let path = workspace.path().join("stale.txt");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler({
+                let path = path.clone();
+                move |request| {
+                    // Mutate the file after the verified preparation/approval projection.
+                    std::fs::write(&path, "changed externally\n").expect("stale write");
+                    permit_once(request)
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("edit stale"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let finished = events.iter().find_map(|event| match event {
+        AgentEvent::ToolExecutionFinished { id, result, .. } if id == "edit_stale" => Some(result),
+        _ => None,
+    }).expect("finished");
+    assert!(finished.is_error);
+    let details = finished.details.as_ref().expect("details");
+    assert_eq!(details["status"], "stale");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionUpdate {
+                partial_result,
+                ..
+            } if partial_result.details.as_ref().is_some_and(|d| d.get("kind") == Some(&json!("edit_progress")))
+        )),
+        "no commit progress after stale"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "changed externally\n"
+    );
+}
+
+#[tokio::test]
+async fn runtime_edit_emits_prepared_then_per_file_progress_updates() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
+    std::fs::write(workspace.path().join("src/a.txt"), "aaa\n").expect("a");
+    std::fs::write(workspace.path().join("src/b.txt"), "bbb\n").expect("b");
+    let args = batch_edit_arguments(&[("src/a.txt", "aaa", "AAA"), ("src/b.txt", "bbb", "BBB")]);
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("edit_prog", "Edit", args)]),
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(workspace.path())
+            .expect("workspace"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("edit"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+
+    let edit_events: Vec<_> = events
+        .iter()
+        .filter(|event| match event {
+            AgentEvent::ToolExecutionStarted { id, .. }
+            | AgentEvent::ToolExecutionUpdate { id, .. }
+            | AgentEvent::ToolExecutionFinished { id, .. } => id == "edit_prog",
+            _ => false,
+        })
+        .collect();
+    assert!(
+        matches!(edit_events.first(), Some(AgentEvent::ToolExecutionStarted { .. })),
+        "started first: {edit_events:?}"
+    );
+    let kinds: Vec<_> = edit_events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => partial_result
+                .details
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|k| k.as_str())
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds.first().map(String::as_str), Some("edit_prepared"));
+    assert!(kinds.iter().any(|k| k == "edit_progress"));
+    assert!(
+        matches!(edit_events.last(), Some(AgentEvent::ToolExecutionFinished { .. })),
+        "finished last"
+    );
+}
+
+#[tokio::test]
+async fn runtime_edit_partial_commit_is_failed_tool_result() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
+    std::fs::write(workspace.path().join("src/a.txt"), "aaa\n").expect("a");
+    std::fs::write(workspace.path().join("src/b.txt"), "bbb\n").expect("b");
+    std::fs::write(workspace.path().join("src/c.txt"), "ccc\n").expect("c");
+    let context = ToolContext::new(workspace.path())
+        .expect("ctx")
+        .with_access(ToolAccess::all());
+    let prepared = PreparedEdit::prepare(
+        &context,
+        &batch_edit_arguments(&[
+            ("src/a.txt", "aaa", "AAA"),
+            ("src/b.txt", "bbb", "BBB"),
+            ("src/c.txt", "ccc", "CCC"),
+        ]),
+    )
+    .await
+    .expect("prepare");
+    let prepared = Arc::clone(&prepared).with_injected_commit_failure(1);
+    let mut on_progress = |_u| {};
+    let result = prepared
+        .commit(&CancellationToken::new(), &mut on_progress)
+        .await;
+    assert!(result.is_error);
+    let details = result.details.expect("details");
+    assert_eq!(details["status"], "partial_commit");
+    assert_eq!(details["changes"][0]["status"], "committed");
+    assert_eq!(details["changes"][1]["status"], "failed");
+    assert_eq!(details["changes"][2]["status"], "not_attempted");
+}
+
+#[tokio::test]
+async fn instruction_preflight_defers_whole_edit_for_one_new_scope() {
+    let fixture = preflight_fixture(&[("nested", "nested rules\n")], "root rules\n");
+    let nested_file = fixture.workspace.join("nested").join("a.txt");
+    let root_file = fixture.workspace.join("root.txt");
+    std::fs::write(&nested_file, "nested\n").expect("nested");
+    std::fs::write(&root_file, "root\n").expect("root");
+    let args = json!({
+        "files": [
+            {
+                "path": root_file.to_string_lossy(),
+                "replacements": [{ "old": "root", "new": "ROOT" }]
+            },
+            {
+                "path": nested_file.to_string_lossy(),
+                "replacements": [{ "old": "nested", "new": "NESTED" }]
+            }
+        ]
+    });
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("edit_batch", "Edit", args)]),
+        end_turn_events("done"),
+    ]);
+    let runtime = preflight_runtime(&fixture, &harness);
+    let mut context = AgentContext::new();
+    let events = run_turn_collect(&runtime, &mut context, "edit across scopes").await;
+
+    let finished = finished_tool_results(&events, "edit_batch");
+    assert_eq!(finished.len(), 1);
+    assert!(!finished[0].is_error);
+    let details = finished[0].details.as_ref().expect("details");
+    assert_eq!(details["status"], "deferred");
+    assert_eq!(details["side_effect_occurred"], false);
+    assert_eq!(std::fs::read_to_string(&nested_file).expect("nested"), "nested\n");
+    assert_eq!(std::fs::read_to_string(&root_file).expect("root"), "root\n");
 }

@@ -18,7 +18,10 @@ use super::permission::{
 };
 use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
 use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
-use super::tool_arguments::{InstructionScopeProbe, prepare_tool_arguments};
+use super::tool_arguments::{
+    InstructionScopeProbe, PreparedExecution, prepare_tool_arguments,
+};
+use crate::tools::PreparedEdit;
 use crate::instructions::{
     InstructionEpochData, InstructionFailure, InstructionFingerprint, InstructionPreflightDecision,
     InstructionReconcileKind, InstructionReconcileRequest,
@@ -122,10 +125,11 @@ pub(super) struct PendingInstructionEpoch {
 // ---------------------------------------------------------------------------
 
 /// Typed probe targets for one batch: deduplicated reconcile targets plus a
-/// per-call probe map used for blocked-scope coverage checks.
+/// per-call probe collection used for blocked-scope coverage checks.
 struct BatchProbes {
     targets: Vec<PathBuf>,
-    per_call: Vec<Option<PathBuf>>,
+    /// Per call, every distinct probe directory in declaration order.
+    per_call: Vec<Vec<PathBuf>>,
 }
 
 /// The preflight gate for one fully parsed batch.
@@ -183,23 +187,22 @@ fn collect_batch_probes(
     let mut targets: Vec<PathBuf> = Vec::new();
     let mut per_call = Vec::with_capacity(prepared.len());
     for (tool_call, parsed) in prepared {
-        let probe = parsed
-            .as_ref()
-            .ok()
-            .and_then(|prepared_call| {
-                InstructionScopeProbe::from_prepared_tool(
-                    &tool_call.name,
-                    &prepared_call.arguments,
-                    workspace,
-                )
-            })
-            .map(|probe| canonical_lenient(&probe.target_directory));
-        if let Some(dir) = &probe
-            && !targets.contains(dir)
-        {
-            targets.push(dir.clone());
+        let call_probes = parsed.as_ref().ok().map_or_else(Vec::new, |prepared_call| {
+            InstructionScopeProbe::from_prepared_tool(
+                &tool_call.name,
+                &prepared_call.arguments,
+                workspace,
+            )
+            .into_iter()
+            .map(|probe| canonical_lenient(&probe.target_directory))
+            .collect::<Vec<_>>()
+        });
+        for dir in &call_probes {
+            if !targets.contains(dir) {
+                targets.push(dir.clone());
+            }
         }
-        per_call.push(probe);
+        per_call.push(call_probes);
     }
     BatchProbes { targets, per_call }
 }
@@ -368,10 +371,10 @@ fn current_blocked_scope(
             prepared
                 .iter()
                 .zip(probes.per_call.iter())
-                .any(|((tool_call, parsed), probe)| {
+                .any(|((tool_call, parsed), call_probes)| {
                     parsed.is_ok()
                         && is_mutation_or_execution_tool(tool_call.name.as_ref())
-                        && probe.as_ref().is_some_and(|probe| {
+                        && call_probes.iter().any(|probe| {
                             entry.directories.iter().any(|dir| probe.starts_with(dir))
                         })
                 })
@@ -530,6 +533,63 @@ fn emit_synthesized_finished(
 }
 
 // ---------------------------------------------------------------------------
+// Prepared Edit phase
+// ---------------------------------------------------------------------------
+
+/// Prepare every successfully parsed Edit call without side effects. Failures
+/// replace the prepared call with a terminal `prepare_failed` result so Ask
+/// mode never opens an approval dialog.
+async fn prepare_edit_calls(
+    tool_context: &ToolContext,
+    prepared: &mut [(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+) {
+    for (tool_call, parsed) in prepared.iter_mut() {
+        let Ok(prepared_call) = parsed else {
+            continue;
+        };
+        if prepared_call.name != "Edit" {
+            continue;
+        }
+        // Prepare with write access only for path resolution; no writes occur.
+        let prepare_ctx = tool_context.clone().with_access(ToolAccess {
+            file_write: true,
+            ..ToolAccess::none()
+        });
+        match PreparedEdit::prepare(&prepare_ctx, &prepared_call.arguments).await {
+            Ok(edit) => {
+                prepared_call.execution = PreparedExecution::Edit(edit);
+            }
+            Err(result) => {
+                *parsed = Err(result);
+            }
+        }
+        let _ = tool_call;
+    }
+}
+
+/// Recheck every authorized prepared Edit. Stale targets become terminal
+/// results with zero writes.
+async fn recheck_prepared_edits(authorized: &mut [AuthorizedToolCall<'_>]) {
+    for entry in authorized.iter_mut() {
+        if !matches!(entry.outcome, AuthorizedToolCallOutcome::Run { .. }) {
+            continue;
+        }
+        let Some(prepared) = entry.prepared.as_ref() else {
+            continue;
+        };
+        let PreparedExecution::Edit(edit) = &prepared.execution else {
+            continue;
+        };
+        if let Err(result) = edit.recheck_all().await {
+            entry.outcome = AuthorizedToolCallOutcome::Terminal(result);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Authorization phase
 // ---------------------------------------------------------------------------
 
@@ -579,7 +639,7 @@ async fn authorize_tool_batch<'a>(
             },
             Ok(mut prepared_call) => {
                 let preparation =
-                    permission_preparation_for_mode(config, tool_call, &prepared_call.arguments);
+                    permission_preparation_for_mode(config, tool_call, &prepared_call);
                 let class = scheduling_class_for_preparation(
                     config,
                     tool_call,
@@ -595,7 +655,7 @@ async fn authorize_tool_batch<'a>(
                         config,
                         preparation,
                         tool_call,
-                        &prepared_call.arguments,
+                        &prepared_call,
                         turn,
                         emitter,
                         cancel_token,
@@ -697,12 +757,31 @@ pub(super) async fn execute_tool_calls(
         }
     };
 
-    // Phase 3 — authorize the full batch (dialogs await sequentially).
+    // Phase 3 — construct the base ToolContext (no tool body yet) and prepare
+    // every Edit call side-effect free. Prepare failures become terminal
+    // results before permission dialogs.
+    let tool_context = default_tool_context(
+        config,
+        Arc::clone(&model),
+        Arc::clone(&registry),
+        turn,
+        cancel_token,
+        process_supervisor.clone(),
+        emitter
+            .context
+            .instruction_registry()
+            .is_some()
+            .then(|| emitter.context.instruction_state().clone()),
+    )?;
+    let mut prepared = prepared;
+    prepare_edit_calls(&tool_context, &mut prepared).await;
+
+    // Phase 4 — authorize the full batch (dialogs await sequentially).
     // Consumes `prepared` so Allow can write Plan/Goal context onto
     // `PreparedToolCall.approval` (single transport home).
-    let authorized = authorize_tool_batch(config, prepared, turn, emitter, cancel_token).await;
+    let mut authorized = authorize_tool_batch(config, prepared, turn, emitter, cancel_token).await;
 
-    // Phase 4 — one frozen fingerprint recheck after all authorization. A
+    // Phase 5 — one frozen fingerprint recheck after all authorization. A
     // source changed while a dialog waited returns to the defer path instead
     // of executing against stale instructions.
     if let Some(fingerprint) = fingerprint {
@@ -759,20 +838,11 @@ pub(super) async fn execute_tool_calls(
         }
     }
 
-    // Phase 5 — schedule and execute the authorized batch.
-    let tool_context = default_tool_context(
-        config,
-        model,
-        Arc::clone(&registry),
-        turn,
-        cancel_token,
-        process_supervisor.clone(),
-        emitter
-            .context
-            .instruction_registry()
-            .is_some()
-            .then(|| emitter.context.instruction_state().clone()),
-    )?;
+    // Phase 6 — recheck every prepared Edit target after approval and instruction
+    // recheck. Stale targets become terminal results with zero writes.
+    recheck_prepared_edits(&mut authorized).await;
+
+    // Phase 7 — schedule and execute the authorized batch.
     let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
         || authorized
             .iter()
@@ -989,7 +1059,7 @@ async fn execute_authorized_sequential(
         if uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref()) {
             let workspace_root = context.workspace_root().to_path_buf();
             context = context.with_shell_admission_callback(make_shell_admission_callback(
-                sink,
+                sink.clone(),
                 turn,
                 tool_call.id.to_string(),
                 tool_call.name.to_string(),
@@ -1004,15 +1074,37 @@ async fn execute_authorized_sequential(
                 arguments: arguments.as_ref().clone(),
             });
         }
-        let mut result = run_tool_with_cancel(
-            skills,
-            registry.as_ref(),
-            tool_call,
-            arguments.as_ref(),
-            &context,
-            cancel_token,
-        )
-        .await;
+        let mut result = if let PreparedExecution::Edit(edit) = &prepared_call.execution {
+            // Emit verified planned projection before the first commit.
+            emitter.emit(AgentEvent::ToolExecutionUpdate {
+                turn,
+                id: tool_call.id.to_string(),
+                name: tool_call.name.to_string(),
+                partial_result: edit.prepared_update(),
+            });
+            let progress_sink = sink;
+            let progress_id = tool_call.id.to_string();
+            let progress_name = tool_call.name.to_string();
+            let mut on_progress = move |update: ToolResult| {
+                progress_sink.emit_event(AgentEvent::ToolExecutionUpdate {
+                    turn,
+                    id: progress_id.clone(),
+                    name: progress_name.clone(),
+                    partial_result: update,
+                });
+            };
+            edit.commit(cancel_token, &mut on_progress).await
+        } else {
+            run_tool_with_cancel(
+                skills,
+                registry.as_ref(),
+                tool_call,
+                arguments.as_ref(),
+                &context,
+                cancel_token,
+            )
+            .await
+        };
         executed_any = true;
         if !cancel_token.is_cancelled() {
             result = after_tool_result(config, tool_call, result, cancel_token).await;

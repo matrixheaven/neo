@@ -42,27 +42,48 @@ pub fn check_plan_mode_guard(
         return PlanModeGuard::Allow;
     }
     match tool_name {
-        "Write" | "Edit" => {
+        "Write" => {
             if let Some(path) = args.get("path").and_then(serde_json::Value::as_str)
                 && is_active_plan_file_path(plan_mode, workspace_root, path)
             {
                 return PlanModeGuard::Allow;
             }
-            let plan_path = plan_mode.plan_file_path().map_or_else(
-                || "(no plan file selected yet)".to_owned(),
-                |p| p.display().to_string(),
-            );
-            PlanModeGuard::Deny {
-                message: format!(
-                    "Plan mode is active. You may only write to the current plan file: \
-                     {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
-                ),
+            plan_mode_write_deny(plan_mode)
+        }
+        "Edit" => {
+            let Some(files) = args.get("files").and_then(serde_json::Value::as_array) else {
+                return plan_mode_write_deny(plan_mode);
+            };
+            if files.is_empty() {
+                return plan_mode_write_deny(plan_mode);
             }
+            let all_plan = files.iter().all(|file| {
+                file.get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| is_active_plan_file_path(plan_mode, workspace_root, path))
+            });
+            if all_plan {
+                return PlanModeGuard::Allow;
+            }
+            plan_mode_write_deny(plan_mode)
         }
         "TaskStop" | "CronCreate" | "CronDelete" => PlanModeGuard::Deny {
             message: format!("blocked by plan mode: {tool_name} is not allowed while planning"),
         },
         _ => PlanModeGuard::Allow,
+    }
+}
+
+fn plan_mode_write_deny(plan_mode: &PlanMode) -> PlanModeGuard {
+    let plan_path = plan_mode.plan_file_path().map_or_else(
+        || "(no plan file selected yet)".to_owned(),
+        |p| p.display().to_string(),
+    );
+    PlanModeGuard::Deny {
+        message: format!(
+            "Plan mode is active. You may only write to the current plan file: \
+             {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
+        ),
     }
 }
 
@@ -150,6 +171,56 @@ mod tests {
         let s = active_state(Path::new("/tmp/p.md"));
         assert!(matches!(
             check_plan_mode_guard(&s, None, "TaskStop", &json!({})),
+            PlanModeGuard::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn active_plan_mode_allows_edit_only_when_every_target_is_plan_file() {
+        let s = active_state(Path::new("/ws/plans/p.md"));
+        assert!(matches!(
+            check_plan_mode_guard(
+                &s,
+                Some(Path::new("/ws")),
+                "Edit",
+                &json!({
+                    "files": [
+                        {
+                            "path": "plans/p.md",
+                            "replacements": [{ "old": "a", "new": "b" }]
+                        },
+                        {
+                            "path": "/ws/plans/p.md",
+                            "replacements": [{ "old": "c", "new": "d" }]
+                        }
+                    ]
+                })
+            ),
+            PlanModeGuard::Allow
+        ));
+    }
+
+    #[test]
+    fn active_plan_mode_rejects_edit_with_any_non_plan_target() {
+        let s = active_state(Path::new("/ws/plans/p.md"));
+        assert!(matches!(
+            check_plan_mode_guard(
+                &s,
+                Some(Path::new("/ws")),
+                "Edit",
+                &json!({
+                    "files": [
+                        {
+                            "path": "plans/p.md",
+                            "replacements": [{ "old": "a", "new": "b" }]
+                        },
+                        {
+                            "path": "src/other.rs",
+                            "replacements": [{ "old": "c", "new": "d" }]
+                        }
+                    ]
+                })
+            ),
             PlanModeGuard::Deny { .. }
         ));
     }

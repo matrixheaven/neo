@@ -5,8 +5,10 @@ use tokio_util::sync::CancellationToken;
 use super::config::AgentConfig;
 use super::events::EventPublisher;
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
-use super::tool_arguments::ApprovalExecutionContext;
+use super::tool_arguments::{ApprovalExecutionContext, PreparedExecution, PreparedToolCall};
 use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
+use crate::approval::EditApprovalPresentation;
+use crate::tools::PreparedEdit;
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
@@ -53,7 +55,7 @@ pub(super) async fn resolve_permission_preparation(
     config: &AgentConfig,
     preparation: PermissionPreparation,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
     turn: u32,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
@@ -76,7 +78,7 @@ pub(super) async fn resolve_permission_preparation(
                 config,
                 turn,
                 tool_call,
-                arguments,
+                prepared_call,
                 operation,
                 subject,
                 session_scope,
@@ -99,8 +101,9 @@ pub(super) async fn resolve_permission_preparation(
 pub(super) fn permission_preparation_for_mode(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
 ) -> PermissionPreparation {
+    let arguments = &prepared_call.arguments;
     // Read live permission state once. The TUI may switch this mid-turn via
     // `/ask`, `/auto`, `/yolo`, or `/permissions`; every branch below must use
     // this `mode` instead of the static `config.permission_mode` snapshot.
@@ -117,7 +120,8 @@ pub(super) fn permission_preparation_for_mode(
     }
 
     // 6. Derive the reusable scope + prefix rule for the ask fallback.
-    let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call, arguments);
+    let (session_scope, prefix_rule) =
+        approval_scope_for_prepared_call(config, tool_call, prepared_call);
 
     // 7-8. Cached approvals (persistent prefix rules + session approvals).
     if let Some(prep) = check_cached_approvals(config, tool_call, arguments, session_scope.as_ref())
@@ -300,10 +304,29 @@ fn check_plan_file_write(
         return None;
     }
     let plan_mode = config.plan_mode.read().ok()?;
-    if let Some(path) = arguments.get("path").and_then(|v| v.as_str())
-        && plan_mode.is_active()
-        && is_active_plan_file_path(&plan_mode, config.workspace_root.as_deref(), path)
-    {
+    if !plan_mode.is_active() {
+        return None;
+    }
+    let workspace = config.workspace_root.as_deref();
+    let allowed = match tool_call.name.as_ref() {
+        "Write" => arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|path| is_active_plan_file_path(&plan_mode, workspace, path)),
+        "Edit" => {
+            let Some(files) = arguments.get("files").and_then(serde_json::Value::as_array) else {
+                return None;
+            };
+            !files.is_empty()
+                && files.iter().all(|file| {
+                    file.get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|path| is_active_plan_file_path(&plan_mode, workspace, path))
+                })
+        }
+        _ => false,
+    };
+    if allowed {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
     }
     None
@@ -438,14 +461,11 @@ fn ordinary_approval_presentation(
     operation: PermissionOperation,
     subject: &str,
     arguments: &serde_json::Value,
+    edit_presentation: Option<EditApprovalPresentation>,
 ) -> ApprovalPresentation {
     let is_task_stop =
         operation == PermissionOperation::Shell && arguments.get("task_id").is_some();
     let is_terminal = operation == PermissionOperation::Shell && arguments.get("mode").is_some();
-    let is_edit = operation == PermissionOperation::FileWrite
-        && (arguments.get("old").is_some()
-            || arguments.get("new").is_some()
-            || arguments.get("replace_all").is_some());
 
     if is_task_stop {
         return ApprovalPresentation::Tool {
@@ -480,13 +500,11 @@ fn ordinary_approval_presentation(
         };
     }
 
-    if is_edit {
-        return ApprovalPresentation::Tool {
-            title: "Edit file?".to_owned(),
-            details: compact_details([
-                labeled_argument(arguments, "path"),
-                labeled_argument(arguments, "replace_all"),
-            ]),
+    if let Some(edit) = edit_presentation {
+        let n = edit.files;
+        return ApprovalPresentation::Edit {
+            title: format!("Edit {n} files?"),
+            edit,
         };
     }
 
@@ -709,17 +727,26 @@ fn non_empty_details(details: Vec<String>, fallback: impl FnOnce() -> Vec<String
 fn build_ordinary_approval_request(
     turn: u32,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
     operation: PermissionOperation,
     subject: &str,
     session_scope: Option<SessionApprovalScope>,
     prefix_rule: Option<PrefixApprovalRule>,
 ) -> ApprovalRequest {
+    let edit_presentation = match &prepared_call.execution {
+        PreparedExecution::Edit(edit) => Some(edit.approval_presentation()),
+        PreparedExecution::Direct => None,
+    };
     ApprovalRequest {
         turn,
         id: tool_call.id.to_string(),
         operation,
-        presentation: ordinary_approval_presentation(operation, subject, arguments),
+        presentation: ordinary_approval_presentation(
+            operation,
+            subject,
+            &prepared_call.arguments,
+            edit_presentation,
+        ),
         options: ordinary_approval_options(session_scope, prefix_rule),
     }
 }
@@ -868,7 +895,7 @@ async fn resolve_approval(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
     operation: PermissionOperation,
     subject: String,
     session_scope: Option<SessionApprovalScope>,
@@ -876,6 +903,7 @@ async fn resolve_approval(
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> AppliedApproval {
+    let arguments = &prepared_call.arguments;
     let request = match operation {
         PermissionOperation::PlanTransition => {
             build_plan_approval_request(config, turn, tool_call, arguments)
@@ -886,7 +914,7 @@ async fn resolve_approval(
         _ => build_ordinary_approval_request(
             turn,
             tool_call,
-            arguments,
+            prepared_call,
             operation,
             &subject,
             session_scope,
@@ -1194,29 +1222,42 @@ fn shell_argv_for_prefix_check(
 /// Derive `(session_scope, prefix_rule)` for a tool call. Returns `(None, None)`
 /// for review transitions, dangerous commands, interactive tools, and anything
 /// where a reusable grant is unsafe.
-fn approval_scope_for_tool_call(
+fn approval_scope_for_prepared_call(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
 ) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
     // Review transitions and dangerous commands never offer scope/prefix.
     if matches!(tool_call.name.as_ref(), "ExitPlanMode" | "ExitGoalMode") {
         return (None, None);
     }
     match tool_call.name.as_ref() {
-        "Bash" => bash_approval_scope(config, arguments),
+        "Bash" => bash_approval_scope(config, &prepared_call.arguments),
         "Write" => {
-            let (scope, _) =
-                file_write_approval_scope(config, arguments, FileWriteApprovalOperation::Write);
+            let (scope, _) = file_write_approval_scope(
+                config,
+                &prepared_call.arguments,
+                FileWriteApprovalOperation::Write,
+            );
             (scope, None)
         }
-        "Edit" => {
-            let (scope, _) =
-                file_write_approval_scope(config, arguments, FileWriteApprovalOperation::Edit);
-            (scope, None)
-        }
+        "Edit" => match &prepared_call.execution {
+            PreparedExecution::Edit(edit) => (edit_session_approval_scope(config, edit), None),
+            PreparedExecution::Direct => (None, None),
+        },
         _ => tool_approval_scope(config, &tool_call.name),
     }
+}
+
+/// Multi-key session scope for a prepared Edit batch. Omitted when any target
+/// cannot participate in a narrow workspace-contained FileWrite key.
+fn edit_session_approval_scope(
+    config: &AgentConfig,
+    edit: &PreparedEdit,
+) -> Option<SessionApprovalScope> {
+    let workspace = workspace_key_root(config);
+    let workspace_root = config.workspace_root.as_deref()?;
+    edit.session_approval_scope(&workspace, workspace_root)
 }
 
 /// Build the session scope + optional prefix rule for a Bash call.
@@ -1416,8 +1457,17 @@ mod tests {
             name: "Write".into(),
             raw_arguments: arguments.to_string().into(),
         };
+        let prepared = PreparedToolCall {
+            id: call.id.to_string(),
+            name: call.name.to_string(),
+            raw_arguments: call.raw_arguments.to_string(),
+            arguments,
+            warning: None,
+            approval: None,
+            execution: PreparedExecution::Direct,
+        };
 
-        let preparation = permission_preparation_for_mode(&config, &call, &arguments);
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
 
         assert!(matches!(preparation, PermissionPreparation::Deny(_)));
     }
