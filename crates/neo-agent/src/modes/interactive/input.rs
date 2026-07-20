@@ -249,6 +249,10 @@ impl InteractiveController {
         if !self.tui.chrome().approval_is_pending() {
             return Ok(false);
         }
+        // The wheel owns transcript navigation even while approval input is focused.
+        if matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_)) {
+            return Ok(false);
+        }
         // Interrupt rejects every visible approval (and any pending runtime
         // channels) instead of being swallowed by the dialog handler.
         if matches!(event, InputEvent::Interrupt) {

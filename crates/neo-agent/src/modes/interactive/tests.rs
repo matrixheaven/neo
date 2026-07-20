@@ -6547,6 +6547,42 @@ async fn approval_uses_selection_priority_for_real_keys() {
 }
 
 #[tokio::test]
+async fn approval_mouse_wheel_scrolls_transcript_without_moving_selection() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    for index in 0..30 {
+        controller
+            .transcript_mut()
+            .push_status(format!("approval-scroll-row-{index}"));
+    }
+    controller.transcript_mut().sync_transcript_view(30, 6);
+    let (pending, _response_rx) = make_pending_approval(ordinary_tool_request(
+        "tool-1",
+        "Write",
+        "approved.txt",
+        Some(file_write_session_scope("approved.txt")),
+    ));
+    controller.register_pending_approval(pending);
+    let selected = controller.chrome().approval_selected_action().cloned();
+
+    controller
+        .handle_input_event(InputEvent::ScrollUp(3))
+        .await
+        .expect("wheel scrolls transcript while approval stays focused");
+
+    assert!(transcript_scrollback(&controller) > 0);
+    assert_eq!(
+        controller.chrome().approval_selected_action(),
+        selected.as_ref()
+    );
+}
+
+#[tokio::test]
 async fn approval_revise_collects_feedback_without_editing_prompt() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
