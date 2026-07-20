@@ -13923,7 +13923,7 @@ async fn ctrl_b_detaches_foreground_delegate_into_shared_background_tasks() {
 }
 
 #[tokio::test]
-async fn slash_tasks_opens_task_browser_with_shared_background_tasks() {
+async fn slash_tasks_opens_task_browser_while_main_turn_is_running() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
     let mut controller = InteractiveController::new_for_test(
@@ -13931,7 +13931,7 @@ async fn slash_tasks_opens_task_browser_with_shared_background_tasks() {
         "test-session",
         "openai/gpt-4.1",
         temp.path().to_path_buf(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        |_request| async move { std::future::pending::<Result<Vec<AgentEvent>>>().await },
     );
     let config = test_config(temp.path(), sessions_dir);
     config
@@ -13939,6 +13939,13 @@ async fn slash_tasks_opens_task_browser_with_shared_background_tasks() {
         .start_question("question-1".to_owned(), "Pick one".to_owned())
         .await;
     controller.local_config = Some(config);
+
+    controller.type_text("main question");
+    controller
+        .submit_current_prompt()
+        .await
+        .expect("main turn starts");
+    assert!(controller.active_turn.is_some());
 
     controller.type_text("/tasks");
     controller
@@ -13956,6 +13963,7 @@ async fn slash_tasks_opens_task_browser_with_shared_background_tasks() {
         &controller,
         "active_background_tasks: 1"
     ));
+    assert!(controller.active_turn.is_some());
 }
 
 #[tokio::test]

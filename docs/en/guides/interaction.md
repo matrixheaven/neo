@@ -45,7 +45,7 @@ Typing `/` at the start of the prompt triggers command completion. Common comman
 | `/model [alias]` | Switch model (no arg opens the model picker) |
 | `/provider` | Show configured providers |
 | `/mcp` | View/manage MCP servers |
-| `/tasks` | View background tasks |
+| `/tasks` | View background tasks, including while a turn is running |
 | `/plan [on\|off\|clear]` | Toggle plan mode |
 | `/goal <objective>` | Start/manage goal mode |
 | `/compact [instruction]` | Request a manual context compaction |

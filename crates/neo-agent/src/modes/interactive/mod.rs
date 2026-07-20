@@ -1450,6 +1450,13 @@ impl InteractiveController {
             return Ok(());
         }
 
+        // `/tasks` is a read-only local overlay, so it stays available while
+        // a turn is running instead of entering the follow-up queue.
+        if prompt == "/tasks" {
+            self.handle_simple_slash_command(&prompt).await;
+            return Ok(());
+        }
+
         // `/new` / `/clear` are session-lifecycle commands. They stay
         // dispatchable while a turn is running (and report their own blocked
         // status), so dispatch them before the turn-active guard below.
