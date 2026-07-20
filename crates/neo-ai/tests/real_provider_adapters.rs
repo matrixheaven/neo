@@ -2303,37 +2303,51 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
+    assert_eq!(events.len(), 6);
     assert_eq!(
-        events,
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "google-generative-ai".to_owned()
-            },
-            AiStreamEvent::TextDelta {
-                text: "hi ".to_owned()
-            },
-            AiStreamEvent::ToolCallStart {
-                id: "read_file".to_owned(),
-                name: "read_file".to_owned()
-            },
-            AiStreamEvent::ToolCallArgsDelta {
-                id: "read_file".to_owned(),
-                json_fragment: "{\"path\":\"Cargo.toml\"}".to_owned()
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "read_file".to_owned(),
-                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: StopReason::ToolUse,
-                usage: Some(neo_ai::TokenUsage {
-                    input_tokens: 9,
-                    output_tokens: 4,
-                    input_cache_read_tokens: 0,
-                    input_cache_write_tokens: 0,
-                })
-            },
-        ]
+        events[0],
+        AiStreamEvent::MessageStart {
+            id: "google-generative-ai".to_owned()
+        }
+    );
+    assert_eq!(
+        events[1],
+        AiStreamEvent::TextDelta {
+            text: "hi ".to_owned()
+        }
+    );
+    let tool_id = match &events[2] {
+        AiStreamEvent::ToolCallStart { id, name } => {
+            assert_eq!(name, "read_file");
+            id.clone()
+        }
+        other => panic!("expected ToolCallStart, got {other:?}"),
+    };
+    assert_eq!(
+        events[3],
+        AiStreamEvent::ToolCallArgsDelta {
+            id: tool_id.clone(),
+            json_fragment: "{\"path\":\"Cargo.toml\"}".to_owned()
+        }
+    );
+    assert_eq!(
+        events[4],
+        AiStreamEvent::ToolCallEnd {
+            id: tool_id,
+            raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
+        }
+    );
+    assert_eq!(
+        events[5],
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: Some(neo_ai::TokenUsage {
+                input_tokens: 9,
+                output_tokens: 4,
+                input_cache_read_tokens: 0,
+                input_cache_write_tokens: 0,
+            })
+        }
     );
 
     let sent = server.requests().pop().unwrap();
@@ -2491,7 +2505,7 @@ async fn google_generative_ai_client_serializes_tool_result_errors() {
 
     let sent = server.requests().pop().unwrap();
     let function_response = &sent.body["contents"][2]["parts"][0]["functionResponse"];
-    assert_eq!(function_response["name"], "call-1");
+    assert_eq!(function_response["name"], "read_file");
     assert_eq!(function_response["response"]["result"], "permission denied");
     assert_eq!(function_response["response"]["is_error"], true);
 }

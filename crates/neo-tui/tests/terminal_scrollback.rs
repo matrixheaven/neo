@@ -40,7 +40,8 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
     });
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, "spacing-user", "spacing-thinking", 1);
-    assert_blank_rows_between(&mut screen, "spacing-thinking", "spacing-tool-command", 1);
+    assert_blank_rows_between(&mut screen, "spacing-thinking", "● Using Bash", 1);
+    assert_blank_rows_between(&mut screen, "● Using Bash", "$ spacing-tool-command", 0);
     pane.acknowledge_history(&update.history);
 
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
@@ -53,7 +54,8 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
     pane.append_assistant_delta("spacing-assistant-stable\n\nspacing-assistant-live");
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     let tool_tail = block_tail_containing(&update.history, "spacing-tool-command");
-    assert_blank_rows_between(&mut screen, "spacing-thinking", "spacing-tool-command", 1);
+    assert_blank_rows_between(&mut screen, "spacing-thinking", "● Used Bash", 1);
+    assert_blank_rows_between(&mut screen, "● Used Bash", "$ spacing-tool-command", 0);
     assert_blank_rows_between(&mut screen, &tool_tail, "spacing-assistant-stable", 1);
     assert_blank_rows_between(
         &mut screen,
