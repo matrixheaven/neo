@@ -380,12 +380,11 @@ impl TranscriptPane {
             AgentEvent::ShellCommandStarted {
                 id,
                 command,
-                cwd,
                 origin,
                 ..
             } => {
                 match origin {
-                    ShellCommandOrigin::ModelBashTool => self.start_shell_command(id, command, cwd),
+                    ShellCommandOrigin::ModelBashTool => self.start_shell_command(id),
                     ShellCommandOrigin::UserShellMode => self.start_user_shell_command(id, command),
                 }
                 true
@@ -793,13 +792,8 @@ impl TranscriptPane {
         }
     }
 
-    fn start_shell_command(&mut self, id: &str, command: &str, cwd: &std::path::Path) {
-        self.upsert_tool(
-            id,
-            "Bash".to_owned(),
-            Some(format!("{command} ({})", cwd.display())),
-            ToolStatusKind::Running,
-        );
+    fn start_shell_command(&mut self, id: &str) {
+        self.upsert_tool(id, "Bash".to_owned(), None, ToolStatusKind::Running);
         self.mark_dirty();
     }
 

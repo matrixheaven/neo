@@ -1463,6 +1463,10 @@ fn transcript_does_not_render_duplicate_bash_queued_and_used_for_same_id() {
         "same tool id should render one Bash card: {frame:?}"
     );
     assert!(frame.iter().any(|line| line.contains("Used Bash")));
+    assert!(
+        frame.iter().any(|line| line.contains("$ echo hi")),
+        "successful Bash card must retain its command: {frame:?}"
+    );
     assert!(!frame.iter().any(|line| line.contains("Queued Bash")));
 }
 
