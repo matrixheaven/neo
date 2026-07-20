@@ -2901,8 +2901,7 @@ mod tests {
         server.startup_timeout_ms = Some(50);
         config.mcp.servers.push(server);
         let manager = McpConnectionManager::new(ProcessSupervisor::default());
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let layer = crate::log_capture::CapturingLayer::new(event_tx);
+        let (layer, mut event_rx) = crate::log_capture::capture_channel(8);
         let _guard = tracing_subscriber::registry().with(layer).set_default();
 
         tool_registry_for_config(
