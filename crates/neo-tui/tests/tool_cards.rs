@@ -876,6 +876,7 @@ fn edit_diff_preview_clusters_changes_with_context_and_hidden_footer() {
 
 #[test]
 fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
+    let theme = TuiTheme::default();
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Edit".to_owned(),
@@ -909,11 +910,30 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
         exit_code: None,
     });
 
-    let rows = plain(card.render(80));
+    let rendered = card.render_with_theme(80, &theme);
+    let rows = plain(rendered.clone());
     assert!(
-        rows.iter()
-            .any(|line| line.contains("1 files · 1 replacements")),
+        rows[0].contains("Used Edit (src/lib.rs) · 1 files · 1 replacements · +1 -1"),
         "batch summary missing: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|line| line.contains("1 files · 1 replacements"))
+            .count(),
+        1,
+        "batch summary should only appear in the header: {rows:?}"
+    );
+    assert!(
+        rendered[0]
+            .spans()
+            .iter()
+            .any(|span| span.text() == "+1" && span.style().fg == Some(theme.diff_added))
+    );
+    assert!(
+        rendered[0]
+            .spans()
+            .iter()
+            .any(|span| span.text() == "-1" && span.style().fg == Some(theme.diff_removed))
     );
     assert!(rows.iter().any(|line| line.contains("src/lib.rs")));
     assert!(

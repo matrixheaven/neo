@@ -77,6 +77,8 @@ pub fn tool_header_spans_with_elapsed(
             format!(" · {chip}"),
             Style::default().fg(meta_color),
         ));
+    } else if let Some(chip) = edit_header_chip(state, theme) {
+        spans.extend(chip);
     } else {
         let chip = result_chip(state);
         if !chip.is_empty() {
@@ -84,6 +86,59 @@ pub fn tool_header_spans_with_elapsed(
         }
     }
     spans
+}
+
+fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>> {
+    let details = state.details.as_ref()?;
+    if state.name != "Edit" {
+        return None;
+    }
+    let kind = details.get("kind").and_then(serde_json::Value::as_str);
+    if !matches!(kind, Some("edit" | "edit_progress")) {
+        return None;
+    }
+    let number = |key| {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let committed = state.status == ToolStatusKind::Succeeded
+        && kind == Some("edit")
+        && details.get("status").and_then(serde_json::Value::as_str) == Some("committed");
+    if !committed {
+        return Some(vec![
+            Span::styled(" · ", Style::default().fg(theme.text_muted)),
+            Span::styled(
+                format!("+{}", number("added")),
+                Style::default().fg(theme.diff_added),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("-{}", number("removed")),
+                Style::default().fg(theme.diff_removed),
+            ),
+        ]);
+    }
+    Some(vec![
+        Span::styled(
+            format!(
+                " · {} files · {} replacements · ",
+                number("files"),
+                number("replacements")
+            ),
+            Style::default().fg(theme.text_muted),
+        ),
+        Span::styled(
+            format!("+{}", number("added")),
+            Style::default().fg(theme.diff_added),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("-{}", number("removed")),
+            Style::default().fg(theme.diff_removed),
+        ),
+    ])
 }
 
 /// Render the semantic `WaitDelegate` header. `elapsed_secs` is intentionally
@@ -1167,23 +1222,6 @@ fn prefix_chars(s: &str, n: usize) -> String {
 }
 
 fn result_chip(state: &ToolCallState) -> String {
-    if state.name == "Edit"
-        && let Some(details) = state.details.as_ref()
-        && matches!(
-            details.get("kind").and_then(serde_json::Value::as_str),
-            Some("edit" | "edit_progress")
-        )
-    {
-        let added = details
-            .get("added")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let removed = details
-            .get("removed")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        return format!(" · +{added} -{removed}");
-    }
     if state.name == "Write" {
         if let Some(line_count) = state
             .details

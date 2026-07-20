@@ -232,12 +232,11 @@ fn render_prepared_or_committed(
     theme: &TuiTheme,
     committed: bool,
 ) -> Vec<Line> {
-    let mut rows = render_summary(
-        details,
-        width,
-        theme,
-        (!committed).then(|| "verified".to_owned()),
-    );
+    let mut rows = if committed {
+        Vec::new()
+    } else {
+        render_summary(details, width, theme, Some("verified".to_owned()))
+    };
     let Some(changes) = details.get("changes").and_then(Value::as_array) else {
         return rows;
     };
