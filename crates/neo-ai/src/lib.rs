@@ -25,7 +25,7 @@ pub use options::{
     CacheRetention, ReasoningBudget, ReasoningCapability, ReasoningEffort, ReasoningSelection,
     RequestMetadata, RequestOptions,
 };
-pub use reasoning::{ReasoningContinuation, ReasoningPolicy, sanitize_reasoning_continuation};
+pub use reasoning::ReasoningPolicy;
 pub use registry::{
     ModelRegistry, ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec,
 };

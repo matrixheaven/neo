@@ -310,39 +310,6 @@ impl MultiAgentRuntime {
         self.update_terminal_delegate(id, AgentLifecycleState::Completed, update, false)
     }
 
-    /// Like `complete_delegate` but also stores the accumulated conversation
-    /// messages on the snapshot so they survive a future resume.
-    fn complete_delegate_with_messages(
-        &self,
-        id: &AgentId,
-        update: AgentRunUpdate,
-        messages: &[AgentMessage],
-    ) -> AgentSnapshot {
-        let mut locked = self.state.lock().expect("multi-agent state poisoned");
-        let snapshot = locked
-            .agents
-            .get_mut(id.as_str())
-            .expect("agent should exist");
-        let now = now_ms();
-        snapshot.state = AgentLifecycleState::Completed;
-        snapshot.tool_count = update.tool_count;
-        snapshot.token_count = update.token_count;
-        snapshot.cache_read_token_count = update.cache_read_token_count;
-        snapshot.cache_write_token_count = update.cache_write_token_count;
-        snapshot.elapsed = update.elapsed;
-        snapshot.latest_text = update.latest_text.as_deref().map(bounded_latest_text);
-        snapshot.activity = update.activity;
-        snapshot.prior_messages = messages.to_vec();
-        snapshot.terminal_at_ms.get_or_insert(now);
-        snapshot.updated_at_ms = now;
-        snapshot.terminal_reason = Some(terminal_reason_for_state(AgentLifecycleState::Completed));
-        snapshot.outcome = Some(AgentTerminalOutcome {
-            summary: bounded_latest_text(&update.summary),
-            is_error: false,
-        });
-        snapshot.clone()
-    }
-
     #[must_use]
     pub fn fail_delegate(&self, id: &AgentId, update: AgentRunUpdate) -> AgentSnapshot {
         self.update_terminal_delegate(id, AgentLifecycleState::Failed, update, true)
@@ -388,23 +355,7 @@ impl MultiAgentRuntime {
             .agents
             .get_mut(id.as_str())
             .expect("agent should exist");
-        let now = now_ms();
-        snapshot.state = state;
-        snapshot.tool_count = update.tool_count;
-        snapshot.token_count = update.token_count;
-        snapshot.cache_read_token_count = update.cache_read_token_count;
-        snapshot.cache_write_token_count = update.cache_write_token_count;
-        snapshot.elapsed = update.elapsed;
-        snapshot.latest_text.clone_from(&update.latest_text);
-        snapshot.activity = update.activity;
-        snapshot.terminal_at_ms.get_or_insert(now);
-        snapshot.updated_at_ms = now;
-        snapshot.terminal_reason = Some(terminal_reason_for_state(state));
-        snapshot.outcome = Some(AgentTerminalOutcome {
-            summary: update.summary,
-            is_error,
-        });
-        snapshot.clone()
+        apply_terminal_delegate_update(snapshot, state, update, is_error)
     }
 
     #[must_use]
@@ -453,14 +404,30 @@ impl MultiAgentRuntime {
     #[must_use]
     pub fn detach_swarm(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let snapshot = state.swarms.get_mut(swarm_id)?;
+        let child_ids = state
+            .swarms
+            .get(swarm_id)?
+            .children
+            .iter()
+            .map(|child| child.agent.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let now = now_ms();
+        for agent_id in &child_ids {
+            if let Some(agent) = state.agents.get_mut(agent_id) {
+                agent.mode = AgentRunMode::Background;
+                agent.detached_from_foreground = true;
+                agent.updated_at_ms = now;
+            }
+        }
+        let mut snapshot = project_swarm_from_agents(&state, state.swarms.get(swarm_id)?);
         snapshot.mode = AgentRunMode::Background;
         for child in &mut snapshot.children {
             child.agent.mode = AgentRunMode::Background;
             child.agent.detached_from_foreground = true;
-            child.agent.updated_at_ms = now_ms();
+            child.agent.updated_at_ms = now;
         }
-        Some(snapshot.clone())
+        state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
+        Some(snapshot)
     }
 
     /// Register a swarm snapshot in the runtime state.
@@ -599,8 +566,7 @@ impl MultiAgentRuntime {
     pub fn cancel_swarm_by_id(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
         let (snapshot, tokens) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let mut snapshot = state.swarms.get(swarm_id)?.clone();
-            sync_swarm_children_from_agents(&state, &mut snapshot);
+            let mut snapshot = project_swarm_from_agents(&state, state.swarms.get(swarm_id)?);
             let mut changed = false;
             // Collect the child agent IDs that need cancelling.
             let cancelled_ids: Vec<String> = snapshot
@@ -832,7 +798,11 @@ impl MultiAgentRuntime {
     #[must_use]
     pub fn resumable_swarm_items(&self, swarm_id: &str) -> Vec<usize> {
         let state = self.state.lock().expect("multi-agent state poisoned");
-        let Some(swarm) = state.swarms.get(swarm_id) else {
+        let Some(swarm) = state
+            .swarms
+            .get(swarm_id)
+            .map(|swarm| project_swarm_from_agents(&state, swarm))
+        else {
             return Vec::new();
         };
         swarm
@@ -898,26 +868,22 @@ impl MultiAgentRuntime {
     /// Look up a swarm snapshot by id.
     #[must_use]
     pub fn swarm_snapshot(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
-        let mut swarm = self
-            .state
-            .lock()
-            .expect("multi-agent state poisoned")
+        let state = self.state.lock().expect("multi-agent state poisoned");
+        state
             .swarms
-            .get(swarm_id)?
-            .clone();
-        refresh_swarm(&mut swarm);
-        Some(swarm)
+            .get(swarm_id)
+            .map(|swarm| project_swarm_from_agents(&state, swarm))
     }
 
     /// List all swarm snapshots in the runtime.
     #[must_use]
     pub fn list_swarms(&self) -> Vec<super::SwarmSnapshot> {
         let state = self.state.lock().expect("multi-agent state poisoned");
-        let mut swarms: Vec<_> = state.swarms.values().cloned().collect();
-        for swarm in &mut swarms {
-            refresh_swarm(swarm);
-        }
-        swarms
+        state
+            .swarms
+            .values()
+            .map(|swarm| project_swarm_from_agents(&state, swarm))
+            .collect()
     }
 
     /// Cancel all non-terminal children in a swarm.
@@ -927,12 +893,13 @@ impl MultiAgentRuntime {
     pub fn cancel_swarm(&self, swarm_id: &str) -> Result<super::SwarmSnapshot, String> {
         let (swarm_snapshot, tokens) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let mut snapshot = state
-                .swarms
-                .get(swarm_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?;
-            sync_swarm_children_from_agents(&state, &mut snapshot);
+            let mut snapshot = project_swarm_from_agents(
+                &state,
+                state
+                    .swarms
+                    .get(swarm_id)
+                    .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?,
+            );
             if snapshot.state.is_terminal() {
                 return Err(format!(
                     "swarm already {}; terminal swarm state is immutable",
@@ -981,8 +948,7 @@ impl MultiAgentRuntime {
                     });
                 }
             }
-            sync_swarm_children_from_agents(&state, &mut snapshot);
-            refresh_swarm(&mut snapshot);
+            snapshot = project_swarm_from_agents(&state, &snapshot);
             state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
             (snapshot, tokens)
         };
@@ -1036,16 +1002,23 @@ fn refresh_swarm(snapshot: &mut super::SwarmSnapshot) {
     snapshot.state = snapshot.aggregate.status();
 }
 
-/// Sync swarm children from the canonical `state.agents` map. The stored
-/// swarm snapshot can be stale if a child completed or failed after the
-/// snapshot was last updated, so before using the swarm for cancellation
-/// decisions we refresh each child's agent from the authoritative source.
+/// Sync projected swarm children from the canonical `state.agents` map.
 fn sync_swarm_children_from_agents(state: &MultiAgentState, snapshot: &mut super::SwarmSnapshot) {
     for child in &mut snapshot.children {
         if let Some(agent) = state.agents.get(child.agent.id.as_str()) {
             child.agent = agent.clone();
         }
     }
+}
+
+fn project_swarm_from_agents(
+    state: &MultiAgentState,
+    snapshot: &super::SwarmSnapshot,
+) -> super::SwarmSnapshot {
+    let mut projected = snapshot.clone();
+    sync_swarm_children_from_agents(state, &mut projected);
+    refresh_swarm(&mut projected);
+    projected
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1635,31 +1608,23 @@ impl MultiAgentRuntime {
     ) -> ChildRunOutput {
         match run {
             Ok((events, messages)) => {
-                if self
-                    .snapshot(&snapshot.id)
-                    .is_some_and(|current| current.state == AgentLifecycleState::Cancelled)
-                {
-                    let mut current = self.snapshot(&snapshot.id).unwrap_or(snapshot);
-                    current.prior_messages.clone_from(&messages);
-                    return ChildRunOutput {
-                        snapshot: current,
-                        events,
-                        messages,
-                    };
-                }
-                let update = summarize_child_events(&events, started_at.elapsed());
-                let completed = if child_events_were_cancelled(&events) {
-                    self.update_terminal_delegate(
-                        &snapshot.id,
-                        AgentLifecycleState::Cancelled,
-                        update,
-                        true,
-                    )
+                let mut update = summarize_child_events(&events, started_at.elapsed());
+                let (state, is_error) = if child_events_were_cancelled(&events) {
+                    (AgentLifecycleState::Cancelled, true)
                 } else if child_events_have_error(&events) {
-                    self.fail_delegate(&snapshot.id, update)
+                    (AgentLifecycleState::Failed, true)
                 } else {
-                    self.complete_delegate_with_messages(&snapshot.id, update, &messages)
+                    update.latest_text = update.latest_text.as_deref().map(bounded_latest_text);
+                    update.summary = bounded_latest_text(&update.summary);
+                    (AgentLifecycleState::Completed, false)
                 };
+                let completed = self.finalize_child_run_with_messages(
+                    &snapshot.id,
+                    state,
+                    update,
+                    is_error,
+                    &messages,
+                );
                 ChildRunOutput {
                     snapshot: completed,
                     events,
@@ -1667,6 +1632,7 @@ impl MultiAgentRuntime {
                 }
             }
             Err(error) => {
+                let messages = snapshot.prior_messages.clone();
                 let update = AgentRunUpdate {
                     summary: error,
                     tool_count: 0,
@@ -1677,14 +1643,40 @@ impl MultiAgentRuntime {
                     latest_text: None,
                     activity: Vec::new(),
                 };
-                let failed = self.fail_delegate(&snapshot.id, update);
+                let failed = self.finalize_child_run_with_messages(
+                    &snapshot.id,
+                    AgentLifecycleState::Failed,
+                    update,
+                    true,
+                    &messages,
+                );
                 ChildRunOutput {
                     snapshot: failed,
                     events: Vec::new(),
-                    messages: Vec::new(),
+                    messages,
                 }
             }
         }
+    }
+
+    fn finalize_child_run_with_messages(
+        &self,
+        id: &AgentId,
+        terminal_state: AgentLifecycleState,
+        update: AgentRunUpdate,
+        is_error: bool,
+        messages: &[AgentMessage],
+    ) -> AgentSnapshot {
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        let snapshot = state
+            .agents
+            .get_mut(id.as_str())
+            .expect("agent should exist");
+        snapshot.prior_messages = messages.to_vec();
+        if snapshot.state == AgentLifecycleState::Cancelled {
+            return snapshot.clone();
+        }
+        apply_terminal_delegate_update(snapshot, terminal_state, update, is_error)
     }
 
     fn register_live_steer(&self, agent_id: &str) -> LiveSteerRegistration {
@@ -1800,6 +1792,31 @@ impl MultiAgentRuntime {
         });
         store.write(&state).map_err(|err| err.to_string())
     }
+}
+
+fn apply_terminal_delegate_update(
+    snapshot: &mut AgentSnapshot,
+    state: AgentLifecycleState,
+    update: AgentRunUpdate,
+    is_error: bool,
+) -> AgentSnapshot {
+    let now = now_ms();
+    snapshot.state = state;
+    snapshot.tool_count = update.tool_count;
+    snapshot.token_count = update.token_count;
+    snapshot.cache_read_token_count = update.cache_read_token_count;
+    snapshot.cache_write_token_count = update.cache_write_token_count;
+    snapshot.elapsed = update.elapsed;
+    snapshot.latest_text = update.latest_text;
+    snapshot.activity = update.activity;
+    snapshot.terminal_at_ms.get_or_insert(now);
+    snapshot.updated_at_ms = now;
+    snapshot.terminal_reason = Some(terminal_reason_for_state(state));
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: update.summary,
+        is_error,
+    });
+    snapshot.clone()
 }
 
 struct LiveSteerRegistration {
@@ -3590,6 +3607,163 @@ mod tests {
                 .agent_cancel_tokens
                 .contains_key("agent_test"),
             "dropping the active live-cancel guard should unregister its token"
+        );
+    }
+
+    #[test]
+    fn swarm_operations_use_canonical_child_state() {
+        let runtime = MultiAgentRuntime::new();
+        let swarm_id = runtime.new_swarm_id();
+        let first = runtime.start_delegate(
+            "first",
+            None,
+            AgentRole::Coder,
+            AgentRunMode::Foreground,
+            DelegateContext::None,
+            AgentPathKind::SwarmChild(&swarm_id),
+        );
+        let second = runtime.start_delegate(
+            "second",
+            None,
+            AgentRole::Coder,
+            AgentRunMode::Foreground,
+            DelegateContext::None,
+            AgentPathKind::SwarmChild(&swarm_id),
+        );
+        runtime.register_swarm(crate::multi_agent::SwarmSnapshot {
+            swarm_id: swarm_id.clone(),
+            description: "test".to_owned(),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Foreground,
+            state: AgentLifecycleState::Running,
+            max_concurrency: 2,
+            aggregate: SwarmAggregate::from_states([
+                AgentLifecycleState::Running,
+                AgentLifecycleState::Running,
+            ]),
+            children: vec![
+                crate::multi_agent::SwarmChildSnapshot {
+                    item_index: 0,
+                    item: "first".to_owned(),
+                    agent: first.clone(),
+                },
+                crate::multi_agent::SwarmChildSnapshot {
+                    item_index: 1,
+                    item: "second".to_owned(),
+                    agent: second.clone(),
+                },
+            ],
+        });
+        runtime.cancel_agent(&first.id).expect("cancel first");
+        let _ = runtime.complete_delegate_for_test(&second.id, "done");
+
+        let projected = runtime.swarm_snapshot(&swarm_id).expect("projected swarm");
+        assert_eq!(projected.aggregate.completed, 1);
+        assert_eq!(projected.aggregate.cancelled, 1);
+        assert_eq!(
+            projected.children[0].agent.state,
+            AgentLifecycleState::Cancelled
+        );
+        assert_eq!(runtime.list_swarms()[0].aggregate.completed, 1);
+        assert_eq!(runtime.resumable_swarm_items(&swarm_id), vec![0]);
+
+        let detached = runtime.detach_swarm(&swarm_id).expect("detach swarm");
+        assert_eq!(detached.mode, AgentRunMode::Background);
+        assert!(
+            detached
+                .children
+                .iter()
+                .all(|child| child.agent.mode == AgentRunMode::Background)
+        );
+        for agent_id in [&first.id, &second.id] {
+            let canonical = runtime.snapshot(agent_id).expect("canonical child");
+            assert_eq!(canonical.mode, AgentRunMode::Background);
+            assert!(canonical.detached_from_foreground);
+        }
+    }
+
+    #[test]
+    fn child_finalization_is_atomic_and_always_persists_messages() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("cancelled child");
+        runtime.cancel_agent(&child.id).expect("cancel child");
+        let messages = vec![AgentMessage::user_text("keep this context")];
+
+        let output =
+            runtime.finish_child_run(child, Instant::now(), Ok((Vec::new(), messages.clone())));
+
+        assert_eq!(output.snapshot.state, AgentLifecycleState::Cancelled);
+        assert_eq!(
+            runtime
+                .snapshot(&output.snapshot.id)
+                .expect("canonical child")
+                .prior_messages,
+            messages
+        );
+
+        let event_cancelled = runtime.start_foreground_delegate_for_test("event cancelled child");
+        let event_messages = vec![AgentMessage::user_text("event cancel context")];
+        let event_output = runtime.finish_child_run(
+            event_cancelled,
+            Instant::now(),
+            Ok((
+                vec![AgentEvent::RunFinished {
+                    turn: 1,
+                    stop_reason: StopReason::Cancelled,
+                }],
+                event_messages.clone(),
+            )),
+        );
+        assert_eq!(event_output.snapshot.state, AgentLifecycleState::Cancelled);
+        assert_eq!(
+            runtime
+                .snapshot(&event_output.snapshot.id)
+                .expect("event-cancelled child")
+                .prior_messages,
+            event_messages
+        );
+
+        let completed = runtime.start_foreground_delegate_for_test("completed child");
+        let completed_messages = vec![AgentMessage::user_text("completed context")];
+        let completed_output = runtime.finish_child_run(
+            completed,
+            Instant::now(),
+            Ok((Vec::new(), completed_messages.clone())),
+        );
+        assert_eq!(
+            completed_output.snapshot.state,
+            AgentLifecycleState::Completed
+        );
+        assert_eq!(
+            runtime
+                .snapshot(&completed_output.snapshot.id)
+                .expect("completed child")
+                .prior_messages,
+            completed_messages
+        );
+        assert!(
+            runtime
+                .cancel_agent(&completed_output.snapshot.id)
+                .is_none()
+        );
+
+        let mut errored = runtime.start_foreground_delegate_for_test("cancelled error child");
+        errored.prior_messages = vec![AgentMessage::user_text("prior error context")];
+        runtime
+            .cancel_agent(&errored.id)
+            .expect("cancel error child");
+        let error_output = runtime.finish_child_run(
+            errored.clone(),
+            Instant::now(),
+            Err("stream failed after cancellation".to_owned()),
+        );
+        assert_eq!(error_output.snapshot.state, AgentLifecycleState::Cancelled);
+        assert_eq!(
+            runtime
+                .snapshot(&error_output.snapshot.id)
+                .expect("cancelled error child")
+                .prior_messages,
+            errored.prior_messages
         );
     }
 }

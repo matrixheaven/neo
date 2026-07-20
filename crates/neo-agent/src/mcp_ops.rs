@@ -23,6 +23,7 @@ pub struct AddMcpServerInput {
     pub id: String,
     pub cli_type: String,
     pub command: Option<String>,
+    pub args: Vec<String>,
     pub url: Option<String>,
     pub env: Vec<String>,
     pub headers: Vec<String>,
@@ -84,14 +85,6 @@ pub fn display_mcp_kind(transport: McpTransport) -> &'static str {
     }
 }
 
-/// Parse a shell-style command string into a program and arguments.
-pub fn parse_command_string(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let parts =
-        shell_words::split(cmd).with_context(|| format!("invalid command string: {cmd}"))?;
-    let (command, args) = parts.split_first().context("command string is empty")?;
-    Ok((command.clone(), args.to_vec()))
-}
-
 /// Parse `KEY=VALUE` strings into a map.
 pub fn key_value_pairs(
     values: Vec<String>,
@@ -119,7 +112,10 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
     match server.transport {
         McpTransport::Stdio => {
             anyhow::ensure!(
-                server.command.is_some(),
+                server
+                    .command
+                    .as_deref()
+                    .is_some_and(|command| !command.is_empty()),
                 "studio MCP server '{}' requires a command",
                 server.id
             );
@@ -159,17 +155,17 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
 pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpServerConfig> {
     let transport = parse_mcp_kind(&input.cli_type)?;
 
-    let (command, args) = if transport == McpTransport::Stdio {
-        let Some(cmd) = input.command else {
+    let command = if transport == McpTransport::Stdio {
+        let Some(command) = input.command else {
             anyhow::bail!("studio MCP requires a command");
         };
-        let (cmd, args) = parse_command_string(&cmd)?;
-        (Some(cmd), args)
+        Some(command)
     } else {
         if input.command.is_some() {
             anyhow::bail!("remote MCP uses url, not command");
         }
-        (None, Vec::new())
+        anyhow::ensure!(input.args.is_empty(), "remote MCP cannot use arguments");
+        None
     };
 
     let url = if transport == McpTransport::Http || transport == McpTransport::Sse {
@@ -200,7 +196,7 @@ pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpSe
         transport,
         command,
         url,
-        args,
+        args: input.args,
         env: key_value_pairs(input.env, "env")?,
         headers: key_value_pairs(input.headers, "headers")?,
         cwd: input.cwd,
@@ -787,13 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_string_splits_args() {
-        let (cmd, args) = parse_command_string("npx -y @server/filesystem /repo").unwrap();
-        assert_eq!(cmd, "npx");
-        assert_eq!(args, vec!["-y", "@server/filesystem", "/repo"]);
-    }
-
-    #[test]
     fn key_value_pairs_parses_and_trims() {
         let pairs = key_value_pairs(
             vec!["KEY=value".to_owned(), "OTHER =  spaced  ".to_owned()],
@@ -815,6 +804,7 @@ mod tests {
             id: "fs".to_owned(),
             cli_type: "studio".to_owned(),
             command: None,
+            args: vec![],
             url: None,
             env: vec![],
             headers: vec![],
@@ -829,11 +819,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_stdio_program_rejects_empty_without_trimming() {
+        let mut server = McpServerConfig {
+            id: "fs".to_owned(),
+            enabled: true,
+            transport: McpTransport::Stdio,
+            command: Some(String::new()),
+            url: None,
+            args: vec![],
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            cwd: None,
+            enabled_tools: vec![],
+            disabled_tools: vec![],
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        };
+        assert!(validate_mcp_server_config(&server).is_err());
+
+        server.command = Some("  npx  ".to_owned());
+        assert!(validate_mcp_server_config(&server).is_ok());
+        assert_eq!(server.command.as_deref(), Some("  npx  "));
+    }
+
+    #[test]
     fn build_mcp_server_config_http_rejects_command() {
         let input = AddMcpServerInput {
             id: "linear".to_owned(),
             cli_type: "remote-http".to_owned(),
             command: Some("npx".to_owned()),
+            args: vec![],
             url: Some("https://example.invalid/mcp".to_owned()),
             env: vec![],
             headers: vec![],
@@ -852,7 +867,8 @@ mod tests {
         let input = AddMcpServerInput {
             id: "fs".to_owned(),
             cli_type: "studio".to_owned(),
-            command: Some("npx -y @server/filesystem".to_owned()),
+            command: Some("npx".to_owned()),
+            args: vec!["-y".to_owned(), "@server/filesystem".to_owned()],
             url: None,
             env: vec![],
             headers: vec!["Authorization=secret".to_owned()],

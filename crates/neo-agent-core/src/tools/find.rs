@@ -1,6 +1,7 @@
 use ignore::WalkBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::Path;
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 
@@ -38,6 +39,11 @@ const fn default_limit() -> usize {
 
 const fn default_include_dirs() -> bool {
     true
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_str()
+        .map_or_else(|| format!("<non-UTF-8 path:{path:?}>"), ToOwned::to_owned)
 }
 
 pub struct FindTool;
@@ -85,9 +91,7 @@ impl Tool for FindTool {
                     let limit = input.limit;
                     for entry in WalkBuilder::new(root).standard_filters(true).build() {
                         let entry = entry.map_err(std::io::Error::other)?;
-                        let Some(name) = entry.file_name().to_str() else {
-                            continue;
-                        };
+                        let name = entry.file_name().to_string_lossy();
                         let is_dir = entry
                             .file_type()
                             .is_some_and(|file_type| file_type.is_dir());
@@ -104,7 +108,7 @@ impl Tool for FindTool {
                                 .ok()
                                 .and_then(|m| m.modified().ok())
                                 .unwrap_or(std::time::UNIX_EPOCH);
-                            paths.push((display.display().to_string(), mtime));
+                            paths.push((display_path(display), mtime));
                             if limit > 0 && paths.len() >= limit {
                                 break;
                             }
@@ -240,5 +244,23 @@ mod tests {
 
         let result = run_find(&ctx, "nonexistent", json!({})).await;
         assert!(result.content.contains("No matching paths found"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn non_utf8_names_are_reported_instead_of_skipped() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let name = OsString::from_vec(b"needle-\xff".to_vec());
+        std::fs::write(workspace.path().join(name), "x").expect("write non-UTF-8 file");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let result = run_find(&ctx, "needle", json!({})).await;
+        assert!(result.content.contains("<non-UTF-8 path:"));
+        assert!(result.content.contains("Found 1 matching path"));
     }
 }

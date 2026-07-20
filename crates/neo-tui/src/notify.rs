@@ -10,6 +10,16 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 
 static NOTIFICATION_ERROR_REPORTED: AtomicBool = AtomicBool::new(false);
+static DESKTOP_NOTIFICATION_STATE: Mutex<NotificationState> = Mutex::new(NotificationState {
+    disabled: false,
+    in_flight: false,
+});
+
+#[derive(Debug, Default)]
+struct NotificationState {
+    disabled: bool,
+    in_flight: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NotificationCommand {
@@ -75,7 +85,11 @@ fn ring_bell() {
 
 /// Spawn a fire-and-forget desktop notification.
 fn spawn_desktop_notification(title: &str, body: &str, subtitle: Option<&str>) {
+    if !admit_desktop_notification() {
+        return;
+    }
     let Some(command) = desktop_notification_command(title, body, subtitle) else {
+        finish_desktop_notification(true);
         report_notification_error_once("desktop notifications are unsupported on this platform");
         return;
     };
@@ -94,15 +108,58 @@ fn spawn_desktop_notification(title: &str, body: &str, subtitle: Option<&str>) {
                 .spawn(move || report_notification_exit(wait_for_notification_child(&waiter)))
             {
                 stop_notification_child(&child);
+                finish_desktop_notification(true);
                 report_notification_error_once(&format!(
                     "failed to start desktop notification waiter: {error}"
                 ));
             }
         }
-        Err(error) => report_notification_error_once(&format!(
-            "failed to start desktop notification command: {error}"
-        )),
+        Err(error) => {
+            let permanent = notification_spawn_error_is_permanent(&error);
+            finish_desktop_notification(permanent);
+            report_notification_error_once(&format!(
+                "failed to start desktop notification command: {error}"
+            ));
+        }
     }
+}
+
+fn admit_desktop_notification() -> bool {
+    let Ok(mut state) = DESKTOP_NOTIFICATION_STATE.lock() else {
+        return false;
+    };
+    admit_notification(&mut state)
+}
+
+fn finish_desktop_notification(disable: bool) {
+    let Ok(mut state) = DESKTOP_NOTIFICATION_STATE.lock() else {
+        return;
+    };
+    finish_notification(&mut state, disable);
+}
+
+fn admit_notification(state: &mut NotificationState) -> bool {
+    if state.disabled || state.in_flight {
+        return false;
+    }
+    state.in_flight = true;
+    true
+}
+
+fn finish_notification(state: &mut NotificationState, disable: bool) {
+    state.in_flight = false;
+    state.disabled |= disable;
+}
+
+fn notification_spawn_error_is_permanent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidFilename
+    )
 }
 
 fn wait_for_notification_child(child: &Mutex<Option<Child>>) -> io::Result<ExitStatus> {
@@ -125,7 +182,9 @@ fn stop_notification_child(child: &Mutex<Option<Child>>) {
 }
 
 fn report_notification_exit(result: io::Result<ExitStatus>) {
-    if let Some(message) = notification_exit_diagnostic(result) {
+    let diagnostic = notification_exit_diagnostic(result);
+    finish_desktop_notification(diagnostic.is_some());
+    if let Some(message) = diagnostic {
         report_notification_error_once(&message);
     }
 }
@@ -332,5 +391,35 @@ mod tests {
         let diagnostic = notification_exit_diagnostic(Ok(status)).unwrap();
         assert!(diagnostic.contains("exited with"));
         assert!(diagnostic.contains('7'));
+    }
+
+    #[test]
+    fn desktop_notification_admission_allows_only_one_in_flight() {
+        let mut state = NotificationState::default();
+        assert!(admit_notification(&mut state));
+        assert!(!admit_notification(&mut state));
+
+        finish_notification(&mut state, false);
+        assert!(admit_notification(&mut state));
+    }
+
+    #[test]
+    fn permanent_spawn_errors_disable_future_notifications() {
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::InvalidFilename,
+        ] {
+            assert!(notification_spawn_error_is_permanent(&io::Error::from(
+                kind
+            )));
+        }
+
+        let mut state = NotificationState::default();
+        assert!(admit_notification(&mut state));
+        finish_notification(&mut state, true);
+        assert!(!admit_notification(&mut state));
     }
 }

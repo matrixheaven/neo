@@ -11,7 +11,6 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use serde::Serialize;
 use sysinfo::{Pid as SystemPid, ProcessesToUpdate, System};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -29,7 +28,10 @@ use super::{
         GuardRequest, GuardResponse, GuardTaskKind, ProtocolError, StartRequest, read_request,
         request_stream, write_response,
     },
-    status::{FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind},
+    status::{
+        FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind, RunningStatus,
+        require_durable_running_write,
+    },
 };
 use crate::{
     session::atomic_file::{AtomicWriteStatus, write_file_atomic_status},
@@ -121,12 +123,12 @@ where
         final_status_path(&start),
         start.task_id.clone(),
         started_at_ms,
-        write_running_status(&start, started_at_ms),
+        write_running_status(&start, started_at_ms, None),
     )?;
 
     let (mut writer, response_tx) = spawn_response_writer(response);
     let (mut process, mut sampler) =
-        start_bash_process(&start, &response_tx, start_request_id).await?;
+        start_bash_process(&start, &response_tx, start_request_id, started_at_ms).await?;
     let output_tasks = spawn_output_tasks(&mut process, &start, &response_tx).await?;
 
     let result = run_supervision_loop(
@@ -208,6 +210,7 @@ async fn start_bash_process(
     start: &StartRequest,
     response_tx: &mpsc::Sender<GuardResponse>,
     start_request_id: u64,
+    started_at_ms: u64,
 ) -> io::Result<(GuardedBashProcess, ProcessSampler)> {
     let mut process = GuardedBashProcess::spawn(start)?;
     let command_pid = process.child.id().unwrap_or_default();
@@ -217,6 +220,11 @@ async fn start_bash_process(
         let _ = process.terminate_and_wait(&mut sampler).await;
         return Err(io::Error::other("cannot establish Bash process identity"));
     }
+    require_durable_running_write(write_running_status(
+        start,
+        started_at_ms,
+        Some((command_pid, command_start_id)),
+    )?)?;
     try_send_response(
         response_tx,
         GuardResponse::Started {
@@ -1252,21 +1260,18 @@ mod tests {
     }
 }
 
-#[derive(Serialize)]
-struct RunningStatus<'a> {
-    schema_version: u32,
-    task_id: &'a str,
-    guardian_pid: u32,
+fn write_running_status(
+    start: &StartRequest,
     started_at_ms: u64,
-}
-
-fn write_running_status(start: &StartRequest, started_at_ms: u64) -> io::Result<AtomicWriteStatus> {
-    let content = serde_json::to_vec(&RunningStatus {
-        schema_version: 1,
-        task_id: &start.task_id,
-        guardian_pid: std::process::id(),
-        started_at_ms,
-    })?;
+    command: Option<(u32, u64)>,
+) -> io::Result<AtomicWriteStatus> {
+    let status = command.map_or_else(
+        || RunningStatus::new(&start.task_id, started_at_ms),
+        |(pid, start_id)| {
+            RunningStatus::new(&start.task_id, started_at_ms).with_command(pid, start_id)
+        },
+    );
+    let content = serde_json::to_vec(&status)?;
     write_file_atomic_status(&running_status_path(start), &content)
 }
 

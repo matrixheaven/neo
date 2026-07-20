@@ -224,9 +224,12 @@ pub enum McpCommand {
         /// MCP type: studio, remote-http, remote-sse
         #[arg(short = 't', long = "type", value_name = "TYPE")]
         r#type: String,
-        /// Full shell command for studio type (global -c is taken, so -C)
-        #[arg(short = 'C', long = "command", value_name = "CMD")]
+        /// Program to run for stdio transport (global -c is taken, so -C)
+        #[arg(short = 'C', long = "command", value_name = "PROGRAM")]
         command: Option<String>,
+        /// Program argument for stdio transport; repeat for multiple arguments
+        #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
+        args: Vec<String>,
         /// Service URL for remote-http / remote-sse
         #[arg(short = 'u', long = "url", value_name = "URL")]
         url: Option<String>,

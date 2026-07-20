@@ -169,6 +169,12 @@ type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
+struct PendingFileCompletion {
+    prefix: PromptCompletionPrefix,
+    complete_on_finish: bool,
+    handle: JoinHandle<Result<Vec<PickerItem>>>,
+}
+
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const TASK_BROWSER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -366,8 +372,12 @@ pub(crate) struct InteractiveController {
     pending_background_question_followups: VecDeque<String>,
     clipboard_writer: ClipboardWriter,
     completion_root: PathBuf,
+    pending_file_completion: Option<PendingFileCompletion>,
+    queued_file_completion: Option<(PromptCompletionPrefix, bool)>,
     workspace_root: PathBuf,
     git_status_provider: GitStatusProvider,
+    pending_git_status: Option<JoinHandle<Option<String>>>,
+    git_status_refresh_queued: bool,
     last_git_status_refresh: Option<Instant>,
     git_status_refresh_interval: Duration,
     last_task_browser_refresh: Option<Instant>,
@@ -808,8 +818,12 @@ impl InteractiveController {
             pending_background_question_followups: VecDeque::new(),
             clipboard_writer: Arc::new(write_system_clipboard),
             completion_root: workspace_root.clone(),
+            pending_file_completion: None,
+            queued_file_completion: None,
             workspace_root,
             git_status_provider,
+            pending_git_status: None,
+            git_status_refresh_queued: false,
             last_git_status_refresh: Some(Instant::now()),
             git_status_refresh_interval: GIT_STATUS_REFRESH_INTERVAL,
             last_task_browser_refresh: None,
@@ -1061,35 +1075,11 @@ impl InteractiveController {
                 self.model_items = catalogs.model_items;
                 self.tui.chrome_mut().set_theme(config.theme.theme);
                 self.local_config = Some(config);
-                self.spawn_sync_mcp_manager();
             }
             Err(error) => {
                 tracing::warn!("failed to reload config: {error}");
             }
         }
-    }
-
-    /// Push the current application config onto the MCP connection manager.
-    ///
-    /// Must be called after `local_config` is updated. Runs in a spawned task
-    /// so it can be used from synchronous refresh paths. If there is no async
-    /// runtime available (e.g. in unit tests that build a controller without
-    /// one), the sync is skipped silently.
-    fn spawn_sync_mcp_manager(&self) {
-        let Some(config) = self.local_config.clone() else {
-            return;
-        };
-        let Some(manager) = self.mcp_manager.clone() else {
-            return;
-        };
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        tokio::spawn(async move {
-            if let Err(error) = mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
-                tracing::warn!("failed to sync MCP manager: {error}");
-            }
-        });
     }
 
     fn push_status(&mut self, message: impl Into<String>) {
@@ -1250,7 +1240,7 @@ impl InteractiveController {
                             self.wait_for_active_turn().await?;
                         }
                         if had_active_turn {
-                            self.refresh_git_status_now();
+                            self.request_git_status_refresh();
                             let deadline = render(&mut self.tui, false)?;
                             frame_scheduler.replace_animation_deadline(deadline);
                         }
@@ -1274,14 +1264,16 @@ impl InteractiveController {
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
             }
             self.drain_log_events();
-            if self.active_turn.is_some() && self.refresh_git_status_if_due() {
-                frame_request = frame_request.merge(FrameRequest::Coalesced);
+            if self.active_turn.is_some() {
+                self.refresh_git_status_if_due();
             }
             let mut async_state_changed = self.maybe_refresh_task_browser().await;
             async_state_changed |= self.poll_pending_catalog_fetch().await;
             async_state_changed |= self.poll_pending_custom_endpoint_fetch().await;
             async_state_changed |= self.poll_pending_custom_endpoint_test().await;
             async_state_changed |= self.poll_pending_mcp_probe().await;
+            async_state_changed |= self.poll_pending_file_completion().await;
+            async_state_changed |= self.poll_pending_git_status().await;
             async_state_changed |= self.poll_mcp_startup().await;
             if async_state_changed || self.tui.is_transcript_dirty() {
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
@@ -1826,9 +1818,47 @@ impl InteractiveController {
             .last_git_status_refresh
             .is_none_or(|refreshed_at| refreshed_at.elapsed() >= self.git_status_refresh_interval);
         if should_refresh {
-            return self.refresh_git_status_now();
+            self.request_git_status_refresh();
         }
         false
+    }
+
+    fn request_git_status_refresh(&mut self) {
+        if self.pending_git_status.is_some() {
+            self.git_status_refresh_queued = true;
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            #[cfg(test)]
+            self.refresh_git_status_now();
+            return;
+        }
+        let provider = self.git_status_provider.clone();
+        let root = self.workspace_root.clone();
+        self.pending_git_status = Some(tokio::task::spawn_blocking(move || provider(&root)));
+        self.last_git_status_refresh = Some(Instant::now());
+    }
+
+    async fn poll_pending_git_status(&mut self) -> bool {
+        let Some(pending) = self.pending_git_status.take() else {
+            return false;
+        };
+        if !pending.is_finished() {
+            self.pending_git_status = Some(pending);
+            return false;
+        }
+        let result = pending.await;
+        let changed = if let Ok(label) = result {
+            let changed = self.tui.chrome().git_status_label() != label.as_deref();
+            self.tui.chrome_mut().set_git_status_label(label);
+            changed
+        } else {
+            false
+        };
+        if std::mem::take(&mut self.git_status_refresh_queued) {
+            self.request_git_status_refresh();
+        }
+        changed
     }
 
     fn frame_request_for_agent_event(event: &AgentEvent) -> FrameRequest {
@@ -1860,7 +1890,7 @@ impl InteractiveController {
         self.tui.transcript_mut().apply_agent_event(&event);
         self.tui.chrome_mut().apply_agent_event(event);
         if should_refresh_git_status {
-            self.refresh_git_status_now();
+            self.request_git_status_refresh();
         }
         frame_request
     }

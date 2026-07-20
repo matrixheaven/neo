@@ -17,6 +17,7 @@ pub struct McpAddFormOptions {
 pub struct McpAddFormData {
     pub name: String,
     pub command: Option<String>,
+    pub args: Vec<String>,
     pub url: Option<String>,
     pub bearer_token: Option<String>,
     pub headers: Vec<String>,
@@ -38,8 +39,8 @@ struct Field {
     multiline: bool,
 }
 
-// Field indices shared across transports. The field at index 2 means Env for
-// stdio and Bearer Token for http/sse; index 3 is only present for http/sse.
+// Field indices shared across transports. For stdio, indices 2 and 3 are
+// Arguments and Env; for remote transports they are Bearer Token and Headers.
 const FIELD_NAME: usize = 0;
 const FIELD_COMMAND_OR_URL: usize = 1;
 const FIELD_OPTIONAL_1: usize = 2;
@@ -52,6 +53,15 @@ fn split_key_value_entries(text: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_argument_rows(text: &str) -> Option<Vec<String>> {
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    text.lines()
+        .map(|line| serde_json::from_str::<String>(line).ok())
         .collect()
 }
 
@@ -78,11 +88,18 @@ impl McpAddFormState {
                     multiline: false,
                 },
                 Field {
-                    label: "Command",
+                    label: "Program",
                     buffer: String::new(),
                     optional: false,
                     masked: false,
                     multiline: false,
+                },
+                Field {
+                    label: "Arguments (JSON string per line)",
+                    buffer: String::new(),
+                    optional: true,
+                    masked: false,
+                    multiline: true,
                 },
                 Field {
                     label: "Env",
@@ -205,6 +222,14 @@ impl McpAddFormState {
         {
             return false;
         }
+        if self.transport == "stdio"
+            && self
+                .fields
+                .get(FIELD_OPTIONAL_1)
+                .is_none_or(|field| parse_argument_rows(&field.buffer).is_none())
+        {
+            return false;
+        }
         true
     }
 
@@ -228,16 +253,18 @@ impl McpAddFormState {
                 .unwrap_or_default()
         };
 
-        let (command, url, bearer_token, headers, env) = match self.transport.as_str() {
+        let (command, args, url, bearer_token, headers, env) = match self.transport.as_str() {
             "stdio" => (
                 Some(second),
+                parse_argument_rows(&self.fields[FIELD_OPTIONAL_1].buffer).unwrap_or_default(),
                 None,
                 None,
                 Vec::new(),
-                optional_vec(FIELD_OPTIONAL_1),
+                optional_vec(FIELD_HEADERS),
             ),
             _ => (
                 None,
+                Vec::new(),
                 Some(second),
                 optional(FIELD_OPTIONAL_1),
                 optional_vec(FIELD_HEADERS),
@@ -248,6 +275,7 @@ impl McpAddFormState {
         self.result = Some(McpAddFormResult::Submitted(McpAddFormData {
             name,
             command,
+            args,
             url,
             bearer_token,
             headers,
@@ -501,7 +529,11 @@ mod tests {
         let mut state = stdio_state();
         state.handle_input(InputEvent::Paste("fs".to_owned()));
         state.handle_input(InputEvent::Insert('\t'));
-        state.handle_input(InputEvent::Paste("npx -y @server/filesystem".to_owned()));
+        state.handle_input(InputEvent::Paste("npx".to_owned()));
+        state.handle_input(InputEvent::Insert('\t'));
+        state.handle_input(InputEvent::Paste(
+            "\"-y\"\n\"  spaced  \"\n\"\"\n\"@server/filesystem\"".to_owned(),
+        ));
         state.handle_input(InputEvent::Insert('\t'));
         state.handle_input(InputEvent::Paste("KEY=value".to_owned()));
         let result = state.handle_input(InputEvent::Submit);
@@ -509,7 +541,11 @@ mod tests {
         match state.take_result() {
             Some(McpAddFormResult::Submitted(data)) => {
                 assert_eq!(data.name, "fs");
-                assert_eq!(data.command, Some("npx -y @server/filesystem".to_owned()));
+                assert_eq!(data.command, Some("npx".to_owned()));
+                assert_eq!(
+                    data.args,
+                    vec!["-y", "  spaced  ", "", "@server/filesystem"]
+                );
                 assert!(data.url.is_none());
                 assert_eq!(data.env, vec!["KEY=value".to_owned()]);
                 assert!(data.headers.is_empty());
@@ -539,6 +575,7 @@ mod tests {
                 assert_eq!(data.bearer_token, Some("tok".to_owned()));
                 assert_eq!(data.headers, vec!["Authorization=bearer".to_owned()]);
                 assert!(data.command.is_none());
+                assert!(data.args.is_empty());
                 assert!(data.env.is_empty());
             }
             other => panic!("expected submitted result, got {other:?}"),

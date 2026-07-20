@@ -169,21 +169,97 @@ fn content_bodies(
     messages: &[ChatMessage],
     replay_reasoning: bool,
 ) -> Result<Vec<Value>, ProviderError> {
-    let mut tool_names = BTreeMap::new();
     let mut contents = Vec::new();
-    for message in messages {
-        if let ChatMessage::Assistant { tool_calls, .. } = message {
-            tool_names.extend(
-                tool_calls
+    let mut pending_tool_calls = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        match &messages[index] {
+            ChatMessage::Assistant { tool_calls, .. } => {
+                ensure_no_pending_tool_results(&pending_tool_calls)?;
+                pending_tool_calls = tool_calls
                     .iter()
-                    .map(|tool_call| (tool_call.id.as_str(), tool_call.name.as_str())),
-            );
-        }
-        if let Some(content) = content_body(message, replay_reasoning, &tool_names) {
-            contents.push(content?);
+                    .map(|tool_call| (tool_call.id.as_str(), tool_call.name.as_str()))
+                    .collect();
+                if let Some(content) = content_body(&messages[index], replay_reasoning) {
+                    contents.push(content?);
+                }
+                index += 1;
+            }
+            ChatMessage::ToolResult { .. } => {
+                let mut results = BTreeMap::new();
+                while let Some(ChatMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                }) = messages.get(index)
+                {
+                    if !pending_tool_calls.iter().any(|(id, _)| *id == tool_call_id) {
+                        return Err(ProviderError::Protocol(format!(
+                            "Google tool result references unknown tool call '{tool_call_id}'"
+                        )));
+                    }
+                    if results
+                        .insert(tool_call_id.as_str(), (content.as_slice(), *is_error))
+                        .is_some()
+                    {
+                        return Err(ProviderError::Protocol(format!(
+                            "Google tool result is duplicated for tool call '{tool_call_id}'"
+                        )));
+                    }
+                    index += 1;
+                }
+
+                let missing = pending_tool_calls
+                    .iter()
+                    .filter_map(|(id, _)| (!results.contains_key(id)).then_some(*id))
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    return Err(missing_tool_results_error(&missing));
+                }
+
+                let mut parts = Vec::with_capacity(results.len());
+                for (tool_call_id, tool_name) in &pending_tool_calls {
+                    if let Some((content, is_error)) = results.remove(tool_call_id) {
+                        parts.push(tool_result_part(tool_name, content, is_error)?);
+                    }
+                }
+                contents.push(json!({
+                    "role": "user",
+                    "parts": parts,
+                }));
+                pending_tool_calls.clear();
+            }
+            _ => {
+                ensure_no_pending_tool_results(&pending_tool_calls)?;
+                if let Some(content) = content_body(&messages[index], replay_reasoning) {
+                    contents.push(content?);
+                }
+                index += 1;
+            }
         }
     }
+    ensure_no_pending_tool_results(&pending_tool_calls)?;
     Ok(contents)
+}
+
+fn ensure_no_pending_tool_results(
+    pending_tool_calls: &[(&str, &str)],
+) -> Result<(), ProviderError> {
+    if pending_tool_calls.is_empty() {
+        return Ok(());
+    }
+    let missing = pending_tool_calls
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    Err(missing_tool_results_error(&missing))
+}
+
+fn missing_tool_results_error(missing: &[&str]) -> ProviderError {
+    ProviderError::Protocol(format!(
+        "Google tool results are missing for tool calls: {}",
+        missing.join(", ")
+    ))
 }
 
 fn thinking_budget_tokens(effort: &ReasoningEffort) -> Result<i32, ProviderError> {
@@ -202,7 +278,6 @@ fn thinking_budget_tokens(effort: &ReasoningEffort) -> Result<i32, ProviderError
 fn content_body(
     message: &ChatMessage,
     replay_reasoning: bool,
-    tool_names: &BTreeMap<&str, &str>,
 ) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
@@ -243,32 +318,25 @@ fn content_body(
                 }),
             )
         }
-        ChatMessage::ToolResult {
-            tool_call_id,
-            content,
-            is_error,
-        } => Some(
-            reject_images(content, "Google Generative AI", "tool result").and_then(|()| {
-                let name = tool_names.get(tool_call_id.as_str()).ok_or_else(|| {
-                    ProviderError::Protocol(format!(
-                        "Google tool result references unknown tool call '{tool_call_id}'"
-                    ))
-                })?;
-                Ok(json!({
-                    "role": "function",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": name,
-                            "response": {
-                                "result": content_text(content),
-                                "is_error": is_error,
-                            },
-                        },
-                    }],
-                }))
-            }),
-        ),
+        ChatMessage::ToolResult { .. } => None,
     }
+}
+
+fn tool_result_part(
+    tool_name: &str,
+    content: &[ContentPart],
+    is_error: bool,
+) -> Result<Value, ProviderError> {
+    reject_images(content, "Google Generative AI", "tool result")?;
+    Ok(json!({
+        "functionResponse": {
+            "name": tool_name,
+            "response": {
+                "result": content_text(content),
+                "is_error": is_error,
+            },
+        },
+    }))
 }
 
 fn content_parts(
@@ -712,7 +780,6 @@ mod tests {
                 }],
             },
             false,
-            &BTreeMap::new(),
         )
         .expect("assistant message should produce content");
 
@@ -804,16 +871,16 @@ mod tests {
                     .collect(),
             },
             ChatMessage::ToolResult {
-                tool_call_id: ids[0].clone(),
+                tool_call_id: ids[1].clone(),
                 content: vec![ContentPart::Text {
-                    text: "first".to_owned(),
+                    text: "second".to_owned(),
                 }],
                 is_error: false,
             },
             ChatMessage::ToolResult {
-                tool_call_id: ids[1].clone(),
+                tool_call_id: ids[0].clone(),
                 content: vec![ContentPart::Text {
-                    text: "second".to_owned(),
+                    text: "first".to_owned(),
                 }],
                 is_error: false,
             },
@@ -834,9 +901,87 @@ mod tests {
             },
         ];
         let contents = content_bodies(&messages, false).unwrap();
+        assert_eq!(contents.len(), 4);
+        assert_eq!(contents[1]["role"], "user");
         assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "read");
-        assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "read");
-        assert_eq!(contents[4]["parts"][0]["functionResponse"]["name"], "write");
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["result"],
+            "first"
+        );
+        assert_eq!(contents[1]["parts"][1]["functionResponse"]["name"], "read");
+        assert_eq!(
+            contents[1]["parts"][1]["functionResponse"]["response"]["result"],
+            "second"
+        );
+        assert_eq!(contents[3]["role"], "user");
+        assert_eq!(contents[3]["parts"][0]["functionResponse"]["name"], "write");
+
+        let unknown = vec![ChatMessage::ToolResult {
+            tool_call_id: "unknown".to_owned(),
+            content: vec![ContentPart::Text {
+                text: "result".to_owned(),
+            }],
+            is_error: false,
+        }];
+        let err = content_bodies(&unknown, false).unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderError::Protocol(message) if message.contains("unknown tool call 'unknown'")
+        ));
+    }
+
+    #[test]
+    fn tool_results_reject_incomplete_parallel_batch() {
+        let messages = vec![
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call-1".to_owned(),
+                        name: "read".to_owned(),
+                        raw_arguments: "{}".to_owned(),
+                    },
+                    ToolCall {
+                        id: "call-2".to_owned(),
+                        name: "write".to_owned(),
+                        raw_arguments: "{}".to_owned(),
+                    },
+                ],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call-1".to_owned(),
+                content: vec![ContentPart::Text {
+                    text: "done".to_owned(),
+                }],
+                is_error: false,
+            },
+        ];
+
+        let err = content_bodies(&messages, false).unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderError::Protocol(message)
+                if message == "Google tool results are missing for tool calls: call-2"
+        ));
+    }
+
+    #[test]
+    fn tool_results_reject_zero_result_batch_at_end_of_history() {
+        let messages = vec![ChatMessage::Assistant {
+            content: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "call-1".to_owned(),
+                name: "read".to_owned(),
+                raw_arguments: "{}".to_owned(),
+            }],
+        }];
+
+        let err = content_bodies(&messages, false).unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderError::Protocol(message)
+                if message == "Google tool results are missing for tool calls: call-1"
+        ));
     }
 
     #[test]

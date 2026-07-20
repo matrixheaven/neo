@@ -391,21 +391,24 @@ impl GitBashCwd {
     /// Returns an error if the path is not absolute or is otherwise unusable
     /// as a Git Bash cwd.
     pub fn new(path: &Path) -> Result<Self, WindowsCwdError> {
-        let lossy = path.to_string_lossy();
-        if lossy.is_empty() {
+        let path_text = path.to_str().ok_or_else(|| WindowsCwdError {
+            path: path.to_string_lossy().into_owned(),
+            reason: "path is not valid Unicode and cannot be translated to Git Bash",
+        })?;
+        if path_text.is_empty() {
             return Err(WindowsCwdError {
-                path: lossy.into_owned(),
+                path: path_text.to_owned(),
                 reason: "path is empty",
             });
         }
 
         // UNC: must be \\server\share at minimum.
-        if lossy.starts_with(r"\\") {
-            let trimmed = lossy.trim_start_matches('\\');
+        if path_text.starts_with(r"\\") {
+            let trimmed = path_text.trim_start_matches('\\');
             let parts: Vec<&str> = trimmed.split('\\').collect();
             if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
                 return Err(WindowsCwdError {
-                    path: lossy.into_owned(),
+                    path: path_text.to_owned(),
                     reason: "UNC path must include server and share",
                 });
             }
@@ -415,11 +418,11 @@ impl GitBashCwd {
         }
 
         // Drive letter: must be `C:\` or `C:/` (not bare `C:`).
-        let bytes = lossy.as_bytes();
+        let bytes = path_text.as_bytes();
         if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
             if bytes.len() < 3 || !matches!(bytes[2], b'\\' | b'/') {
                 return Err(WindowsCwdError {
-                    path: lossy.into_owned(),
+                    path: path_text.to_owned(),
                     reason: "drive-relative path is not absolute; use a full path like `C:\\dir`",
                 });
             }
@@ -429,7 +432,7 @@ impl GitBashCwd {
         }
 
         Err(WindowsCwdError {
-            path: lossy.into_owned(),
+            path: path_text.to_owned(),
             reason: "path is not a Windows drive or UNC absolute path",
         })
     }
@@ -719,6 +722,17 @@ mod tests {
     fn git_bash_cwd_rejects_malformed_unc() {
         let err = GitBashCwd::new(Path::new(r"\\server")).unwrap_err();
         assert!(err.reason.contains("UNC path must include"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_bash_cwd_rejects_non_unicode_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"C:\\bad-\xff".to_vec()));
+        let err = GitBashCwd::new(&path).unwrap_err();
+        assert!(err.reason.contains("not valid Unicode"));
     }
 
     #[test]

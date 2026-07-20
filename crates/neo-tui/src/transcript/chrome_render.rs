@@ -43,7 +43,6 @@ pub fn apply_gutter(lines: &mut [String]) {
 pub(super) struct OrderedToolRender {
     pub lines: Vec<Line>,
     pub animated_header_indices: Vec<usize>,
-    pub live_header_indices: Vec<usize>,
 }
 
 pub(super) fn render_ordered_tools(
@@ -53,7 +52,6 @@ pub(super) fn render_ordered_tools(
 ) -> OrderedToolRender {
     let mut rows = Vec::new();
     let mut animated_header_indices = Vec::new();
-    let mut live_header_indices = Vec::new();
     let mut i = 0;
     while i < ordered.len() {
         if !rows.is_empty() {
@@ -62,12 +60,7 @@ pub(super) fn render_ordered_tools(
         let current_name = ordered[i].name().to_owned();
         let groupable = is_groupable(&current_name);
         if !groupable {
-            record_tool_header(
-                &ordered[i],
-                rows.len(),
-                &mut animated_header_indices,
-                &mut live_header_indices,
-            );
+            record_tool_header(&ordered[i], rows.len(), &mut animated_header_indices);
             rows.extend(ordered[i].render_with_theme(width, theme));
             i += 1;
             continue;
@@ -89,21 +82,10 @@ pub(super) fn render_ordered_tools(
                     if index > 0 {
                         rows.push(Line::raw(""));
                     }
-                    record_tool_header(
-                        tool,
-                        rows.len(),
-                        &mut animated_header_indices,
-                        &mut live_header_indices,
-                    );
+                    record_tool_header(tool, rows.len(), &mut animated_header_indices);
                     rows.extend(tool.render_with_theme(width, theme));
                 }
             } else {
-                if ordered[i..j]
-                    .iter()
-                    .any(|tool| tool.finalization() == crate::primitive::Finalization::Live)
-                {
-                    live_header_indices.push(rows.len());
-                }
                 let states: Vec<&ToolCallState> =
                     ordered[i..j].iter().map(ToolCallComponent::state).collect();
                 let expanded = ordered[i..j].iter().all(ToolCallComponent::is_expanded);
@@ -114,12 +96,7 @@ pub(super) fn render_ordered_tools(
                 rows.extend(render_tool_group(&group, width, theme, expanded));
             }
         } else {
-            record_tool_header(
-                &ordered[i],
-                rows.len(),
-                &mut animated_header_indices,
-                &mut live_header_indices,
-            );
+            record_tool_header(&ordered[i], rows.len(), &mut animated_header_indices);
             rows.extend(ordered[i].render_with_theme(width, theme));
         }
         i = j;
@@ -127,7 +104,6 @@ pub(super) fn render_ordered_tools(
     OrderedToolRender {
         lines: rows,
         animated_header_indices,
-        live_header_indices,
     }
 }
 
@@ -135,13 +111,9 @@ fn record_tool_header(
     tool: &ToolCallComponent,
     row: usize,
     animated_header_indices: &mut Vec<usize>,
-    live_header_indices: &mut Vec<usize>,
 ) {
     if tool.has_visible_animation() {
         animated_header_indices.push(row);
-    }
-    if tool.finalization() == crate::primitive::Finalization::Live {
-        live_header_indices.push(row);
     }
 }
 

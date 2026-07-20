@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::{
     AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
     ReasoningCapability,
+    auth::env_value,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::responses::OpenAiResponsesClient,
@@ -76,8 +77,6 @@ impl ModelRegistry {
 pub struct ProviderSpec {
     pub id: String,
     pub display_name: String,
-    pub api: ApiKind,
-    pub supported_apis: Vec<ApiKind>,
     pub base_url: Option<String>,
     /// Inline API key stored in config (e.g. `api_key = "sk-..."`).
     /// Takes priority over `api_key_env_vars` during credential resolution.
@@ -86,7 +85,7 @@ pub struct ProviderSpec {
     pub ambient_auth_env_vars: Vec<Vec<String>>,
     /// Protocol type declared in config.toml `[providers.<id>].type`.
     /// The resolver uses this to select the wire client.
-    pub provider_type: Option<ApiType>,
+    pub provider_type: ApiType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +143,7 @@ impl ProviderRegistry {
         let authenticated = spec.ambient_auth_env_vars.iter().any(|group| {
             group
                 .iter()
-                .all(|key| env.get(key).is_some_and(|value| !value.is_empty()))
+                .all(|key| env_value(env, key).is_some_and(|value| !value.is_empty()))
         });
         let configured = !env_keys.is_empty() || authenticated;
         let missing_reason = (!configured).then(|| missing_reason(spec));
@@ -192,13 +191,6 @@ impl ProviderResolver {
             }
         })?;
 
-        let provider_type = provider
-            .provider_type
-            .ok_or_else(|| AiError::Configuration {
-                message: format!("provider {} must declare a provider type", provider.id),
-            })?;
-        let effective_api = provider_type.to_api_kind();
-
         // Credential: inline api_key > env vars > ambient auth
         let api_key = provider
             .api_key
@@ -221,21 +213,11 @@ impl ProviderResolver {
                 message: format!("provider {} does not define a base URL", provider.id),
             })?;
 
-        match effective_api {
-            ApiKind::OpenAiResponse => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
-            ApiKind::AnthropicMessages => {
-                Ok(Arc::new(AnthropicMessagesClient::new(base_url, api_key)))
-            }
-            ApiKind::OpenAi => Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key))),
-            ApiKind::GoogleGenerativeAi => {
-                Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key)))
-            }
-            ApiKind::Local => Err(AiError::Configuration {
-                message: format!(
-                    "provider {} model API {:?} is not supported by production resolver",
-                    provider.id, model.api
-                ),
-            }),
+        match provider.provider_type {
+            ApiType::OpenAiResponse => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
+            ApiType::Anthropic => Ok(Arc::new(AnthropicMessagesClient::new(base_url, api_key))),
+            ApiType::OpenAi => Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key))),
+            ApiType::Google => Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key))),
         }
     }
 }
@@ -244,17 +226,18 @@ fn api_key_from_provider(
     provider: &ProviderSpec,
     env: &BTreeMap<String, String>,
 ) -> Option<String> {
-    provider
-        .api_key_env_vars
-        .iter()
-        .find_map(|key| env.get(key).filter(|value| !value.is_empty()).cloned())
+    provider.api_key_env_vars.iter().find_map(|key| {
+        env_value(env, key)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 fn configured_env_keys(provider: &ProviderSpec, env: &BTreeMap<String, String>) -> Vec<String> {
     provider
         .api_key_env_vars
         .iter()
-        .filter(|key| env.get(*key).is_some_and(|value| !value.is_empty()))
+        .filter(|key| env_value(env, key).is_some_and(|value| !value.is_empty()))
         .cloned()
         .collect()
 }
@@ -348,8 +331,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "openai",
             "OpenAI",
-            ApiKind::OpenAiResponse,
-            &[ApiKind::OpenAiResponse, ApiKind::OpenAi],
+            ApiType::OpenAiResponse,
             Some("https://api.openai.com/v1"),
             &["OPENAI_API_KEY"],
             &[],
@@ -357,8 +339,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "anthropic",
             "Anthropic",
-            ApiKind::AnthropicMessages,
-            &[ApiKind::AnthropicMessages],
+            ApiType::Anthropic,
             Some("https://api.anthropic.com/v1"),
             &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
             &[],
@@ -366,8 +347,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "google",
             "Google Generative AI",
-            ApiKind::GoogleGenerativeAi,
-            &[ApiKind::GoogleGenerativeAi],
+            ApiType::Google,
             Some("https://generativelanguage.googleapis.com/v1beta"),
             &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             &[],
@@ -375,8 +355,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "openrouter",
             "OpenRouter",
-            ApiKind::OpenAi,
-            &[ApiKind::OpenAi],
+            ApiType::OpenAi,
             Some("https://openrouter.ai/api/v1"),
             &["OPENROUTER_API_KEY"],
             &[],
@@ -384,8 +363,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
         provider(
             "amazon-bedrock",
             "Amazon Bedrock",
-            ApiKind::AnthropicMessages,
-            &[ApiKind::AnthropicMessages],
+            ApiType::Anthropic,
             None,
             &[],
             &[
@@ -403,24 +381,14 @@ fn builtin_providers() -> Vec<ProviderSpec> {
 fn provider(
     id: &str,
     display_name: &str,
-    api: ApiKind,
-    supported_apis: &[ApiKind],
+    provider_type: ApiType,
     base_url: Option<&str>,
     api_key_env_vars: &[&str],
     ambient_auth_env_vars: &[&[&str]],
 ) -> ProviderSpec {
-    let provider_type = match api {
-        ApiKind::OpenAiResponse => Some(ApiType::OpenAiResponse),
-        ApiKind::AnthropicMessages => Some(ApiType::Anthropic),
-        ApiKind::GoogleGenerativeAi => Some(ApiType::Google),
-        ApiKind::OpenAi => Some(ApiType::OpenAi),
-        ApiKind::Local => None,
-    };
     ProviderSpec {
         id: id.to_owned(),
         display_name: display_name.to_owned(),
-        api,
-        supported_apis: supported_apis.to_vec(),
         base_url: base_url.map(str::to_owned),
         api_key: None,
         api_key_env_vars: api_key_env_vars

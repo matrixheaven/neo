@@ -1,5 +1,18 @@
 use std::{collections::BTreeMap, fmt};
 
+pub(crate) fn env_value<'a>(env: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
+    #[cfg(windows)]
+    {
+        env.iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        env.get(key).map(String::as_str)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSource {
     Cli,
@@ -123,12 +136,11 @@ impl CredentialResolver {
 
     fn resolve_env(&self) -> Option<ResolvedCredential> {
         self.env_vars.iter().find_map(|key| {
-            self.env
-                .get(key)
+            env_value(&self.env, key)
                 .filter(|value| !value.is_empty())
                 .map(|secret| {
                     ResolvedCredential::new(
-                        secret.clone(),
+                        secret,
                         CredentialSource::Environment,
                         format!("env {key}"),
                     )

@@ -1,9 +1,7 @@
 //! Extracted: git-status badge rendering and parsing helpers.
 
 use std::fmt::Write as _;
-use std::fs::File;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use neo_agent_core::AgentEvent;
@@ -15,9 +13,6 @@ pub(super) struct GitStatusBadge {
     pub(super) dirty: bool,
     pub(super) ahead: u32,
     pub(super) behind: u32,
-    pub(super) added: u32,
-    pub(super) deleted: u32,
-    pub(super) untracked: u32,
 }
 
 impl GitStatusBadge {
@@ -27,13 +22,7 @@ impl GitStatusBadge {
         }
 
         let mut parts = Vec::new();
-        let has_line_counts = self.added > 0 || self.deleted > 0;
-        if has_line_counts {
-            parts.push(format!("+{} -{}", self.added, self.deleted));
-        }
-        if self.untracked > 0 {
-            parts.push(format!("?{}", self.untracked));
-        } else if self.dirty && !has_line_counts {
+        if self.dirty {
             parts.push("±".to_owned());
         }
         let mut sync = String::new();
@@ -73,10 +62,6 @@ pub(super) fn git_status_label_with_program(
     program: &str,
     workspace_root: &Path,
 ) -> Option<String> {
-    if !workspace_root.join(".git").exists() {
-        return None;
-    }
-
     let status_output = Command::new(program)
         .arg("-C")
         .arg(workspace_root)
@@ -87,38 +72,7 @@ pub(super) fn git_status_label_with_program(
         return None;
     }
     let status = String::from_utf8_lossy(&status_output.stdout);
-    let mut badge = parse_git_status_porcelain(&status)?;
-    if badge.dirty && !badge.unborn {
-        let numstat_output = Command::new(program)
-            .arg("-C")
-            .arg(workspace_root)
-            .args(["diff", "--numstat", "HEAD", "--"])
-            .output()
-            .ok();
-        if let Some(output) = numstat_output
-            && output.status.success()
-        {
-            let numstat = String::from_utf8_lossy(&output.stdout);
-            let (added, deleted) = parse_git_numstat(&numstat);
-            badge.added = added;
-            badge.deleted = deleted;
-        }
-        let untracked_output = Command::new(program)
-            .arg("-C")
-            .arg(workspace_root)
-            .args(["ls-files", "--others", "--exclude-standard", "-z"])
-            .output()
-            .ok();
-        if let Some(output) = untracked_output
-            && output.status.success()
-        {
-            let untracked_files = parse_git_untracked_files_z(&output.stdout);
-            let (added, untracked) = count_untracked_changes(workspace_root, &untracked_files);
-            badge.added = badge.added.saturating_add(added);
-            badge.untracked = badge.untracked.saturating_add(untracked);
-        }
-    }
-    Some(badge.format())
+    parse_git_status_porcelain(&status).map(|badge| badge.format())
 }
 
 pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge> {
@@ -148,9 +102,6 @@ pub(super) fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge>
             dirty,
             ahead,
             behind,
-            added: 0,
-            deleted: 0,
-            untracked: 0,
         })
 }
 
@@ -196,73 +147,5 @@ fn parse_git_sync_count(sync_part: &str, label: &str) -> u32 {
                 .parse()
                 .ok()
         })
-        .unwrap_or(0)
-}
-
-pub(super) fn parse_git_numstat(stdout: &str) -> (u32, u32) {
-    stdout.lines().fold((0, 0), |(added, deleted), line| {
-        let mut parts = line.split('\t');
-        let line_added = parse_git_numstat_count(parts.next());
-        let line_deleted = parse_git_numstat_count(parts.next());
-        (added + line_added, deleted + line_deleted)
-    })
-}
-
-pub(super) fn parse_git_untracked_files_z(stdout: &[u8]) -> Vec<PathBuf> {
-    stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
-        .collect()
-}
-
-pub(super) fn count_untracked_changes(workspace_root: &Path, paths: &[PathBuf]) -> (u32, u32) {
-    paths.iter().fold(
-        (0_u32, 0_u32),
-        |(added, other), path| match count_text_file_lines(&workspace_root.join(path)) {
-            Some(lines) => (added.saturating_add(lines), other),
-            None => (added, other.saturating_add(1)),
-        },
-    )
-}
-
-fn count_text_file_lines(path: &Path) -> Option<u32> {
-    let mut file = File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-
-    let mut buffer = [0_u8; 8192];
-    let mut lines = 0_u32;
-    let mut saw_byte = false;
-    let mut last_byte = 0_u8;
-
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        for byte in &buffer[..read] {
-            if *byte == 0 {
-                return None;
-            }
-            saw_byte = true;
-            if *byte == b'\n' {
-                lines = lines.saturating_add(1);
-            }
-            last_byte = *byte;
-        }
-    }
-
-    if saw_byte && last_byte != b'\n' {
-        lines = lines.saturating_add(1);
-    }
-    Some(lines)
-}
-
-fn parse_git_numstat_count(value: Option<&str>) -> u32 {
-    value
-        .filter(|value| *value != "-")
-        .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
 }

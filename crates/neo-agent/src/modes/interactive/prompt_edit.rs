@@ -460,7 +460,10 @@ impl InteractiveController {
                 .apply_edit(PromptEdit::Insert("\t"));
             return;
         };
-        self.refresh_skill_store_for_completion();
+        if prefix.text.starts_with('@') {
+            self.start_file_completion(prefix, true);
+            return;
+        }
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
@@ -610,7 +613,10 @@ impl InteractiveController {
             return;
         }
 
-        self.refresh_skill_store_for_completion();
+        if prefix.text.starts_with('@') {
+            self.start_file_completion(prefix, false);
+            return;
+        }
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,
@@ -665,7 +671,6 @@ impl InteractiveController {
     }
 
     fn open_slash_prompt_completion_at_cursor(&mut self) {
-        self.refresh_skill_store_for_completion();
         let completions = match prompt_completions(
             &self.completion_root,
             "/",
@@ -695,6 +700,7 @@ impl InteractiveController {
     }
 
     pub(super) fn close_inline_prompt_completion(&mut self) {
+        self.queued_file_completion = None;
         if self
             .tui
             .chrome_mut()
@@ -703,6 +709,79 @@ impl InteractiveController {
         {
             let _ = self.tui.chrome_mut().close_focused_overlay();
         }
+    }
+
+    fn start_file_completion(&mut self, prefix: PromptCompletionPrefix, complete_on_finish: bool) {
+        if self.pending_file_completion.is_some() {
+            self.queued_file_completion = Some((prefix, complete_on_finish));
+            return;
+        }
+        let root = self.completion_root.clone();
+        let requested = prefix.clone();
+        let trusted = self.project_trusted();
+        let skill_store = self.skill_store.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            prompt_completions(&root, &requested.text, skill_store.as_ref(), trusted)
+        });
+        self.pending_file_completion = Some(super::PendingFileCompletion {
+            prefix,
+            complete_on_finish,
+            handle,
+        });
+    }
+
+    pub(super) async fn poll_pending_file_completion(&mut self) -> bool {
+        let Some(pending) = self.pending_file_completion.take() else {
+            return false;
+        };
+        if !pending.handle.is_finished() {
+            self.pending_file_completion = Some(pending);
+            return false;
+        }
+        let result = pending.handle.await;
+        if let Some((prefix, complete_on_finish)) = self.queued_file_completion.take() {
+            self.start_file_completion(prefix, complete_on_finish);
+            return false;
+        }
+        let Ok(Ok(completions)) = result else {
+            return false;
+        };
+        let Some(current) = self.tui.chrome_mut().prompt().completion_prefix() else {
+            return false;
+        };
+        if current != pending.prefix || !current.text.starts_with('@') {
+            return false;
+        }
+        if pending.complete_on_finish {
+            if completions.is_empty() {
+                self.tui
+                    .chrome_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Insert("\t"));
+            } else if completions.len() == 1 {
+                match self.file_reference_marker_for_completion(&completions[0]) {
+                    Ok(marker) => {
+                        let _ = self
+                            .tui
+                            .chrome_mut()
+                            .prompt_mut()
+                            .replace_completion_prefix(&current, &marker);
+                    }
+                    Err(error) => self.push_status(error.message()),
+                }
+            } else {
+                self.tui
+                    .chrome_mut()
+                    .open_prompt_completion_picker(current, completions);
+            }
+        } else if completions.is_empty() {
+            self.close_inline_prompt_completion();
+        } else {
+            self.tui
+                .chrome_mut()
+                .open_prompt_completion_picker(current, completions);
+        }
+        true
     }
 
     pub(super) fn refresh_skill_store_for_completion(&mut self) {

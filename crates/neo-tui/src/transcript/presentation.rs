@@ -77,12 +77,7 @@ impl LiveBlock {
         }
     }
 
-    fn with_header(
-        lines: Vec<String>,
-        animated: bool,
-        _pin_first_header: bool,
-        separator_before: bool,
-    ) -> Self {
+    fn with_header(lines: Vec<String>, animated: bool, separator_before: bool) -> Self {
         Self {
             animated_line_indices: (animated && !lines.is_empty())
                 .then_some(0)
@@ -96,7 +91,6 @@ impl LiveBlock {
     fn with_detected_headers(
         lines: Vec<String>,
         animated_line_indices: Vec<usize>,
-        _pinned_line_indices: Vec<usize>,
         separator_before: bool,
     ) -> Self {
         Self {
@@ -291,7 +285,6 @@ impl TranscriptPresentation {
                     live_blocks.push(LiveBlock::with_detected_headers(
                         block.lines,
                         rendered_tools.animated_header_indices,
-                        rendered_tools.live_header_indices,
                         block.separator_before,
                     ));
                 }
@@ -339,7 +332,6 @@ impl TranscriptPresentation {
                             .entries()
                             .get(index)
                             .is_some_and(TranscriptEntry::has_visible_animation),
-                        finalization == Finalization::Live,
                         separator_before,
                     ));
                     commit_blocked |= finalization == Finalization::Live;
@@ -485,7 +477,6 @@ fn tool_run_end(
 struct RenderedToolEntries {
     lines: Vec<String>,
     animated_header_indices: Vec<usize>,
-    live_header_indices: Vec<usize>,
 }
 
 fn render_tool_entries(
@@ -510,7 +501,6 @@ fn render_tool_entries(
     RenderedToolEntries {
         lines,
         animated_header_indices: rendered.animated_header_indices,
-        live_header_indices: rendered.live_header_indices,
     }
 }
 

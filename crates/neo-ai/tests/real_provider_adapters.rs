@@ -1689,7 +1689,18 @@ async fn openai_responses_client_returns_protocol_error_for_incomplete_streams()
 #[tokio::test]
 async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
-        json!({ "type": "message_start", "message": { "id": "msg-1" } }),
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg-1",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 8,
+                    "cache_creation_input_tokens": 2
+                }
+            }
+        }),
         json!({
             "type": "content_block_start",
             "index": 0,
@@ -1713,12 +1724,7 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
         json!({
             "type": "message_delta",
             "delta": { "stop_reason": "tool_use" },
-            "usage": {
-                "input_tokens": 11,
-                "output_tokens": 3,
-                "cache_read_input_tokens": 8,
-                "cache_creation_input_tokens": 2
-            }
+            "usage": { "output_tokens": 3 }
         }),
         json!({ "type": "message_stop" }),
     ])]);
@@ -2504,6 +2510,7 @@ async fn google_generative_ai_client_serializes_tool_result_errors() {
         .unwrap();
 
     let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["contents"][2]["role"], "user");
     let function_response = &sent.body["contents"][2]["parts"][0]["functionResponse"];
     assert_eq!(function_response["name"], "read_file");
     assert_eq!(function_response["response"]["result"], "permission denied");

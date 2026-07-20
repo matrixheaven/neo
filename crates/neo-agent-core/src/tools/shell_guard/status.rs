@@ -10,6 +10,48 @@ use thiserror::Error;
 use super::ResourceLimitDetail;
 use crate::session::atomic_file::{AtomicWriteStatus, write_file_atomic_create_new};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RunningStatus {
+    pub(crate) schema_version: u32,
+    pub(crate) task_id: String,
+    pub(crate) guardian_pid: u32,
+    pub(crate) started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_start_id: Option<u64>,
+}
+
+impl RunningStatus {
+    pub(crate) fn new(task_id: &str, started_at_ms: u64) -> Self {
+        Self {
+            schema_version: 1,
+            task_id: task_id.to_owned(),
+            guardian_pid: std::process::id(),
+            started_at_ms,
+            command_pid: None,
+            command_start_id: None,
+        }
+    }
+
+    pub(crate) fn with_command(mut self, command_pid: u32, command_start_id: u64) -> Self {
+        self.command_pid = Some(command_pid);
+        self.command_start_id = Some(command_start_id);
+        self
+    }
+
+    pub(crate) fn command_identity(&self) -> Option<(u32, u64)> {
+        Some((self.command_pid?, self.command_start_id?))
+    }
+}
+
+pub(crate) fn require_durable_running_write(status: AtomicWriteStatus) -> io::Result<()> {
+    match status {
+        AtomicWriteStatus::Durable => Ok(()),
+        AtomicWriteStatus::CommittedUnsynced(error) => Err(error),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GuardStatusKind {

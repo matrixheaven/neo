@@ -25,10 +25,7 @@ use neo_tui::{
 use tokio::sync::oneshot;
 use tracing_subscriber::prelude::*;
 
-use super::git_status::{
-    count_untracked_changes, git_status_label_with_program, parse_git_numstat,
-    parse_git_status_porcelain, parse_git_untracked_files_z,
-};
+use super::git_status::{git_status_label_with_program, parse_git_status_porcelain};
 use super::snapshot::{compose_tui_frame, render_overlay_snapshot};
 use super::*;
 use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
@@ -544,15 +541,12 @@ fn rebuilding_session_transcript_resets_captured_log_budget() {
 }
 
 #[test]
-fn git_status_badge_formats_branch_diff_and_sync() {
-    let mut badge =
+fn git_status_badge_formats_dirty_and_sync() {
+    let badge =
         parse_git_status_porcelain("## main...origin/main [ahead 2, behind 1]\n M src/app.rs\n")
             .expect("git badge");
-    let (added, deleted) = parse_git_numstat("12\t3\tsrc/app.rs\n-\t-\tassets/image.png\n");
-    badge.added = added;
-    badge.deleted = deleted;
 
-    assert_eq!(badge.format(), "main [+12 -3 ↑2↓1]");
+    assert_eq!(badge.format(), "main [± ↑2↓1]");
 }
 
 #[test]
@@ -571,35 +565,6 @@ fn git_status_badge_formats_unborn_branch_as_init() {
 }
 
 #[test]
-fn git_status_badge_counts_untracked_text_file_lines() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    fs::create_dir_all(dir.path().join("src")).expect("create source dir");
-    fs::write(dir.path().join("src/new.rs"), "first\nsecond\n").expect("write source file");
-
-    let mut badge = parse_git_status_porcelain("## feature\n?? src/new.rs\n").expect("git badge");
-    let untracked_files = parse_git_untracked_files_z(b"src/new.rs\0");
-    let (added, untracked) = count_untracked_changes(dir.path(), &untracked_files);
-    badge.added = added;
-    badge.untracked = untracked;
-
-    assert_eq!(badge.format(), "feature [+2 -0]");
-}
-
-#[test]
-fn git_status_badge_counts_untracked_files_without_line_counts() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    fs::write(dir.path().join("image.bin"), b"neo\0image").expect("write binary file");
-
-    let mut badge = parse_git_status_porcelain("## feature\n?? image.bin\n").expect("git badge");
-    let untracked_files = parse_git_untracked_files_z(b"image.bin\0");
-    let (added, untracked) = count_untracked_changes(dir.path(), &untracked_files);
-    badge.added = added;
-    badge.untracked = untracked;
-
-    assert_eq!(badge.format(), "feature [?1]");
-}
-
-#[test]
 fn git_status_badge_is_absent_when_git_program_is_missing() {
     let missing = git_status_label_with_program(
         "definitely-not-a-real-git-binary-for-neo-tests",
@@ -610,7 +575,7 @@ fn git_status_badge_is_absent_when_git_program_is_missing() {
 }
 
 #[test]
-fn git_status_badge_is_absent_when_workspace_has_no_git_dir() {
+fn git_status_badge_resolves_repository_from_nested_workspace() {
     let parent = tempfile::tempdir().expect("tempdir");
     let workspace = parent.path().join("nested-workspace");
     fs::create_dir(&workspace).expect("create workspace");
@@ -624,7 +589,10 @@ fn git_status_badge_is_absent_when_workspace_has_no_git_dir() {
         .expect("run git init");
     assert!(init_status.success(), "git init should succeed");
 
-    assert_eq!(git_status_label_with_program("git", &workspace), None);
+    assert_eq!(
+        git_status_label_with_program("git", &workspace),
+        Some("main [init]".to_owned())
+    );
 }
 
 #[test]
@@ -768,6 +736,32 @@ fn refresh_git_status_if_due_uses_30s_interval() {
     );
 }
 
+#[tokio::test]
+async fn completed_git_status_is_applied_before_queued_refresh_starts() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_git_status_provider(Arc::new(|_| Some("main [second]".to_owned())));
+    controller
+        .tui
+        .chrome_mut()
+        .set_git_status_label(Some("main".to_owned()));
+    let completed = tokio::spawn(async { Some("main [first]".to_owned()) });
+    while !completed.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    controller.pending_git_status = Some(completed);
+    controller.git_status_refresh_queued = true;
+
+    assert!(controller.poll_pending_git_status().await);
+    assert_eq!(controller.chrome().git_status_label(), Some("main [first]"));
+    assert!(controller.pending_git_status.is_some());
+}
+
 #[test]
 fn refresh_git_status_now_clears_badge_when_git_unavailable() {
     let mut controller = InteractiveController::new_for_test(
@@ -827,6 +821,17 @@ fn test_session_summary(
 
 fn transcript_entries(controller: &InteractiveController) -> &[TranscriptEntry] {
     controller.transcript().transcript().entries()
+}
+
+async fn wait_for_file_completion(controller: &mut InteractiveController) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if controller.poll_pending_file_completion().await {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("file completion did not finish");
 }
 
 fn transcript_has_status(controller: &InteractiveController, expected: &str) -> bool {
@@ -4232,7 +4237,7 @@ fn event_loop_slash_tree_absent() {
 }
 
 #[tokio::test]
-async fn event_loop_tab_inserts_file_reference_chip_marker() {
+async fn event_loop_tab_coalesces_latest_file_completion_and_inserts_marker() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(temp.path().join("src")).expect("mkdir");
     fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write file");
@@ -4264,11 +4269,31 @@ async fn event_loop_tab_inserts_file_reference_chip_marker() {
         },
     );
 
-    controller.type_text("@main");
+    controller
+        .handle_input_event(InputEvent::Insert('@'))
+        .await
+        .expect("start file completion");
+    controller
+        .handle_input_event(InputEvent::Paste("main".to_owned()))
+        .await
+        .expect("queue latest file completion");
+    let (queued, complete_on_finish) = controller
+        .queued_file_completion
+        .as_ref()
+        .expect("latest file completion is queued");
+    assert_eq!(queued.text, "@main");
+    assert!(!*complete_on_finish);
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
         .expect("tab inserts file reference");
+    let (queued, complete_on_finish) = controller
+        .queued_file_completion
+        .as_ref()
+        .expect("tab upgrades the latest queued completion");
+    assert_eq!(queued.text, "@main");
+    assert!(*complete_on_finish);
+    wait_for_file_completion(&mut controller).await;
 
     assert_eq!(controller.chrome().prompt().text, "[file #1 main.rs]");
     assert!(controller.chrome().focused_overlay().is_none());
@@ -4341,6 +4366,7 @@ async fn event_loop_closes_stale_file_reference_picker_without_inserting_marker(
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
         .expect("tab opens file reference picker");
+    wait_for_file_completion(&mut controller).await;
     assert!(controller.chrome().focused_overlay().is_some());
 
     fs::remove_file(main).expect("remove selected completion");
@@ -4484,6 +4510,7 @@ async fn event_loop_file_reference_marker_keeps_chip_in_user_transcript() {
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
         .expect("tab inserts file reference marker");
+    wait_for_file_completion(&mut controller).await;
     assert_eq!(
         controller.chrome().prompt().text,
         "[file #1 prompt_completion.rs]"

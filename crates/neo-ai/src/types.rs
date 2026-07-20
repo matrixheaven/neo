@@ -253,6 +253,8 @@ impl ModelCapabilities {
 pub struct ModelSpec {
     pub provider: ProviderId,
     pub model: String,
+    /// Catalog metadata for display and model selection. Wire protocol is owned by
+    /// the registered provider's [`ApiType`].
     pub api: ApiKind,
     pub capabilities: ModelCapabilities,
 }

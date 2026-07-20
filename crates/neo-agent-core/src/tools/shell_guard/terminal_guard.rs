@@ -6,7 +6,6 @@ use std::{
 
 use futures::StreamExt as _;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, PtySystem, native_pty_system};
-use serde::Serialize;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -22,7 +21,10 @@ use super::{
     },
     process_tree::TerminalProcessTree,
     protocol::{GuardRequest, GuardResponse, StartRequest, request_stream, write_response},
-    status::{FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind},
+    status::{
+        FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind, RunningStatus,
+        require_durable_running_write,
+    },
 };
 use crate::{
     session::atomic_file::{AtomicWriteStatus, write_file_atomic_status},
@@ -96,7 +98,7 @@ fn start_terminal_guard(
         final_status_path,
         start.task_id.clone(),
         started_at_ms,
-        write_running_status(start, started_at_ms),
+        write_running_status(start, started_at_ms, None),
     )?;
     let (response_tx, mut response_rx) = mpsc::channel(RESPONSE_QUEUE_CAPACITY);
     let response_writer = tokio::spawn(async move {
@@ -120,6 +122,11 @@ fn start_terminal_guard(
             "cannot establish Terminal process identity",
         ));
     }
+    require_durable_running_write(write_running_status(
+        start,
+        started_at_ms,
+        Some((command_pid, command_start_id)),
+    )?)?;
     try_send_response(
         &response_tx,
         GuardResponse::Started {
@@ -717,21 +724,18 @@ fn pty_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-#[derive(Serialize)]
-struct RunningStatus<'a> {
-    schema_version: u32,
-    task_id: &'a str,
-    guardian_pid: u32,
+fn write_running_status(
+    start: &StartRequest,
     started_at_ms: u64,
-}
-
-fn write_running_status(start: &StartRequest, started_at_ms: u64) -> io::Result<AtomicWriteStatus> {
-    let content = serde_json::to_vec(&RunningStatus {
-        schema_version: 1,
-        task_id: &start.task_id,
-        guardian_pid: std::process::id(),
-        started_at_ms,
-    })?;
+    command: Option<(u32, u64)>,
+) -> io::Result<AtomicWriteStatus> {
+    let status = command.map_or_else(
+        || RunningStatus::new(&start.task_id, started_at_ms),
+        |(pid, start_id)| {
+            RunningStatus::new(&start.task_id, started_at_ms).with_command(pid, start_id)
+        },
+    );
+    let content = serde_json::to_vec(&status)?;
     write_file_atomic_status(
         &start
             .status_dir

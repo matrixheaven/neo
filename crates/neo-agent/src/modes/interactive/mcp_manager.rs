@@ -218,6 +218,7 @@ impl InteractiveController {
             id: data.name,
             cli_type: cli_type.to_owned(),
             command: data.command,
+            args: data.args,
             url: data.url,
             env: data.env,
             headers,
@@ -244,7 +245,6 @@ impl InteractiveController {
         }
         self.push_status(format!("MCP server {} saved", config.id));
         self.refresh_config();
-        self.sync_mcp_manager_from_config().await;
         // Reopen the MCP manager overlay to show the newly saved server. With
         // the chrome fix this updates the existing overlay in-place rather
         // than pushing a duplicate layer.
@@ -326,7 +326,6 @@ impl InteractiveController {
             if new_enabled { "enabled" } else { "disabled" }
         ));
         self.refresh_config();
-        self.sync_mcp_manager_from_config().await;
         // Refresh the MCP manager overlay to reflect the new enabled/disabled
         // state. Updates the existing overlay in-place rather than stacking.
         self.open_mcp_manager().await;
@@ -342,7 +341,6 @@ impl InteractiveController {
         }
         self.push_status(format!("MCP server {id} removed"));
         self.refresh_config();
-        self.sync_mcp_manager_from_config().await;
         // Refresh the MCP manager overlay so the deleted server disappears.
         // Updates the existing overlay in-place rather than stacking.
         self.open_mcp_manager().await;

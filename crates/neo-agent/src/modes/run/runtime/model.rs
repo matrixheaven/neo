@@ -229,7 +229,7 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
                 p.display_name.clone_from(display_name);
             }
             if let Some(t) = &provider_config.provider_type {
-                p.provider_type = Some(*t);
+                p.provider_type = *t;
             }
             if let Some(base_url) = &provider_config.base_url {
                 p.base_url = Some(base_url.clone());
@@ -247,20 +247,17 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
                 tracing::warn!("ignoring provider {provider_id}: missing required `type`");
                 continue;
             };
-            let default_api = provider_type.to_api_kind();
             ProviderSpec {
                 id: provider_id.clone(),
                 display_name: provider_config
                     .display_name
                     .clone()
                     .unwrap_or_else(|| provider_id.clone()),
-                api: default_api,
-                supported_apis: vec![default_api],
                 base_url: provider_config.base_url.clone(),
                 api_key: provider_config.api_key.clone(),
                 api_key_env_vars: provider_config.api_key_env.iter().cloned().collect(),
                 ambient_auth_env_vars: vec![],
-                provider_type: Some(provider_type),
+                provider_type,
             }
         };
         registry.register(provider);

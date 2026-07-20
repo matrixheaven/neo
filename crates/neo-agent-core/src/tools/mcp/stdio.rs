@@ -7,6 +7,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use rmcp::{ServiceExt, transport::TokioChildProcess};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -34,7 +39,7 @@ pub struct StdioConfig {
 ///
 /// Stderr is configured on `TokioChildProcessBuilder`, because the builder
 /// overwrites the command's stdio settings during `spawn()`.
-pub(crate) fn build_command(config: &StdioConfig) -> Command {
+pub(crate) fn build_command(config: &StdioConfig) -> CommandWrap {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args);
     for (k, v) in &config.env {
@@ -43,6 +48,12 @@ pub(crate) fn build_command(config: &StdioConfig) -> Command {
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
+    let mut cmd = CommandWrap::from(cmd);
+    cmd.wrap(KillOnDrop);
+    #[cfg(unix)]
+    cmd.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    cmd.wrap(JobObject);
     cmd
 }
 
@@ -166,6 +177,24 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt as _;
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn stdio_command_owns_process_tree() {
+        let command = build_command(&StdioConfig {
+            command: "mcp-server".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        });
+
+        assert!(command.has_wrap::<KillOnDrop>());
+        #[cfg(unix)]
+        assert!(command.has_wrap::<ProcessGroup>());
+        #[cfg(windows)]
+        assert!(command.has_wrap::<JobObject>());
+    }
 
     #[test]
     fn failing_stdio_server_writes_stderr() {

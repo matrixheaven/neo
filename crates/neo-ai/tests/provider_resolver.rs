@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
 use neo_ai::{
-    AiError, ApiKind, CredentialResolver, CredentialSource, ModelCapabilities, ModelSpec,
-    ProviderId,
-    registry::{ProviderRegistry, ProviderSpec},
+    AiError, ApiKind, ApiType, CredentialResolver, CredentialSource, ModelCapabilities, ModelSpec,
+    ProviderId, registry::ProviderRegistry,
 };
 
 fn model(provider: &str, name: &str, api: ApiKind) -> ModelSpec {
@@ -137,8 +136,35 @@ fn credential_resolver_prefers_cli_env_then_auth_file_without_leaking_values() {
     assert_eq!(auth_file.source(), CredentialSource::AuthFile);
 }
 
+#[cfg(windows)]
 #[test]
-fn provider_resolver_builds_real_clients_by_model_api() {
+fn credential_resolver_matches_environment_names_case_insensitively_on_windows() {
+    let credential = CredentialResolver::new("openai")
+        .with_env(
+            ["OPENAI_API_KEY"],
+            &BTreeMap::from([("openai_api_key".to_owned(), "secret".to_owned())]),
+        )
+        .resolve()
+        .expect("Windows environment names are case-insensitive");
+
+    assert_eq!(credential.secret(), "secret");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn credential_resolver_matches_environment_names_exactly_on_unix() {
+    let credential = CredentialResolver::new("openai")
+        .with_env(
+            ["OPENAI_API_KEY"],
+            &BTreeMap::from([("openai_api_key".to_owned(), "secret".to_owned())]),
+        )
+        .resolve();
+
+    assert!(credential.is_none());
+}
+
+#[test]
+fn provider_resolver_builds_clients_from_registered_provider_types() {
     let registry = ProviderRegistry::production();
     let env = BTreeMap::from([
         ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
@@ -177,80 +203,15 @@ fn provider_resolver_builds_real_clients_by_model_api() {
 }
 
 #[test]
-fn provider_resolver_rejects_model_api_mismatches() {
-    let mut registry = ProviderRegistry::production();
-    registry.register(ProviderSpec {
-        id: "untyped-provider".to_owned(),
-        display_name: "Untyped".to_owned(),
-        api: ApiKind::OpenAiResponse,
-        supported_apis: vec![ApiKind::OpenAiResponse],
-        base_url: Some("https://api.example.com/v1".to_owned()),
-        api_key: None,
-        api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
-        ambient_auth_env_vars: vec![],
-        provider_type: None,
-    });
-    let env = BTreeMap::from([("UNTYPED_KEY".to_owned(), "key".to_owned())]);
+fn provider_resolver_uses_provider_type_as_wire_identity() {
+    let registry = ProviderRegistry::production();
+    let env = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "openai-key".to_owned())]);
     let resolver = registry.resolver_from(env);
-
-    let Err(missing_type) = resolver.resolve(&model(
-        "untyped-provider",
-        "bad-claude",
-        ApiKind::AnthropicMessages,
-    )) else {
-        panic!("untyped provider must be rejected");
-    };
-    assert!(matches!(
-        missing_type,
-        AiError::Configuration { message: _ }
-    ));
-    assert!(
-        missing_type
-            .to_string()
-            .contains("provider untyped-provider must declare a provider type")
-    );
-
-    // Provider type selects the wire client regardless of the model's api field.
-    let registry2 = ProviderRegistry::production();
-    let env2 = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "openai-key".to_owned())]);
-    let resolver2 = registry2.resolver_from(env2);
-    let result = resolver2.resolve(&model("openai", "some-model", ApiKind::AnthropicMessages));
+    let result = resolver.resolve(&model("openai", "some-model", ApiKind::AnthropicMessages));
     assert!(
         result.is_ok(),
-        "provider_type should override model.api mismatch"
+        "model catalog metadata must not override the provider wire type"
     );
-}
-
-#[test]
-fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
-    let mut registry = ProviderRegistry::production();
-    registry.register(ProviderSpec {
-        id: "untyped-provider".to_owned(),
-        display_name: "Untyped".to_owned(),
-        api: ApiKind::OpenAiResponse,
-        supported_apis: vec![ApiKind::OpenAiResponse],
-        base_url: Some("https://api.example.com/v1".to_owned()),
-        api_key: None,
-        api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
-        ambient_auth_env_vars: vec![],
-        provider_type: None,
-    });
-    let resolver = registry.resolver_from(BTreeMap::new());
-
-    let Err(mismatch) = resolver.resolve(&model(
-        "untyped-provider",
-        "bad-claude",
-        ApiKind::AnthropicMessages,
-    )) else {
-        panic!("api mismatch should fail before credential lookup");
-    };
-
-    assert!(
-        mismatch
-            .to_string()
-            .contains("provider untyped-provider must declare a provider type")
-    );
-    assert!(!mismatch.to_string().contains("UNTYPED_KEY"));
 }
 
 #[test]
@@ -261,7 +222,7 @@ fn production_registry_includes_google_generative_ai_credentials() {
         .expect("google provider should exist");
 
     assert_eq!(google.display_name, "Google Generative AI");
-    assert_eq!(google.api, ApiKind::GoogleGenerativeAi);
+    assert_eq!(google.provider_type, ApiType::Google);
     assert_eq!(
         google.base_url.as_deref(),
         Some("https://generativelanguage.googleapis.com/v1beta")

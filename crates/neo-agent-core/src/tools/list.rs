@@ -1,5 +1,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 
@@ -29,8 +31,16 @@ fn default_path() -> std::path::PathBuf {
 
 #[derive(Debug, Clone)]
 struct Entry {
+    path: PathBuf,
     name: String,
     is_dir: bool,
+    is_hidden: bool,
+}
+
+fn display_name(name: &OsStr) -> String {
+    name.to_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("<non-UTF-8:{name:?}>"))
 }
 
 pub struct ListTool;
@@ -85,11 +95,11 @@ impl Tool for ListTool {
 
                 if entry.is_dir {
                     lines.push(format!("{connector}{name}/", name = entry.name));
-                    if input.collapse_hidden_dirs && entry.name.starts_with('.') {
+                    if input.collapse_hidden_dirs && entry.is_hidden {
                         continue;
                     }
                     let child_prefix = if is_last { "    " } else { "│   " };
-                    let child_path = path.join(&entry.name);
+                    let child_path = &entry.path;
                     let child = collect_entries(&child_path, LIST_DIR_CHILD_WIDTH).await?;
                     if !child.readable {
                         lines.push(format!("{child_prefix}└── [not readable]"));
@@ -156,9 +166,17 @@ async fn collect_entries(
         Err(error) => return Err(error),
     };
     while let Some(entry) = read_dir.next_entry().await? {
-        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let raw_name = entry.file_name();
+        let is_hidden = raw_name.as_encoded_bytes().starts_with(b".");
+        let name = display_name(&raw_name);
         let is_dir = entry.file_type().await.is_ok_and(|ft| ft.is_dir());
-        entries.push(Entry { name, is_dir });
+        entries.push(Entry {
+            path,
+            name,
+            is_dir,
+            is_hidden,
+        });
         total += 1;
     }
 
@@ -310,5 +328,30 @@ mod tests {
             .expect("list execute");
         assert!(result.is_error);
         assert!(result.content.contains("is not readable"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn non_utf8_hidden_directory_uses_raw_name_and_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let dir = workspace
+            .path()
+            .join(OsString::from_vec(b".dir-\xff".to_vec()));
+        std::fs::create_dir(&dir).expect("create non-UTF-8 directory");
+        std::fs::write(dir.join("child.txt"), "x").expect("write child");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let expanded = run_list(&ctx, ".", false).await;
+        assert!(expanded.contains("<non-UTF-8:"));
+        assert!(expanded.contains("child.txt"));
+
+        let collapsed = run_list(&ctx, ".", true).await;
+        assert!(collapsed.contains("<non-UTF-8:"));
+        assert!(!collapsed.contains("child.txt"));
     }
 }

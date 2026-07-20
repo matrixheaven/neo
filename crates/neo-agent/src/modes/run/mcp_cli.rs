@@ -4,9 +4,7 @@ use anyhow::Context;
 use neo_agent_core::ProcessSupervisor;
 
 use crate::config::{self, AppConfig, McpServerConfig, McpTransport, neo_home};
-use crate::mcp_ops::{
-    authenticate_mcp_server_oauth, display_mcp_kind, parse_command_string, parse_mcp_kind,
-};
+use crate::mcp_ops::{authenticate_mcp_server_oauth, display_mcp_kind, parse_mcp_kind};
 
 pub(crate) async fn list_mcp(config: &AppConfig) -> String {
     if config.mcp.servers.is_empty() {
@@ -61,6 +59,7 @@ pub(crate) async fn add_mcp_server(
     mcp_name: String,
     r#type: String,
     command: Option<String>,
+    args: Vec<String>,
     url: Option<String>,
     env: Vec<String>,
     headers: Vec<String>,
@@ -74,17 +73,17 @@ pub(crate) async fn add_mcp_server(
 ) -> anyhow::Result<String> {
     let transport = parse_mcp_kind(&r#type)?;
 
-    let (command, args) = if transport == McpTransport::Stdio {
-        let Some(cmd) = command else {
+    let command = if transport == McpTransport::Stdio {
+        let Some(command) = command else {
             anyhow::bail!("studio MCP requires --command");
         };
-        let (cmd, args) = parse_command_string(&cmd)?;
-        (Some(cmd), args)
+        Some(command)
     } else {
         if command.is_some() {
             anyhow::bail!("remote MCP uses --url, not --command");
         }
-        (None, Vec::new())
+        anyhow::ensure!(args.is_empty(), "remote MCP cannot use --arg");
+        None
     };
 
     let url = if transport == McpTransport::Http || transport == McpTransport::Sse {

@@ -11,24 +11,27 @@ use std::{
 };
 
 use tokio::{
-    io::AsyncRead,
-    process::{Child, ChildStdin, ChildStdout, Command},
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::{Mutex, oneshot, watch},
+    task::JoinHandle,
 };
 
 use super::{
     ShellCommandPermit, ShellRuntime,
-    output::{TaggedHeadTailBuffer, TaggedOutput},
+    output::{StreamKind, TaggedHeadTailBuffer, TaggedOutput},
     protocol::{
         GuardRequest, GuardResponse, GuardResponsePart, GuardTaskKind, MAX_FRAME_BODY,
         MAX_TERMINAL_WRITE, ProtocolError, StartRequest, decode_fragmented_response, read_response,
         write_request,
     },
-    status::{GuardExit, GuardStatusKind},
+    status::{GuardExit, GuardStatusKind, RunningStatus},
 };
 use crate::tools::{ToolError, ToolUpdateCallback};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_STDERR_LIMIT: usize = 4 * 1024;
+const FAILED_START_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub(crate) struct GuardedCommandResult {
@@ -395,58 +398,92 @@ async fn spawn_guardian_and_handshake(
 > {
     let permit = args.permit;
     std::fs::create_dir_all(args.status_dir)?;
+    let running_status_path = args
+        .status_dir
+        .join(format!("{}.running.json", args.task_id));
     let mut child = Command::new(args.runtime.guardian_executable())
         .arg("__process-guard")
         .current_dir(args.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
-    let mut control = child
-        .stdin
+    let startup_stderr = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(STARTUP_STDERR_LIMIT)));
+    let stderr_task = child
+        .stderr
         .take()
-        .ok_or_else(|| io::Error::other("guardian stdin was not piped"))?;
-    let mut response = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("guardian stdout was not piped"))?;
-    write_request(
-        &mut control,
-        &GuardRequest::Start {
-            request_id: 1,
-            request: StartRequest {
-                task_id: args.task_id,
-                kind: args.kind,
-                command: args.command_text,
-                limits: args
-                    .runtime
-                    .guard_limits(args.timeout, args.max_output_bytes),
-                status_dir: args.status_dir.to_path_buf(),
-                cols: args.cols,
-                rows: args.rows,
+        .map(|stderr| spawn_startup_stderr_drain(stderr, Arc::clone(&startup_stderr)));
+    let handshake = async {
+        let mut control = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("guardian stdin was not piped"))?;
+        let mut response = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("guardian stdout was not piped"))?;
+        write_request(
+            &mut control,
+            &GuardRequest::Start {
+                request_id: 1,
+                request: StartRequest {
+                    task_id: args.task_id,
+                    kind: args.kind,
+                    command: args.command_text,
+                    limits: args
+                        .runtime
+                        .guard_limits(args.timeout, args.max_output_bytes),
+                    status_dir: args.status_dir.to_path_buf(),
+                    cols: args.cols,
+                    rows: args.rows,
+                },
             },
-        },
-    )
-    .await
-    .map_err(protocol_error)?;
-    let started = tokio::time::timeout(
-        START_TIMEOUT,
-        read_logical_response(&mut response, args.stream_limit),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guardian start timed out"))?
-    .map_err(protocol_error)?;
-    let GuardResponse::Started {
-        request_id: 1,
-        guardian_pid,
-        command_pid,
-        command_start_id,
-    } = started
-    else {
-        return Err(ToolError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "guardian did not acknowledge Start",
-        )));
+        )
+        .await
+        .map_err(protocol_error)?;
+        let started = tokio::time::timeout(
+            START_TIMEOUT,
+            read_logical_response(&mut response, args.stream_limit),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guardian start timed out"))?
+        .map_err(protocol_error)?;
+        let GuardResponse::Started {
+            request_id: 1,
+            guardian_pid,
+            command_pid,
+            command_start_id,
+        } = started
+        else {
+            return Err(ToolError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "guardian did not acknowledge Start",
+            )));
+        };
+
+        Ok((
+            control,
+            response,
+            guardian_pid,
+            command_pid,
+            command_start_id,
+        ))
+    }
+    .await;
+
+    let (control, response, guardian_pid, command_pid, command_start_id) = match handshake {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(cleanup_failed_guardian_start(
+                child,
+                stderr_task,
+                startup_stderr,
+                &running_status_path,
+                error,
+            )
+            .await);
+        }
     };
 
     Ok((
@@ -458,6 +495,77 @@ async fn spawn_guardian_and_handshake(
         command_pid,
         command_start_id,
     ))
+}
+
+fn spawn_startup_stderr_drain(
+    mut stderr: ChildStderr,
+    output: Arc<Mutex<TaggedHeadTailBuffer>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => output
+                    .lock()
+                    .await
+                    .push(StreamKind::Stderr, &buffer[..read]),
+            }
+        }
+    })
+}
+
+async fn cleanup_failed_guardian_start(
+    mut child: Child,
+    stderr_task: Option<JoinHandle<()>>,
+    startup_stderr: Arc<Mutex<TaggedHeadTailBuffer>>,
+    running_status_path: &Path,
+    error: ToolError,
+) -> ToolError {
+    let error_kind = match &error {
+        ToolError::Io(error) => error.kind(),
+        _ => io::ErrorKind::Other,
+    };
+    let message = match &error {
+        ToolError::Io(error) => error.to_string(),
+        _ => error.to_string(),
+    };
+    // The failed handshake future has dropped its ChildStdin. Give the guardian
+    // time to observe control EOF, terminate the command tree, and persist
+    // ParentExited before applying the machine-safety fallback.
+    match tokio::time::timeout(FAILED_START_CLEANUP_GRACE, child.wait()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) | Err(_) => {
+            if let Some((command_pid, command_start_id)) =
+                read_running_command_identity(running_status_path).await
+            {
+                emergency_cleanup(command_pid, command_start_id).await;
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+    if let Some(stderr_task) = stderr_task {
+        let _ = tokio::time::timeout(Duration::from_millis(250), stderr_task).await;
+    }
+    let stderr = startup_stderr.lock().await.snapshot().stderr;
+    if stderr.is_empty() {
+        return error;
+    }
+    ToolError::Io(io::Error::new(
+        error_kind,
+        format!(
+            "{message}; guardian stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        ),
+    ))
+}
+
+async fn read_running_command_identity(path: &Path) -> Option<(u32, u64)> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice::<RunningStatus>(&bytes)
+        .ok()?
+        .command_identity()
 }
 
 struct ReaderTaskArgs {
@@ -676,9 +784,7 @@ async fn emergency_cleanup(command_pid: u32, command_start_id: u64) {
     };
     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
     tokio::time::sleep(Duration::from_millis(500)).await;
-    if identity_matches(command_pid, command_start_id) {
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    }
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
 }
 
 #[cfg(unix)]
@@ -701,6 +807,97 @@ mod tests {
 
     const SNAPSHOT_KIND: u8 = 105;
     const EXITED_KIND: u8 = 106;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_guardian_start_fallback_kills_real_descendant() {
+        let workspace = tempfile::tempdir().unwrap();
+        let descendant_pid_path = workspace.path().join("descendant.pid");
+        let quoted_pid_path = descendant_pid_path.to_string_lossy().replace('\'', "'\\''");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "trap '' TERM; sleep 30 & echo $! > '{quoted_pid_path}'; wait"
+            ))
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut command = command.spawn().unwrap();
+        let command_pid = command.id().unwrap();
+        let command_start_id = super::super::guardian::process_start_id(command_pid);
+        assert_ne!(command_start_id, 0);
+        let running_status_path = workspace.path().join("failed-start-cleanup.running.json");
+        std::fs::write(
+            &running_status_path,
+            serde_json::to_vec(
+                &RunningStatus::new("failed-start-cleanup", 1)
+                    .with_command(command_pid, command_start_id),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_running_command_identity(&running_status_path).await,
+            Some((command_pid, command_start_id))
+        );
+        for _ in 0..100 {
+            if descendant_pid_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let descendant_pid: u32 = std::fs::read_to_string(&descendant_pid_path)
+            .expect("command group must write descendant pid")
+            .trim()
+            .parse()
+            .unwrap();
+
+        let mut guardian = Command::new("/bin/sh");
+        guardian
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut guardian = guardian.spawn().unwrap();
+        drop(guardian.stdin.take());
+        let startup_stderr = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(STARTUP_STDERR_LIMIT)));
+        let error = tokio::time::timeout(
+            Duration::from_secs(4),
+            cleanup_failed_guardian_start(
+                guardian,
+                None,
+                startup_stderr,
+                &running_status_path,
+                ToolError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "handshake failed",
+                )),
+            ),
+        )
+        .await
+        .expect("failed guardian cleanup must finish")
+        .to_string();
+
+        assert!(error.contains("handshake failed"));
+        let _ = command.wait().await;
+        let pid = sysinfo::Pid::from_u32(descendant_pid);
+        let mut system = sysinfo::System::new();
+        for _ in 0..50 {
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            if system.process(pid).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            system.process(pid).is_none(),
+            "forced fallback must terminate the real descendant before killing guardian"
+        );
+    }
 
     #[tokio::test]
     async fn logical_reader_round_trips_fragmented_snapshot_and_exited() {

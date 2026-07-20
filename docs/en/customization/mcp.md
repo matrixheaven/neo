@@ -114,11 +114,15 @@ The OAuth token is persisted under `~/.neo/mcp/`, keyed by `<server_id> + <url>`
 | --- | --- |
 | `neo mcp list` | List all configured servers and their discovered tools |
 | `neo mcp status` | Show each server's connection status, tool count, and most recent error |
-| `neo mcp add <name> -t <type> ...` | Add and probe a new server (`--type` accepts `studio`/`remote-http`/`remote-sse`) |
+| `neo mcp add filesystem -t studio --command npx --arg=-y --arg @modelcontextprotocol/server-filesystem --arg /repo` | Add and probe a stdio server using an executable plus typed arguments |
 | `neo mcp del <name>` / `enable` / `disable` | Manage servers |
 | `neo mcp resources [--server <id>]` | List resources of connected servers |
 | `neo mcp read-resource <id> <uri>` | Read the contents of a single resource |
 | `/mcp` (TUI) | Open the MCP management panel to view status, trigger reconnect, or log in |
+
+For stdio servers, `--command` accepts only the executable. Repeat `--arg` once per argument; Neo passes this argv directly without shell parsing or expansion.
+
+In the TUI stdio form, enter one JSON string per row in **Arguments**. JSON quoting preserves whitespace exactly, and `""` represents an empty argument.
 
 > Configuration changes require restarting Neo or opening a new session to take effect; the `/mcp` panel can refresh and reconnect individual servers online.
 

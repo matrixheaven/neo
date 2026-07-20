@@ -5,7 +5,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use super::common::error::{ProviderError, stream_failure};
-use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use super::common::helpers::{merge_token_usage, reject_images, rounded_f64};
 use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
@@ -576,13 +576,21 @@ impl ParseState {
     fn ingest(&mut self, value: &Value) -> Result<(), ProviderError> {
         match value.get("type").and_then(Value::as_str) {
             Some("message_start") => {
-                let id = value
-                    .get("message")
-                    .and_then(|message| message.get("id"))
+                let message = value.get("message").unwrap_or(&Value::Null);
+                let id = message
+                    .get("id")
                     .and_then(Value::as_str)
                     .unwrap_or("message")
                     .to_owned();
                 self.ensure_started(id);
+                if let Some(usage) = message.get("usage") {
+                    self.usage = merge_token_usage(
+                        self.usage.take(),
+                        usage,
+                        "input_tokens",
+                        "output_tokens",
+                    );
+                }
             }
             Some("content_block_start") => self.ingest_block_start(value),
             Some("content_block_delta") => self.ingest_block_delta(value),
@@ -746,10 +754,10 @@ impl ParseState {
         {
             self.last_stop_reason = stop_reason(reason);
         }
-        self.usage = value
-            .get("usage")
-            .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"))
-            .or(self.usage.clone());
+        if let Some(usage) = value.get("usage") {
+            self.usage =
+                merge_token_usage(self.usage.take(), usage, "input_tokens", "output_tokens");
+        }
     }
 
     fn finish_events(&mut self) -> Vec<AiStreamEvent> {

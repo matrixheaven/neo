@@ -114,11 +114,15 @@ OAuth token 持久化在 `~/.neo/mcp/` 下，按 `<server_id> + <url>` 为键隔
 | --- | --- |
 | `neo mcp list` | 列出所有配置的 server 及其发现的工具 |
 | `neo mcp status` | 显示每个 server 的连接状态、工具数、最近错误 |
-| `neo mcp add <name> -t <type> ...` | 添加并探测新 server（`--type` 取 `studio`/`remote-http`/`remote-sse`） |
+| `neo mcp add filesystem -t studio --command npx --arg=-y --arg @modelcontextprotocol/server-filesystem --arg /repo` | 使用 executable 与显式参数添加并探测 stdio server |
 | `neo mcp del <name>` / `enable` / `disable` | 管理 server |
 | `neo mcp resources [--server <id>]` | 列出已连接 server 的资源 |
 | `neo mcp read-resource <id> <uri>` | 读取单个资源内容 |
 | `/mcp`（TUI） | 打开 MCP 管理面板，查看状态、触发重连、登录 |
+
+对于 stdio server，`--command` 只接受 executable。每个参数分别重复一次 `--arg`；Neo 直接传递该 argv，不做 shell 拆词或展开。
+
+在 TUI 的 stdio 表单中，**Arguments** 每行填写一个 JSON 字符串。JSON 引号会精确保留空白，`""` 表示空参数。
 
 > 配置变更后需重启 Neo 或开启新会话才能生效；`/mcp` 面板可在线刷新与重连单个 server。
 

@@ -157,6 +157,7 @@ pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
                         if c == '\x07'
                             || c == '\x18'
                             || c == '\x1a'
+                            || c == '\u{009c}'
                             || (c == '\x1b' && chars.peek() == Some(&'\\'))
                         {
                             if c == '\x1b' {
@@ -297,6 +298,15 @@ mod tests {
     fn strip_ansi_string_sequences_cancel_on_can_sub() {
         assert_eq!(strip_ansi("\x1b]osc\x18visible"), "visible");
         assert_eq!(strip_ansi("\x1b_apc\x1avisible"), "visible");
+    }
+
+    #[test]
+    fn strip_ansi_string_sequences_terminate_on_c1_st() {
+        assert_eq!(strip_ansi("\x1b]osc\u{009c}visible"), "visible");
+        assert_eq!(strip_ansi("\x1bPpayload\u{009c}visible"), "visible");
+        assert_eq!(strip_ansi("\x1b^payload\u{009c}visible"), "visible");
+        assert_eq!(strip_ansi("\x1bXpayload\u{009c}visible"), "visible");
+        assert_eq!(strip_ansi("\x1b_payload\u{009c}visible"), "visible");
     }
 
     #[test]

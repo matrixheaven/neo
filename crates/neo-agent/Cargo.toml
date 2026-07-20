@@ -26,7 +26,6 @@ schemars.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
-shell-words = "1.1"
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
