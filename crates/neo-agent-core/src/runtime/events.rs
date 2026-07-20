@@ -391,13 +391,10 @@ pub(super) fn emit_terminal_events(
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
-    let Some(arguments) = arguments else {
-        return;
-    };
     if tool_call.name.as_ref() != "Terminal" {
         return;
     }
-    let Some(details) = &result.details else {
+    let (Some(arguments), Some(details)) = (arguments, result.details.as_ref()) else {
         return;
     };
     let Some(handle) = details
@@ -407,7 +404,8 @@ pub(super) fn emit_terminal_events(
     else {
         return;
     };
-    match arguments.get("mode").and_then(serde_json::Value::as_str) {
+    let mode = arguments.get("mode").and_then(serde_json::Value::as_str);
+    match mode {
         Some("start") => {
             let command = details
                 .get("command")
@@ -427,49 +425,12 @@ pub(super) fn emit_terminal_events(
             emitter.emit(AgentEvent::TerminalSessionStarted {
                 turn,
                 id: tool_call.id.to_string(),
-                handle,
+                handle: handle.clone(),
                 command,
                 cwd: tool_context.workspace_root().to_path_buf(),
                 cols,
                 rows,
             });
-        }
-        Some("read") => {
-            let output = details
-                .get("output")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let truncated = details
-                .get("truncated")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            if !output.is_empty() {
-                emitter.emit(AgentEvent::TerminalSessionOutput {
-                    turn,
-                    id: tool_call.id.to_string(),
-                    handle: handle.clone(),
-                    output,
-                    truncated,
-                });
-            }
-            let status = details
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("running");
-            if status != "running" {
-                let exit_code = details
-                    .get("exit_code")
-                    .and_then(serde_json::Value::as_i64)
-                    .and_then(|code| i32::try_from(code).ok());
-                emitter.emit(AgentEvent::TerminalSessionFinished {
-                    turn,
-                    id: tool_call.id.to_string(),
-                    handle,
-                    status: status.to_owned(),
-                    exit_code,
-                });
-            }
         }
         Some("stop") => {
             let status = details
@@ -484,12 +445,50 @@ pub(super) fn emit_terminal_events(
             emitter.emit(AgentEvent::TerminalSessionFinished {
                 turn,
                 id: tool_call.id.to_string(),
-                handle,
+                handle: handle.clone(),
                 status,
                 exit_code,
             });
         }
         _ => {}
+    }
+
+    if matches!(mode, Some("start" | "write" | "read")) {
+        let output = details
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let truncated = details
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !output.is_empty() {
+            emitter.emit(AgentEvent::TerminalSessionOutput {
+                turn,
+                id: tool_call.id.to_string(),
+                handle: handle.clone(),
+                output,
+                truncated,
+            });
+        }
+        let status = details
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("running");
+        if status != "running" {
+            let exit_code = details
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            emitter.emit(AgentEvent::TerminalSessionFinished {
+                turn,
+                id: tool_call.id.to_string(),
+                handle,
+                status: status.to_owned(),
+                exit_code,
+            });
+        }
     }
 }
 
@@ -595,5 +594,47 @@ mod tests {
             }
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_output_bearing_modes_emit_incremental_output() {
+        for mode in ["start", "write", "read"] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut emitter = EventEmitter::new(tx, AgentContext::new());
+            let workspace = tempfile::tempdir().expect("workspace");
+            let context = ToolContext::new(workspace.path()).expect("tool context");
+            let call = AgentToolCall {
+                id: format!("tool-{mode}").into(),
+                name: "Terminal".into(),
+                raw_arguments: json!({ "mode": mode }).to_string().into(),
+            };
+            let result = ToolResult::ok("").with_details(json!({
+                "handle": "terminal-1",
+                "status": "running",
+                "output": mode,
+                "truncated": false,
+            }));
+
+            emit_terminal_events(
+                3,
+                Some(&json!({ "mode": mode })),
+                &call,
+                &result,
+                &context,
+                &mut emitter,
+            );
+
+            if mode == "start" {
+                assert!(matches!(
+                    rx.try_recv().expect("started").expect("event"),
+                    AgentEvent::TerminalSessionStarted { .. }
+                ));
+            }
+            assert!(matches!(
+                rx.try_recv().expect("output").expect("event"),
+                AgentEvent::TerminalSessionOutput { output, .. } if output == mode
+            ));
+            assert!(rx.try_recv().is_err());
+        }
     }
 }

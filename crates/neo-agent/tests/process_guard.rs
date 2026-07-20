@@ -3,7 +3,7 @@
 use std::{process::Stdio, time::Duration};
 
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn process_guard_parent_eof_kills_bash_descendant() {
@@ -71,11 +71,12 @@ async fn process_guard_descendant_limit_returns_resource_limited() {
         .arg("__process-guard")
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn process guard");
     let mut stdin = child.stdin.take().expect("guard stdin");
+    let mut stdout = child.stdout.take().expect("guard stdout");
     stdin
         .write_all(&start_bash_frame(
             workspace.path(),
@@ -89,6 +90,7 @@ async fn process_guard_descendant_limit_returns_resource_limited() {
         .expect("write Start frame");
     stdin.flush().await.expect("flush Start frame");
 
+    wait_for_started_frame(&mut stdout).await;
     let descendant_pid = wait_for_pid_file(&workspace.path().join("child.pid")).await;
     let wait = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     if wait.is_err() {
@@ -119,11 +121,12 @@ async fn process_guard_deadline_kills_tree_without_polling() {
         .arg("__process-guard")
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn process guard");
     let mut stdin = child.stdin.take().expect("guard stdin");
+    let mut stdout = child.stdout.take().expect("guard stdout");
     stdin
         .write_all(&start_bash_frame(
             workspace.path(),
@@ -137,6 +140,7 @@ async fn process_guard_deadline_kills_tree_without_polling() {
         .expect("write Start frame");
     stdin.flush().await.expect("flush Start frame");
 
+    wait_for_started_frame(&mut stdout).await;
     let descendant_pid = wait_for_pid_file(&workspace.path().join("child.pid")).await;
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
@@ -326,6 +330,17 @@ fn start_bash_frame(
     frame.extend_from_slice(&1u64.to_be_bytes());
     frame.extend_from_slice(&payload);
     frame
+}
+
+async fn wait_for_started_frame(stdout: &mut tokio::process::ChildStdout) {
+    let mut frame = [0; 29];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut frame))
+        .await
+        .expect("Started frame timeout")
+        .expect("read Started frame");
+    assert_eq!(u32::from_be_bytes(frame[..4].try_into().unwrap()), 25);
+    assert_eq!(frame[4], 101);
+    assert_eq!(u64::from_be_bytes(frame[5..13].try_into().unwrap()), 1);
 }
 
 async fn wait_for_pid_file(path: &std::path::Path) -> String {

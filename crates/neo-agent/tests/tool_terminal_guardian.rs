@@ -841,6 +841,14 @@ async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
         .as_str()
         .unwrap()
         .to_owned();
+    let mut started = blocked.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if !started.contains("writer-started") {
+        started = read_until(&registry, &context, &blocked_handle, "writer-started").await;
+    }
+    assert!(started.contains("writer-started"));
     let healthy = registry
         .run(
             "Terminal",
@@ -852,6 +860,10 @@ async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
     let healthy_handle = healthy.details.as_ref().unwrap()["handle"]
         .as_str()
         .unwrap()
+        .to_owned();
+    let mut healthy_output = healthy.details.as_ref().unwrap()["output"]
+        .as_str()
+        .unwrap_or_default()
         .to_owned();
 
     let write_registry = std::sync::Arc::clone(&registry);
@@ -870,25 +882,23 @@ async fn blocked_write_in_one_terminal_does_not_block_other_handles() {
             )
             .await
     });
-    let started = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_until(&registry, &context, &blocked_handle, "writer-started"),
-    )
-    .await
-    .expect("blocked terminal must emit writer-started");
-    assert!(started.contains("writer-started"));
     let healthy = tokio::time::timeout(
         Duration::from_millis(500),
         registry.run(
             "Terminal",
             &context,
-            json!({ "mode": "read", "handle": healthy_handle }),
+            json!({ "mode": "read", "handle": healthy_handle, "yield_time_ms": 0 }),
         ),
     )
     .await
     .expect("another guardian must remain responsive")
     .expect("healthy terminal read");
-    assert!(healthy.content.contains("healthy-terminal"));
+    healthy_output.push_str(
+        healthy.details.as_ref().unwrap()["output"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    assert!(healthy_output.contains("healthy-terminal"));
 
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -1248,7 +1258,8 @@ async fn run_session_usability_attempt(
     let details = start_terminal_command(
         registry,
         context,
-        "trap 'printf control-alive\\n' INT; while :; do sleep 30; done".to_owned(),
+        "trap 'printf control-alive\\n' INT; printf control-ready\\n; while :; do sleep 30; done"
+            .to_owned(),
         80,
         24,
         100,
@@ -1258,6 +1269,18 @@ async fn run_session_usability_attempt(
         .as_str()
         .ok_or_else(|| "missing handle".to_owned())?
         .to_owned();
+
+    #[cfg(not(windows))]
+    {
+        let mut ready = details["output"].as_str().unwrap_or_default().to_owned();
+        if !ready.contains("control-ready") {
+            ready = read_until(registry, context, &handle, "control-ready").await;
+        }
+        if !ready.contains("control-ready") {
+            try_stop(registry, context, &handle).await;
+            return Err(format!("terminal control handler not ready: {ready:?}"));
+        }
+    }
 
     #[cfg(windows)]
     let alive_input = json!([{ "text": "CMD:ALIVE" }, { "control": 13 }]);

@@ -7830,7 +7830,8 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
             "tool_start",
             json!({
                 "mode": "start",
-                "command": "printf term; printf '%s%s%s%s' inal -runtime -leak -tail; sleep 1"
+                "command": "printf term; printf '%s%s%s%s' inal -runtime -leak -tail; sleep 1",
+                "max_output_bytes": 4
             }),
         ),
         Some(_) if last.contains("status: cancelled") => vec![
@@ -7854,13 +7855,6 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
                 "max_output_bytes": 4
             }),
         ),
-        Some(_) if last.contains("status: running") => bash_tool_turn(
-            turn_index,
-            "tool_wait",
-            json!({
-                "command": "sleep 0.05; printf waited"
-            }),
-        ),
         Some(handle) if !last.contains("status: cancelled") => terminal_tool_turn(
             turn_index,
             "tool_read",
@@ -7872,31 +7866,6 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
         ),
         _ => end_turn_done(turn_index),
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn bash_tool_turn(
-    turn_index: usize,
-    tool_id: &str,
-    arguments: serde_json::Value,
-) -> Vec<AiStreamEvent> {
-    vec![
-        AiStreamEvent::MessageStart {
-            id: format!("msg_{turn_index}"),
-        },
-        AiStreamEvent::ToolCallStart {
-            id: tool_id.to_owned(),
-            name: "Bash".to_owned(),
-        },
-        AiStreamEvent::ToolCallEnd {
-            id: tool_id.to_owned(),
-            raw_arguments: arguments.to_string(),
-        },
-        AiStreamEvent::MessageEnd {
-            stop_reason: neo_ai::StopReason::ToolUse,
-            usage: None,
-        },
-    ]
 }
 
 fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamEvent> {
