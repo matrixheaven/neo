@@ -717,14 +717,21 @@ fn write_tool_card_renders_finalized_diff_from_details() {
         rows.iter()
             .any(|line| line.contains("Used Write (src/generated.rs) · 20 lines"))
     );
+    assert_eq!(
+        rows.iter()
+            .filter(|line| line.contains("src/generated.rs") && line.contains("20 lines"))
+            .count(),
+        1,
+        "path and line count should appear only in the header: {rows:?}"
+    );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
     // New files show a syntax-highlighted preview, not an all-green diff.
-    assert!(rows.iter().any(|line| line.contains(" 1 line 1")));
-    assert!(!rows.iter().any(|line| line.contains("20 line 20")));
+    assert!(rows.iter().any(|line| line == "   1  line 1"));
+    assert!(!rows.iter().any(|line| line == "  20  line 20"));
 
     card.set_expanded(true);
     let expanded = plain(card.render(80));
-    assert!(expanded.iter().any(|line| line.contains("20 line 20")));
+    assert!(expanded.iter().any(|line| line == "  20  line 20"));
 }
 
 #[test]
@@ -751,12 +758,11 @@ fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
         "header should show the path, not raw JSON: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|line| line.contains(" 1 // sample_service.go")),
+        rows.iter().any(|line| line == "   1  // sample_service.go"),
         "streaming preview should render content with line numbers: {rows:?}"
     );
     assert!(
-        rows.iter().any(|line| line.contains(" 5 import (")),
+        rows.iter().any(|line| line == "   5  import ("),
         "escaped newlines should become preview lines while streaming: {rows:?}"
     );
     assert!(
@@ -1676,8 +1682,8 @@ fn write_streaming_preview_reuses_final_format() {
     assert!(
         frame
             .iter()
-            .any(|line| line.contains("src/foo.rs") && line.contains("lines")),
-        "streaming preview should show path header: {frame:?}"
+            .any(|line| line.contains("Preparing Write (src/foo.rs)")),
+        "streaming preview should keep the path in the tool header: {frame:?}"
     );
 }
 

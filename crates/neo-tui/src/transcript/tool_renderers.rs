@@ -749,7 +749,7 @@ fn render_write_preview(
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
-    let mut rows = vec![palette.weak_line(format!("  {path} · {total} lines"))];
+    let mut rows = Vec::new();
 
     let highlight_path = highlight_path_for_write_preview(path, content);
     let highlighted = palette
@@ -763,7 +763,7 @@ fn render_write_preview(
     let use_highlight = !highlighted.is_empty() && highlight_path.is_some();
 
     for (index, line) in lines.iter().take(limit).enumerate() {
-        let line_num = format!("  {:>4} ", index + 1);
+        let line_num = format!("{:>4}  ", index + 1);
         if use_highlight && let Some(highlighted_line) = highlighted.get(index) {
             let theme = palette.theme.expect("theme present when highlighted");
             let mut spans = vec![Span::styled(
