@@ -18,6 +18,25 @@ pub struct DiffModel {
 impl DiffModel {
     #[must_use]
     pub fn from_tool_details(details: &serde_json::Value) -> Option<Self> {
+        // Ordered multi-file Edit batches expose `changes[].diff`.
+        if let Some(changes) = details.get("changes").and_then(serde_json::Value::as_array) {
+            let mut combined = String::new();
+            for change in changes {
+                if let Some(diff) = change.get("diff").and_then(serde_json::Value::as_str) {
+                    if !combined.is_empty() && !combined.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                    combined.push_str(diff);
+                    if !combined.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                }
+            }
+            if !combined.is_empty() {
+                return Self::parse_unified(&combined);
+            }
+        }
+        // Non-Edit tools still use a single top-level diff.
         let diff = details.get("diff")?.as_str()?;
         Self::parse_unified(diff)
     }
@@ -594,4 +613,35 @@ fn fit_width(text: &str, width: usize) -> String {
         return text.to_owned();
     }
     text.chars().take(width).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn diff_model_reads_ordered_edit_changes() {
+        let details = json!({
+            "kind": "edit",
+            "status": "committed",
+            "changes": [
+                {
+                    "path": "a.txt",
+                    "diff": "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old_a\n+new_a\n"
+                },
+                {
+                    "path": "b.txt",
+                    "diff": "--- b.txt\n+++ b.txt\n@@ -1 +1 @@\n-old_b\n+new_b\n"
+                }
+            ]
+        });
+        let model = DiffModel::from_tool_details(&details).expect("model");
+        assert_eq!(model.stats().files_changed, 2);
+        assert_eq!(model.stats().added, 2);
+        assert_eq!(model.stats().removed, 2);
+        assert_eq!(model.files().len(), 2);
+        assert_eq!(model.files()[0].new_path, "a.txt");
+        assert_eq!(model.files()[1].new_path, "b.txt");
+    }
 }

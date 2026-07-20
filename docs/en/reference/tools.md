@@ -10,7 +10,7 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 | --- | --- |
 | `Read` | Read a UTF-8 text file, with support for paginated reading by line offset. |
 | `Write` | Create or fully overwrite a UTF-8 file inside the workspace. |
-| `Edit` | Perform an exact find-and-replace on an existing file, returning a unified diff. |
+| `Edit` | Apply ordered exact replacements across existing UTF-8 regular files via `files[]` / `replacements[]` / `expected_matches` (default 1). Prepares the whole batch before any write, approves a verified diff in Ask mode, commits files atomically in declaration order, and reports partial commits truthfully. Does not create files (use `Write`). Legacy top-level `path`/`old`/`new`/`replace_all` is not accepted. |
 | `List` | List directory contents as a two-level tree. |
 | `Glob` | Match file/directory paths by glob pattern, sorted by modification time. |
 | `Find` | Locate workspace paths by a substring of their file or directory name. |

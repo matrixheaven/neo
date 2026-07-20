@@ -2308,9 +2308,15 @@ fn apply_tool_activity_event(
             } else {
                 AgentToolActivityPhase::Done
             };
-            let summary = tool_args
-                .get(id)
-                .and_then(|arguments| summarize_tool_arguments(name, arguments))
+            let summary = result
+                .details
+                .as_ref()
+                .and_then(summarize_edit_details)
+                .or_else(|| {
+                    tool_args
+                        .get(id)
+                        .and_then(|arguments| summarize_tool_arguments(name, arguments))
+                })
                 .or_else(|| last_tool_summary(activity.as_slice(), id));
             upsert_tool_activity(
                 activity,
@@ -2328,9 +2334,15 @@ fn apply_tool_activity_event(
             partial_result,
             ..
         } => {
-            let summary = tool_args
-                .get(id)
-                .and_then(|arguments| summarize_tool_arguments(name, arguments))
+            let summary = partial_result
+                .details
+                .as_ref()
+                .and_then(summarize_edit_details)
+                .or_else(|| {
+                    tool_args
+                        .get(id)
+                        .and_then(|arguments| summarize_tool_arguments(name, arguments))
+                })
                 .or_else(|| last_tool_summary(activity.as_slice(), id));
             upsert_tool_activity(
                 activity,
@@ -2657,6 +2669,9 @@ fn last_tool_summary(activity: &[AgentActivityEntry], id: &str) -> Option<String
 }
 
 fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option<String> {
+    if name == "Edit" {
+        return summarize_edit_arguments(arguments);
+    }
     let starts_shell = name == "Bash"
         || (name == "Terminal"
             && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"));
@@ -2691,6 +2706,84 @@ fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option
                 format!("{key}: {}", compact_line(&value.to_string()))
             }
         })
+}
+
+fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
+    let files = arguments.get("files")?.as_array()?;
+    if files.is_empty() {
+        return None;
+    }
+    let mut replacements = 0usize;
+    let mut paths = Vec::new();
+    for file in files {
+        if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
+            paths.push(path);
+        }
+        replacements += file
+            .get("replacements")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+    }
+    let head = paths.first().copied().unwrap_or("?");
+    let tail = paths.last().copied().unwrap_or(head);
+    let path_part = if paths.len() <= 1 {
+        compact_line(head)
+    } else if paths.len() == 2 {
+        format!("{} · {}", compact_line(head), compact_line(tail))
+    } else {
+        format!("{} … {}", compact_line(head), compact_line(tail))
+    };
+    Some(format!(
+        "{} files · {} replacements · {path_part}",
+        files.len(),
+        replacements
+    ))
+}
+
+fn summarize_edit_details(details: &serde_json::Value) -> Option<String> {
+    let kind = details.get("kind")?.as_str()?;
+    match kind {
+        "edit_prepared" => {
+            let files = details.get("files")?.as_u64()?;
+            let replacements = details.get("replacements")?.as_u64()?;
+            let added = details
+                .get("added")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let removed = details
+                .get("removed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Some(format!(
+                "prepared · {files} files · {replacements} replacements · +{added} -{removed}"
+            ))
+        }
+        "edit_progress" => {
+            let committed = details.get("committed")?.as_u64()?;
+            let total = details.get("total")?.as_u64()?;
+            let latest = details
+                .get("latest_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            Some(format!(
+                "committing {committed}/{total} · {}",
+                compact_line(latest)
+            ))
+        }
+        "edit" => {
+            let status = details.get("status")?.as_str()?;
+            let files = details.get("files").and_then(serde_json::Value::as_u64);
+            match status {
+                "committed" => Some(format!("committed · {} files", files.unwrap_or(0))),
+                "prepare_failed" => Some("prepare failed · zero writes".to_owned()),
+                "stale" => Some("stale · zero writes".to_owned()),
+                "partial_commit" => Some("partial commit".to_owned()),
+                "durability_uncertain" => Some("durability uncertain".to_owned()),
+                other => Some(other.to_owned()),
+            }
+        }
+        _ => None,
+    }
 }
 
 const MAX_AGENT_TOOL_OUTPUT_PREVIEW_BYTES: usize = 512;
@@ -2848,6 +2941,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolResult;
 
     #[test]
     fn shell_tool_summary_preserves_head_and_tail_within_budget() {
@@ -2903,6 +2997,102 @@ mod tests {
             summary.chars().all(|character| !character.is_control()),
             "{summary:?}"
         );
+    }
+
+    #[test]
+    fn edit_tool_summary_preserves_counts_and_head_tail_within_budget() {
+        let summary = summarize_tool_arguments(
+            "Edit",
+            &serde_json::json!({
+                "files": [
+                    {"path": "src/a.rs", "replacements": [{"old":"a","new":"A"}]},
+                    {"path": "src/b.rs", "replacements": [{"old":"b","new":"B"},{"old":"c","new":"C"}]},
+                    {"path": "src/c.rs", "replacements": [{"old":"d","new":"D"}]}
+                ]
+            }),
+        )
+        .expect("edit summary");
+        assert!(summary.contains("3 files"), "{summary}");
+        assert!(summary.contains("4 replacements"), "{summary}");
+        assert!(summary.contains("src/a.rs"), "{summary}");
+        assert!(summary.contains("src/c.rs"), "{summary}");
+        assert!(summary.chars().count() <= 160, "{summary}");
+    }
+
+    #[test]
+    fn edit_tool_summary_prefers_structured_partial_progress() {
+        let mut activity = Vec::new();
+        let mut tool_args = HashMap::new();
+        let started = AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "e1".to_owned(),
+            name: "Edit".to_owned(),
+            arguments: serde_json::json!({
+                "files": [{"path":"a.rs","replacements":[{"old":"a","new":"A"}]}]
+            }),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &started
+        ));
+        let update = AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "e1".to_owned(),
+            name: "Edit".to_owned(),
+            partial_result: ToolResult::ok("progress").with_details(serde_json::json!({
+                "kind": "edit_progress",
+                "committed": 2,
+                "total": 5,
+                "latest_path": "src/lib.rs",
+                "added": 9,
+                "removed": 4
+            })),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &update
+        ));
+        let summary = last_tool_summary(&activity, "e1").expect("summary");
+        assert!(summary.contains("committing 2/5"), "{summary}");
+        assert!(summary.contains("src/lib.rs"), "{summary}");
+    }
+
+    #[test]
+    fn replayed_unfinished_edit_is_interrupted_and_not_resumed() {
+        // Replay projects unfinished progress as a terminal interrupted card
+        // without re-submitting PreparedEdit to runtime. Activity summary alone
+        // never starts commit.
+        let mut activity = Vec::new();
+        let mut tool_args = HashMap::new();
+        let update = AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "e2".to_owned(),
+            name: "Edit".to_owned(),
+            partial_result: ToolResult::ok("progress").with_details(serde_json::json!({
+                "kind": "edit_progress",
+                "committed": 1,
+                "total": 3,
+                "latest_path": "a.rs",
+                "added": 1,
+                "removed": 1
+            })),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &update
+        ));
+        assert!(
+            activity.iter().all(|entry| match &entry.kind {
+                AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
+                _ => true,
+            }),
+            "progress alone must not invent a completed commit"
+        );
+        // No execution attempt is recorded beyond the projected activity entry.
+        assert_eq!(tool_args.len(), 0);
     }
 
     #[test]

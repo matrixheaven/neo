@@ -95,7 +95,8 @@ Neo 在工具运行前，仅从类型化工具参数推导嵌套 `AGENTS.md` 的
 
 | 工具类别 | 作用域探针 |
 | --- | --- |
-| `Read`、`Write`、`Edit` | 目标文件的父目录 |
+| `Read`、`Write` | 目标文件的父目录 |
+| `Edit` | 每个 `files[].path` 的父目录（保持声明顺序；任一目标引入新作用域或被阻塞时，整个 Edit 调用一并推迟或阻塞） |
 | `List`、`Grep`、`Find`、`Glob` | 显式 root 或 path 目录 |
 | `Bash`、`Terminal` | 显式 `cwd`，否则为主工作区 |
 | 其他工具 | 无指令作用域探针 |

@@ -1415,17 +1415,32 @@ impl TranscriptPane {
         else {
             return;
         };
-        let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
-            return;
+        // Write keeps top-level path/content. Edit may touch the plan file via
+        // files[].path; snapshot path only (no full staged content on Edit).
+        let (path, content) = if tool_call.name.as_ref() == "Edit" {
+            let Some(path) = arguments
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|file| file.get("path").and_then(serde_json::Value::as_str))
+            else {
+                return;
+            };
+            (path, None)
+        } else {
+            let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+                return;
+            };
+            let content = arguments
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            (path, content)
         };
         if !looks_like_plan_file_path(path) {
             return;
         }
-        let content = arguments
-            .get("content")
-            .or_else(|| arguments.get("new"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         self.replay_plan_snapshot = Some(ReplayPlanSnapshot {
             path: path.to_owned(),
             content,

@@ -8,11 +8,11 @@ use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
 use super::tool_arguments::{ApprovalExecutionContext, PreparedExecution, PreparedToolCall};
 use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
 use crate::approval::EditApprovalPresentation;
-use crate::tools::PreparedEdit;
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
 };
+use crate::tools::PreparedEdit;
 use crate::tools::normalize_path;
 use crate::tools::plan_mode::{
     ExitPlanModeInput, ExitPlanModeOption, ExitPlanModeSuggestion, prevalidate_exit_plan_mode,

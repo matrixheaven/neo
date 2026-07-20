@@ -5,6 +5,7 @@ pub mod chrome_render;
 mod delegate_card;
 mod delegate_group;
 pub mod diff_preview;
+mod edit_tool_presentation;
 pub mod entry;
 mod event_handler;
 mod instruction_card;

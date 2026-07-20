@@ -158,6 +158,15 @@ impl ToolCallComponent {
         true
     }
 
+    /// Retain structured Edit progress/prepared details on the live card.
+    pub fn set_live_details(&mut self, details: serde_json::Value) -> bool {
+        if self.state.details.as_ref() == Some(&details) {
+            return false;
+        }
+        self.state.details = Some(details);
+        true
+    }
+
     fn trim_live_output(&mut self) {
         while self.live_output.len() > MAX_LIVE_OUTPUT_LINES
             || self.live_output_chars > MAX_LIVE_OUTPUT_CHARS
@@ -209,8 +218,10 @@ impl ToolCallComponent {
     }
 
     pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) -> bool {
+        // Edit interruptions retain last structured progress details.
+        let clear_details = self.state.name != "Edit";
         let changed = self.state.result != result
-            || self.state.details.is_some()
+            || (clear_details && self.state.details.is_some())
             || self.state.exit_code.is_some()
             || self.state.status != status
             || !self.live_output.is_empty()
@@ -222,7 +233,9 @@ impl ToolCallComponent {
             return false;
         }
         self.state.result = result;
-        self.state.details = None;
+        if clear_details {
+            self.state.details = None;
+        }
         self.state.exit_code = None;
         self.state.status = status;
         self.live_output.clear();

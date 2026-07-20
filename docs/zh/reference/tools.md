@@ -10,7 +10,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | --- | --- |
 | `Read` | 读取 UTF-8 文本文件，支持按行偏移分页读取。 |
 | `Write` | 创建或完整覆盖写入工作区内 UTF-8 文件。 |
-| `Edit` | 对现有文件做精确字符串查找替换，返回 unified diff。 |
+| `Edit` | 通过有序 `files[]` / `replacements[]` / `expected_matches`（默认 1）对已有 UTF-8 常规文件做精确替换。整批 prepare 后才写入，Ask 模式批准已验证 diff，按声明顺序逐文件原子提交，并如实报告 partial commit。不创建文件（用 `Write`）。不接受旧版顶层 `path`/`old`/`new`/`replace_all`。 |
 | `List` | 以两层树形列出目录内容。 |
 | `Glob` | 按 glob 模式匹配文件/目录路径，按修改时间排序。 |
 | `Find` | 按文件/目录名子串查找工作区路径。 |

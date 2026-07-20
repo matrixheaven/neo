@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::tools::normalize_path;
 use crate::tools::PreparedEdit;
+use crate::tools::normalize_path;
 use crate::{AgentToolCall, PlanSelection, ToolResult};
 use neo_ai::ToolSpec;
 
@@ -417,7 +417,10 @@ impl InstructionScopeProbe {
 
 /// Collect parent-directory probes for every Edit `files[].path`, preserving
 /// declaration order and deduplicating identical canonical directories.
-fn edit_scope_probes(arguments: &serde_json::Value, primary_workspace: &Path) -> Vec<InstructionScopeProbe> {
+fn edit_scope_probes(
+    arguments: &serde_json::Value,
+    primary_workspace: &Path,
+) -> Vec<InstructionScopeProbe> {
     let Some(files) = arguments.get("files").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };

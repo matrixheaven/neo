@@ -47,9 +47,7 @@ struct EditReplacementInput {
         description = "Exact existing UTF-8 text to replace. Matching is character-for-character with no normalization."
     )]
     old: String,
-    #[schemars(
-        description = "Replacement text. Empty string removes the matched text."
-    )]
+    #[schemars(description = "Replacement text. Empty string removes the matched text.")]
     new: String,
     #[serde(default = "default_expected_matches")]
     #[schemars(
@@ -234,10 +232,7 @@ impl PreparedEdit {
                     Some(file_index),
                     None,
                     Some(file.path.display().to_string()),
-                    format!(
-                        "duplicate effective target path: {}",
-                        resolved.display()
-                    ),
+                    format!("duplicate effective target path: {}", resolved.display()),
                     "Remove duplicate paths and submit a fresh Edit call.",
                 ));
             }
@@ -259,7 +254,10 @@ impl PreparedEdit {
                         Some(file_index),
                         None,
                         Some(file.path.display().to_string()),
-                        format!("failed to read metadata for {}: {error}", resolved.display()),
+                        format!(
+                            "failed to read metadata for {}: {error}",
+                            resolved.display()
+                        ),
                         "Re-read the file and submit a fresh Edit call.",
                     ));
                 }
@@ -593,7 +591,8 @@ impl PreparedEdit {
                 }));
             }
 
-            let write_result = self.write_file(file_index, &file.resolved_path, file.staged.as_bytes());
+            let write_result =
+                self.write_file(file_index, &file.resolved_path, file.staged.as_bytes());
             match write_result {
                 Ok(AtomicWriteStatus::Durable) => {
                     committed_count += 1;
@@ -987,9 +986,8 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 }
 
 async fn read_fingerprint(path: &Path) -> Result<EditFingerprint, String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        format!("failed to recheck metadata for {}: {error}", path.display())
-    })?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to recheck metadata for {}: {error}", path.display()))?;
     if is_reparse_or_symlink(&metadata) {
         return Err(format!(
             "target became a symlink or reparse point: {}",
@@ -997,14 +995,20 @@ async fn read_fingerprint(path: &Path) -> Result<EditFingerprint, String> {
         ));
     }
     if !metadata.is_file() {
-        return Err(format!("target is no longer a regular file: {}", path.display()));
+        return Err(format!(
+            "target is no longer a regular file: {}",
+            path.display()
+        ));
     }
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| format!("failed to recheck {}: {error}", path.display()))?;
     // Content must still be UTF-8; non-UTF-8 is treated as stale for the prepared plan.
     if String::from_utf8(bytes.clone()).is_err() {
-        return Err(format!("target is no longer valid UTF-8: {}", path.display()));
+        return Err(format!(
+            "target is no longer valid UTF-8: {}",
+            path.display()
+        ));
     }
     Ok(EditFingerprint {
         resolved_path: path.to_path_buf(),

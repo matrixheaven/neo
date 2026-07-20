@@ -691,7 +691,6 @@ fn render_tool_body_with_palette(
 
     render_diff_details(state, expanded, width, palette)
         .or_else(|| render_write_body(state, expanded, palette))
-        .or_else(|| render_edit_body(state, expanded, palette))
         .or_else(|| {
             (state.name == "WaitDelegate")
                 .then(|| render_wait_delegate_body(state, expanded, width, palette))
@@ -709,24 +708,23 @@ fn render_diff_details(
     width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Option<Vec<Line>> {
-    // Only Edit uses unified diff rendering. Write always uses a
+    // Only Edit uses structured batch presentation. Write always uses a
     // syntax-highlighted content preview (via render_write_body).
     if state.name != "Edit" {
         return None;
     }
-    if let Some(model) = state
-        .details
-        .as_ref()
-        .and_then(DiffModel::from_tool_details)
-    {
-        return Some(render_diff_model_lines(
-            &model,
+    let theme = palette.theme?;
+    Some(super::edit_tool_presentation::render_edit_body(
+        super::edit_tool_presentation::EditRenderInput {
+            status: state.status,
+            arguments: state.arguments.as_deref(),
+            details: state.details.as_ref(),
+            result: state.result.as_deref(),
             expanded,
             width,
-            palette.theme,
-        ));
-    }
-    None
+            theme,
+        },
+    ))
 }
 
 fn render_write_body(
@@ -835,37 +833,6 @@ fn infer_live_content_path(content: &str) -> Option<&'static str> {
         }
     }
     saw_jsonish.then_some("live.json")
-}
-
-fn render_edit_body(
-    state: &ToolCallState,
-    expanded: bool,
-    palette: ToolBodyPalette<'_>,
-) -> Option<Vec<Line>> {
-    if state.name != "Edit" {
-        return None;
-    }
-
-    let arguments = state.arguments.as_deref().and_then(parse_edit_arguments)?;
-    Some(render_edit_preview(&arguments, expanded, palette))
-}
-
-fn render_edit_preview(
-    arguments: &EditArguments,
-    expanded: bool,
-    palette: ToolBodyPalette<'_>,
-) -> Vec<Line> {
-    let max = (!expanded).then_some(COMMAND_PREVIEW_LINES);
-    crate::transcript::diff_preview::render_diff_lines_clustered(
-        &arguments.old,
-        &arguments.new,
-        &arguments.path,
-        3,
-        max,
-    )
-    .into_iter()
-    .map(|line| palette.diff_line(&line))
-    .collect()
 }
 
 fn render_result_body(
@@ -1001,25 +968,11 @@ fn diff_body_line(raw: &str, theme: &TuiTheme) -> Line {
     Line::styled(format!("  {plain}"), Style::default().fg(color))
 }
 
-struct EditArguments {
-    path: String,
-    old: String,
-    new: String,
-}
-
 fn parse_write_arguments(arguments: Option<&str>) -> Option<(String, String)> {
     let value = serde_json::from_str::<serde_json::Value>(arguments?).ok()?;
     let path = string_field(&value, "path")?;
     let content = string_field(&value, "content")?;
     Some((path, content))
-}
-
-fn parse_edit_arguments(arguments: &str) -> Option<EditArguments> {
-    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
-    let path = string_field(&value, "path")?;
-    let old = string_field(&value, "old")?;
-    let new = string_field(&value, "new")?;
-    Some(EditArguments { path, old, new })
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -1033,6 +986,15 @@ fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
     let arguments = arguments.map(str::trim).filter(|value| !value.is_empty())?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        if let Some(path) = value
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|files| files.first())
+            .and_then(|file| file.get("path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some((one_line(path), true));
+        }
         for key in ["path", "command", "pattern", "query", "url", "description"] {
             if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
                 let is_path = key == "path";
@@ -1202,12 +1164,17 @@ pub fn render_streaming_preview(
     }
 
     if state.name == "Edit" {
-        let path = extract_partial_string_field(args, "path").unwrap_or_default();
-        let tokens = estimate_tokens(args);
-        return vec![Line::styled(
-            format!("  Editing {path}... ~{} tok", format_token_count(tokens)),
-            Style::default().fg(theme.text_muted),
-        )];
+        return super::edit_tool_presentation::render_edit_body(
+            super::edit_tool_presentation::EditRenderInput {
+                status: state.status,
+                arguments: Some(args),
+                details: state.details.as_ref(),
+                result: state.result.as_deref(),
+                expanded,
+                width: _width.max(40),
+                theme,
+            },
+        );
     }
 
     Vec::new()

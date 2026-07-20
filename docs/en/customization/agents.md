@@ -95,7 +95,8 @@ Neo discovers nested `AGENTS.md` files from typed tool arguments before tools ru
 
 | Tool class | Scope probe |
 | --- | --- |
-| `Read`, `Write`, `Edit` | Parent directory of the target file |
+| `Read`, `Write` | Parent directory of the target file |
+| `Edit` | Parent directory of every `files[].path` (declaration order; whole Edit call defers or blocks together when any target introduces a new or blocked scope) |
 | `List`, `Grep`, `Find`, `Glob` | Explicit root or path directory |
 | `Bash`, `Terminal` | Explicit `cwd`, otherwise the primary workspace |
 | Other tools | No instruction scope probe |

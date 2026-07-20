@@ -18,15 +18,13 @@ use super::permission::{
 };
 use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
 use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
-use super::tool_arguments::{
-    InstructionScopeProbe, PreparedExecution, prepare_tool_arguments,
-};
-use crate::tools::PreparedEdit;
+use super::tool_arguments::{InstructionScopeProbe, PreparedExecution, prepare_tool_arguments};
 use crate::instructions::{
     InstructionEpochData, InstructionFailure, InstructionFingerprint, InstructionPreflightDecision,
     InstructionReconcileKind, InstructionReconcileRequest,
 };
 use crate::skills::SkillStoreHandle;
+use crate::tools::PreparedEdit;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
     AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ResourceLimitDetail,
@@ -374,9 +372,9 @@ fn current_blocked_scope(
                 .any(|((tool_call, parsed), call_probes)| {
                     parsed.is_ok()
                         && is_mutation_or_execution_tool(tool_call.name.as_ref())
-                        && call_probes.iter().any(|probe| {
-                            entry.directories.iter().any(|dir| probe.starts_with(dir))
-                        })
+                        && call_probes
+                            .iter()
+                            .any(|probe| entry.directories.iter().any(|dir| probe.starts_with(dir)))
                 })
         })
         .cloned()

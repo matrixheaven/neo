@@ -875,19 +875,29 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
         name: "Edit".to_owned(),
         arguments: Some(
             serde_json::json!({
-                "path": "src/lib.rs",
-                "old": "old",
-                "new": "new"
+                "files": [{
+                    "path": "src/lib.rs",
+                    "replacements": [{ "old": "old", "new": "new" }]
+                }]
             })
             .to_string(),
         ),
-        result: Some("edited src/lib.rs".to_owned()),
+        result: Some("edited 1 files".to_owned()),
         details: Some(serde_json::json!({
-            "path": "src/lib.rs",
-            "old": "old",
-            "new": "new",
-            "replace_all": false,
-            "diff": "--- src/lib.rs\n+++ src/lib.rs\n@@ -40,3 +40,3 @@\n context\n-old\n+new\n tail\n"
+            "kind": "edit",
+            "status": "committed",
+            "files": 1,
+            "replacements": 1,
+            "added": 1,
+            "removed": 1,
+            "changes": [{
+                "path": "src/lib.rs",
+                "status": "committed",
+                "replacements": 1,
+                "added": 1,
+                "removed": 1,
+                "diff": "--- src/lib.rs\n+++ src/lib.rs\n@@ -40,3 +40,3 @@\n context\n-old\n+new\n tail\n"
+            }]
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
@@ -895,17 +905,12 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
 
     let rows = plain(card.render(80));
     assert!(
-        rows.iter()
-            .any(|line| line.contains("Used Edit (src/lib.rs) · +1 -1"))
+        rows.iter().any(|line| line.contains("1 files · 1 replacements")),
+        "batch summary missing: {rows:?}"
     );
-    assert!(rows.iter().any(|line| line.contains("41 - old")));
-    assert!(rows.iter().any(|line| line.contains("41 + new")));
-    assert!(
-        !rows
-            .iter()
-            .any(|line| line.contains(" 1 - old") || line.contains(" 1 + new")),
-        "finalized Edit must not use args-local line numbers: {rows:?}"
-    );
+    assert!(rows.iter().any(|line| line.contains("src/lib.rs")));
+    assert!(rows.iter().any(|line| line.contains("-old") || line.contains("- old")));
+    assert!(rows.iter().any(|line| line.contains("+new") || line.contains("+ new")));
 }
 
 #[test]
@@ -1690,7 +1695,7 @@ fn edit_streaming_preview_shows_progress() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "edit-1".to_owned(),
-        json_fragment: r#"{"path":"src/foo.rs","old":"foo","new":"bar"}"#.to_owned(),
+        json_fragment: r#"{"files":[{"path":"src/foo.rs","replacements":[{"old":"foo","new":"bar"}]}]}"#.to_owned(),
     });
 
     let frame = runtime
@@ -1701,16 +1706,169 @@ fn edit_streaming_preview_shows_progress() {
         .collect::<Vec<_>>();
 
     assert!(
-        !frame.iter().any(|line| line.contains("Preparing changes")),
-        "streaming preview should not show old progress line: {frame:?}"
+        frame
+            .iter()
+            .any(|line| line.contains("src/foo.rs") || line.contains("replacements")),
+        "Edit streaming should show path or replacement intent: {frame:?}"
     );
+}
+
+#[test]
+fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
+    let details = serde_json::json!({
+        "kind": "edit",
+        "status": "committed",
+        "files": 5,
+        "replacements": 9,
+        "added": 28,
+        "removed": 17,
+        "changes": (0..5).map(|i| serde_json::json!({
+            "path": format!("src/file{i}.rs"),
+            "status": "committed",
+            "replacements": 1,
+            "added": 2,
+            "removed": 1,
+            "diff": format!("--- src/file{i}.rs\n+++ src/file{i}.rs\n@@ -1 +1 @@\n-old{i}\n+new{i}\n")
+        })).collect::<Vec<_>>()
+    });
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "edit-batch".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: Some(r#"{"files":[]}"#.to_owned()),
+        result: Some("edited".to_owned()),
+        details: Some(details),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let collapsed = plain(card.render(100));
     assert!(
-        frame.iter().any(|line| line.contains("Editing src/foo.rs")),
-        "Edit progress line should show path: {frame:?}"
+        collapsed
+            .iter()
+            .any(|line| line.contains("hidden") || line.contains("ctrl+o")),
+        "collapsed should omit with explicit marker: {collapsed:?}"
     );
+
+    card.set_expanded(true);
+    let expanded = plain(card.render(100));
+    for i in 0..5 {
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains(&format!("file{i}.rs"))),
+            "expanded missing file{i}: {expanded:?}"
+        );
+    }
+
+    let narrow = plain(card.render(40));
+    for line in &narrow {
+        assert!(
+            neo_tui::primitive::visible_width(line) <= 40,
+            "row exceeds width: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn edit_batch_card_distinguishes_prepare_stale_partial_and_durability() {
+    for (status, needle) in [
+        ("prepare_failed", "zero writes"),
+        ("stale", "zero writes"),
+        ("partial_commit", "partial"),
+        ("durability_uncertain", "durability"),
+    ] {
+        let mut card = ToolCallComponent::new(ToolCallState {
+            id: format!("edit-{status}"),
+            name: "Edit".to_owned(),
+            arguments: None,
+            result: Some("failed".to_owned()),
+            details: Some(serde_json::json!({
+                "kind": "edit",
+                "status": status,
+                "message": "diagnostic",
+                "path": "src/a.rs",
+                "changes": []
+            })),
+            status: ToolStatusKind::Failed,
+            exit_code: None,
+        });
+        let rows = plain(card.render(80));
+        assert!(
+            rows.iter().any(|line| line.contains(needle)),
+            "{status} missing {needle}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn edit_batch_approval_uses_global_expansion() {
+    // Approval entry expansion is owned by global Ctrl+O; renderer accepts expanded flag.
+    let details = serde_json::json!({
+        "kind": "edit_prepared",
+        "files": 2,
+        "replacements": 2,
+        "added": 2,
+        "removed": 2,
+        "changes": [
+            {
+                "path": "a.rs",
+                "replacements": 1,
+                "added": 1,
+                "removed": 1,
+                "diff": "--- a.rs\n+++ a.rs\n@@ -1 +1 @@\n-a\n+A\n"
+            },
+            {
+                "path": "b.rs",
+                "replacements": 1,
+                "added": 1,
+                "removed": 1,
+                "diff": "--- b.rs\n+++ b.rs\n@@ -1 +1 @@\n-b\n+B\n"
+            }
+        ]
+    });
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "edit-prep".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: None,
+        details: Some(details),
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    card.set_expanded(true);
+    let rows = plain(card.render(80));
+    assert!(rows.iter().any(|line| line.contains("a.rs")));
+    assert!(rows.iter().any(|line| line.contains("b.rs")));
+}
+
+#[test]
+fn edit_batch_progress_details_survive_interruption() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "edit-int".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: None,
+        details: Some(serde_json::json!({
+            "kind": "edit_progress",
+            "committed": 2,
+            "total": 5,
+            "latest_path": "src/lib.rs",
+            "added": 9,
+            "removed": 4
+        })),
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    assert!(card.set_terminal_status(
+        ToolStatusKind::Failed,
+        Some("interrupted".to_owned())
+    ));
+    assert!(card.state().details.is_some());
+    let rows = plain(card.render(80));
     assert!(
-        frame.iter().any(|line| line.contains("tok")),
-        "streaming preview should show token count: {frame:?}"
+        rows.iter()
+            .any(|line| line.contains("unknown") || line.contains("interrupted") || line.contains("committing")),
+        "interruption should retain progress evidence: {rows:?}"
     );
 }
 

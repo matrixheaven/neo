@@ -733,11 +733,24 @@ impl TranscriptPane {
     }
 
     fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
-        self.upsert_tool(id, name, None, ToolStatusKind::Running);
-        if self
-            .transcript
-            .mutate_tool(id, |tool| tool.append_live_output(partial_result.content))
-        {
+        self.upsert_tool(id, name.clone(), None, ToolStatusKind::Running);
+        let is_edit = name == "Edit";
+        let details = partial_result.details.clone();
+        let content = partial_result.content;
+        if self.transcript.mutate_tool(id, |tool| {
+            let mut changed = false;
+            if is_edit {
+                if let Some(details) = details {
+                    changed |= tool.set_live_details(details);
+                }
+                if !content.is_empty() {
+                    changed |= tool.append_live_output(content);
+                }
+            } else {
+                changed |= tool.append_live_output(content);
+            }
+            changed
+        }) {
             self.mark_dirty();
         }
     }
