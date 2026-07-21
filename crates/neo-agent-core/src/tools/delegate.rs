@@ -717,7 +717,6 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
     const MAX_SWARM_CHILDREN: usize = 8;
     const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
     const MAX_SWARM_ITEM_TITLE_CHARS: usize = 80;
-    const MAX_SWARM_ITEM_VALUE_CHARS: usize = 512;
     if request.description.trim().is_empty() {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -787,14 +786,6 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
                 ),
             });
         }
-        if item.value.chars().count() > MAX_SWARM_ITEM_VALUE_CHARS {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!(
-                    "items[{index}].value must not exceed {MAX_SWARM_ITEM_VALUE_CHARS} characters"
-                ),
-            });
-        }
     }
     for (agent_id, prompt) in &request.resume_agent_ids {
         if !agent_id.starts_with("agent_") {
@@ -807,14 +798,6 @@ fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
                 message: format!("resume_agent_ids[{agent_id}] must not be empty"),
-            });
-        }
-        if prompt.chars().count() > MAX_SWARM_ITEM_VALUE_CHARS {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!(
-                    "resume_agent_ids[{agent_id}] must not exceed {MAX_SWARM_ITEM_VALUE_CHARS} characters"
-                ),
             });
         }
     }
@@ -957,17 +940,21 @@ mod tests {
     }
 
     #[test]
-    fn delegate_swarm_accepts_long_prompt_template() {
+    fn delegate_swarm_accepts_long_child_instructions() {
         let request: DelegateSwarmRequest = serde_json::from_value(serde_json::json!({
             "description": "long instructions",
             "items": [
-                { "title": "check", "value": "neo-ai" }
+                { "title": "check", "value": "i".repeat(513) }
             ],
-            "prompt_template": "x".repeat(513) + " {{item}}"
+            "prompt_template": "x".repeat(513) + " {{item}}",
+            "resume_agent_ids": {
+                "agent_existing": "r".repeat(513)
+            }
         }))
         .expect("request parses");
 
-        validate_swarm_request("DelegateSwarm", &request).expect("long template accepted");
+        validate_swarm_request("DelegateSwarm", &request)
+            .expect("long child instructions accepted");
     }
 
     #[test]
