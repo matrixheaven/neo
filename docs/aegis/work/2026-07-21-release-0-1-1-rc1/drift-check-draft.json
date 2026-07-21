@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-21-release-0-1-1-rc1",
+  "taskIntentRef": "docs/aegis/work/2026-07-21-release-0-1-1-rc1/task-intent-draft.json",
+  "baselineRefs": [
+    ".github/workflows/ci.yml and .github/workflows/release.yml"
+  ],
+  "scopeStatus": "Release, CI blockers, and durable release records only; unrelated .gitignore edit remains untouched.",
+  "compatStatus": "Package version remains 0.1.1; RC identity and timestamp remain tag metadata.",
+  "retirementStatus": "Old single-file Write test fixtures and contradictory symlink drift test retired; no compatibility branch added.",
+  "newRiskSignals": [
+    "Remote CI and six-platform release jobs remain unverified."
+  ],
+  "decision": "continue"
+}

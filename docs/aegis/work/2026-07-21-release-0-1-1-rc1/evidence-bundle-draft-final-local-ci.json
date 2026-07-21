@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "final-local-ci",
+  "type": "command",
+  "source": "cargo fmt --all --check; cargo clippy --workspace --all-targets --all-features -- -D clippy::all; cargo build -p neo-agent; cargo nextest run --workspace --all-features",
+  "summary": "Final serial workflow-equivalent run exited 0: fmt passed; Clippy 0 errors; build 0 errors; nextest 2767 passed across 63 binaries with 0 failures.",
+  "verifier": "Codex fresh local execution"
+}

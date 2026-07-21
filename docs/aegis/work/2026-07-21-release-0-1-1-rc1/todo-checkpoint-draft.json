@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-21-release-0-1-1-rc1",
+  "currentTodo": "Commit release records, push main, and wait for matching remote CI.",
+  "completedTodos": [
+    "Fixed all local CI blockers and committed scoped repairs through 6422d663.",
+    "Final serial local CI passed: fmt, workspace Clippy, neo-agent build, and 2767 nextest tests.",
+    "Drafted timestamped RC1 release notes at docs/releases/v0.1.1-rc.1.md."
+  ],
+  "activeSlice": "Remote main CI gate before tag creation.",
+  "evidenceRefs": [
+    "final-local-ci; commits 5b8eaa43 56ffcea9 44875b5e 6422d663"
+  ],
+  "blockedOn": null,
+  "nextStep": "Commit release records, push main, wait for the exact head SHA CI to pass, then create and push the annotated RC tag.",
+  "updatedAt": "2026-07-21"
+}

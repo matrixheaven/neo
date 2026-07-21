@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "Run full CI, publish a timestamped RC1 tag, and create a clear GitHub Release covering changes since v0.1.0.",
+  "goal": "Run full CI, publish a timestamped RC1 tag, and create a clear GitHub Release covering changes since v0.1.0.",
+  "successEvidence": [
+    "Local CI succeeds; main push CI succeeds; timestamped RC tag release workflow succeeds; GitHub Release notes and assets are verified."
+  ],
+  "stopCondition": "Done when the GitHub Release and assets are verified; otherwise stop as blocked, needs-verification, or scope-exceeded with a resumable checkpoint.",
+  "nonGoals": [
+    "Do not redesign release automation or alter unrelated user changes."
+  ],
+  "scope": "Release records and notes, CI failures required to unblock release, scoped commits, main push, RC tag, and GitHub Release verification.",
+  "changeKinds": [
+    "release"
+  ],
+  "riskHints": [
+    "Tagging is irreversible without destructive cleanup; current remote CI is failing; shared worktree contains an unrelated .gitignore edit."
+  ]
+}

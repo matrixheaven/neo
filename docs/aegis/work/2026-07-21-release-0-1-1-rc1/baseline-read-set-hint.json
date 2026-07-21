@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
+  ],
+  "whyRelevant": "These workflows define CI gates and the tag-triggered release contract.",
+  "missingAuthority": []
+}

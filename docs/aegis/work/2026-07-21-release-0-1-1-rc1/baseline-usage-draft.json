@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-21-release-0-1-1-rc1",
+  "requiredBaselineRefs": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
+  ],
+  "deliveredContextRefs": [],
+  "acknowledgedBeforePlanRefs": [],
+  "citedInPlanRefs": [],
+  "missingRefs": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
+  ],
+  "decision": "needs-baseline-readback"
+}

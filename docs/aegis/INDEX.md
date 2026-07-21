@@ -131,3 +131,16 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-append-only-skill-catalog.md | Append-Only Skill Catalog Implementation Plan |
 | 2026-07-21 | spec | docs/aegis/specs/2026-07-21-batch-write-design.md | Neo Batch Write Prepared Execution Design |
 | 2026-07-21 | plan | docs/aegis/plans/2026-07-21-batch-write.md | Neo Batch Write Prepared Execution Implementation Plan |
+| 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/10-intent.md | Neo 0.1.1 RC1 release intent |
+| 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/20-checkpoint.md | Neo 0.1.1 RC1 release checkpoint |
+| 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/90-evidence.md | Neo 0.1.1 RC1 release evidence |
+| 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/99-reflection.md | Neo 0.1.1 RC1 release reflection |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/task-intent-draft.json | Neo 0.1.1 RC1 release task intent draft |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/baseline-read-set-hint.json | Neo 0.1.1 RC1 release baseline read-set hint |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/baseline-usage-draft.json | Neo 0.1.1 RC1 release baseline usage draft |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/impact-statement-draft.json | Neo 0.1.1 RC1 release impact statement draft |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/todo-checkpoint-draft.json | Neo 0.1.1 RC1 release todo checkpoint draft |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/drift-check-draft.json | Neo 0.1.1 RC1 release drift check draft |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/resume-state-hint.json | 2026-07-21-release-0-1-1-rc1 resume state hint |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-ci-failure-diagnosis.json | 2026-07-21-release-0-1-1-rc1 evidence ci-failure-diagnosis |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-local-ci.json | 2026-07-21-release-0-1-1-rc1 evidence final-local-ci |

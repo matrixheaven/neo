@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "ci-failure-diagnosis",
+  "type": "remote-log",
+  "source": "gh run view 29799810016 --log-failed",
+  "summary": "Remote CI stopped at Run clippy under Rust 1.97; blocking errors were needless_borrow in list.rs and items_after_test_module in guardian.rs.",
+  "verifier": "Codex root-cause review"
+}

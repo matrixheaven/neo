@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "CI and release distribution"
+  ],
+  "owners": [
+    ".github/workflows/ci.yml and .github/workflows/release.yml"
+  ],
+  "invariants": [
+    "No tag before CI is green; preserve unrelated worktree changes; release remains marked prerelease."
+  ],
+  "compatBoundary": "Cargo crate version remains 0.1.1; release identity is conveyed by the RC tag and GitHub prerelease flag.",
+  "nonGoals": [
+    "Do not redesign release automation or alter unrelated user changes."
+  ]
+}
