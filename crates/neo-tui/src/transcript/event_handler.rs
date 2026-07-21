@@ -734,12 +734,12 @@ impl TranscriptPane {
 
     fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
         self.upsert_tool(id, name.clone(), None, ToolStatusKind::Running);
-        let is_edit = name == "Edit";
+        let is_structured_mutation = matches!(name.as_str(), "Edit" | "Write");
         let details = partial_result.details.clone();
         let content = partial_result.content;
         if self.transcript.mutate_tool(id, |tool| {
             let mut changed = false;
-            if is_edit {
+            if is_structured_mutation {
                 if let Some(details) = details {
                     changed |= tool.set_live_details(details);
                 }

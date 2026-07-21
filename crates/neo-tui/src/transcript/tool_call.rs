@@ -218,8 +218,8 @@ impl ToolCallComponent {
     }
 
     pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) -> bool {
-        // Edit interruptions retain last structured progress details.
-        let clear_details = self.state.name != "Edit";
+        // Edit/Write interruptions retain last structured progress details.
+        let clear_details = self.state.name != "Edit" && self.state.name != "Write";
         let changed = self.state.result != result
             || (clear_details && self.state.details.is_some())
             || self.state.exit_code.is_some()

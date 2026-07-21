@@ -79,6 +79,7 @@ impl ApprovalPromptData {
             ApprovalPresentation::Command { title, .. }
             | ApprovalPresentation::Tool { title, .. }
             | ApprovalPresentation::Edit { title, .. }
+            | ApprovalPresentation::Write { title, .. }
             | ApprovalPresentation::Plan { title, .. }
             | ApprovalPresentation::Goal { title, .. } => title.as_str(),
         }
@@ -492,7 +493,8 @@ impl TranscriptEntry {
             self,
             Self::ApprovalPrompt(ApprovalPromptData {
                 request: ApprovalRequest {
-                    presentation: ApprovalPresentation::Edit { .. },
+                    presentation: ApprovalPresentation::Edit { .. }
+                        | ApprovalPresentation::Write { .. },
                     ..
                 },
                 ..
@@ -536,7 +538,10 @@ impl TranscriptEntry {
                 true
             }
             Self::ApprovalPrompt(data)
-                if matches!(data.request.presentation, ApprovalPresentation::Edit { .. }) =>
+                if matches!(
+                    data.request.presentation,
+                    ApprovalPresentation::Edit { .. } | ApprovalPresentation::Write { .. }
+                ) =>
             {
                 if data.expanded == expanded {
                     return false;
@@ -1049,6 +1054,13 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
             width,
             theme,
         ));
+    } else if let ApprovalPresentation::Write { write, .. } = &data.request.presentation {
+        rows.extend(super::write_tool_presentation::render_write_approval(
+            write,
+            data.expanded,
+            width,
+            theme,
+        ));
     } else {
         for detail in presentation_detail_lines(&data.request.presentation) {
             rows.extend(styled_wrap_with_indent(&detail, width, 2, 4, body));
@@ -1143,7 +1155,7 @@ fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String>
             lines
         }
         ApprovalPresentation::Tool { details, .. } => details.clone(),
-        ApprovalPresentation::Edit { .. } => Vec::new(),
+        ApprovalPresentation::Edit { .. } | ApprovalPresentation::Write { .. } => Vec::new(),
         ApprovalPresentation::Plan { summary, .. } => summary
             .as_ref()
             .filter(|s| !s.trim().is_empty())

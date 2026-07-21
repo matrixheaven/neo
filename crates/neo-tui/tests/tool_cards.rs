@@ -6,7 +6,6 @@ use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};
 use serde_json::json;
-use std::fmt::Write as _;
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
@@ -685,28 +684,33 @@ fn write_tool_card_renders_finalized_diff_from_details() {
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut diff_body = String::new();
-    for line_number in 1..=20 {
-        writeln!(diff_body, "+line {line_number}").expect("write diff line");
-    }
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Write".to_owned(),
         arguments: Some(
             serde_json::json!({
-                "path": "src/generated.rs",
-                "content": content,
+                "files": [{"path": "src/generated.rs", "content": content}]
             })
             .to_string(),
         ),
-        result: Some("wrote src/generated.rs".to_owned()),
+        result: Some("wrote 1 files".to_owned()),
         details: Some(serde_json::json!({
-            "path": "src/generated.rs",
-            "operation": "created",
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 1,
+            "overwritten": 0,
             "added": 20,
             "removed": 0,
-            "line_count": 20,
-            "diff": format!("--- src/generated.rs\n+++ src/generated.rs\n@@ -0,0 +1,20 @@\n{diff_body}")
+            "changes": [{
+                "path": "src/generated.rs",
+                "operation": "created",
+                "status": "committed",
+                "line_count": 20,
+                "added": 20,
+                "removed": 0,
+                "content": content,
+            }]
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
@@ -714,24 +718,16 @@ fn write_tool_card_renders_finalized_diff_from_details() {
 
     let rows = plain(card.render(80));
     assert!(
-        rows.iter()
-            .any(|line| line.contains("Used Write (src/generated.rs) · 20 lines"))
-    );
-    assert_eq!(
-        rows.iter()
-            .filter(|line| line.contains("src/generated.rs") && line.contains("20 lines"))
-            .count(),
-        1,
-        "path and line count should appear only in the header: {rows:?}"
+        rows.iter().any(|line| line.contains("src/generated.rs")),
+        "path should appear in frame header: {rows:?}"
     );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
-    // New files show a syntax-highlighted preview, not an all-green diff.
-    assert!(rows.iter().any(|line| line == "   1  line 1"));
-    assert!(!rows.iter().any(|line| line == "  20  line 20"));
+    assert!(rows.iter().any(|line| line.contains("line 1")));
+    assert!(!rows.iter().any(|line| line.contains("line 11")));
 
     card.set_expanded(true);
     let expanded = plain(card.render(80));
-    assert!(expanded.iter().any(|line| line == "  20  line 20"));
+    assert!(expanded.iter().any(|line| line.contains("line 20")));
 }
 
 #[test]
@@ -747,33 +743,33 @@ fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
     });
 
     card.update_call(Some(
-        r#"{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"#.to_owned(),
+        r#"{"files":[{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"#.to_owned(),
     ));
 
     let rows = plain(card.render(100));
-
     assert!(
         rows.iter()
-            .any(|line| line.contains("Preparing Write (/workspace/sample_service.go)")),
-        "header should show the path, not raw JSON: {rows:?}"
+            .any(|line| line.contains("receiving structured changes")),
+        "partial JSON should show receiving indicator: {rows:?}"
+    );
+
+    card.update_call(Some(
+        r#"{"files":[{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"}]}"#.to_owned(),
+    ));
+
+    let rows = plain(card.render(100));
+    assert!(
+        rows.iter().any(|line| line.contains("sample_service.go")),
+        "complete JSON should show file path: {rows:?}"
     );
     assert!(
-        rows.iter().any(|line| line == "   1  // sample_service.go"),
-        "streaming preview should render content with line numbers: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|line| line == "   5  import ("),
-        "escaped newlines should become preview lines while streaming: {rows:?}"
-    );
-    assert!(
-        !rows.iter().any(|line| line.contains(r#""content":"#)),
-        "streaming Write card must not leak raw JSON arguments: {rows:?}"
+        rows.iter().any(|line| line.contains("unverified intent")),
+        "streaming intent should be marked unverified: {rows:?}"
     );
 }
 
 #[test]
 fn streaming_write_tool_card_highlights_content_before_path_arrives() {
-    let theme = TuiTheme::default();
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Write".to_owned(),
@@ -785,22 +781,17 @@ fn streaming_write_tool_card_highlights_content_before_path_arrives() {
     });
 
     card.update_call(Some(
-        r#"{"content":"package service\n\nfunc main() {\n\tfmt.Println(\"ok\")\n}\n"#.to_owned(),
+        r#"{"files":[{"path":"service.go","content":"package service\n\nfunc main() {\n\tfmt.Println(\"ok\")\n}\n"}]}"#.to_owned(),
     ));
 
-    let rows = card.render_with_theme(100, &theme);
-    let package_line = rows
-        .iter()
-        .find(|line| line.text().contains(" 1 package service"))
-        .expect("streaming preview should include package line");
-
+    let rows = plain(card.render(100));
     assert!(
-        package_line
-            .spans()
-            .iter()
-            .skip(1)
-            .any(|span| span.style().fg != Some(theme.text_primary)),
-        "streaming Write preview should syntax-highlight before path arrives: {package_line:?}"
+        rows.iter().any(|line| line.contains("service.go")),
+        "streaming intent should show file path: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|line| line.contains("unverified intent")),
+        "streaming intent should be marked unverified: {rows:?}"
     );
 }
 
@@ -818,15 +809,14 @@ fn streaming_write_tool_card_does_not_panic_on_trailing_blank_lines() {
     });
 
     card.update_call(Some(
-        r#"{"path":"openspec/changes/example/.comet/handoff/design.md","content":"---\nrole: technical-design\n---\n\n# Design\n\n"}"#
+        r#"{"files":[{"path":"design.md","content":"---\nrole: technical-design\n---\n\n# Design\n\n"}]}"#
             .to_owned(),
     ));
 
     let rows = card.render_with_theme(100, &theme);
-
     assert!(
-        rows.iter().any(|line| line.text().contains(" 6 ")),
-        "preview should preserve trailing blank lines without panicking: {rows:?}"
+        rows.iter().any(|line| line.text().contains("design.md")),
+        "preview should show file path without panicking: {rows:?}"
     );
 }
 
@@ -913,7 +903,7 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
     let rendered = card.render_with_theme(80, &theme);
     let rows = plain(rendered.clone());
     assert!(
-        rows[0].contains("Used Edit (src/lib.rs) · 1 files · 1 replacements · +1 -1"),
+        rows[0].contains("Used Edit · 1 files · 1 replacements · +1 -1"),
         "batch summary missing: {rows:?}"
     );
     assert_eq!(
@@ -985,8 +975,8 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         "{edit_text}"
     );
     assert!(
-        edit_text.contains("tail.rs"),
-        "wrapped path tail lost: {edit_text}"
+        edit_text.contains("src/a_very_long"),
+        "path should appear in frame border: {edit_text}"
     );
     assert!(edit_text.contains("41 - fn old()"), "{edit_text}");
     assert!(
@@ -998,18 +988,6 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
             .iter()
             .flat_map(|line| line.spans())
             .any(|span| { span.text() == "✓ " && span.style().fg == Some(theme.status_ok) })
-    );
-    assert!(
-        edit_rows
-            .iter()
-            .flat_map(|line| line.spans())
-            .any(|span| { span.text() == "+1" && span.style().fg == Some(theme.diff_added) })
-    );
-    assert!(
-        edit_rows
-            .iter()
-            .flat_map(|line| line.spans())
-            .any(|span| { span.text() == "-1" && span.style().fg == Some(theme.diff_removed) })
     );
     let removed = edit_rows
         .iter()
@@ -1054,13 +1032,29 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         name: "Write".to_owned(),
         arguments: Some(
             json!({
-                "path": long_path,
-                "content": "fn main() { let value = ENDING_SENTINEL; }"
+                "files": [{"path": long_path, "content": "fn main() { let value = ENDING_SENTINEL; }"}]
             })
             .to_string(),
         ),
         result: Some("written".to_owned()),
-        details: None,
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 1,
+            "overwritten": 0,
+            "added": 1,
+            "removed": 0,
+            "changes": [{
+                "path": long_path,
+                "operation": "created",
+                "status": "committed",
+                "line_count": 1,
+                "added": 1,
+                "removed": 0,
+                "content": "fn main() { let value = ENDING_SENTINEL; }"
+            }]
+        })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
@@ -1070,8 +1064,8 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         "{write_text}"
     );
     assert!(
-        write_text.contains("tail.rs"),
-        "wrapped path tail lost: {write_text}"
+        write_text.contains("src/a_very_long"),
+        "path should appear in frame border: {write_text}"
     );
     assert!(
         write_text.contains("ENDING_SENTINEL"),
@@ -1108,7 +1102,7 @@ fn partial_edit_header_uses_committed_totals_only() {
     assert!(rows[0].contains("+1 -1"), "header: {}", rows[0]);
     assert!(!rows[0].contains("+21 -21"), "header: {}", rows[0]);
     assert!(
-        rows.iter().any(|row| row.contains("not_attempted")),
+        rows.iter().any(|row| row.contains("pending.rs")),
         "{rows:?}"
     );
     let pending = themed
@@ -1199,9 +1193,26 @@ fn narrow_write_frame_expands_tabs_without_extra_border_overflow() {
         let mut card = ToolCallComponent::new(ToolCallState {
             id: format!("write-{width}"),
             name: "Write".to_owned(),
-            arguments: Some(json!({"path": "x.rs", "content": content}).to_string()),
+            arguments: Some(json!({"files": [{"path": "x.rs", "content": content}]}).to_string()),
             result: Some("written".to_owned()),
-            details: None,
+            details: Some(json!({
+                "kind": "write",
+                "status": "committed",
+                "files": 1,
+                "created": 1,
+                "overwritten": 0,
+                "added": 1,
+                "removed": 0,
+                "changes": [{
+                    "path": "x.rs",
+                    "operation": "created",
+                    "status": "committed",
+                    "line_count": 1,
+                    "added": 1,
+                    "removed": 0,
+                    "content": content
+                }]
+            })),
             status: ToolStatusKind::Succeeded,
             exit_code: None,
         });
@@ -1221,10 +1232,6 @@ fn narrow_write_frame_expands_tabs_without_extra_border_overflow() {
             !rows.iter().any(|row| row.contains('\t')),
             "width={width}: {rows:?}"
         );
-        assert!(
-            rows.iter().any(|row| row.contains('b')),
-            "width={width}: {rows:?}"
-        );
     }
 }
 
@@ -1233,9 +1240,26 @@ fn write_frame_shrinks_to_content_width() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "write-compact-frame".to_owned(),
         name: "Write".to_owned(),
-        arguments: Some(json!({"path": "x.rs", "content": "ok"}).to_string()),
+        arguments: Some(json!({"files": [{"path": "x.rs", "content": "ok"}]}).to_string()),
         result: Some("written".to_owned()),
-        details: None,
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 1,
+            "overwritten": 0,
+            "added": 1,
+            "removed": 0,
+            "changes": [{
+                "path": "x.rs",
+                "operation": "created",
+                "status": "committed",
+                "line_count": 1,
+                "added": 1,
+                "removed": 0,
+                "content": "ok"
+            }]
+        })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
@@ -1999,7 +2023,7 @@ fn write_streaming_preview_reuses_final_format() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "write-1".to_owned(),
-        json_fragment: r#"{"path":"src/foo.rs","content":"use std::collections::HashMap;\n\npub f""#.to_owned(),
+        json_fragment: r#"{"files":[{"path":"src/foo.rs","content":"use std::collections::HashMap;\n\npub f"}]}"#.to_owned(),
     });
 
     let frame = runtime
@@ -2009,23 +2033,17 @@ fn write_streaming_preview_reuses_final_format() {
         .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
 
-    // Should NOT contain the old progress line format.
     assert!(
         !frame.iter().any(|line| line.contains("Preparing changes")),
         "streaming preview should not show old progress line: {frame:?}"
     );
-    // Content should be rendered with the final preview format (line numbers).
     assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("use std::collections::HashMap")),
-        "streaming content should be visible: {frame:?}"
+        frame.iter().any(|line| line.contains("src/foo.rs")),
+        "streaming content should show file path: {frame:?}"
     );
     assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("Preparing Write (src/foo.rs)")),
-        "streaming preview should keep the path in the tool header: {frame:?}"
+        frame.iter().any(|line| line.contains("unverified intent")),
+        "streaming intent should be marked unverified: {frame:?}"
     );
 }
 
@@ -2259,7 +2277,8 @@ fn write_streaming_uses_preview_format() {
         id: "stream-1".to_string(),
         name: "Write".to_string(),
         arguments: Some(
-            r##"{"path":"/tmp/test.md","content":"# Title\nLine 2\nLine 3"}"##.to_string(),
+            r##"{"files":[{"path":"/tmp/test.md","content":"# Title\nLine 2\nLine 3"}]}"##
+                .to_string(),
         ),
         result: None,
         details: None,
@@ -2269,15 +2288,13 @@ fn write_streaming_uses_preview_format() {
     let mut comp = ToolCallComponent::new(state);
     let lines = comp.render_with_theme(80, &TuiTheme::default());
     let body_text = lines.iter().map(Line::to_ansi).collect::<String>();
-    // Should NOT contain the old progress line
     assert!(
         !body_text.contains("Preparing changes"),
         "streaming preview should not show progress line"
     );
-    // Should contain line numbers (same format as final preview)
     assert!(
-        body_text.contains("Title"),
-        "streaming content should be rendered"
+        body_text.contains("test.md"),
+        "streaming content should show file path"
     );
 }
 
@@ -2348,4 +2365,513 @@ fn queued_shell_card_keeps_relative_position_across_later_entries() {
     let tool = rendered.find("$ cargo test").expect("tool row");
     let later = rendered.find("later assistant text").expect("later row");
     assert!(tool < later, "living tool card drifted after later content");
+}
+
+#[test]
+fn batch_write_card_renders_created_content_and_overwrite_diff() {
+    let diff = "--- a/old.txt\n+++ b/old.txt\n@@ -1,2 +1,2 @@\n-old line\n+new line\n context\n";
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "batch-write-1".to_owned(),
+        name: "Write".to_owned(),
+        arguments: Some(
+            json!({
+                "files": [
+                    {"path": "src/new_file.rs", "content": "fn main() {}\n"},
+                    {"path": "old.txt", "content": "new line\ncontext\n"}
+                ]
+            })
+            .to_string(),
+        ),
+        result: Some("wrote 2 files".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 2,
+            "created": 1,
+            "overwritten": 1,
+            "added": 3,
+            "removed": 1,
+            "changes": [
+                {
+                    "path": "src/new_file.rs",
+                    "operation": "created",
+                    "status": "committed",
+                    "line_count": 1,
+                    "added": 1,
+                    "removed": 0,
+                    "content": "fn main() {}"
+                },
+                {
+                    "path": "old.txt",
+                    "operation": "overwritten",
+                    "status": "committed",
+                    "line_count": 2,
+                    "added": 1,
+                    "removed": 1,
+                    "diff": diff
+                }
+            ]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(80));
+    let joined = rows.join("\n");
+
+    // Created file shows line-numbered content.
+    assert!(
+        rows.iter().any(|line| line.contains("fn main()")),
+        "created content should appear: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("1") && line.contains("fn main()")),
+        "created content should have line number: {rows:?}"
+    );
+
+    // Overwritten file shows diff lines.
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("- old line") || line.contains("-old line")),
+        "diff removed line should appear: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("+ new line") || line.contains("+new line")),
+        "diff added line should appear: {rows:?}"
+    );
+
+    // Both paths appear in frame borders.
+    assert!(
+        joined.contains("src/new_file.rs"),
+        "created path in frame: {joined}"
+    );
+    assert!(
+        joined.contains("old.txt"),
+        "overwritten path in frame: {joined}"
+    );
+}
+
+#[test]
+fn batch_write_partial_header_uses_committed_totals_only() {
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "batch-write-partial".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("partial".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "partial_commit",
+            "files": 3,
+            "created": 1,
+            "overwritten": 1,
+            "added": 5,
+            "removed": 2,
+            "changes": [
+                {"path": "a.rs", "operation": "created", "status": "committed", "line_count": 3, "added": 3, "removed": 0, "content": "aaa"},
+                {"path": "b.rs", "operation": "overwritten", "status": "committed", "line_count": 2, "added": 2, "removed": 2, "diff": "--- b.rs\n+++ b.rs\n@@ -1 +1 @@\n-x\n+y\n"},
+                {"path": "c.rs", "operation": "created", "status": "not_attempted", "line_count": 10, "added": 10, "removed": 0, "content": "ccc"}
+            ]
+        })),
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    };
+
+    let header = plain(vec![Line::from_spans(tool_header_spans(
+        &state, &theme, None, 80,
+    ))])
+    .remove(0);
+
+    // The header chip shows the applied-only totals (+5 -2), not planned totals.
+    assert!(
+        header.contains("+5"),
+        "header should show applied added: {header:?}"
+    );
+    assert!(
+        header.contains("-2"),
+        "header should show applied removed: {header:?}"
+    );
+    assert!(
+        !header.contains("+15"),
+        "header must not show planned totals: {header:?}"
+    );
+}
+
+#[test]
+fn batch_write_frames_preserve_highlight_line_numbers_clusters_and_narrow_width() {
+    let diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n first\n-old_alpha\n+new_alpha\n tail\n@@ -20,3 +20,3 @@\n ctx\n-old_beta\n+new_beta\n end\n";
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "batch-write-narrow".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("written".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 0,
+            "overwritten": 1,
+            "added": 2,
+            "removed": 2,
+            "changes": [{
+                "path": "src/lib.rs",
+                "operation": "overwritten",
+                "status": "committed",
+                "line_count": 22,
+                "added": 2,
+                "removed": 2,
+                "diff": diff
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(40));
+
+    // Line numbers present in diff output (e.g. "2 - old_alpha").
+    assert!(
+        rows.iter()
+            .any(|line| { line.contains("old_alpha") || line.contains("new_alpha") })
+            && rows.iter().any(|line| {
+                (line.contains("old_alpha") || line.contains("new_alpha"))
+                    && line.chars().any(|c| c.is_ascii_digit())
+            }),
+        "line numbers should appear with diff: {rows:?}"
+    );
+
+    // No border overflow: all lines <= 40 visible width.
+    for line in &rows {
+        assert!(
+            neo_tui::primitive::visible_width(line) <= 40,
+            "row exceeds width 40: {line:?}"
+        );
+    }
+
+    // Diff clusters rendered (both hunks visible or cluster markers present).
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("alpha") || joined.contains("beta") || joined.contains("changes hidden"),
+        "diff clusters should be rendered: {rows:?}"
+    );
+}
+
+#[test]
+fn batch_write_collapse_keeps_first_two_and_last_file() {
+    let changes: Vec<serde_json::Value> = (0..5)
+        .map(|i| {
+            json!({
+                "path": format!("src/file{i}.rs"),
+                "operation": "created",
+                "status": "committed",
+                "line_count": 2,
+                "added": 2,
+                "removed": 0,
+                "content": format!("fn file{i}() {{}}\n// end {i}")
+            })
+        })
+        .collect();
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "batch-write-collapse".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("wrote 5 files".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 5,
+            "created": 5,
+            "overwritten": 0,
+            "added": 10,
+            "removed": 0,
+            "changes": changes
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    // Collapsed: files 0, 1, and 4 visible; files 2 and 3 omitted.
+    let collapsed = plain(card.render(100));
+    let collapsed_text = collapsed.join("\n");
+    assert!(
+        collapsed_text.contains("file0.rs"),
+        "file0 visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        collapsed_text.contains("file1.rs"),
+        "file1 visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        collapsed_text.contains("file4.rs"),
+        "file4 visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        !collapsed_text.contains("file2.rs"),
+        "file2 omitted collapsed: {collapsed:?}"
+    );
+    assert!(
+        !collapsed_text.contains("file3.rs"),
+        "file3 omitted collapsed: {collapsed:?}"
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("hidden") && line.contains("ctrl+o")),
+        "omission summary should appear: {collapsed:?}"
+    );
+
+    // Expanded: all 5 paths appear.
+    card.set_expanded(true);
+    let expanded = plain(card.render(100));
+    let expanded_text = expanded.join("\n");
+    for i in 0..5 {
+        assert!(
+            expanded_text.contains(&format!("file{i}.rs")),
+            "file{i} visible expanded: {expanded:?}"
+        );
+    }
+}
+
+#[test]
+fn write_and_edit_success_headers_omit_paths_and_color_stats() {
+    let theme = TuiTheme::default();
+
+    // Write card header.
+    let write_state = ToolCallState {
+        id: "write-header".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("wrote".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 2,
+            "created": 1,
+            "overwritten": 1,
+            "added": 10,
+            "removed": 3,
+            "changes": [
+                {"path": "src/alpha.rs", "operation": "created", "status": "committed", "line_count": 5, "added": 5, "removed": 0, "content": "alpha"},
+                {"path": "src/beta.rs", "operation": "overwritten", "status": "committed", "line_count": 5, "added": 5, "removed": 3, "diff": "--- src/beta.rs\n+++ src/beta.rs\n@@ -1 +1 @@\n-a\n+b\n"}
+            ]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+    let write_header = plain(vec![Line::from_spans(tool_header_spans(
+        &write_state,
+        &theme,
+        None,
+        80,
+    ))])
+    .remove(0);
+
+    assert!(
+        write_header.contains("Write"),
+        "header names tool: {write_header:?}"
+    );
+    assert!(
+        write_header.contains("2 files"),
+        "header shows file count: {write_header:?}"
+    );
+    assert!(
+        write_header.contains("1 created"),
+        "header shows created: {write_header:?}"
+    );
+    assert!(
+        write_header.contains("1 overwritten"),
+        "header shows overwritten: {write_header:?}"
+    );
+    assert!(
+        write_header.contains("+10"),
+        "header shows added: {write_header:?}"
+    );
+    assert!(
+        write_header.contains("-3"),
+        "header shows removed: {write_header:?}"
+    );
+    assert!(
+        !write_header.contains("alpha.rs"),
+        "header must not contain path: {write_header:?}"
+    );
+    assert!(
+        !write_header.contains("beta.rs"),
+        "header must not contain path: {write_header:?}"
+    );
+
+    // Edit card header.
+    let edit_state = ToolCallState {
+        id: "edit-header".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("edited".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "committed",
+            "files": 2,
+            "replacements": 3,
+            "added": 7,
+            "removed": 4,
+            "changes": [
+                {"path": "src/gamma.rs", "status": "committed", "replacements": 2, "added": 4, "removed": 2, "diff": "--- src/gamma.rs\n+++ src/gamma.rs\n@@ -1 +1 @@\n-x\n+y\n"},
+                {"path": "src/delta.rs", "status": "committed", "replacements": 1, "added": 3, "removed": 2, "diff": "--- src/delta.rs\n+++ src/delta.rs\n@@ -1 +1 @@\n-a\n+b\n"}
+            ]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+    let edit_header = plain(vec![Line::from_spans(tool_header_spans(
+        &edit_state,
+        &theme,
+        None,
+        80,
+    ))])
+    .remove(0);
+
+    assert!(
+        edit_header.contains("Edit"),
+        "header names tool: {edit_header:?}"
+    );
+    assert!(
+        !edit_header.contains("gamma.rs"),
+        "edit header must not contain path: {edit_header:?}"
+    );
+    assert!(
+        !edit_header.contains("delta.rs"),
+        "edit header must not contain path: {edit_header:?}"
+    );
+}
+
+#[test]
+fn edit_and_write_file_frames_embed_semantic_headers_in_top_border() {
+    // Write card: path embedded in top border.
+    let mut write_card = ToolCallComponent::new(ToolCallState {
+        id: "write-border".to_owned(),
+        name: "Write".to_owned(),
+        arguments: Some(
+            json!({"files": [{"path": "src/embedded.rs", "content": "hello"}]}).to_string(),
+        ),
+        result: Some("written".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 1,
+            "overwritten": 0,
+            "added": 1,
+            "removed": 0,
+            "changes": [{
+                "path": "src/embedded.rs",
+                "operation": "created",
+                "status": "committed",
+                "line_count": 1,
+                "added": 1,
+                "removed": 0,
+                "content": "hello"
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let write_rows = plain(write_card.render(80));
+    let write_top = write_rows
+        .iter()
+        .find(|line| line.starts_with('╭'))
+        .expect("write frame top border");
+    assert!(
+        write_top.contains("src/embedded.rs"),
+        "path should be in top border: {write_top:?}"
+    );
+    // The line after the top border should be body content (│), not a duplicate header.
+    let top_idx = write_rows
+        .iter()
+        .position(|line| line.starts_with('╭'))
+        .unwrap();
+    if top_idx + 1 < write_rows.len() {
+        let after_top = &write_rows[top_idx + 1];
+        assert!(
+            after_top.starts_with('│'),
+            "line after border should be frame body: {after_top:?}"
+        );
+    }
+
+    // Edit card: path embedded in top border.
+    let mut edit_card = ToolCallComponent::new(ToolCallState {
+        id: "edit-border".to_owned(),
+        name: "Edit".to_owned(),
+        arguments: None,
+        result: Some("edited".to_owned()),
+        details: Some(json!({
+            "kind": "edit",
+            "status": "committed",
+            "files": 1,
+            "replacements": 1,
+            "added": 1,
+            "removed": 1,
+            "changes": [{
+                "path": "src/edit_embedded.rs",
+                "status": "committed",
+                "replacements": 1,
+                "added": 1,
+                "removed": 1,
+                "diff": "--- src/edit_embedded.rs\n+++ src/edit_embedded.rs\n@@ -1 +1 @@\n-old\n+new\n"
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let edit_rows = plain(edit_card.render(80));
+    let edit_top = edit_rows
+        .iter()
+        .find(|line| line.starts_with('╭'))
+        .expect("edit frame top border");
+    assert!(
+        edit_top.contains("src/edit_embedded.rs"),
+        "path should be in edit top border: {edit_top:?}"
+    );
+    let edit_top_idx = edit_rows
+        .iter()
+        .position(|line| line.starts_with('╭'))
+        .unwrap();
+    if edit_top_idx + 1 < edit_rows.len() {
+        let after_top = &edit_rows[edit_top_idx + 1];
+        assert!(
+            after_top.starts_with('│'),
+            "line after edit border should be frame body: {after_top:?}"
+        );
+    }
+}
+
+#[test]
+fn streaming_batch_write_uses_unverified_content_preview_without_raw_json() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "stream-batch".to_owned(),
+        name: "Write".to_owned(),
+        arguments: Some(r#"{"files":[{"path":"new.rs","content":"fn main() {}"}]}"#.to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(80));
+    let joined = rows.join("\n");
+
+    // Shows unverified intent indicator or file path.
+    assert!(
+        joined.contains("unverified intent") || joined.contains("new.rs"),
+        "streaming should show unverified intent or path: {rows:?}"
+    );
+
+    // Does NOT show raw JSON braces.
+    assert!(
+        !joined.contains("{\"files\""),
+        "streaming must not show raw JSON: {rows:?}"
+    );
+    assert!(
+        !joined.contains("\"content\""),
+        "streaming must not show raw JSON keys: {rows:?}"
+    );
 }

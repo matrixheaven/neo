@@ -1,17 +1,17 @@
-//! Pure structured Edit tool presentation.
+//! Pure structured Write tool presentation.
 
-use crate::diff_model::{DiffLine, DiffModel};
+use crate::diff_model::DiffModel;
 use crate::markdown::{highlight_code_lines, wrap_spans};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Line, Span, Style};
+use crate::primitive::{Line, Span, Style};
 use crate::shell::ToolStatusKind;
-use neo_agent_core::EditApprovalPresentation;
+use neo_agent_core::WriteApprovalPresentation;
 use serde_json::Value;
 
 use super::tool_renderers::{expand_tabs, framed_content_width, hard_wrap_line, render_code_frame};
 
 #[derive(Debug, Clone, Copy)]
-pub struct EditRenderInput<'a> {
+pub struct WriteRenderInput<'a> {
     pub status: ToolStatusKind,
     pub arguments: Option<&'a str>,
     pub details: Option<&'a Value>,
@@ -22,7 +22,7 @@ pub struct EditRenderInput<'a> {
 }
 
 #[must_use]
-pub fn render_edit_body(input: EditRenderInput<'_>) -> Vec<Line> {
+pub fn render_write_body_structured(input: WriteRenderInput<'_>) -> Vec<Line> {
     let kind = input
         .details
         .and_then(|details| details.get("kind"))
@@ -30,14 +30,14 @@ pub fn render_edit_body(input: EditRenderInput<'_>) -> Vec<Line> {
     if matches!(
         input.status,
         ToolStatusKind::Failed | ToolStatusKind::Cancelled
-    ) && matches!(kind, Some("edit_progress" | "edit_prepared"))
+    ) && matches!(kind, Some("write_progress" | "write_prepared"))
     {
         return render_interrupted(input);
     }
 
     if let Some(details) = input.details {
         match kind {
-            Some("edit_prepared") => {
+            Some("write_prepared") => {
                 return render_prepared_or_committed(
                     details,
                     input.expanded,
@@ -46,10 +46,10 @@ pub fn render_edit_body(input: EditRenderInput<'_>) -> Vec<Line> {
                     false,
                 );
             }
-            Some("edit_progress") => {
+            Some("write_progress") => {
                 return render_progress(details, input.width, input.theme);
             }
-            Some("edit") => {
+            Some("write") => {
                 let status = details.get("status").and_then(Value::as_str).unwrap_or("");
                 return match status {
                     "committed" => render_prepared_or_committed(
@@ -134,17 +134,17 @@ pub fn render_edit_body(input: EditRenderInput<'_>) -> Vec<Line> {
 }
 
 #[must_use]
-pub fn render_edit_approval(
-    edit: &EditApprovalPresentation,
+pub fn render_write_approval(
+    write: &WriteApprovalPresentation,
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let details = serde_json::to_value(edit).unwrap_or_default();
-    render_prepared_or_committed(&details, expanded, width, theme, false)
+    let details = serde_json::to_value(write).unwrap_or_default();
+    render_approval_prepared(&details, expanded, width, theme)
 }
 
-fn render_interrupted(input: EditRenderInput<'_>) -> Vec<Line> {
+fn render_interrupted(input: WriteRenderInput<'_>) -> Vec<Line> {
     let warn = Style::default().fg(input.theme.status_warn);
     let muted = Style::default().fg(input.theme.text_muted);
     let mut rows = styled_wrapped(
@@ -189,33 +189,17 @@ fn render_streaming_or_intent(
         return styled_wrapped("receiving structured changes...", width, muted);
     }
 
-    let replacements = files
-        .iter()
-        .map(|file| {
-            file.get("replacements")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len)
-        })
-        .sum::<usize>();
     let mut rows = styled_wrapped(
-        &format!(
-            "{} files · {replacements} replacements · unverified intent",
-            files.len()
-        ),
+        &format!("{} files · unverified intent", files.len()),
         width,
         muted,
     );
     for file in &files {
         let path = file.get("path").and_then(Value::as_str).unwrap_or("?");
-        let count = file
-            .get("replacements")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
         rows.extend(render_code_frame(
             Line::from_spans(vec![
                 Span::styled("? ", muted),
                 Span::styled(path.to_owned(), Style::default().fg(theme.text_primary)),
-                Span::styled(format!(" · {count} replacements"), muted),
             ]),
             Vec::new(),
             width,
@@ -256,8 +240,36 @@ fn render_prepared_or_committed(
             width,
             theme,
             committed.then_some("committed"),
-            true,
         ));
+    }
+    if let Some(start) = omitted_start {
+        rows.extend(render_omission(&changes[start..], width, theme));
+    }
+    rows
+}
+
+/// Approval presentation uses a `preview` sub-object with `operation` tag.
+fn render_approval_prepared(
+    details: &Value,
+    expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let mut rows = render_summary(details, width, theme, Some("verified".to_owned()));
+    let Some(changes) = details.get("changes").and_then(Value::as_array) else {
+        return rows;
+    };
+    let selected = select_change_indices(changes.len(), expanded);
+    let mut omitted_start = None;
+    for (index, change) in changes.iter().enumerate() {
+        if !selected.contains(&index) {
+            omitted_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = omitted_start.take() {
+            rows.extend(render_omission(&changes[start..index], width, theme));
+        }
+        rows.extend(render_approval_change_frame(change, expanded, width, theme));
     }
     if let Some(start) = omitted_start {
         rows.extend(render_omission(&changes[start..], width, theme));
@@ -316,22 +328,10 @@ fn render_terminal_changes(
     ));
     if let Some(changes) = details.get("changes").and_then(Value::as_array) {
         for change in changes {
-            let status = change
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let show_diff = matches!(status, "committed" | "committed_unsynced");
-            rows.extend(render_change_frame(
-                change,
-                expanded,
-                width,
-                theme,
-                Some(status),
-                show_diff,
-            ));
+            rows.extend(render_change_frame(change, expanded, width, theme, None));
         }
     }
-    rows
+    render_created_directories(details, width, theme, rows)
 }
 
 fn render_failure(
@@ -361,10 +361,32 @@ fn render_failure(
         ));
     }
     rows.extend(styled_wrapped(
-        "Re-read affected files and submit a new Edit call.",
+        "Re-read affected files and submit a new Write call.",
         width,
         muted,
     ));
+    render_created_directories(details, width, theme, rows)
+}
+
+fn render_created_directories(
+    details: &Value,
+    width: usize,
+    theme: &TuiTheme,
+    mut rows: Vec<Line>,
+) -> Vec<Line> {
+    if let Some(dirs) = details
+        .get("created_directories")
+        .and_then(Value::as_array)
+        .filter(|dirs| !dirs.is_empty())
+    {
+        let muted = Style::default().fg(theme.text_muted);
+        rows.extend(styled_wrapped("created directories:", width, muted));
+        for dir in dirs {
+            if let Some(path) = dir.as_str() {
+                rows.extend(styled_wrapped(&format!("  {path}"), width, muted));
+            }
+        }
+    }
     rows
 }
 
@@ -379,8 +401,9 @@ fn render_summary(
         .or_else(|| details.get("total"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let replacements = details
-        .get("replacements")
+    let created = details.get("created").and_then(Value::as_u64).unwrap_or(0);
+    let overwritten = details
+        .get("overwritten")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let added = details.get("added").and_then(Value::as_u64).unwrap_or(0);
@@ -394,7 +417,7 @@ fn render_summary(
     }
     spans.extend([
         Span::styled(
-            format!("{files} files · {replacements} replacements · "),
+            format!("{files} files · {created} created · {overwritten} overwritten · "),
             Style::default().fg(theme.text_muted),
         ),
         Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
@@ -429,22 +452,35 @@ fn render_change_frame(
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
-    status: Option<&str>,
-    show_diff: bool,
+    override_status: Option<&str>,
 ) -> Vec<Line> {
     let path = change.get("path").and_then(Value::as_str).unwrap_or("?");
+    let operation = change
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("created");
     let added = change.get("added").and_then(Value::as_u64).unwrap_or(0);
     let removed = change.get("removed").and_then(Value::as_u64).unwrap_or(0);
-    let (marker, marker_color) = match status {
+    let status = override_status.map(str::to_owned).or_else(|| {
+        change
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+
+    let (marker, marker_color) = match status.as_deref() {
         Some("committed") => ("✓", theme.status_ok),
         Some("committed_unsynced") => ("✓", theme.status_warn),
         Some("failed") => ("✗", theme.status_error),
         Some("not_attempted") => ("·", theme.text_muted),
         Some(_) => ("·", theme.text_muted),
+        None if operation == "created" => ("+", theme.status_ok),
         None => ("M", theme.diff_hunk),
     };
-    let applied_or_planned =
-        status.is_none() || matches!(status, Some("committed" | "committed_unsynced"));
+
+    let applied_or_planned = status
+        .as_deref()
+        .is_none_or(|s| matches!(s, "committed" | "committed_unsynced"));
     let added_style = if applied_or_planned {
         Style::default().fg(theme.diff_added)
     } else {
@@ -455,210 +491,183 @@ fn render_change_frame(
     } else {
         Style::default().fg(theme.text_muted)
     };
+
     let mut header = vec![
         Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
         Span::styled(
             path.to_owned(),
             Style::default().fg(theme.text_primary).bold(),
         ),
+        Span::styled(
+            format!(" · {operation}"),
+            Style::default().fg(theme.text_muted),
+        ),
         Span::styled("  ", Style::default()),
         Span::styled(format!("+{added}"), added_style),
         Span::styled(" ", Style::default()),
         Span::styled(format!("-{removed}"), removed_style),
     ];
-    if let Some(status) = status {
+    if let Some(status) = &status {
         header.push(Span::styled(
             format!(" · {status}"),
             Style::default().fg(marker_color),
         ));
     }
-    let body = if show_diff {
-        change
-            .get("diff")
-            .and_then(Value::as_str)
-            .and_then(DiffModel::parse_unified)
-            .map(|model| render_diff_preview(&model, path, expanded, width, theme))
-            .unwrap_or_default()
+
+    let show_body = applied_or_planned;
+    let body = if show_body {
+        render_change_body(change, operation, path, expanded, width, theme)
     } else {
         Vec::new()
     };
     render_code_frame(Line::from_spans(header), body, width, Some(theme))
 }
 
-pub(super) fn render_diff_preview_pub(
-    model: &DiffModel,
+fn render_change_body(
+    change: &Value,
+    operation: &str,
     path: &str,
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    render_diff_preview(model, path, expanded, width, theme)
+    match operation {
+        "created" => change
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|content| render_created_content(content, path, expanded, width, theme))
+            .unwrap_or_default(),
+        "overwritten" => change
+            .get("diff")
+            .and_then(Value::as_str)
+            .and_then(DiffModel::parse_unified)
+            .map(|model| {
+                super::edit_tool_presentation::render_diff_preview_pub(
+                    &model, path, expanded, width, theme,
+                )
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
-fn render_diff_preview(
-    model: &DiffModel,
+fn render_created_content(
+    content: &str,
     path: &str,
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let number_width = model
-        .files()
-        .iter()
-        .flat_map(|file| &file.hunks)
-        .map(|hunk| hunk.old_start.max(hunk.new_start) + hunk.lines.len())
-        .max()
-        .unwrap_or(1)
-        .to_string()
-        .len();
+    let content = expand_tabs(content);
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let limit = if expanded || total <= 10 { total } else { 10 };
     let content_width = framed_content_width(width);
-    let prefix_width = if width < 7 { 0 } else { number_width + 3 };
+    let highlighted = highlight_code_lines(&content, path, theme);
+    let number_width = total.to_string().len();
+    let prefix_width = if width < 7 {
+        0
+    } else {
+        (number_width + 2).min(content_width.saturating_sub(1))
+    };
     let code_width = content_width.saturating_sub(prefix_width).max(1);
-    let mut logical = Vec::new();
-
-    for file in model.files() {
-        for hunk in &file.hunks {
-            let source = hunk
-                .lines
-                .iter()
-                .map(|line| expand_tabs(diff_text(line)).into_owned())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let highlighted = highlight_code_lines(&source, path, theme);
-            let mut old_line = hunk.old_start;
-            let mut new_line = hunk.new_start;
-            for (index, line) in hunk.lines.iter().enumerate() {
-                let (line_number, sign, gutter_color) = match line {
-                    DiffLine::Context(_) => {
-                        let number = new_line;
-                        old_line += 1;
-                        new_line += 1;
-                        (number, ' ', theme.diff_context)
-                    }
-                    DiffLine::Added(_) => {
-                        let number = new_line;
-                        new_line += 1;
-                        (number, '+', theme.diff_added)
-                    }
-                    DiffLine::Removed(_) => {
-                        let number = old_line;
-                        old_line += 1;
-                        (number, '-', theme.diff_removed)
-                    }
-                };
-                let code = highlighted.get(index).cloned().unwrap_or_else(|| {
-                    vec![Span::styled(
-                        expand_tabs(diff_text(line)).into_owned(),
-                        Style::default().fg(theme.text_primary),
-                    )]
-                });
-                logical.push(LogicalDiffLine {
-                    line_number,
-                    sign,
-                    gutter_color,
-                    code,
-                });
-            }
-        }
-    }
-
-    let selected = select_diff_lines(&logical, expanded);
     let mut rows = Vec::new();
-    let mut omitted = 0usize;
-    for (index, line) in logical.iter().enumerate() {
-        if !selected[index] {
-            omitted += 1;
-            continue;
-        }
-        if omitted > 0 {
-            rows.push(diff_omission_line(omitted, theme));
-            omitted = 0;
-        }
-        for (visual_index, visual) in wrap_spans(&line.code, code_width).into_iter().enumerate() {
-            let mut spans = if visual_index == 0 && prefix_width > 0 {
-                vec![
-                    Span::styled(
-                        format!("{:>number_width$} ", line.line_number),
-                        Style::default().fg(line.gutter_color),
-                    ),
-                    Span::styled(
-                        format!("{} ", line.sign),
-                        Style::default().fg(line.gutter_color),
-                    ),
-                ]
+
+    for (index, line) in lines.iter().take(limit).enumerate() {
+        let code_spans = highlighted.get(index).cloned().unwrap_or_else(|| {
+            vec![Span::styled(
+                (*line).to_owned(),
+                Style::default().fg(theme.text_primary),
+            )]
+        });
+        for (visual_index, visual) in wrap_spans(&code_spans, code_width).into_iter().enumerate() {
+            let prefix = if prefix_width == 0 {
+                String::new()
+            } else if visual_index == 0 {
+                format!("{:>number_width$}  ", index + 1)
             } else {
-                vec![Span::raw(" ".repeat(prefix_width))]
+                " ".repeat(prefix_width)
             };
+            let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.text_muted))];
             spans.extend(visual);
             rows.push(Line::from_spans(spans));
         }
     }
-    if omitted > 0 {
-        rows.push(diff_omission_line(omitted, theme));
+    if limit < total {
+        rows.push(Line::styled(
+            format!(
+                "  ... ({} more lines, {total} total, ctrl+o to expand)",
+                total - limit
+            ),
+            Style::default().fg(theme.text_muted),
+        ));
     }
     rows
 }
 
-struct LogicalDiffLine {
-    line_number: usize,
-    sign: char,
-    gutter_color: Color,
-    code: Vec<Span>,
-}
+/// Approval changes use `preview.operation` + `preview.content`/`preview.diff`.
+fn render_approval_change_frame(
+    change: &Value,
+    expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let path = change.get("path").and_then(Value::as_str).unwrap_or("?");
+    let added = change.get("added").and_then(Value::as_u64).unwrap_or(0);
+    let removed = change.get("removed").and_then(Value::as_u64).unwrap_or(0);
+    let preview = change.get("preview");
+    let operation = preview
+        .and_then(|p| p.get("operation"))
+        .and_then(Value::as_str)
+        .unwrap_or("created");
 
-fn select_diff_lines(lines: &[LogicalDiffLine], expanded: bool) -> Vec<bool> {
-    if expanded {
-        return vec![true; lines.len()];
-    }
-    let changes = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| (line.sign != ' ').then_some(index))
-        .collect::<Vec<_>>();
-    let Some((&first, rest)) = changes.split_first() else {
-        return vec![true; lines.len()];
+    let (marker, marker_color) = if operation == "created" {
+        ("+", theme.status_ok)
+    } else {
+        ("M", theme.diff_hunk)
     };
-    let mut clusters = Vec::new();
-    let mut start = first;
-    let mut end = first;
-    for &index in rest {
-        if index.saturating_sub(end) <= 5 {
-            end = index;
-        } else {
-            clusters.push((start, end));
-            start = index;
-            end = index;
-        }
-    }
-    clusters.push((start, end));
 
-    let mut selected = vec![false; lines.len()];
-    for &(start, end) in [clusters.first(), clusters.last()].into_iter().flatten() {
-        let start = start.saturating_sub(2);
-        let end = (end + 2).min(lines.len().saturating_sub(1));
-        selected[start..=end].fill(true);
-    }
-    selected
-}
+    let header = vec![
+        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
+        Span::styled(
+            path.to_owned(),
+            Style::default().fg(theme.text_primary).bold(),
+        ),
+        Span::styled(
+            format!(" · {operation}"),
+            Style::default().fg(theme.text_muted),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            format!("-{removed}"),
+            Style::default().fg(theme.diff_removed),
+        ),
+    ];
 
-fn diff_omission_line(count: usize, theme: &TuiTheme) -> Line {
-    Line::styled(
-        format!("... {count} diff lines hidden · ctrl+o to expand"),
-        Style::default().fg(theme.text_muted),
-    )
-}
-
-fn diff_text(line: &DiffLine) -> &str {
-    match line {
-        DiffLine::Context(text) | DiffLine::Added(text) | DiffLine::Removed(text) => text,
-    }
+    let body = match operation {
+        "created" => preview
+            .and_then(|p| p.get("content"))
+            .and_then(Value::as_str)
+            .map(|content| render_created_content(content, path, expanded, width, theme))
+            .unwrap_or_default(),
+        "overwritten" => preview
+            .and_then(|p| p.get("diff"))
+            .and_then(Value::as_str)
+            .and_then(DiffModel::parse_unified)
+            .map(|model| {
+                super::edit_tool_presentation::render_diff_preview_pub(
+                    &model, path, expanded, width, theme,
+                )
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    render_code_frame(Line::from_spans(header), body, width, Some(theme))
 }
 
 fn render_omission(changes: &[Value], width: usize, theme: &TuiTheme) -> Vec<Line> {
-    let replacements = changes
-        .iter()
-        .filter_map(|change| change.get("replacements").and_then(Value::as_u64))
-        .sum::<u64>();
     let changed_lines = changes
         .iter()
         .map(|change| {
@@ -668,7 +677,7 @@ fn render_omission(changes: &[Value], width: usize, theme: &TuiTheme) -> Vec<Lin
         .sum::<u64>();
     styled_wrapped(
         &format!(
-            "... {} files · {replacements} replacements · {changed_lines} changed lines hidden · ctrl+o to expand",
+            "... {} files · {changed_lines} changed lines hidden · ctrl+o to expand",
             changes.len()
         ),
         width,

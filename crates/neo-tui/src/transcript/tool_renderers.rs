@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::markdown::{highlight_code_lines, lang_from_path, wrap_spans};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Style, clip_plain_to_width, truncate_width, visible_width};
 use crate::primitive::{Line, Span, Text};
@@ -14,7 +13,6 @@ use super::shell_tool_presentation;
 use super::tool_call::ToolCallState;
 
 const RESULT_PREVIEW_LINES: usize = 3;
-const COMMAND_PREVIEW_LINES: usize = 10;
 /// Maximum visible length of the key argument shown in a tool header.
 /// Borrowed from Kimi Code: the argument is capped so the closing `)` can
 /// always be rendered, regardless of terminal width.
@@ -66,11 +64,13 @@ pub fn tool_header_spans_with_elapsed(
     }
     if let Some(metadata) = shell_metadata {
         spans.extend(metadata);
-    } else if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
-        let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
-        spans.push(Span::styled(" (", Style::default().fg(meta_color)));
-        spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
-        spans.push(Span::styled(")", Style::default().fg(meta_color)));
+    } else if !is_structured_mutation_tool(state) {
+        if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
+            let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
+            spans.push(Span::styled(" (", Style::default().fg(meta_color)));
+            spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
+            spans.push(Span::styled(")", Style::default().fg(meta_color)));
+        }
     }
     if let Some(chip) = list_delegates_header_chip(state) {
         spans.push(Span::styled(
@@ -78,6 +78,8 @@ pub fn tool_header_spans_with_elapsed(
             Style::default().fg(meta_color),
         ));
     } else if let Some(chip) = edit_header_chip(state, theme) {
+        spans.extend(chip);
+    } else if let Some(chip) = write_header_chip(state, theme) {
         spans.extend(chip);
     } else {
         let chip = result_chip(state);
@@ -139,6 +141,64 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
             Style::default().fg(theme.diff_removed),
         ),
     ])
+}
+
+fn write_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>> {
+    let details = state.details.as_ref()?;
+    if state.name != "Write" {
+        return None;
+    }
+    let kind = details.get("kind").and_then(serde_json::Value::as_str);
+    if !matches!(kind, Some("write" | "write_progress")) {
+        return None;
+    }
+    let number = |key| {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let committed = state.status == ToolStatusKind::Succeeded
+        && kind == Some("write")
+        && details.get("status").and_then(serde_json::Value::as_str) == Some("committed");
+    if !committed {
+        return Some(vec![
+            Span::styled(" · ", Style::default().fg(theme.text_muted)),
+            Span::styled(
+                format!("+{}", number("added")),
+                Style::default().fg(theme.diff_added),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("-{}", number("removed")),
+                Style::default().fg(theme.diff_removed),
+            ),
+        ]);
+    }
+    Some(vec![
+        Span::styled(
+            format!(
+                " · {} files · {} created · {} overwritten · ",
+                number("files"),
+                number("created"),
+                number("overwritten")
+            ),
+            Style::default().fg(theme.text_muted),
+        ),
+        Span::styled(
+            format!("+{}", number("added")),
+            Style::default().fg(theme.diff_added),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("-{}", number("removed")),
+            Style::default().fg(theme.diff_removed),
+        ),
+    ])
+}
+
+fn is_structured_mutation_tool(state: &ToolCallState) -> bool {
+    matches!(state.name.as_str(), "Edit" | "Write") && state.details.is_some()
 }
 
 /// Render the semantic `WaitDelegate` header. `elapsed_secs` is intentionally
@@ -780,94 +840,20 @@ fn render_write_body(
     if state.name != "Write" {
         return None;
     }
-
-    let (path, content) = parse_write_arguments(state.arguments.as_deref())?;
-    Some(render_write_preview(
-        &path, &content, expanded, width, palette,
-    ))
-}
-
-fn render_write_preview(
-    path: &str,
-    content: &str,
-    expanded: bool,
-    width: usize,
-    palette: ToolBodyPalette<'_>,
-) -> Vec<Line> {
-    let content = expand_tabs(content);
-    let content = content.as_ref();
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-    let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
-    let mut rows = Vec::new();
-    let content_width = framed_content_width(width);
-
-    let highlight_path = highlight_path_for_write_preview(path, content);
-    let highlighted = palette
-        .theme
-        .and_then(|theme| {
-            highlight_path
-                .as_deref()
-                .map(|path| highlight_code_lines(content, path, theme))
-        })
-        .unwrap_or_default();
-    let use_highlight = !highlighted.is_empty() && highlight_path.is_some();
-
-    for (index, line) in lines.iter().take(limit).enumerate() {
-        let prefix_width = if width < 7 {
-            0
-        } else {
-            6.min(content_width.saturating_sub(1))
-        };
-        let code_width = content_width.saturating_sub(prefix_width).max(1);
-        let code_spans = if use_highlight {
-            highlighted.get(index).cloned().unwrap_or_default()
-        } else {
-            vec![Span::styled(
-                (*line).to_owned(),
-                palette.theme.map_or_else(Style::default, |theme| {
-                    Style::default().fg(theme.text_primary)
-                }),
-            )]
-        };
-        for (visual_index, visual) in wrap_spans(&code_spans, code_width).into_iter().enumerate() {
-            let prefix = if prefix_width == 0 {
-                String::new()
-            } else if visual_index == 0 {
-                format!("{:>4}  ", index + 1)
-            } else {
-                " ".repeat(prefix_width)
-            };
-            let mut spans = vec![Span::styled(
-                prefix,
-                palette.theme.map_or_else(Style::default, |theme| {
-                    Style::default().fg(theme.text_muted)
-                }),
-            )];
-            spans.extend(visual);
-            rows.push(Line::from_spans(spans));
-        }
-    }
-    if limit < total {
-        rows.push(palette.weak_line(format!(
-            "  ... ({} more lines, {total} total, ctrl+o to expand)",
-            total - limit
-        )));
-    }
-    let header = match palette.theme {
-        Some(theme) => Line::from_spans(vec![
-            Span::styled(
-                path.to_owned(),
-                Style::default().fg(theme.text_primary).bold(),
-            ),
-            Span::styled(
-                format!(" · {total} lines"),
-                Style::default().fg(theme.text_muted),
-            ),
-        ]),
-        None => Line::raw(format!("{path} · {total} lines")),
-    };
-    render_code_frame(header, rows, width, palette.theme)
+    let theme = palette.theme?;
+    Some(
+        super::write_tool_presentation::render_write_body_structured(
+            super::write_tool_presentation::WriteRenderInput {
+                status: state.status,
+                arguments: state.arguments.as_deref(),
+                details: state.details.as_ref(),
+                result: state.result.as_deref(),
+                expanded,
+                width,
+                theme,
+            },
+        ),
+    )
 }
 
 pub(super) fn framed_content_width(width: usize) -> usize {
@@ -879,6 +865,7 @@ pub(super) fn framed_content_width(width: usize) -> usize {
 }
 
 /// Content-width rounded frame shared by Edit and Write projections.
+/// The header is embedded in the top border: `╭─ header ───╮`.
 pub(super) fn render_code_frame(
     header: Line,
     body: Vec<Line>,
@@ -895,18 +882,23 @@ pub(super) fn render_code_frame(
     let border = theme.map_or_else(Style::default, |theme| {
         Style::default().fg(theme.surface_border)
     });
-    let wrapped = std::iter::once(header)
-        .chain(body)
-        .flat_map(|line| hard_wrap_line(&line, framed_content_width(width)))
+    let content_width = framed_content_width(width);
+    let wrapped = body
+        .into_iter()
+        .flat_map(|line| hard_wrap_line(&line, content_width))
         .collect::<Vec<_>>();
-    let inner = wrapped
-        .iter()
-        .map(Line::visible_width)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let horizontal = "─".repeat(inner + 2);
-    let mut rows = vec![Line::styled(format!("╭{horizontal}╮"), border)];
+    let body_max = wrapped.iter().map(Line::visible_width).max().unwrap_or(0);
+    let header_max = header.visible_width().min(content_width);
+    let inner = body_max.max(header_max).max(1);
+
+    let header_clipped = header.truncate_to_width(inner.saturating_sub(1));
+    let header_width = header_clipped.visible_width();
+    let fill = inner.saturating_sub(header_width + 1);
+    let mut top = vec![Span::styled("╭─ ", border)];
+    top.extend(header_clipped.into_spans());
+    top.push(Span::styled(format!(" {}╮", "─".repeat(fill)), border));
+    let mut rows = vec![Line::from_spans(top)];
+
     for line in wrapped {
         let padding = " ".repeat(inner.saturating_sub(line.visible_width()));
         let mut spans = vec![Span::styled("│ ", border)];
@@ -915,6 +907,7 @@ pub(super) fn render_code_frame(
         spans.push(Span::styled(" │", border));
         rows.push(Line::from_spans(spans));
     }
+    let horizontal = "─".repeat(inner + 2);
     rows.push(Line::styled(format!("╰{horizontal}╯"), border));
     rows
 }
@@ -969,56 +962,6 @@ pub(super) fn expand_tabs(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
-}
-
-fn highlight_path_for_write_preview<'a>(path: &'a str, content: &str) -> Option<Cow<'a, str>> {
-    if lang_from_path(path).is_some() {
-        return Some(Cow::Borrowed(path));
-    }
-    infer_live_content_path(content).map(Cow::Borrowed)
-}
-
-fn infer_live_content_path(content: &str) -> Option<&'static str> {
-    let mut saw_jsonish = false;
-    for line in content.lines().take(20).map(str::trim_start) {
-        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with("package ") || line.starts_with("func ") {
-            return Some("live.go");
-        }
-        if line.starts_with("use ")
-            || line.starts_with("pub ")
-            || line.starts_with("impl ")
-            || line.starts_with("fn ")
-        {
-            return Some("live.rs");
-        }
-        if line.starts_with("import ")
-            || line.starts_with("from ")
-            || line.starts_with("def ")
-            || line.starts_with("class ")
-        {
-            return Some("live.py");
-        }
-        if line.starts_with("const ")
-            || line.starts_with("let ")
-            || line.starts_with("function ")
-            || line.starts_with("export ")
-        {
-            return Some("live.ts");
-        }
-        if line.starts_with('{') || line.starts_with('[') {
-            saw_jsonish = true;
-        }
-        if line.starts_with("[package]") || line.contains(" = ") {
-            return Some("live.toml");
-        }
-        if line.contains(": ") && !line.ends_with('{') {
-            return Some("live.yaml");
-        }
-    }
-    saw_jsonish.then_some("live.json")
 }
 
 fn render_result_body(
@@ -1077,34 +1020,12 @@ pub(crate) const fn is_pending_or_running(status: ToolStatusKind) -> bool {
     matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
 }
 
-const fn preview_limit(total: usize, expanded: bool, collapsed_limit: usize) -> usize {
-    if expanded || total < collapsed_limit {
-        total
-    } else {
-        collapsed_limit
-    }
-}
-
 fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
     state.name == "TodoList" && state.status == ToolStatusKind::Succeeded
 }
 
 pub(crate) fn is_file_write_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit")
-}
-
-fn parse_write_arguments(arguments: Option<&str>) -> Option<(String, String)> {
-    let value = serde_json::from_str::<serde_json::Value>(arguments?).ok()?;
-    let path = string_field(&value, "path")?;
-    let content = string_field(&value, "content")?;
-    Some((path, content))
-}
-
-fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(std::borrow::ToOwned::to_owned)
 }
 
 /// Extract the key argument value and whether it came from a path-like key.
@@ -1222,19 +1143,6 @@ fn prefix_chars(s: &str, n: usize) -> String {
 }
 
 fn result_chip(state: &ToolCallState) -> String {
-    if state.name == "Write" {
-        if let Some(line_count) = state
-            .details
-            .as_ref()
-            .and_then(|details| details.get("line_count"))
-            .and_then(serde_json::Value::as_u64)
-        {
-            return format!(" · {line_count} lines");
-        }
-        if let Some((_, content)) = parse_write_arguments(state.arguments.as_deref()) {
-            return format!(" · {} lines", content.lines().count());
-        }
-    }
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
         return String::new();
     };
@@ -1253,9 +1161,8 @@ fn one_line(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Render a live preview while a tool's arguments are still streaming from the
-/// model. For Write, reuses the final `render_write_preview` format (with line
-/// numbers and syntax highlighting) so there is no format switch on completion.
-/// For Edit, shows only a brief progress line.
+/// model. Both Write and Edit delegate to their structured presentation modules
+/// which handle the streaming/intent case internally.
 #[must_use]
 pub fn render_streaming_preview(
     state: &ToolCallState,
@@ -1267,17 +1174,17 @@ pub fn render_streaming_preview(
     let args = state.arguments.as_deref().unwrap_or("");
 
     if state.name == "Write" {
-        let path = extract_partial_string_field(args, "path").unwrap_or_default();
-        let content = extract_partial_string_field(args, "content").unwrap_or_default();
-        if content.is_empty() {
-            return vec![Line::styled(
-                "  Waiting for content...",
-                Style::default().fg(theme.text_muted),
-            )];
-        }
-        // Reuse the final preview renderer for format consistency.
-        let palette = ToolBodyPalette::themed(theme);
-        return render_write_preview(&path, &content, expanded, width, palette);
+        return super::write_tool_presentation::render_write_body_structured(
+            super::write_tool_presentation::WriteRenderInput {
+                status: state.status,
+                arguments: Some(args),
+                details: state.details.as_ref(),
+                result: state.result.as_deref(),
+                expanded,
+                width,
+                theme,
+            },
+        );
     }
 
     if state.name == "Edit" {

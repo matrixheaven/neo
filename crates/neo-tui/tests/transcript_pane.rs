@@ -4,7 +4,8 @@ use neo_agent_core::instructions::{
 };
 use neo_agent_core::{
     ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
-    EditApprovalChange, EditApprovalPresentation, PermissionOperation,
+    EditApprovalChange, EditApprovalPresentation, PermissionOperation, WriteApprovalChange,
+    WriteApprovalPresentation, WriteApprovalPreview,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Finalization, strip_ansi, visible_width};
@@ -2954,4 +2955,74 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         !finished_text.contains(" remaining"),
         "remaining should hide after success: {finished_text}"
     );
+}
+
+fn write_request(id: &str, prefix: &str, files: usize) -> ApprovalRequest {
+    let changes = (0..files)
+        .map(|index| WriteApprovalChange {
+            path: PathBuf::from(format!("src/{prefix}_{index}.rs")),
+            line_count: 3,
+            added: 3,
+            removed: 0,
+            preview: WriteApprovalPreview::Created {
+                content: format!("fn {prefix}_{index}() {{}}\n// line 2\n// line 3\n"),
+            },
+        })
+        .collect();
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::FileWrite,
+        presentation: ApprovalPresentation::Write {
+            title: format!("Write {files} files?"),
+            write: WriteApprovalPresentation {
+                files,
+                created: files,
+                overwritten: 0,
+                added: files * 3,
+                removed: 0,
+                changes,
+            },
+        },
+        options: shell_options(),
+    }
+}
+
+#[test]
+fn batch_write_approval_follows_global_expansion() {
+    let mut pane = TranscriptPane::new(64, 80);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: write_request("write-1", "batch", 4),
+    });
+
+    // Collapsed: only first 2 + last file paths visible.
+    let collapsed = plain_frame(&mut pane, 64, 80);
+    assert!(
+        collapsed.iter().any(|line| line.contains("batch_0.rs")),
+        "first file visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        collapsed.iter().any(|line| line.contains("batch_1.rs")),
+        "second file visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        collapsed.iter().any(|line| line.contains("batch_3.rs")),
+        "last file visible collapsed: {collapsed:?}"
+    );
+    assert!(
+        !collapsed.iter().any(|line| line.contains("batch_2.rs")),
+        "middle file omitted collapsed: {collapsed:?}"
+    );
+
+    // Toggle global expansion.
+    pane.set_tool_output_expanded(true);
+    let expanded = plain_frame(&mut pane, 64, 80);
+    for index in 0..4 {
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains(&format!("batch_{index}.rs"))),
+            "file {index} visible expanded: {expanded:?}"
+        );
+    }
 }

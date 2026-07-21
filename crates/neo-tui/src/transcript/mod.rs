@@ -22,6 +22,7 @@ pub mod tool_call;
 pub mod tool_group;
 pub mod tool_renderers;
 mod workflow_card;
+mod write_tool_presentation;
 
 use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot};
 
