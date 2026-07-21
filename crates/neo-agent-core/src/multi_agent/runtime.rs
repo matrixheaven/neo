@@ -1516,7 +1516,7 @@ impl MultiAgentRuntime {
                 let summary = result
                     .details
                     .as_ref()
-                    .and_then(summarize_edit_details)
+                    .and_then(summarize_batch_tool_details)
                     .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
                 upsert_tool_activity(
                     &mut snapshot.activity,
@@ -1537,7 +1537,7 @@ impl MultiAgentRuntime {
                 let summary = partial_result
                     .details
                     .as_ref()
-                    .and_then(summarize_edit_details)
+                    .and_then(summarize_batch_tool_details)
                     .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
                 upsert_tool_activity(
                     &mut snapshot.activity,
@@ -2336,7 +2336,7 @@ fn apply_tool_activity_event(
             let summary = result
                 .details
                 .as_ref()
-                .and_then(summarize_edit_details)
+                .and_then(summarize_batch_tool_details)
                 .or_else(|| {
                     tool_args
                         .get(id)
@@ -2362,7 +2362,7 @@ fn apply_tool_activity_event(
             let summary = partial_result
                 .details
                 .as_ref()
-                .and_then(summarize_edit_details)
+                .and_then(summarize_batch_tool_details)
                 .or_else(|| {
                     tool_args
                         .get(id)
@@ -2697,6 +2697,9 @@ fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option
     if name == "Edit" {
         return summarize_edit_arguments(arguments);
     }
+    if name == "Write" {
+        return summarize_write_arguments(arguments);
+    }
     let starts_shell = name == "Bash"
         || (name == "Terminal"
             && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"));
@@ -2762,6 +2765,32 @@ fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
         "{} files · {} replacements · {path_part}",
         files.len(),
         replacements
+    )))
+}
+
+fn summarize_write_arguments(arguments: &serde_json::Value) -> Option<String> {
+    let files = arguments.get("files")?.as_array()?;
+    if files.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for file in files {
+        if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
+            paths.push(path);
+        }
+    }
+    let head = paths.first().copied().unwrap_or("?");
+    let tail = paths.last().copied().unwrap_or(head);
+    let path_part = if paths.len() <= 1 {
+        compact_line(head)
+    } else if paths.len() == 2 {
+        format!("{} · {}", compact_line(head), compact_line(tail))
+    } else {
+        format!("{} … {}", compact_line(head), compact_line(tail))
+    };
+    Some(bounded_edit_summary(format!(
+        "Write {} files · {path_part}",
+        files.len()
     )))
 }
 
@@ -2862,6 +2891,96 @@ fn summarize_edit_details(details: &serde_json::Value) -> Option<String> {
         _ => return None,
     };
     Some(bounded_edit_summary(summary))
+}
+
+fn summarize_write_details(details: &serde_json::Value) -> Option<String> {
+    let kind = details.get("kind")?.as_str()?;
+    let summary = match kind {
+        "write_prepared" => {
+            let files = details.get("files")?.as_u64()?;
+            let created = details
+                .get("created")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let overwritten = details
+                .get("overwritten")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let added = details
+                .get("added")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let removed = details
+                .get("removed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            format!(
+                "prepared · {files} files · {created} created · {overwritten} overwritten · +{added} -{removed}"
+            )
+        }
+        "write_progress" => {
+            let committed = details.get("committed")?.as_u64()?;
+            let total = details.get("total")?.as_u64()?;
+            let latest = details
+                .get("latest_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            format!("committing {committed}/{total} · {}", compact_line(latest))
+        }
+        "write" => {
+            let status = details.get("status")?.as_str()?;
+            let number = |key| {
+                details
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            let files = number("files");
+            let created = number("created");
+            let overwritten = number("overwritten");
+            let added = number("added");
+            let removed = number("removed");
+            let changes = details.get("changes").and_then(serde_json::Value::as_array);
+            let committed = changes.map_or(0, |changes| {
+                changes
+                    .iter()
+                    .filter(|change| {
+                        matches!(
+                            change.get("status").and_then(serde_json::Value::as_str),
+                            Some("committed" | "committed_unsynced")
+                        )
+                    })
+                    .count()
+            });
+            match status {
+                "committed" => {
+                    format!(
+                        "wrote {files} files · {created} created · {overwritten} overwritten · +{added} -{removed}"
+                    )
+                }
+                "prepare_failed" => "failed · zero writes".to_owned(),
+                "stale" => "failed · zero writes".to_owned(),
+                "cancelled" if committed == 0 => "failed · zero writes".to_owned(),
+                "cancelled" => format!("partial {committed}/{files} · +{added} -{removed}"),
+                "commit_failed" if committed == 0 => "failed · zero writes".to_owned(),
+                "commit_failed" => format!("partial {committed}/{files} · +{added} -{removed}"),
+                "partial_commit" => {
+                    format!("partial {committed}/{files} · +{added} -{removed}")
+                }
+                "durability_uncertain" => {
+                    format!("durability uncertain · {files} files")
+                }
+                other => other.to_owned(),
+            }
+        }
+        _ => return None,
+    };
+    Some(bounded_edit_summary(summary))
+}
+
+/// Combined dispatcher for structured batch-tool details (Edit and Write).
+fn summarize_batch_tool_details(details: &serde_json::Value) -> Option<String> {
+    summarize_edit_details(details).or_else(|| summarize_write_details(details))
 }
 
 fn bounded_edit_summary(summary: String) -> String {
@@ -3253,6 +3372,193 @@ mod tests {
         );
         // No execution attempt is recorded beyond the projected activity entry.
         assert_eq!(tool_args.len(), 0);
+    }
+
+    #[test]
+    fn write_tool_summary_prefers_structured_progress_and_terminal_partial() {
+        let mut activity = Vec::new();
+        let mut tool_args = HashMap::new();
+        let started = AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "w1".to_owned(),
+            name: "Write".to_owned(),
+            arguments: serde_json::json!({
+                "files": [
+                    {"path": "src/a.rs", "content": "fn main() {}"},
+                    {"path": "src/b.rs", "content": "pub fn b() {}"}
+                ]
+            }),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &started
+        ));
+        // Raw argument summary is available before structured details arrive.
+        let raw_summary = last_tool_summary(&activity, "w1").expect("raw summary");
+        assert!(raw_summary.contains("Write 2 files"), "{raw_summary}");
+
+        // Structured progress overrides raw argument summary.
+        let update = AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "w1".to_owned(),
+            name: "Write".to_owned(),
+            partial_result: ToolResult::ok("progress").with_details(serde_json::json!({
+                "kind": "write_progress",
+                "committed": 1,
+                "total": 2,
+                "latest_path": "src/a.rs",
+                "latest_operation": "created",
+                "added": 1,
+                "removed": 0
+            })),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &update
+        ));
+        let progress_summary = last_tool_summary(&activity, "w1").expect("progress summary");
+        assert!(
+            progress_summary.contains("committing 1/2"),
+            "{progress_summary}"
+        );
+        assert!(progress_summary.contains("src/a.rs"), "{progress_summary}");
+
+        // Terminal partial_commit overrides both raw and progress summaries.
+        let finished = AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "w1".to_owned(),
+            name: "Write".to_owned(),
+            result: ToolResult::error("partial").with_details(serde_json::json!({
+                "kind": "write",
+                "status": "partial_commit",
+                "files": 2,
+                "created": 1,
+                "overwritten": 1,
+                "added": 1,
+                "removed": 0,
+                "changes": [
+                    {"path": "src/a.rs", "status": "committed"},
+                    {"path": "src/b.rs", "status": "not_attempted"}
+                ]
+            })),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &finished
+        ));
+        let final_summary = last_tool_summary(&activity, "w1").expect("final summary");
+        assert!(final_summary.contains("partial 1/2"), "{final_summary}");
+        assert!(final_summary.contains("+1 -0"), "{final_summary}");
+    }
+
+    #[test]
+    fn live_write_summary_is_bounded_without_content() {
+        let runtime = MultiAgentRuntime::new();
+        let child = runtime.start_foreground_delegate_for_test("write files");
+        let started_at = Instant::now();
+
+        // Large file contents in arguments must not leak into the summary.
+        let large_content = "x".repeat(10_000);
+        let started = AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "w-live".to_owned(),
+            name: "Write".to_owned(),
+            arguments: serde_json::json!({
+                "files": [
+                    {"path": "src/first.rs", "content": large_content},
+                    {"path": "src/middle.rs", "content": large_content},
+                    {"path": "src/last.rs", "content": large_content}
+                ]
+            }),
+        };
+        runtime
+            .apply_child_event(&child.id, started_at, &started)
+            .expect("started update");
+        let snapshot = runtime.agent_snapshot(child.id.as_str()).expect("snapshot");
+        let summary = last_tool_summary(&snapshot.activity, "w-live").expect("summary");
+
+        // Summary must not contain any file content.
+        assert!(!summary.contains("xxx"), "{summary}");
+        assert!(summary.contains("Write 3 files"), "{summary}");
+        assert!(summary.contains("src/first.rs"), "{summary}");
+        assert!(summary.contains("src/last.rs"), "{summary}");
+        // Summary must be within the 160-char bound.
+        assert!(summary.chars().count() <= 160, "{summary}");
+
+        // Structured committed result also stays bounded.
+        let finished = AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "w-live".to_owned(),
+            name: "Write".to_owned(),
+            result: ToolResult::ok("wrote 3 files").with_details(serde_json::json!({
+                "kind": "write",
+                "status": "committed",
+                "files": 3,
+                "created": 2,
+                "overwritten": 1,
+                "added": 300,
+                "removed": 50,
+                "changes": [
+                    {"path": "src/first.rs", "status": "committed"},
+                    {"path": "src/middle.rs", "status": "committed"},
+                    {"path": "src/last.rs", "status": "committed"}
+                ]
+            })),
+        };
+        runtime
+            .apply_child_event(&child.id, started_at, &finished)
+            .expect("finished update");
+        let final_snapshot = runtime
+            .agent_snapshot(child.id.as_str())
+            .expect("final snapshot");
+        let final_summary =
+            last_tool_summary(&final_snapshot.activity, "w-live").expect("final summary");
+        assert!(final_summary.contains("wrote 3 files"), "{final_summary}");
+        assert!(final_summary.contains("2 created"), "{final_summary}");
+        assert!(final_summary.chars().count() <= 160, "{final_summary}");
+    }
+
+    #[test]
+    fn replayed_unfinished_write_is_interrupted_and_not_resumed() {
+        // Replay projects unfinished Write progress as a terminal interrupted card
+        // without re-submitting PreparedWrite to runtime. Activity summary alone
+        // never starts commit.
+        let mut activity = Vec::new();
+        let mut tool_args = HashMap::new();
+        let update = AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "w2".to_owned(),
+            name: "Write".to_owned(),
+            partial_result: ToolResult::ok("progress").with_details(serde_json::json!({
+                "kind": "write_progress",
+                "committed": 1,
+                "total": 3,
+                "latest_path": "src/lib.rs",
+                "latest_operation": "overwritten",
+                "added": 10,
+                "removed": 5
+            })),
+        };
+        assert!(apply_tool_activity_event(
+            &mut activity,
+            &mut tool_args,
+            &update
+        ));
+        assert!(
+            activity.iter().all(|entry| match &entry.kind {
+                AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
+                _ => true,
+            }),
+            "progress alone must not invent a completed commit"
+        );
+        // No execution attempt is recorded beyond the projected activity entry.
+        assert_eq!(tool_args.len(), 0);
+        // Summary reflects the interrupted progress, not a terminal state.
+        let summary = last_tool_summary(&activity, "w2").expect("summary");
+        assert!(summary.contains("committing 1/3"), "{summary}");
     }
 
     #[test]

@@ -3311,3 +3311,81 @@ fn swarm_card_does_not_regress_cancelled_child_to_done() {
         "stale completed swarm must not replace cancelled child: {text}"
     );
 }
+
+#[test]
+fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
+    // A Write tool activity with structured batch summary renders in the same
+    // card layout as any other tool activity — same row structure, ordering,
+    // and expansion rules. Only the summary text content differs.
+    let mut snapshot = running_delegate();
+    snapshot.tool_count = 2;
+    snapshot.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("src/main.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                summary: Some("wrote 3 files · 2 created · 1 overwritten · +120 -30".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+            },
+        },
+    ];
+
+    let rows =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()));
+    let text = rows.join("\n");
+
+    // Header row is present with standard format.
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+    // Both tool activities render as "Used" rows (Done phase).
+    assert!(text.contains("Used Read"), "{text}");
+    assert!(text.contains("Used Write"), "{text}");
+    // Write summary text is visible in the card.
+    assert!(text.contains("wrote 3 files"), "{text}");
+    // Ordering: Read before Write (insertion order preserved).
+    let read_pos = rows
+        .iter()
+        .position(|l| l.contains("Used Read"))
+        .expect("read row");
+    let write_pos = rows
+        .iter()
+        .position(|l| l.contains("Used Write"))
+        .expect("write row");
+    assert!(
+        read_pos < write_pos,
+        "Read must appear before Write: {text}"
+    );
+    // Card is not expanded (no output preview for Write).
+    assert!(!text.contains("└"), "{text}");
+
+    // Verify ongoing Write with progress summary also renders correctly.
+    let mut ongoing_snapshot = running_delegate();
+    ongoing_snapshot.tool_count = 1;
+    ongoing_snapshot.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "write-2".to_owned(),
+            name: "Write".to_owned(),
+            summary: Some("committing 2/5 · src/lib.rs".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+        },
+    }];
+
+    let ongoing_text = plain(
+        DelegateCardComponent::new(ongoing_snapshot).render_with_theme(120, &TuiTheme::default()),
+    )
+    .join("\n");
+
+    // Ongoing tool uses "Using" marker.
+    assert!(ongoing_text.contains("Using Write"), "{ongoing_text}");
+    assert!(ongoing_text.contains("committing 2/5"), "{ongoing_text}");
+}

@@ -431,7 +431,7 @@ fn terminal_exit_finalizes_every_live_entry_variant() {
         store.push_tool_run(
             "tool-1",
             "Write",
-            Some(r#"{"path":"notes.txt"}"#.to_owned()),
+            Some(r#"{"files":[{"path":"notes.txt","content":"hello"}]}"#.to_owned()),
         );
         store.push_shell_run(ShellRunComponent::running("shell-1", "sleep 10"));
     }
