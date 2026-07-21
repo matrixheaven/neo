@@ -33,3 +33,11 @@ No evidence has been recorded yet.
 - Source: Windows target cargo check; Linux ARM64 cargo zigbuild release; two exact nextest filters; fmt and targeted Clippy
 - Summary: Windows target check exited 0; aarch64-unknown-linux-gnu release zigbuild exited 0; notification encoding and real PTY tests passed; fmt and both affected library Clippy checks exited 0.
 - Verifier: Codex fresh local execution
+
+## EvidenceBundleDraft
+
+- Artifact key: builtin-skill-refresh-race
+- Type: remote-log-and-test
+- Source: main CI run 29807598057; exact btw follow-up test; concurrent built-in extraction test
+- Summary: CI observed a truncated `.builtin/sub-skill/SKILL.md` during parallel refresh. The canonical writer now atomically creates or replaces each built-in file; both the original failing test and the new concurrency test pass.
+- Verifier: Codex root-cause review and fresh local execution

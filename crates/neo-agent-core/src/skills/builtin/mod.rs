@@ -1,9 +1,14 @@
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
-use crate::skills::{LoadedSkill, SkillManifest, SkillSource};
+use crate::{
+    session::atomic_file::{
+        AtomicWriteStatus, replace_existing_file_atomic_status, write_file_atomic_create_new,
+    },
+    skills::{LoadedSkill, SkillManifest, SkillSource},
+};
 
 const SUB_SKILL: &str = include_str!("sub-skill.md");
 const SELF_EVO: &str = include_str!("self-evo.md");
@@ -36,7 +41,7 @@ pub fn extract_builtin_skills(
         let skill_dir = builtin_dir.join(&skill.name);
         fs::create_dir_all(&skill_dir)?;
         let path = skill_dir.join("SKILL.md");
-        fs::write(&path, source)?;
+        refresh_builtin_file(&path, source.as_bytes())?;
     }
 
     // Discover extracted skills on disk. This is what the runtime will actually use.
@@ -46,6 +51,26 @@ pub fn extract_builtin_skills(
         .into_iter()
         .filter(|skill| !REMOVED_BUILTINS.contains(&skill.name.as_str()))
         .collect())
+}
+
+fn refresh_builtin_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let status = match fs::symlink_metadata(path) {
+        Ok(_) => replace_existing_file_atomic_status(path, content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match write_file_atomic_create_new(path, content) {
+                Ok(status) => Ok(status),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    replace_existing_file_atomic_status(path, content)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }?;
+    match status {
+        AtomicWriteStatus::Durable => Ok(()),
+        AtomicWriteStatus::CommittedUnsynced(error) => Err(error),
+    }
 }
 
 pub fn builtin_skills() -> Result<Vec<LoadedSkill>, BuiltinSkillError> {
@@ -80,4 +105,34 @@ fn prune_removed_builtins(builtin_dir: &Path) -> Result<(), BuiltinSkillError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_extraction_never_exposes_partial_skill_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join("skills");
+        extract_builtin_skills(&skills_dir).expect("seed built-ins");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let skills_dir = skills_dir.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..16 {
+                        extract_builtin_skills(&skills_dir).expect("extract built-ins");
+                    }
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+    }
 }

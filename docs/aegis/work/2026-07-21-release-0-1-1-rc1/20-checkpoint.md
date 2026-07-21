@@ -58,8 +58,9 @@
 - Marked the partial RC1 GitHub Release as prerelease and titled it as an incomplete build.
 - Fixed the Windows target dependency and removed the Linux ARM64 `xpty` linker incompatibility.
 - Verified Windows target compilation, Linux ARM64 release linking, notification encoding, and real PTY operation locally.
+- Fixed the main CI skill refresh race after run 29807598057 exposed a partially written built-in skill.
 - Evidence refs:
-- release run 29805672416; local-windows-target-check; local-linux-arm64-zigbuild; targeted-release-repair-tests
+- release run 29805672416; main CI run 29807598057; local-windows-target-check; local-linux-arm64-zigbuild; targeted-release-repair-tests
 - Blocked on: none
 - Next step: Commit and push the repair and RC2 notes, wait for exact-head main CI, then create the immutable RC2 tag.
 
