@@ -9,7 +9,7 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 | Tool | Purpose |
 | --- | --- |
 | `Read` | Read a UTF-8 text file, with support for paginated reading by line offset. |
-| `Write` | Create or fully overwrite a UTF-8 file inside the workspace. |
+| `Write` | Create or fully overwrite UTF-8 files inside the workspace via `files[]` (each with `path` and `content`). Prepares the whole batch before any write, approves a verified projection in Ask mode, commits files atomically in declaration order, and reports partial commits truthfully. Existing targets must be UTF-8 regular files (rejects binary, symlink, directory). No-op overwrites (content unchanged) fail the whole batch. Legacy top-level `path`/`content` is not accepted. |
 | `Edit` | Apply ordered exact replacements across existing UTF-8 regular files via `files[]` / `replacements[]` / `expected_matches` (default 1). Prepares the whole batch before any write, approves a verified diff in Ask mode, commits files atomically in declaration order, and reports partial commits truthfully. Does not create files (use `Write`). Legacy top-level `path`/`old`/`new`/`replace_all` is not accepted. |
 | `List` | List directory contents as a two-level tree. |
 | `Glob` | Match file/directory paths by glob pattern, sorted by modification time. |
@@ -43,6 +43,36 @@ the next file from starting and never interrupts an in-progress atomic replace.
 parent-directory durability could not be confirmed. Re-read affected files and
 submit a fresh `Edit`; Neo never blindly retries or rolls back a partial batch.
 Use `Write` for file creation or full-file replacement.
+
+### Write staging and commit contract
+
+`Write` accepts `files[]` in declaration order. Each file contains `path` and
+`content`. Files that do not exist are created (missing parent directories are
+created during commit); existing files are completely overwritten.
+
+Before any write, Neo resolves every target, classifies each as created or
+overwritten, rejects non-UTF-8 existing files, symlinks, reparse points,
+directories, and no-op overwrites (content identical to current), deduplicates
+resolved targets, and builds the approval projection (line-numbered content for
+created files, unified diff for overwritten files). Any prepare error fails the
+whole call with zero writes and zero directory creation. In Ask mode the user
+approves that verified projection. Neo then rechecks every target fingerprint;
+a stale or appeared target before the first commit produces zero writes.
+
+Files commit in declaration order. Each file install is atomic (create-new or
+strict-replace), but the batch is not a cross-file transaction: after a file
+commits, a later stale check, I/O failure, durability failure, or cancellation
+does not roll it back. Structured results distinguish `committed`,
+`prepare_failed`, `stale`, `cancelled`, `commit_failed`, `partial_commit`, and
+`durability_uncertain`, with per-file `committed`, `committed_unsynced`,
+`failed`, or `not_attempted` states. Results report `created_directories` for
+any parent directories created during commit.
+
+Cancellation before the first commit writes nothing. During commit it prevents
+the next file from starting and never interrupts an in-progress atomic install.
+`durability_uncertain` means the requested contents were installed but
+parent-directory durability could not be confirmed. Re-read affected files and
+submit a fresh `Write`; Neo never blindly retries or rolls back a partial batch.
 
 ## Shell
 

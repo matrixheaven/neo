@@ -9,7 +9,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | 工具 | 用途 |
 | --- | --- |
 | `Read` | 读取 UTF-8 文本文件，支持按行偏移分页读取。 |
-| `Write` | 创建或完整覆盖写入工作区内 UTF-8 文件。 |
+| `Write` | 通过 `files[]`（每项含 `path` 和 `content`）创建或完整覆盖工作区内 UTF-8 文件。整批 prepare 后才写入，Ask 模式批准已验证投影，按声明顺序逐文件原子提交，并如实报告 partial commit。已有目标必须是 UTF-8 常规文件（拒绝二进制、符号链接、目录）。无变更覆盖（内容相同）导致整批失败。不接受旧版顶层 `path`/`content`。 |
 | `Edit` | 通过有序 `files[]` / `replacements[]` / `expected_matches`（默认 1）对已有 UTF-8 常规文件做精确替换。整批 prepare 后才写入，Ask 模式批准已验证 diff，按声明顺序逐文件原子提交，并如实报告 partial commit。不创建文件（用 `Write`）。不接受旧版顶层 `path`/`old`/`new`/`replace_all`。 |
 | `List` | 以两层树形列出目录内容。 |
 | `Glob` | 按 glob 模式匹配文件/目录路径，按修改时间排序。 |
@@ -38,6 +38,29 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 替换。`durability_uncertain` 表示请求内容已经安装，但无法确认父目录持久化。此时应重新
 读取受影响文件并发起新的 `Edit`；Neo 不会盲目重试或回滚部分批次。创建文件或完整替换
 文件请使用 `Write`。
+
+### Write 暂存与提交合同
+
+`Write` 按声明顺序接收 `files[]`。每个文件包含 `path` 和 `content`。不存在的文件
+将被创建（缺失的父目录在提交期间创建）；已有文件被完整覆盖。
+
+任何写入之前，Neo 会解析所有目标，将每个分类为 created 或 overwritten，拒绝非 UTF-8
+已有文件、符号链接、重解析点、目录以及无变更覆盖（内容与当前相同），去重已解析目标，
+并生成审批投影（created 文件显示带行号的内容，overwritten 文件显示 unified diff）。
+任一 prepare 错误都会让整次调用以零写入、零目录创建失败。Ask 模式中，用户批准的是这份
+已验证投影。随后 Neo 重新检查每个目标的指纹；首次提交前发现 stale 或已出现的目标同样
+是零写入。
+
+文件按声明顺序提交。每个文件的安装是原子的（create-new 或 strict-replace），但整批
+不是跨文件事务：一个文件提交后，后续 stale、I/O 失败、持久性失败或取消都不会回滚它。
+结构化结果区分 `committed`、`prepare_failed`、`stale`、`cancelled`、
+`commit_failed`、`partial_commit` 与 `durability_uncertain`；逐文件状态为
+`committed`、`committed_unsynced`、`failed` 或 `not_attempted`。结果报告提交期间
+创建的 `created_directories`。
+
+首次提交前取消保证零写入。提交期间的取消只阻止下一个文件开始，不会中断正在进行的原子
+安装。`durability_uncertain` 表示请求内容已经安装，但无法确认父目录持久化。此时应
+重新读取受影响文件并发起新的 `Write`；Neo 不会盲目重试或回滚部分批次。
 
 ## Shell
 
