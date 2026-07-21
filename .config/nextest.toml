@@ -11,7 +11,7 @@ slow-timeout = { period = "20s", terminate-after = 2 }
 shell-guardian = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = "binary(shell_admission_runtime) | binary(tool_bash_guardian) | binary(tool_terminal_guardian) | binary(runtime_turn) | binary(tool_bash)"
+filter = "binary(process_guard) | binary(shell_admission_runtime) | binary(tool_bash_guardian) | binary(tool_terminal_guardian) | binary(runtime_turn) | binary(tool_bash)"
 test-group = "shell-guardian"
 
 [[profile.default.overrides]]

@@ -132,7 +132,7 @@ async fn process_guard_deadline_kills_tree_without_polling() {
             workspace.path(),
             "guard-deadline",
             "sleep 30 & echo $! > child.pid; wait",
-            100,
+            1_000,
             32,
             10_485_760,
         ))
