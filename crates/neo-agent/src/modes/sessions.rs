@@ -363,6 +363,17 @@ fn format_message(message: &AgentMessage) -> String {
     format!("{role}: {text}")
 }
 
+fn message_role(message: &AgentMessage) -> &'static str {
+    match message {
+        AgentMessage::System { .. } => "system",
+        AgentMessage::Instruction { .. } => "instruction",
+        AgentMessage::User { .. } => "user",
+        AgentMessage::Assistant { .. } => "assistant",
+        AgentMessage::ToolResult { .. } => "tool",
+        AgentMessage::ShellCommand { .. } => "shell",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,16 +392,5 @@ mod tests {
             render_messages_html("session".to_owned(), &[message]).expect("render transcript html");
         assert!(html.contains("review @[main.rs]"), "{html}");
         assert!(!html.contains("snapshot"), "{html}");
-    }
-}
-
-fn message_role(message: &AgentMessage) -> &'static str {
-    match message {
-        AgentMessage::System { .. } => "system",
-        AgentMessage::Instruction { .. } => "instruction",
-        AgentMessage::User { .. } => "user",
-        AgentMessage::Assistant { .. } => "assistant",
-        AgentMessage::ToolResult { .. } => "tool",
-        AgentMessage::ShellCommand { .. } => "shell",
     }
 }
