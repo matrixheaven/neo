@@ -617,6 +617,7 @@ impl InteractiveController {
             self.start_file_completion(prefix, false);
             return;
         }
+        self.refresh_skill_store_for_completion();
         let completions = match prompt_completions(
             &self.completion_root,
             &prefix.text,

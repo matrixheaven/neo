@@ -234,7 +234,7 @@ fn input_roles_without_system(request: &RecordedRequest) -> Vec<&str> {
         .iter()
         .filter_map(|message| {
             let role = message["role"].as_str().expect("role");
-            (role != "system").then_some(role)
+            (role != "system" && !is_skill_catalog_snapshot(message)).then_some(role)
         })
         .collect()
 }
@@ -242,9 +242,15 @@ fn input_roles_without_system(request: &RecordedRequest) -> Vec<&str> {
 fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
     input_messages(request)
         .iter()
-        .filter(|message| message["role"] == "user")
+        .filter(|message| message["role"] == "user" && !is_skill_catalog_snapshot(message))
         .map(|message| message["content"].as_str().expect("user content"))
         .collect()
+}
+
+fn is_skill_catalog_snapshot(message: &Value) -> bool {
+    message["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("<available_skills>"))
 }
 
 fn system_input_contents(request: &RecordedRequest) -> Vec<&str> {

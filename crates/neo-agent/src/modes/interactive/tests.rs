@@ -1629,8 +1629,10 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
             id: "write-1".to_owned(),
             name: "Write".to_owned(),
             arguments: serde_json::json!({
-                "path": "artifact.txt",
-                "content": content,
+                "files": [{
+                    "path": "artifact.txt",
+                    "content": content,
+                }],
             }),
         });
     controller.start_turn_with_prompt(Vec::new());
@@ -1667,7 +1669,8 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
     let (review_surface, first_after_ctrl_o) = rendered.get(1).expect("frame after ctrl-o");
     assert!(!*review_surface);
     assert!(first_after_ctrl_o.contains("Using Write"));
-    assert!(first_after_ctrl_o.contains("live-line-12"));
+    assert!(first_after_ctrl_o.contains("1 files · unverified intent"));
+    assert!(first_after_ctrl_o.contains("artifact.txt"));
     assert!(!first_after_ctrl_o.contains("Used Write"));
     assert!(controller.transcript().tool_output_expanded());
 }
@@ -11971,8 +11974,11 @@ async fn mcp_add_transport_opens_form() {
         "rendered frame should contain contextual form title: {joined}"
     );
     assert!(
-        joined.contains("▸ Name:") && joined.contains("Command:"),
-        "rendered frame should show Name and Command fields for stdio: {joined}"
+        joined.contains("▸ Name:")
+            && joined.contains("Program:")
+            && joined.contains("Arguments (JSON string per line):")
+            && joined.contains("Env:"),
+        "rendered frame should show stdio fields: {joined}"
     );
 }
 
@@ -12013,7 +12019,7 @@ async fn mcp_add_form_stdio_submits_to_config() {
         "form should be focused"
     );
 
-    // Fill Name, Command, and Env.
+    // Fill Name, Program, Arguments, and Env.
     controller
         .handle_input_event(InputEvent::Paste("fs".to_owned()))
         .await
@@ -12023,11 +12029,19 @@ async fn mcp_add_form_stdio_submits_to_config() {
         .await
         .expect("switch to command");
     controller
+        .handle_input_event(InputEvent::Paste("npx".to_owned()))
+        .await
+        .expect("type program");
+    controller
+        .handle_input_event(InputEvent::Insert('\t'))
+        .await
+        .expect("switch to arguments");
+    controller
         .handle_input_event(InputEvent::Paste(
-            "npx -y @server/filesystem /repo".to_owned(),
+            "\"-y\"\n\"@server/filesystem\"\n\"/repo\"".to_owned(),
         ))
         .await
-        .expect("type command");
+        .expect("type arguments");
     controller
         .handle_input_event(InputEvent::Insert('\t'))
         .await

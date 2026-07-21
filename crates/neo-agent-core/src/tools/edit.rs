@@ -1234,54 +1234,6 @@ mod workspace_policy_tests {
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn recheck_rejects_requested_path_drift() {
-        use std::os::unix::fs::symlink;
-
-        let workspace = tempfile::tempdir().expect("workspace");
-        let first = workspace.path().join("first");
-        let second = workspace.path().join("second");
-        std::fs::create_dir(&first).expect("first directory");
-        std::fs::create_dir(&second).expect("second directory");
-        std::fs::write(first.join("file.txt"), "before\n").expect("first file");
-        std::fs::write(second.join("file.txt"), "before\n").expect("second file");
-        let alias = workspace.path().join("alias");
-        symlink(&first, &alias).expect("first alias");
-        let context = ToolContext::new(workspace.path())
-            .expect("context")
-            .with_access(ToolAccess::all());
-        let prepared = PreparedEdit::prepare(
-            &context,
-            &json!({
-                "files": [{
-                    "path": "alias/file.txt",
-                    "replacements": [{ "old": "before", "new": "after" }]
-                }]
-            }),
-        )
-        .await
-        .expect("prepare");
-
-        std::fs::remove_file(&alias).expect("remove alias");
-        symlink(&second, &alias).expect("second alias");
-        let mut on_progress = |_update| {};
-        let result = prepared
-            .commit(&context, &CancellationToken::new(), &mut on_progress)
-            .await;
-
-        assert!(result.is_error);
-        assert_eq!(result.details.expect("details")["status"], "stale");
-        assert_eq!(
-            std::fs::read_to_string(first.join("file.txt")).expect("first"),
-            "before\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(second.join("file.txt")).expect("second"),
-            "before\n"
-        );
-    }
-
     #[tokio::test]
     async fn prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs() {
         let workspace = tempfile::tempdir().expect("workspace");

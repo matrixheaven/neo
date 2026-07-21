@@ -459,6 +459,8 @@ mod tests {
         state.handle_input(InputEvent::Insert('\t'));
         assert_eq!(state.active_field, 2);
         state.handle_input(InputEvent::Insert('\t'));
+        assert_eq!(state.active_field, 3);
+        state.handle_input(InputEvent::Insert('\t'));
         assert_eq!(state.active_field, 0);
     }
 

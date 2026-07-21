@@ -824,7 +824,12 @@ fn input_messages(request: &RecordedRequest) -> &[Value] {
 fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
     input_messages(request)
         .iter()
-        .filter(|message| message["role"] == "user")
+        .filter(|message| {
+            message["role"] == "user"
+                && !message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("<available_skills>"))
+        })
         .map(|message| message["content"].as_str().expect("user content"))
         .collect()
 }

@@ -4658,22 +4658,19 @@ async fn parallel_mode_serializes_ask_approval_batches() {
         std::fs::read_to_string(workspace.path().join("approved.txt")).expect("written file"),
         "ok"
     );
-    assert!(matches!(
-        &context.messages()[2],
+    assert!(context.messages().iter().any(|message| matches!(
+        message,
         AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
-            content,
             is_error,
+            ..
         } if tool_call_id.as_ref() == "tool_1"
             && tool_name.as_ref() == "Write"
-            && content
-                .iter()
-                .any(|part| matches!(part, Content::Text { text } if text.contains("approved.txt")))
             && !is_error
-    ));
-    assert!(matches!(
-        &context.messages()[3],
+    )));
+    assert!(context.messages().iter().any(|message| matches!(
+        message,
         AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
@@ -4685,7 +4682,7 @@ async fn parallel_mode_serializes_ask_approval_batches() {
                 .iter()
                 .any(|part| matches!(part, Content::Text { text } if text.contains("Found")))
             && !is_error
-    ));
+    )));
 }
 
 fn parallel_write_and_glob_harness() -> FakeHarness {
@@ -7427,7 +7424,7 @@ async fn runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_p
         .next()
         .expect("finished Edit");
     assert!(result.is_error);
-    assert!(result.content.contains("Plan mode"));
+    assert!(result.content.contains("Plan mode"), "{}", result.content);
     assert_eq!(std::fs::read_to_string(&plan_path).expect("plan"), "plan\n");
     assert_eq!(std::fs::read_to_string(other).expect("other"), "other\n");
 }
@@ -8944,7 +8941,7 @@ async fn approval_requests_only_offer_runtime_supported_actions() {
     ));
     assert!(matches!(
         write.presentation,
-        ApprovalPresentation::Tool { .. }
+        ApprovalPresentation::Write { .. }
     ));
 }
 

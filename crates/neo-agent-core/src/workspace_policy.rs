@@ -207,13 +207,16 @@ impl WorkspaceAccessPolicy {
 }
 
 fn reject_link_components(candidate: &Path, root: &Path) -> Result<(), WorkspaceAccessError> {
-    let relative =
-        candidate
-            .strip_prefix(root)
-            .map_err(|_| WorkspaceAccessError::PathOutsideWorkspace {
-                path: candidate.to_path_buf(),
-            })?;
-    let mut current = root.to_path_buf();
+    let lexical_root = candidate
+        .ancestors()
+        .find(|ancestor| ancestor.canonicalize().is_ok_and(|path| path == root))
+        .unwrap_or(root);
+    let relative = candidate.strip_prefix(lexical_root).map_err(|_| {
+        WorkspaceAccessError::PathOutsideWorkspace {
+            path: candidate.to_path_buf(),
+        }
+    })?;
+    let mut current = lexical_root.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
         match std::fs::symlink_metadata(&current) {
