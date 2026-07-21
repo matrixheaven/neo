@@ -22,7 +22,8 @@ use crate::session::atomic_file::{
 #[serde(deny_unknown_fields)]
 struct WriteInput {
     #[schemars(
-        description = "Ordered list of files to create or completely overwrite. Declaration order is the commit order."
+        description = "Ordered list of files to create or completely overwrite. Declaration order is the commit order.",
+        length(min = 1)
     )]
     files: Vec<WriteFileInput>,
 }
@@ -31,7 +32,8 @@ struct WriteInput {
 #[serde(deny_unknown_fields)]
 struct WriteFileInput {
     #[schemars(
-        description = "Path to the file to create or overwrite. Relative paths resolve against the working directory."
+        description = "Path to the file to create or overwrite. Relative paths resolve against the working directory.",
+        length(min = 1)
     )]
     path: PathBuf,
     #[schemars(
@@ -623,12 +625,15 @@ impl PreparedWrite {
                 for remaining in self.files.iter().skip(file_index) {
                     changes.push(header_change_json(remaining, "not_attempted"));
                 }
-                return ToolResult::error(format!(
+                let mut message = format!(
                     "Write cancelled after committing {committed_count}/{total} files. Committed content remains. Re-read remaining files before a fresh Write call."
-                )).with_details(json!({
+                );
+                append_created_directories(context, &mut message, &created_dirs);
+                return ToolResult::error(message.clone()).with_details(json!({
                     "kind": "write",
                     "status": "partial_commit",
                     "cause": "cancelled",
+                    "message": message,
                     "files": total,
                     "created": self.created,
                     "overwritten": self.overwritten,
@@ -644,25 +649,34 @@ impl PreparedWrite {
                     return result;
                 }
                 let details = result.details.clone().unwrap_or_else(|| json!({}));
-                changes.push(header_change_json(file, "failed"));
+                let diagnostic = details
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("target became stale before write")
+                    .to_owned();
+                changes.push(failed_change_json(file, &format!("stale: {diagnostic}")));
                 for remaining in self.files.iter().skip(file_index + 1) {
                     changes.push(header_change_json(remaining, "not_attempted"));
                 }
                 let path = file.requested_path.display().to_string();
-                return ToolResult::error(format!(
+                let mut message = format!(
                     "Write partial commit: {committed_count}/{total} files committed; \
                      {path} became stale before write. Already committed content remains. \
                      Re-read remaining files before a fresh Write call."
-                ))
-                .with_details(json!({
+                );
+                append_created_directories(context, &mut message, &created_dirs);
+                return ToolResult::error(message.clone()).with_details(json!({
                     "kind": "write",
                     "status": "partial_commit",
+                    "cause": "stale",
                     "files": total,
                     "created": self.created,
                     "overwritten": self.overwritten,
                     "added": cumulative_added,
                     "removed": cumulative_removed,
                     "failed_path": path,
+                    "file_index": file_index,
+                    "message": message,
                     "stale": details,
                     "created_directories": created_directories_json(context, &created_dirs),
                     "changes": changes,
@@ -701,19 +715,29 @@ impl PreparedWrite {
                     committed_count += 1;
                     cumulative_added += file.added;
                     cumulative_removed += file.removed;
-                    changes.push(installed_change_json(file, "committed_unsynced"));
+                    let diagnostic = format!("durability uncertain: {error}");
+                    changes.push(installed_change_json_with_message(
+                        file,
+                        "committed_unsynced",
+                        &diagnostic,
+                    ));
                     for remaining in self.files.iter().skip(file_index + 1) {
                         changes.push(header_change_json(remaining, "not_attempted"));
                     }
-                    return ToolResult::error(format!(
+                    let mut message = format!(
                         "Write durability uncertain after committing {committed_count}/{total} files. \
                          Contents of {} were installed but parent-directory durability is uncertain ({error}). \
                          Re-read files before a fresh Write call; do not blindly replay.",
                         file.requested_path.display()
-                    ))
-                    .with_details(json!({
+                    );
+                    append_created_directories(context, &mut message, &created_dirs);
+                    return ToolResult::error(message.clone()).with_details(json!({
                         "kind": "write",
                         "status": "durability_uncertain",
+                        "cause": "durability_uncertain",
+                        "file_index": file_index,
+                        "failed_path": file.requested_path.display().to_string(),
+                        "message": message,
                         "files": total,
                         "created": self.created,
                         "overwritten": self.overwritten,
@@ -724,7 +748,8 @@ impl PreparedWrite {
                     }));
                 }
                 Err(error) => {
-                    changes.push(header_change_json(file, "failed"));
+                    let diagnostic = format!("file install failed: {error}");
+                    changes.push(failed_change_json(file, &diagnostic));
                     for remaining in self.files.iter().skip(file_index + 1) {
                         changes.push(header_change_json(remaining, "not_attempted"));
                     }
@@ -734,7 +759,7 @@ impl PreparedWrite {
                     } else {
                         "partial_commit"
                     };
-                    let message = if zero {
+                    let mut message = if zero {
                         format!(
                             "Write failed before any durable write at {}: {error}. Zero files installed. \
                              Re-read the file and submit a fresh Write call.",
@@ -748,9 +773,14 @@ impl PreparedWrite {
                             file.requested_path.display()
                         )
                     };
-                    return ToolResult::error(message).with_details(json!({
+                    append_created_directories(context, &mut message, &created_dirs);
+                    return ToolResult::error(message.clone()).with_details(json!({
                         "kind": "write",
                         "status": status,
+                        "cause": "install_failed",
+                        "file_index": file_index,
+                        "failed_path": file.requested_path.display().to_string(),
+                        "message": diagnostic,
                         "files": total,
                         "created": self.created,
                         "overwritten": self.overwritten,
@@ -917,6 +947,22 @@ fn header_change_json(file: &PreparedWriteFile, status: &str) -> serde_json::Val
     })
 }
 
+fn failed_change_json(file: &PreparedWriteFile, message: &str) -> serde_json::Value {
+    let mut change = header_change_json(file, "failed");
+    change["message"] = json!(message);
+    change
+}
+
+fn installed_change_json_with_message(
+    file: &PreparedWriteFile,
+    status: &str,
+    message: &str,
+) -> serde_json::Value {
+    let mut change = installed_change_json(file, status);
+    change["message"] = json!(message);
+    change
+}
+
 /// Full change entry for installed files, including content or diff body.
 fn installed_change_json(file: &PreparedWriteFile, status: &str) -> serde_json::Value {
     let mut value = json!({
@@ -962,6 +1008,17 @@ fn created_directories_json(context: &ToolContext, dirs: &[PathBuf]) -> Vec<Stri
             _ => dir.display().to_string(),
         })
         .collect()
+}
+
+fn append_created_directories(context: &ToolContext, content: &mut String, dirs: &[PathBuf]) {
+    if dirs.is_empty() {
+        return;
+    }
+    content.push_str("\nCreated directories remain:");
+    for path in created_directories_json(context, dirs) {
+        content.push_str("\n  ");
+        content.push_str(&path);
+    }
 }
 
 fn absolute_candidate(context: &ToolContext, path: &Path) -> PathBuf {
@@ -1219,6 +1276,14 @@ mod tests {
         let details = zero.details.expect("zero details");
         assert_eq!(details["status"], "commit_failed");
         assert_eq!(details["changes"][0]["status"], "failed");
+        assert_eq!(details["cause"], "install_failed");
+        assert_eq!(details["file_index"], 0);
+        assert_eq!(details["failed_path"], "a.txt");
+        assert!(
+            details["changes"][0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("first install failure"))
+        );
         assert_eq!(details["changes"][1]["status"], "not_attempted");
         assert_eq!(details["changes"][2]["status"], "not_attempted");
         assert!(!workspace.path().join("a.txt").exists());
@@ -1246,6 +1311,11 @@ mod tests {
         assert_eq!(details["status"], "partial_commit");
         assert_eq!(details["changes"][0]["status"], "committed");
         assert_eq!(details["changes"][1]["status"], "failed");
+        assert!(
+            details["changes"][1]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("injected install failure"))
+        );
         assert_eq!(details["changes"][2]["status"], "not_attempted");
         assert_eq!(details["added"], 1);
         assert_eq!(
@@ -1285,6 +1355,12 @@ mod tests {
             .await;
 
         assert!(result.is_error);
+        assert!(
+            result.content.contains("Created directories remain:")
+                && result.content.contains("deep/nested/dir"),
+            "provider-visible result must disclose remaining directories: {}",
+            result.content
+        );
         let details = result.details.expect("details");
         assert_eq!(details["status"], "commit_failed");
         let created: Vec<String> = details["created_directories"]
@@ -1375,5 +1451,60 @@ mod tests {
         }
         assert!(!workspace.path().join("legacy.txt").exists());
         assert!(!workspace.path().join("x.txt").exists());
+
+        let schema = WriteTool.input_schema();
+        assert_eq!(schema["properties"]["files"]["minItems"], 1);
+        let item_schema = &schema["properties"]["files"]["items"];
+        let file_schema = item_schema
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|reference| reference.rsplit('/').next())
+            .and_then(|name| schema.get("$defs").and_then(|defs| defs.get(name)))
+            .unwrap_or(item_schema);
+        assert_eq!(file_schema["properties"]["path"]["minLength"], 1);
+    }
+
+    #[tokio::test]
+    async fn write_rejects_parent_traversal_and_link_ancestors_before_side_effects() {
+        let container = tempfile::tempdir().expect("container");
+        let workspace = container.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let outside = container.path().join("outside");
+        let ctx = context(&workspace);
+
+        let traversal = WriteTool
+            .execute(
+                &ctx,
+                json!({
+                    "files": [{
+                        "path": "missing/../../outside/escaped.txt",
+                        "content": "escaped"
+                    }]
+                }),
+            )
+            .await
+            .expect("tool result");
+        assert!(traversal.is_error);
+        assert!(!outside.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let real = workspace.join("real");
+            std::fs::create_dir(&real).expect("real directory");
+            symlink(&real, workspace.join("linked")).expect("directory symlink");
+            let linked = WriteTool
+                .execute(
+                    &ctx,
+                    json!({
+                        "files": [{"path": "linked/file.txt", "content": "linked"}]
+                    }),
+                )
+                .await
+                .expect("tool result");
+            assert!(linked.is_error);
+            assert!(!real.join("file.txt").exists());
+        }
     }
 }

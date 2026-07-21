@@ -964,7 +964,7 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
-    let edit_rows = edit.render_with_theme(32, &theme);
+    let edit_rows = edit.render_with_theme(60, &theme);
     let edit_text = edit_rows
         .iter()
         .map(Line::text)
@@ -975,8 +975,14 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         "{edit_text}"
     );
     assert!(
-        edit_text.contains("src/a_very_long"),
-        "path should appear in frame border: {edit_text}"
+        edit_text.contains("tail.rs") && !edit_text.contains("src/a_very_long_directory_name"),
+        "narrow frame should preserve the path tail: {edit_text}"
+    );
+    assert!(
+        edit_text.contains("committed")
+            && edit_text.contains("1 replacements")
+            && edit_text.contains("+1 -1"),
+        "narrow frame must preserve semantic suffix: {edit_text}"
     );
     assert!(edit_text.contains("41 - fn old()"), "{edit_text}");
     assert!(
@@ -1058,18 +1064,30 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
-    let write_text = plain(write.render(32)).join("\n");
+    let write_text = plain(write.render(60)).join("\n");
     assert!(
         write_text.contains('╭') && write_text.contains('╰'),
         "{write_text}"
     );
     assert!(
-        write_text.contains("src/a_very_long"),
-        "path should appear in frame border: {write_text}"
+        write_text.contains("tail.rs") && !write_text.contains("src/a_very_long_directory_name"),
+        "narrow frame should preserve the path tail: {write_text}"
+    );
+    assert!(
+        write_text.contains("created")
+            && write_text.contains("1 lines")
+            && write_text.contains("+1 -0")
+            && write_text.contains("committed"),
+        "narrow frame must preserve semantic suffix: {write_text}"
     );
     assert!(
         write_text.contains("ENDING_SENTINEL"),
         "wrapped code tail lost: {write_text}"
+    );
+    let too_narrow = plain(write.render(48)).join("\n");
+    assert!(
+        !too_narrow.contains('╭') && too_narrow.contains("tail.rs"),
+        "a title that cannot retain a path tail must use the unframed fallback: {too_narrow}"
     );
 }
 
@@ -1782,8 +1800,10 @@ fn replay_exit_plan_mode_restores_plan_box_from_plan_file() {
             id: "write-1".into(),
             name: "Write".into(),
             raw_arguments: serde_json::json!({
-                "path": plan_path_text,
-                "content": "# Replay plan\n\nShip the thing.",
+                "files": [{
+                    "path": plan_path_text,
+                    "content": "# Replay plan\n\nShip the thing."
+                }]
             })
             .to_string()
             .into(),
@@ -2559,6 +2579,122 @@ fn batch_write_frames_preserve_highlight_line_numbers_clusters_and_narrow_width(
 }
 
 #[test]
+fn batch_write_created_head_tail_and_failed_diagnostics_are_visible() {
+    let content = (1..=15)
+        .map(|line| format!("line_{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut created = ToolCallComponent::new(ToolCallState {
+        id: "write-head-tail".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("written".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "committed",
+            "files": 1,
+            "created": 1,
+            "overwritten": 0,
+            "added": 15,
+            "removed": 0,
+            "changes": [{
+                "path": "src/generated.rs",
+                "operation": "created",
+                "status": "committed",
+                "line_count": 15,
+                "added": 15,
+                "removed": 0,
+                "content": content
+            }]
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+    let collapsed = plain(created.render(100)).join("\n");
+    assert!(collapsed.contains("line_1") && collapsed.contains("line_15"));
+    assert!(
+        !collapsed.contains("line_8"),
+        "middle must be collapsed: {collapsed}"
+    );
+    assert!(collapsed.contains("5 lines hidden"), "{collapsed}");
+    created.set_expanded(true);
+    let expanded = plain(created.render(100)).join("\n");
+    assert!(expanded.contains("line_8"), "expanded body: {expanded}");
+
+    let mut failed = ToolCallComponent::new(ToolCallState {
+        id: "write-failed-diagnostic".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some("failed".to_owned()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "partial_commit",
+            "files": 2,
+            "created": 2,
+            "overwritten": 0,
+            "added": 1,
+            "removed": 0,
+            "created_directories": ["src/generated"],
+            "changes": [
+                {"path": "src/a.rs", "operation": "created", "status": "committed", "line_count": 1, "added": 1, "removed": 0, "content": "a"},
+                {"path": "src/b.rs", "operation": "created", "status": "failed", "line_count": 1, "added": 0, "removed": 0, "message": "file install failed: permission denied"}
+            ]
+        })),
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    });
+    let failed_rows = plain(failed.render(100));
+    let failed_text = failed_rows.join("\n");
+    assert!(failed_rows[0].contains("partial commit · 1/2 committed"));
+    assert!(failed_text.contains("file install failed: permission denied"));
+    assert!(failed_text.contains("created directories:") && failed_text.contains("src/generated"));
+}
+
+#[test]
+fn batch_write_live_headers_own_aggregate_summary_once() {
+    let mut prepared = ToolCallComponent::new(ToolCallState {
+        id: "write-prepared-summary".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: None,
+        details: Some(json!({
+            "kind": "write_prepared",
+            "files": 2,
+            "created": 2,
+            "overwritten": 0,
+            "added": 2,
+            "removed": 0,
+            "changes": []
+        })),
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    let prepared_text = plain(prepared.render(100)).join("\n");
+    assert_eq!(prepared_text.matches("2 files · 2 created").count(), 1);
+    assert!(!prepared_text.contains("verified · 2 files"));
+
+    let mut progress = ToolCallComponent::new(ToolCallState {
+        id: "write-progress-summary".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: None,
+        details: Some(json!({
+            "kind": "write_progress",
+            "committed": 1,
+            "total": 2,
+            "latest_path": "src/a.rs",
+            "added": 1,
+            "removed": 0
+        })),
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    let progress_text = plain(progress.render(100)).join("\n");
+    assert_eq!(progress_text.matches("committing 1/2 files").count(), 1);
+    assert_eq!(progress_text.matches("+1 -0").count(), 1);
+}
+
+#[test]
 fn batch_write_collapse_keeps_first_two_and_last_file() {
     let changes: Vec<serde_json::Value> = (0..5)
         .map(|i| {
@@ -2784,6 +2920,12 @@ fn edit_and_write_file_frames_embed_semantic_headers_in_top_border() {
         write_top.contains("src/embedded.rs"),
         "path should be in top border: {write_top:?}"
     );
+    assert!(
+        write_top.contains("created")
+            && write_top.contains("1 lines")
+            && write_top.contains("+1 -0"),
+        "Write semantic metadata should be in top border: {write_top:?}"
+    );
     // The line after the top border should be body content (│), not a duplicate header.
     let top_idx = write_rows
         .iter()
@@ -2830,6 +2972,12 @@ fn edit_and_write_file_frames_embed_semantic_headers_in_top_border() {
     assert!(
         edit_top.contains("src/edit_embedded.rs"),
         "path should be in edit top border: {edit_top:?}"
+    );
+    assert!(
+        edit_top.contains("committed")
+            && edit_top.contains("1 replacements")
+            && edit_top.contains("+1 -1"),
+        "Edit semantic metadata should be in top border: {edit_top:?}"
     );
     let edit_top_idx = edit_rows
         .iter()

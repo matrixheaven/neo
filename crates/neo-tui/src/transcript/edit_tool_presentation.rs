@@ -8,7 +8,9 @@ use crate::shell::ToolStatusKind;
 use neo_agent_core::EditApprovalPresentation;
 use serde_json::Value;
 
-use super::tool_renderers::{expand_tabs, framed_content_width, hard_wrap_line, render_code_frame};
+use super::tool_renderers::{
+    expand_tabs, framed_content_width, hard_wrap_line, render_code_frame, render_mutation_frame,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct EditRenderInput<'a> {
@@ -435,6 +437,10 @@ fn render_change_frame(
     let path = change.get("path").and_then(Value::as_str).unwrap_or("?");
     let added = change.get("added").and_then(Value::as_u64).unwrap_or(0);
     let removed = change.get("removed").and_then(Value::as_u64).unwrap_or(0);
+    let replacements = change
+        .get("replacements")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let (marker, marker_color) = match status {
         Some("committed") => ("✓", theme.status_ok),
         Some("committed_unsynced") => ("✓", theme.status_warn),
@@ -455,23 +461,22 @@ fn render_change_frame(
     } else {
         Style::default().fg(theme.text_muted)
     };
-    let mut header = vec![
-        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
-        Span::styled(
-            path.to_owned(),
-            Style::default().fg(theme.text_primary).bold(),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(format!("+{added}"), added_style),
-        Span::styled(" ", Style::default()),
-        Span::styled(format!("-{removed}"), removed_style),
-    ];
+    let mut suffix = Vec::new();
     if let Some(status) = status {
-        header.push(Span::styled(
+        suffix.push(Span::styled(
             format!(" · {status}"),
             Style::default().fg(marker_color),
         ));
     }
+    suffix.extend([
+        Span::styled(
+            format!(" · {replacements} replacements · "),
+            Style::default().fg(theme.text_muted),
+        ),
+        Span::styled(format!("+{added}"), added_style),
+        Span::styled(" ", Style::default()),
+        Span::styled(format!("-{removed}"), removed_style),
+    ]);
     let body = if show_diff {
         change
             .get("diff")
@@ -482,7 +487,15 @@ fn render_change_frame(
     } else {
         Vec::new()
     };
-    render_code_frame(Line::from_spans(header), body, width, Some(theme))
+    render_mutation_frame(
+        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
+        path,
+        Style::default().fg(theme.text_primary).bold(),
+        suffix,
+        body,
+        width,
+        Some(theme),
+    )
 }
 
 pub(super) fn render_diff_preview_pub(

@@ -7,6 +7,7 @@ use crate::primitive::{Color, Style, clip_plain_to_width, truncate_width, visibl
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::partial_json::extract_partial_string_field;
 use super::shell_tool_presentation;
@@ -149,7 +150,7 @@ fn write_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span
         return None;
     }
     let kind = details.get("kind").and_then(serde_json::Value::as_str);
-    if !matches!(kind, Some("write" | "write_progress")) {
+    if !matches!(kind, Some("write" | "write_progress" | "write_prepared")) {
         return None;
     }
     let number = |key| {
@@ -161,30 +162,52 @@ fn write_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span
     let committed = state.status == ToolStatusKind::Succeeded
         && kind == Some("write")
         && details.get("status").and_then(serde_json::Value::as_str) == Some("committed");
-    if !committed {
-        return Some(vec![
-            Span::styled(" · ", Style::default().fg(theme.text_muted)),
-            Span::styled(
-                format!("+{}", number("added")),
-                Style::default().fg(theme.diff_added),
+    let status = details.get("status").and_then(serde_json::Value::as_str);
+    let committed_count = details
+        .get("changes")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, |changes| {
+            changes
+                .iter()
+                .filter(|change| {
+                    matches!(
+                        change.get("status").and_then(serde_json::Value::as_str),
+                        Some("committed" | "committed_unsynced")
+                    )
+                })
+                .count() as u64
+        });
+    let summary = if committed || kind == Some("write_prepared") {
+        format!(
+            " · {} files · {} created · {} overwritten · ",
+            number("files"),
+            number("created"),
+            number("overwritten")
+        )
+    } else if kind == Some("write_progress") {
+        format!(
+            " · committing {}/{} files · ",
+            number("committed"),
+            number("total")
+        )
+    } else {
+        match status {
+            Some("partial_commit") => format!(
+                " · partial commit · {committed_count}/{} committed · ",
+                number("files")
             ),
-            Span::raw(" "),
-            Span::styled(
-                format!("-{}", number("removed")),
-                Style::default().fg(theme.diff_removed),
+            Some("commit_failed") => " · commit failed · zero file installs · ".to_owned(),
+            Some("durability_uncertain") => format!(
+                " · durability uncertain · {committed_count}/{} installed · ",
+                number("files")
             ),
-        ]);
-    }
+            Some("cancelled") => " · cancelled · zero file installs · ".to_owned(),
+            Some("stale" | "prepare_failed") => " · zero file installs · ".to_owned(),
+            _ => " · ".to_owned(),
+        }
+    };
     Some(vec![
-        Span::styled(
-            format!(
-                " · {} files · {} created · {} overwritten · ",
-                number("files"),
-                number("created"),
-                number("overwritten")
-            ),
-            Style::default().fg(theme.text_muted),
-        ),
+        Span::styled(summary, Style::default().fg(theme.text_muted)),
         Span::styled(
             format!("+{}", number("added")),
             Style::default().fg(theme.diff_added),
@@ -888,8 +911,11 @@ pub(super) fn render_code_frame(
         .flat_map(|line| hard_wrap_line(&line, content_width))
         .collect::<Vec<_>>();
     let body_max = wrapped.iter().map(Line::visible_width).max().unwrap_or(0);
-    let header_max = header.visible_width().min(content_width);
-    let inner = body_max.max(header_max).max(1);
+    let header_max = header.visible_width().min(content_width.saturating_sub(1));
+    let inner = body_max
+        .max(header_max.saturating_add(1))
+        .min(content_width)
+        .max(1);
 
     let header_clipped = header.truncate_to_width(inner.saturating_sub(1));
     let header_width = header_clipped.visible_width();
@@ -910,6 +936,60 @@ pub(super) fn render_code_frame(
     let horizontal = "─".repeat(inner + 2);
     rows.push(Line::styled(format!("╰{horizontal}╯"), border));
     rows
+}
+
+pub(super) fn render_mutation_frame(
+    marker: Span,
+    path: &str,
+    path_style: Style,
+    suffix: Vec<Span>,
+    body: Vec<Line>,
+    width: usize,
+    theme: Option<&TuiTheme>,
+) -> Vec<Line> {
+    let title_budget = framed_content_width(width).saturating_sub(1);
+    let fixed_width =
+        marker.visible_width() + suffix.iter().map(Span::visible_width).sum::<usize>();
+    if width < 7 || fixed_width.saturating_add(1) >= title_budget {
+        let header = Line::from_spans(
+            std::iter::once(marker)
+                .chain(std::iter::once(Span::styled(path.to_owned(), path_style)))
+                .chain(suffix)
+                .collect(),
+        );
+        return std::iter::once(header)
+            .chain(body)
+            .flat_map(|line| hard_wrap_line(&line, width.max(1)))
+            .collect();
+    }
+
+    let path_budget = title_budget - fixed_width;
+    let fitted_path = if visible_width(path) <= path_budget {
+        path.to_owned()
+    } else {
+        format!("…{}", tail_to_width(path, path_budget.saturating_sub(1)))
+    };
+    let header = Line::from_spans(
+        std::iter::once(marker)
+            .chain(std::iter::once(Span::styled(fitted_path, path_style)))
+            .chain(suffix)
+            .collect(),
+    );
+    render_code_frame(header, body, width, theme)
+}
+
+fn tail_to_width(text: &str, max_width: usize) -> String {
+    let mut used = 0usize;
+    let mut tail = Vec::new();
+    for grapheme in text.graphemes(true).rev() {
+        let width = visible_width(grapheme);
+        if used + width > max_width {
+            break;
+        }
+        used += width;
+        tail.push(grapheme);
+    }
+    tail.into_iter().rev().collect()
 }
 
 pub(super) fn hard_wrap_line(line: &Line, width: usize) -> Vec<Line> {

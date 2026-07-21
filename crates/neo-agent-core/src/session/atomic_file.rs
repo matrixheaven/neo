@@ -202,7 +202,24 @@ pub(crate) fn create_missing_directories_recording(dir: &Path) -> DirectoryCreat
     let mut created = Vec::new();
     for path in missing.iter().rev() {
         match fs::create_dir(path) {
-            Ok(()) => created.push(path.clone()),
+            Ok(()) => {
+                created.push(path.clone());
+                let Some(parent) = path.parent() else {
+                    return DirectoryCreation {
+                        created,
+                        error: Some(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("directory has no parent: {}", path.display()),
+                        )),
+                    };
+                };
+                if let Err(error) = sync_parent_dir(parent) {
+                    return DirectoryCreation {
+                        created,
+                        error: Some(error),
+                    };
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 if let Err(validation) = validate_safe_directory(path) {
                     return DirectoryCreation {
@@ -344,9 +361,23 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     fs::File::open(parent)?.sync_all()
 }
 
-#[cfg(not(unix))]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
+#[cfg(windows)]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(winsafe::co::FILE_FLAG::BACKUP_SEMANTICS.raw())
+        .open(parent)?;
+    directory.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("directory sync is unsupported for {}", parent.display()),
+    ))
 }
 
 pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {

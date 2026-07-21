@@ -26,7 +26,7 @@ mod todo;
 mod write;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -219,7 +219,7 @@ pub struct ToolContext {
     pub session_directory: Option<PathBuf>,
     pub access: ToolAccess,
     workspace_policy: WorkspaceAccessPolicy,
-    allowed_external_write_paths: BTreeSet<PathBuf>,
+    allowed_external_write_paths: BTreeMap<PathBuf, PathBuf>,
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
@@ -299,7 +299,7 @@ impl ToolContext {
             session_directory: None,
             access: ToolAccess::none(),
             workspace_policy,
-            allowed_external_write_paths: BTreeSet::new(),
+            allowed_external_write_paths: BTreeMap::new(),
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
@@ -330,7 +330,11 @@ impl ToolContext {
     ) -> Self {
         self.allowed_external_write_paths = paths
             .into_iter()
-            .map(|path| normalize_path(&path))
+            .filter_map(|path| {
+                let requested = normalize_path(&path);
+                let resolved = resolve_authorized_external_path(&requested).ok()?;
+                Some((requested, resolved))
+            })
             .collect();
         self
     }
@@ -488,8 +492,8 @@ impl ToolContext {
     }
 
     pub fn resolve_workspace_path(&self, path: &Path) -> Result<PathBuf, ToolError> {
-        if self.is_allowed_external_write_path(path) {
-            return Ok(normalize_path(path));
+        if let Some(resolved) = self.allowed_external_write_path(path) {
+            return Ok(resolved.to_path_buf());
         }
         self.workspace_policy
             .resolve_read_path(path)
@@ -497,17 +501,18 @@ impl ToolContext {
     }
 
     pub fn resolve_parent_for_write(&self, path: &Path) -> Result<PathBuf, ToolError> {
-        if self.is_allowed_external_write_path(path) {
-            return Ok(normalize_path(path));
+        if let Some(resolved) = self.allowed_external_write_path(path) {
+            return Ok(resolved.to_path_buf());
         }
         self.workspace_policy
             .resolve_write_path(path)
             .map_err(map_workspace_error)
     }
 
-    fn is_allowed_external_write_path(&self, path: &Path) -> bool {
+    fn allowed_external_write_path(&self, path: &Path) -> Option<&Path> {
         self.allowed_external_write_paths
-            .contains(&normalize_path(path))
+            .get(&normalize_path(path))
+            .map(PathBuf::as_path)
     }
 
     fn agent_session_tasks_dir(&self) -> Option<PathBuf> {
@@ -515,6 +520,59 @@ impl ToolContext {
             self.session_directory.as_deref()?,
             self.agent_id.as_deref()?,
         ))
+    }
+}
+
+fn resolve_authorized_external_path(path: &Path) -> std::io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("external write path must be absolute: {}", path.display()),
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return path.canonicalize(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut current = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) => {
+                let mut resolved = current.canonicalize()?;
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let file_name = current.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "external write path has no existing ancestor: {}",
+                            path.display()
+                        ),
+                    )
+                })?;
+                suffix.push(file_name.to_os_string());
+                current = current
+                    .parent()
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "external write path has no existing ancestor: {}",
+                                path.display()
+                            ),
+                        )
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -880,6 +938,36 @@ mod tests {
         let resolved = ctx.resolve_workspace_path(&file).expect("resolve");
 
         assert_eq!(resolved, file.canonicalize().expect("canonical file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_external_write_path_captures_canonical_target_before_retarget() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let external = tempfile::tempdir().expect("external");
+        let first = external.path().join("first");
+        let second = external.path().join("second");
+        std::fs::create_dir(&first).expect("first");
+        std::fs::create_dir(&second).expect("second");
+        let link = external.path().join("active");
+        symlink(&first, &link).expect("link first");
+        let requested = link.join("plan.md");
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_allowed_external_write_paths([requested.clone()]);
+
+        std::fs::remove_file(&link).expect("remove link");
+        symlink(&second, &link).expect("link second");
+
+        assert_eq!(
+            ctx.resolve_parent_for_write(&requested).expect("resolve"),
+            first
+                .canonicalize()
+                .expect("canonical first")
+                .join("plan.md")
+        );
     }
 
     #[test]

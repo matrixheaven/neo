@@ -121,7 +121,7 @@ impl WorkspaceAccessPolicy {
     }
 
     pub fn resolve_write_path(&self, path: &Path) -> Result<PathBuf, WorkspaceAccessError> {
-        let candidate = self.absolute_candidate(path);
+        let candidate = normalize_path(&self.absolute_candidate(path));
         match std::fs::symlink_metadata(&candidate) {
             Ok(_) => return self.resolve_existing_write_path(&candidate),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -144,6 +144,7 @@ impl WorkspaceAccessPolicy {
                 path: canonical_parent,
             });
         };
+        reject_link_components(&candidate, &root.path)?;
         let resolved = canonical_parent.join(file_name);
         if root.read && root.write {
             Ok(resolved)
@@ -167,6 +168,7 @@ impl WorkspaceAccessPolicy {
         let Some(root) = self.containing_root(&canonical) else {
             return Err(WorkspaceAccessError::PathOutsideWorkspace { path: canonical });
         };
+        reject_link_components(candidate, &root.path)?;
         if root.read && root.write {
             Ok(canonical)
         } else {
@@ -202,6 +204,51 @@ impl WorkspaceAccessPolicy {
             .filter(|root| canonical_path.starts_with(&root.path))
             .max_by_key(|root| root.path.components().count())
     }
+}
+
+fn reject_link_components(candidate: &Path, root: &Path) -> Result<(), WorkspaceAccessError> {
+    let relative =
+        candidate
+            .strip_prefix(root)
+            .map_err(|_| WorkspaceAccessError::PathOutsideWorkspace {
+                path: candidate.to_path_buf(),
+            })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if is_reparse_or_symlink(&metadata) => {
+                return Err(WorkspaceAccessError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing symlink or reparse point in write path: {}",
+                        current.display()
+                    ),
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(WorkspaceAccessError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
+}
+
+#[cfg(windows)]
+fn platform_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn platform_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn canonicalize_nearest_existing_parent(path: &Path) -> Result<PathBuf, WorkspaceAccessError> {

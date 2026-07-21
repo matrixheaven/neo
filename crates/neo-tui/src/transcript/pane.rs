@@ -1415,8 +1415,8 @@ impl TranscriptPane {
         else {
             return;
         };
-        // Write keeps top-level path/content. Edit may touch the plan file via
-        // files[].path; snapshot path only (no full staged content on Edit).
+        // Both structured mutation tools use files[]. Edit has no full staged
+        // content, while Write can preserve it as a replay fallback.
         let (path, content) = if tool_call.name.as_ref() == "Edit" {
             let Some(path) = arguments
                 .get("files")
@@ -1429,13 +1429,25 @@ impl TranscriptPane {
             };
             (path, None)
         } else {
-            let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+            let Some((path, content)) = arguments
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|file| {
+                    let path = file.get("path").and_then(serde_json::Value::as_str)?;
+                    looks_like_plan_file_path(path).then(|| {
+                        (
+                            path,
+                            file.get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                        )
+                    })
+                })
+            else {
                 return;
             };
-            let content = arguments
-                .get("content")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
             (path, content)
         };
         if !looks_like_plan_file_path(path) {

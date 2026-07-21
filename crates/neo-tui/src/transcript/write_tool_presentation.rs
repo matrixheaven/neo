@@ -8,7 +8,9 @@ use crate::shell::ToolStatusKind;
 use neo_agent_core::WriteApprovalPresentation;
 use serde_json::Value;
 
-use super::tool_renderers::{expand_tabs, framed_content_width, hard_wrap_line, render_code_frame};
+use super::tool_renderers::{
+    expand_tabs, framed_content_width, hard_wrap_line, render_code_frame, render_mutation_frame,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WriteRenderInput<'a> {
@@ -216,11 +218,7 @@ fn render_prepared_or_committed(
     theme: &TuiTheme,
     committed: bool,
 ) -> Vec<Line> {
-    let mut rows = if committed {
-        Vec::new()
-    } else {
-        render_summary(details, width, theme, Some("verified".to_owned()))
-    };
+    let mut rows = Vec::new();
     let Some(changes) = details.get("changes").and_then(Value::as_array) else {
         return rows;
     };
@@ -278,21 +276,11 @@ fn render_approval_prepared(
 }
 
 fn render_progress(details: &Value, width: usize, theme: &TuiTheme) -> Vec<Line> {
-    let committed = details
-        .get("committed")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total = details.get("total").and_then(Value::as_u64).unwrap_or(0);
     let latest = details
         .get("latest_path")
         .and_then(Value::as_str)
         .unwrap_or("?");
-    let mut rows = render_applied_stats(
-        details,
-        width,
-        theme,
-        &format!("committing {committed}/{total} files"),
-    );
+    let mut rows = Vec::new();
     rows.extend(render_code_frame(
         Line::from_spans(vec![
             Span::styled("✓ ", Style::default().fg(theme.status_ok)),
@@ -320,13 +308,21 @@ fn render_terminal_changes(
     accent: crate::primitive::Color,
 ) -> Vec<Line> {
     let mut rows = styled_wrapped(label, width, Style::default().fg(accent));
-    rows.extend(render_applied_stats(
-        details,
-        width,
-        theme,
-        "applied changes",
-    ));
-    if let Some(changes) = details.get("changes").and_then(Value::as_array) {
+    let changes = details.get("changes").and_then(Value::as_array);
+    let has_per_file_diagnostic = changes.is_some_and(|changes| {
+        changes.iter().any(|change| {
+            change
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| !message.is_empty())
+        })
+    });
+    if !has_per_file_diagnostic
+        && let Some(message) = details.get("message").and_then(Value::as_str)
+    {
+        rows.extend(styled_wrapped(message, width, Style::default().fg(accent)));
+    }
+    if let Some(changes) = changes {
         for change in changes {
             rows.extend(render_change_frame(change, expanded, width, theme, None));
         }
@@ -430,23 +426,6 @@ fn render_summary(
     hard_wrap_line(&Line::from_spans(spans), width)
 }
 
-fn render_applied_stats(details: &Value, width: usize, theme: &TuiTheme, label: &str) -> Vec<Line> {
-    let added = details.get("added").and_then(Value::as_u64).unwrap_or(0);
-    let removed = details.get("removed").and_then(Value::as_u64).unwrap_or(0);
-    hard_wrap_line(
-        &Line::from_spans(vec![
-            Span::styled(format!("{label} · "), Style::default().fg(theme.text_muted)),
-            Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                format!("-{removed}"),
-                Style::default().fg(theme.diff_removed),
-            ),
-        ]),
-        width,
-    )
-}
-
 fn render_change_frame(
     change: &Value,
     expanded: bool,
@@ -474,7 +453,7 @@ fn render_change_frame(
         Some("failed") => ("✗", theme.status_error),
         Some("not_attempted") => ("·", theme.text_muted),
         Some(_) => ("·", theme.text_muted),
-        None if operation == "created" => ("+", theme.status_ok),
+        None if operation == "created" => ("A", theme.status_ok),
         None => ("M", theme.diff_hunk),
     };
 
@@ -492,35 +471,63 @@ fn render_change_frame(
         Style::default().fg(theme.text_muted)
     };
 
-    let mut header = vec![
-        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
-        Span::styled(
-            path.to_owned(),
-            Style::default().fg(theme.text_primary).bold(),
-        ),
-        Span::styled(
-            format!(" · {operation}"),
+    let mut suffix = vec![Span::styled(
+        format!(" · {operation}"),
+        Style::default().fg(theme.text_muted),
+    )];
+    if operation == "created"
+        && let Some(line_count) = change.get("line_count").and_then(Value::as_u64)
+    {
+        suffix.push(Span::styled(
+            format!(" · {line_count} lines"),
             Style::default().fg(theme.text_muted),
-        ),
-        Span::styled("  ", Style::default()),
+        ));
+    }
+    suffix.extend([
+        Span::styled(" · ", Style::default()),
         Span::styled(format!("+{added}"), added_style),
         Span::styled(" ", Style::default()),
         Span::styled(format!("-{removed}"), removed_style),
-    ];
+    ]);
     if let Some(status) = &status {
-        header.push(Span::styled(
+        suffix.push(Span::styled(
             format!(" · {status}"),
             Style::default().fg(marker_color),
         ));
     }
 
-    let show_body = applied_or_planned;
-    let body = if show_body {
+    let diagnostic = change
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|message| {
+            styled_wrapped(
+                message,
+                framed_content_width(width),
+                Style::default().fg(marker_color),
+            )
+        })
+        .unwrap_or_default();
+    let mut body = if status.as_deref() == Some("failed") {
+        diagnostic.clone()
+    } else if applied_or_planned {
         render_change_body(change, operation, path, expanded, width, theme)
     } else {
         Vec::new()
     };
-    render_code_frame(Line::from_spans(header), body, width, Some(theme))
+    if status.as_deref() == Some("committed_unsynced") && !diagnostic.is_empty() {
+        let mut with_diagnostic = diagnostic;
+        with_diagnostic.append(&mut body);
+        body = with_diagnostic;
+    }
+    render_mutation_frame(
+        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
+        path,
+        Style::default().fg(theme.text_primary).bold(),
+        suffix,
+        body,
+        width,
+        Some(theme),
+    )
 }
 
 fn render_change_body(
@@ -561,7 +568,7 @@ fn render_created_content(
     let content = expand_tabs(content);
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
-    let limit = if expanded || total <= 10 { total } else { 10 };
+    let collapsed = !expanded && total > 10;
     let content_width = framed_content_width(width);
     let highlighted = highlight_code_lines(&content, path, theme);
     let number_width = total.to_string().len();
@@ -573,10 +580,25 @@ fn render_created_content(
     let code_width = content_width.saturating_sub(prefix_width).max(1);
     let mut rows = Vec::new();
 
-    for (index, line) in lines.iter().take(limit).enumerate() {
+    let indices = if collapsed {
+        (0..5).chain(total - 5..total).collect::<Vec<_>>()
+    } else {
+        (0..total).collect::<Vec<_>>()
+    };
+    for index in indices {
+        if collapsed && index == total - 5 {
+            rows.push(Line::styled(
+                format!(
+                    "  ... ({} lines hidden, {total} total, ctrl+o to expand)",
+                    total - 10
+                ),
+                Style::default().fg(theme.text_muted),
+            ));
+        }
+        let line = lines[index];
         let code_spans = highlighted.get(index).cloned().unwrap_or_else(|| {
             vec![Span::styled(
-                (*line).to_owned(),
+                line.to_owned(),
                 Style::default().fg(theme.text_primary),
             )]
         });
@@ -592,15 +614,6 @@ fn render_created_content(
             spans.extend(visual);
             rows.push(Line::from_spans(spans));
         }
-    }
-    if limit < total {
-        rows.push(Line::styled(
-            format!(
-                "  ... ({} more lines, {total} total, ctrl+o to expand)",
-                total - limit
-            ),
-            Style::default().fg(theme.text_muted),
-        ));
     }
     rows
 }
@@ -622,29 +635,37 @@ fn render_approval_change_frame(
         .unwrap_or("created");
 
     let (marker, marker_color) = if operation == "created" {
-        ("+", theme.status_ok)
+        ("A", theme.status_ok)
     } else {
         ("M", theme.diff_hunk)
     };
 
-    let header = vec![
-        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
-        Span::styled(
-            path.to_owned(),
-            Style::default().fg(theme.text_primary).bold(),
-        ),
-        Span::styled(
-            format!(" · {operation}"),
+    let operation_label = if operation == "created" {
+        "create"
+    } else {
+        "overwrite"
+    };
+    let mut suffix = vec![Span::styled(
+        format!(" · {operation_label}"),
+        Style::default().fg(theme.text_muted),
+    )];
+    if operation == "created"
+        && let Some(line_count) = change.get("line_count").and_then(Value::as_u64)
+    {
+        suffix.push(Span::styled(
+            format!(" · {line_count} lines"),
             Style::default().fg(theme.text_muted),
-        ),
-        Span::styled("  ", Style::default()),
+        ));
+    }
+    suffix.extend([
+        Span::styled(" · ", Style::default()),
         Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
         Span::styled(" ", Style::default()),
         Span::styled(
             format!("-{removed}"),
             Style::default().fg(theme.diff_removed),
         ),
-    ];
+    ]);
 
     let body = match operation {
         "created" => preview
@@ -664,7 +685,15 @@ fn render_approval_change_frame(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    render_code_frame(Line::from_spans(header), body, width, Some(theme))
+    render_mutation_frame(
+        Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
+        path,
+        Style::default().fg(theme.text_primary).bold(),
+        suffix,
+        body,
+        width,
+        Some(theme),
+    )
 }
 
 fn render_omission(changes: &[Value], width: usize, theme: &TuiTheme) -> Vec<Line> {

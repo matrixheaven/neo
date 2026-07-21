@@ -52,8 +52,8 @@ created during commit); existing files are completely overwritten.
 
 Before any write, Neo resolves every target, classifies each as created or
 overwritten, rejects non-UTF-8 existing files, symlinks, reparse points,
-directories, and no-op overwrites (content identical to current), deduplicates
-resolved targets, and builds the approval projection (line-numbered content for
+directories, no-op overwrites (content identical to current), and duplicate
+resolved targets, then builds the approval projection (line-numbered content for
 created files, unified diff for overwritten files). Any prepare error fails the
 whole call with zero writes and zero directory creation. In Ask mode the user
 approves that verified projection. Neo then rechecks every target fingerprint;

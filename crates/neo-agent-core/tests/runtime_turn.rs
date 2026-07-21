@@ -4787,7 +4787,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
                 && request.options.iter().any(|option| matches!(
                     &option.action,
                     ApprovalAction::PermitForSession { scope }
-                        if scope.label == "Approve writes to this file for this session"
+                        if scope.label == "Approve writes to these 1 files for this session"
                             && scope.keys.len() == 1
                 ))
     )));
@@ -11602,16 +11602,12 @@ async fn runtime_write_approval_uses_verified_batch_projection() {
 async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("stale.txt"), "before\n").expect("seed");
-    let args = batch_write_arguments(&[
-        ("stale.txt", "planned overwrite\n"),
-        ("appeared.txt", "planned create\n"),
-    ]);
+    let args = batch_write_arguments(&[("stale.txt", "planned overwrite\n")]);
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("write_stale", "Write", args)]),
         final_done_turn(),
     ]);
     let path = workspace.path().join("stale.txt");
-    let appeared = workspace.path().join("appeared.txt");
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
             .with_permission_mode(PermissionMode::Ask)
@@ -11619,10 +11615,8 @@ async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
             .expect("workspace")
             .with_approval_handler({
                 let path = path.clone();
-                let appeared = appeared.clone();
                 move |request| {
                     std::fs::write(&path, "changed externally\n").expect("stale");
-                    std::fs::write(&appeared, "appeared externally\n").expect("appeared");
                     permit_once(request)
                 }
             }),
@@ -11663,6 +11657,53 @@ async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
     assert_eq!(
         std::fs::read_to_string(&path).expect("read"),
         "changed externally\n"
+    );
+    let workspace = tempfile::tempdir().expect("appeared workspace");
+    let appeared = workspace.path().join("appeared.txt");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "write_appeared",
+            "Write",
+            batch_write_arguments(&[("appeared.txt", "planned create\n")]),
+        )]),
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace")
+            .with_approval_handler({
+                let appeared = appeared.clone();
+                move |request| {
+                    std::fs::write(&appeared, "appeared externally\n").expect("appeared");
+                    permit_once(request)
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write appeared"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn");
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, result, .. } if id == "write_appeared" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("finished");
+    assert!(finished.is_error);
+    assert_eq!(
+        finished.details.as_ref().expect("details")["status"],
+        "stale"
     );
     assert_eq!(
         std::fs::read_to_string(&appeared).expect("read"),
