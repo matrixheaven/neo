@@ -48,3 +48,26 @@
 - New risk signals:
 - Remote CI and six-platform release jobs remain unverified.
 - Advisory decision: continue
+
+## Checkpoint Update
+
+- Current todo: Commit and push cross-platform release repairs, pass matching main CI, then publish RC2.
+- Active slice: Recover from the incomplete RC1 release build.
+- Completed todos:
+- Confirmed release run 29805672416 failed on Linux ARM64 and both Windows targets.
+- Marked the partial RC1 GitHub Release as prerelease and titled it as an incomplete build.
+- Fixed the Windows target dependency and removed the Linux ARM64 `xpty` linker incompatibility.
+- Verified Windows target compilation, Linux ARM64 release linking, notification encoding, and real PTY operation locally.
+- Evidence refs:
+- release run 29805672416; local-windows-target-check; local-linux-arm64-zigbuild; targeted-release-repair-tests
+- Blocked on: none
+- Next step: Commit and push the repair and RC2 notes, wait for exact-head main CI, then create the immutable RC2 tag.
+
+## DriftCheckDraft
+
+- Scope status: Cross-platform release blockers and release records only; unrelated .gitignore edit remains untouched.
+- Compatibility status: Package version remains 0.1.1; PTY behavior remains on the pre-xpty portable-pty owner; no glibc floor increase.
+- Retirement status: The newly introduced xpty dependency is removed rather than retained behind a fallback.
+- New risk signals:
+- RC2 still requires fresh remote main CI and all six tag-triggered build artifacts.
+- Advisory decision: continue

@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, PtySystem, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
