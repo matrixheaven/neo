@@ -1053,6 +1053,57 @@ fn resource_limit_for_sample(
     })
 }
 
+fn write_running_status(
+    start: &StartRequest,
+    started_at_ms: u64,
+    command: Option<(u32, u64)>,
+) -> io::Result<AtomicWriteStatus> {
+    let status = command.map_or_else(
+        || RunningStatus::new(&start.task_id, started_at_ms),
+        |(pid, start_id)| {
+            RunningStatus::new(&start.task_id, started_at_ms).with_command(pid, start_id)
+        },
+    );
+    let content = serde_json::to_vec(&status)?;
+    write_file_atomic_status(&running_status_path(start), &content)
+}
+
+fn running_status_path(start: &StartRequest) -> PathBuf {
+    start
+        .status_dir
+        .join(format!("{}.running.json", start.task_id))
+}
+
+fn final_status_path(start: &StartRequest) -> PathBuf {
+    start
+        .status_dir
+        .join(format!("{}.status.json", start.task_id))
+}
+
+fn log_path(start: &StartRequest) -> PathBuf {
+    start.status_dir.join(format!("{}.log", start.task_id))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn protocol_is_eof(error: &ProtocolError) -> bool {
+    matches!(error, ProtocolError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof)
+}
+
+fn protocol_io_error(error: ProtocolError) -> io::Error {
+    match error {
+        ProtocolError::Io(error) => error,
+        other => io::Error::new(io::ErrorKind::InvalidData, other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,56 +1308,5 @@ mod tests {
             ),
             unavailable
         );
-    }
-}
-
-fn write_running_status(
-    start: &StartRequest,
-    started_at_ms: u64,
-    command: Option<(u32, u64)>,
-) -> io::Result<AtomicWriteStatus> {
-    let status = command.map_or_else(
-        || RunningStatus::new(&start.task_id, started_at_ms),
-        |(pid, start_id)| {
-            RunningStatus::new(&start.task_id, started_at_ms).with_command(pid, start_id)
-        },
-    );
-    let content = serde_json::to_vec(&status)?;
-    write_file_atomic_status(&running_status_path(start), &content)
-}
-
-fn running_status_path(start: &StartRequest) -> PathBuf {
-    start
-        .status_dir
-        .join(format!("{}.running.json", start.task_id))
-}
-
-fn final_status_path(start: &StartRequest) -> PathBuf {
-    start
-        .status_dir
-        .join(format!("{}.status.json", start.task_id))
-}
-
-fn log_path(start: &StartRequest) -> PathBuf {
-    start.status_dir.join(format!("{}.log", start.task_id))
-}
-
-fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn protocol_is_eof(error: &ProtocolError) -> bool {
-    matches!(error, ProtocolError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof)
-}
-
-fn protocol_io_error(error: ProtocolError) -> io::Error {
-    match error {
-        ProtocolError::Io(error) => error,
-        other => io::Error::new(io::ErrorKind::InvalidData, other),
     }
 }

@@ -100,7 +100,7 @@ impl Tool for ListTool {
                     }
                     let child_prefix = if is_last { "    " } else { "│   " };
                     let child_path = &entry.path;
-                    let child = collect_entries(&child_path, LIST_DIR_CHILD_WIDTH).await?;
+                    let child = collect_entries(child_path, LIST_DIR_CHILD_WIDTH).await?;
                     if !child.readable {
                         lines.push(format!("{child_prefix}└── [not readable]"));
                         continue;
