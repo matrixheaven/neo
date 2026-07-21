@@ -65,13 +65,13 @@ pub fn tool_header_spans_with_elapsed(
     }
     if let Some(metadata) = shell_metadata {
         spans.extend(metadata);
-    } else if !is_structured_mutation_tool(state) {
-        if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
-            let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
-            spans.push(Span::styled(" (", Style::default().fg(meta_color)));
-            spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
-            spans.push(Span::styled(")", Style::default().fg(meta_color)));
-        }
+    } else if !is_structured_mutation_tool(state)
+        && let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref())
+    {
+        let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
+        spans.push(Span::styled(" (", Style::default().fg(meta_color)));
+        spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
+        spans.push(Span::styled(")", Style::default().fg(meta_color)));
     }
     if let Some(chip) = list_delegates_header_chip(state) {
         spans.push(Span::styled(
