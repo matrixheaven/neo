@@ -6,11 +6,14 @@
     ".github/workflows/release.yml"
   ],
   "deliveredContextRefs": [],
-  "acknowledgedBeforePlanRefs": [],
-  "citedInPlanRefs": [],
-  "missingRefs": [
+  "acknowledgedBeforePlanRefs": [
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml"
   ],
-  "decision": "needs-baseline-readback"
+  "citedInPlanRefs": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
+  ],
+  "missingRefs": [],
+  "decision": "continue"
 }

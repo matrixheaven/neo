@@ -41,3 +41,19 @@ No evidence has been recorded yet.
 - Source: main CI run 29807598057; exact btw follow-up test; concurrent built-in extraction test
 - Summary: CI observed a truncated `.builtin/sub-skill/SKILL.md` during parallel refresh. The canonical writer now atomically creates or replaces each built-in file; both the original failing test and the new concurrency test pass.
 - Verifier: Codex root-cause review and fresh local execution
+
+## EvidenceBundleDraft
+
+- Artifact key: rc2-release-complete
+- Type: remote-workflow-and-release
+- Source: GitHub Actions run 29808716841 and GitHub Release v0.1.1-rc.2+20260721.0634
+- Summary: Release workflow completed successfully on all six target platforms. The public non-draft prerelease contains six non-empty archives, complete v0.1.0 baseline and v0.1.1 Added/Changed/Fixed notes, and explicitly supersedes incomplete RC1.
+- Verifier: Codex fresh GitHub CLI verification
+
+## EvidenceBundleDraft
+
+- Artifact key: final-main-ci
+- Type: remote-workflow
+- Source: GitHub Actions run 29808374855 at ec47ee25265a62a7498b0a0f1d6975fbb9a75af1
+- Summary: Main CI completed successfully: formatting, Clippy, release build, and 2773 tests all passed for the exact commit tagged as RC2.
+- Verifier: Codex fresh GitHub CLI verification

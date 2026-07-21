@@ -1,17 +1,20 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-21-release-0-1-1-rc1",
-  "currentTodo": "Commit release records, push main, and wait for matching remote CI.",
+  "currentTodo": "Commit and push the final release evidence records without staging .gitignore.",
   "completedTodos": [
-    "Fixed all local CI blockers and committed scoped repairs through 6422d663.",
-    "Final serial local CI passed: fmt, workspace Clippy, neo-agent build, and 2767 nextest tests.",
-    "Drafted timestamped RC1 release notes at docs/releases/v0.1.1-rc.1.md."
+    "Main CI run 29808374855 passed fmt, Clippy, build, and 2773 tests.",
+    "Published immutable annotated tag v0.1.1-rc.2+20260721.0634 at ec47ee25.",
+    "Release run 29808716841 passed all six platform jobs.",
+    "Verified public RC2 prerelease notes and six non-empty assets."
   ],
-  "activeSlice": "Remote main CI gate before tag creation.",
+  "activeSlice": "Durable release evidence and scoped docs commit.",
   "evidenceRefs": [
-    "final-local-ci; commits 5b8eaa43 56ffcea9 44875b5e 6422d663"
+    "main CI run 29808374855",
+    "release run 29808716841",
+    "GitHub Release v0.1.1-rc.2+20260721.0634"
   ],
   "blockedOn": null,
-  "nextStep": "Commit release records, push main, wait for the exact head SHA CI to pass, then create and push the annotated RC tag.",
+  "nextStep": "Complete reflection, bundle/check the Aegis workspace, then commit and push only release evidence records.",
   "updatedAt": "2026-07-21"
 }

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
+  ],
+  "impactStatement": "docs/aegis/work/2026-07-21-release-0-1-1-rc1/impact-statement-draft.json",
+  "compatPlan": "Cargo crate version remains 0.1.1; release identity is conveyed by the RC tag and GitHub prerelease flag.",
+  "retirementPlan": "The incompatible xpty path remains removed; portable-pty is the sole PTY owner.",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-ci-failure-diagnosis.json",
+    "docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-local-ci.json",
+    "docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-main-ci.json",
+    "docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-rc2-release-complete.json"
+  ]
+}

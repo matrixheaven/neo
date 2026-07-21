@@ -144,3 +144,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/resume-state-hint.json | 2026-07-21-release-0-1-1-rc1 resume state hint |
 | 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-ci-failure-diagnosis.json | 2026-07-21-release-0-1-1-rc1 evidence ci-failure-diagnosis |
 | 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-local-ci.json | 2026-07-21-release-0-1-1-rc1 evidence final-local-ci |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-rc2-release-complete.json | 2026-07-21-release-0-1-1-rc1 evidence rc2-release-complete |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-main-ci.json | 2026-07-21-release-0-1-1-rc1 evidence final-main-ci |
+| 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/gate-input-pack.json | 2026-07-21-release-0-1-1-rc1 gate input pack |
+| 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/proof-bundle.md | 2026-07-21-release-0-1-1-rc1 proof bundle |

@@ -47,3 +47,20 @@
 - Do not redesign release automation or alter unrelated user changes.
 
 These records are Method Pack drafts / hints, not authoritative runtime decisions.
+
+## BaselineUsageDraft
+
+- Required baseline refs:
+- .github/workflows/ci.yml
+- .github/workflows/release.yml
+- Delivered context refs:
+- none
+- Acknowledged before plan:
+- .github/workflows/ci.yml
+- .github/workflows/release.yml
+- Cited in plan:
+- .github/workflows/ci.yml
+- .github/workflows/release.yml
+- Missing refs:
+- none
+- Advisory decision: continue

@@ -72,3 +72,28 @@
 - New risk signals:
 - RC2 still requires fresh remote main CI and all six tag-triggered build artifacts.
 - Advisory decision: continue
+
+## Checkpoint Update
+
+- Current todo: Commit and push the final release evidence records without staging .gitignore.
+- Active slice: Durable release evidence and scoped docs commit.
+- Completed todos:
+- Main CI run 29808374855 passed fmt, Clippy, build, and 2773 tests.
+- Published immutable annotated tag v0.1.1-rc.2+20260721.0634 at ec47ee25.
+- Release run 29808716841 passed all six platform jobs.
+- Verified public RC2 prerelease notes and six non-empty assets.
+- Evidence refs:
+- main CI run 29808374855
+- release run 29808716841
+- GitHub Release v0.1.1-rc.2+20260721.0634
+- Blocked on: none
+- Next step: Complete reflection, bundle/check the Aegis workspace, then commit and push only release evidence records.
+
+## DriftCheckDraft
+
+- Scope status: Release, CI repairs, and durable evidence only; the user .gitignore edit remains untouched.
+- Compatibility status: Cargo version remains 0.1.1; RC identity is tag metadata and GitHub prerelease state.
+- Retirement status: The incompatible xpty path remains removed; portable-pty is the sole PTY owner.
+- New risk signals:
+- RC2 is a prerelease and does not claim stable compatibility.
+- Advisory decision: continue

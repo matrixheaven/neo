@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "final-main-ci",
+  "type": "remote-workflow",
+  "source": "GitHub Actions run 29808374855 at ec47ee25265a62a7498b0a0f1d6975fbb9a75af1",
+  "summary": "Main CI completed successfully: formatting, Clippy, release build, and 2773 tests all passed for the exact commit tagged as RC2.",
+  "verifier": "Codex fresh GitHub CLI verification"
+}

@@ -3,13 +3,14 @@
   "taskId": "2026-07-21-release-0-1-1-rc1",
   "taskIntentRef": "docs/aegis/work/2026-07-21-release-0-1-1-rc1/task-intent-draft.json",
   "baselineRefs": [
-    ".github/workflows/ci.yml and .github/workflows/release.yml"
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml"
   ],
-  "scopeStatus": "Release, CI blockers, and durable release records only; unrelated .gitignore edit remains untouched.",
-  "compatStatus": "Package version remains 0.1.1; RC identity and timestamp remain tag metadata.",
-  "retirementStatus": "Old single-file Write test fixtures and contradictory symlink drift test retired; no compatibility branch added.",
+  "scopeStatus": "Release, CI repairs, and durable evidence only; the user .gitignore edit remains untouched.",
+  "compatStatus": "Cargo version remains 0.1.1; RC identity is tag metadata and GitHub prerelease state.",
+  "retirementStatus": "The incompatible xpty path remains removed; portable-pty is the sole PTY owner.",
   "newRiskSignals": [
-    "Remote CI and six-platform release jobs remain unverified."
+    "RC2 is a prerelease and does not claim stable compatibility."
   ],
   "decision": "continue"
 }
