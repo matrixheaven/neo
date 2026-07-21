@@ -366,7 +366,7 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
 
     let directory = fs::OpenOptions::new()
-        .read(true)
+        .write(true)
         .custom_flags(winsafe::co::FILE_FLAG::BACKUP_SEMANTICS.raw())
         .open(parent)?;
     directory.sync_all()
@@ -404,6 +404,13 @@ fn platform_reparse_point(_metadata: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_sync_accepts_directory_handles() {
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        sync_directory(workspace.path()).expect("sync directory");
+    }
 
     #[test]
     fn replacement_never_creates_missing_paths() {
