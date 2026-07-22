@@ -383,18 +383,16 @@ impl Tool for CreateSkillTool {
             write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
 
             // Write agents/neo.yaml when host_metadata is present.
-            if let Some(ref metadata) = args.host_metadata {
-                if let Some(sidecar_yaml) =
-                    crate::skills::serialize_host_metadata(metadata)
-                {
-                    let agents_dir = skill_dir.join("agents");
-                    stdfs::create_dir_all(&agents_dir).map_err(ToolError::Io)?;
-                    let sidecar_path = agents_dir.join("neo.yaml");
-                    reject_reparse_or_symlink_if_present(&sidecar_path)
-                        .map_err(ToolError::Io)?;
-                    write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes())
-                        .map_err(ToolError::Io)?;
-                }
+            if let Some(sidecar_yaml) = args
+                .host_metadata
+                .as_ref()
+                .and_then(crate::skills::serialize_host_metadata)
+            {
+                let agents_dir = skill_dir.join("agents");
+                stdfs::create_dir_all(&agents_dir).map_err(ToolError::Io)?;
+                let sidecar_path = agents_dir.join("neo.yaml");
+                reject_reparse_or_symlink_if_present(&sidecar_path).map_err(ToolError::Io)?;
+                write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes()).map_err(ToolError::Io)?;
             }
 
             for resource in &resources {
@@ -1360,12 +1358,20 @@ mod tests {
         }
 
         // create-skill is requirement-driven.
-        assert!(create_skill.body.contains("No-argument invocation is not a requirement"));
+        assert!(
+            create_skill
+                .body
+                .contains("No-argument invocation is not a requirement")
+        );
         assert!(create_skill.body.contains("## Verify"));
         assert!(create_skill.body.contains("CreateSkill"));
 
         // self-evo is evidence-driven.
-        assert!(self_evo.body.contains("No-argument invocation is not a scope"));
+        assert!(
+            self_evo
+                .body
+                .contains("No-argument invocation is not a scope")
+        );
         assert!(self_evo.body.contains("## Verify"));
         assert!(self_evo.body.contains("CreateSkill.resources"));
     }
@@ -1421,9 +1427,7 @@ mod tests {
         let content = fs::read_to_string(&path).await.expect("read");
         assert!(content.contains("name: test-skill"));
         assert!(
-            !content.contains(
-                "---\nname: test-skill\ndescription: A test skill\n---\n\n---"
-            ),
+            !content.contains("---\nname: test-skill\ndescription: A test skill\n---\n\n---"),
             "CreateSkill body is plain Markdown and must not be treated as a second frontmatter block"
         );
     }
@@ -2374,9 +2378,11 @@ mod tests {
     async fn create_skill_reloads_shared_skill_store() {
         let temp = tempfile::tempdir().expect("tempdir");
         let user_skills = temp.path().join("skills");
-        let handle = SkillStoreHandle::new(
-            SkillStore::load(std::slice::from_ref(&user_skills), &[], Vec::new()),
-        );
+        let handle = SkillStoreHandle::new(SkillStore::load(
+            std::slice::from_ref(&user_skills),
+            &[],
+            Vec::new(),
+        ));
         let reload_root = user_skills.clone();
         let tool =
             CreateSkillTool::new(temp.path()).with_skill_store_reload(handle.clone(), move || {
@@ -2445,8 +2451,9 @@ mod tests {
         assert!(!result.is_error);
 
         let sidecar_path = skill_dir.join("agents").join("neo.yaml");
-        let sidecar =
-            fs::read_to_string(&sidecar_path).await.expect("read sidecar");
+        let sidecar = fs::read_to_string(&sidecar_path)
+            .await
+            .expect("read sidecar");
         assert!(sidecar.contains("display_name: \"Host Display\""));
         assert!(sidecar.contains("short_description: \"Picker summary\""));
         assert!(sidecar.contains("value: \"myServer\""));
@@ -2465,8 +2472,9 @@ mod tests {
             .expect("execute2");
         assert!(!result2.is_error);
 
-        let sidecar2 =
-            fs::read_to_string(&sidecar_path).await.expect("read sidecar2");
+        let sidecar2 = fs::read_to_string(&sidecar_path)
+            .await
+            .expect("read sidecar2");
         assert!(sidecar2.contains("display_name: \"Host Display\""));
     }
 

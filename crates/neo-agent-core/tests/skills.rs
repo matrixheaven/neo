@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use neo_agent_core::skills::{
-    LoadedSkill, SkillArgument, SkillHostMetadata, SkillInvocation, SkillLoadError,
-    SkillManifest, SkillSource, SkillStore,
+    LoadedSkill, SkillArgument, SkillHostMetadata, SkillInvocation, SkillLoadError, SkillManifest,
+    SkillSource, SkillStore,
     builtin::builtin_skills,
     discovery::{discover_skills, user_skill_dirs},
     expand_skill_body, load_skill_file, parse_skill_invocation,

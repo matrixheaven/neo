@@ -82,21 +82,23 @@
 
 ## Checkpoint Update
 
-- Current todo: Begin implementation with Task 0: Resume-Safe Start and Dirty-Tree Fence.
-- Active slice: Handoff ready after built-in author contract amendment; no source implementation has started.
+- Current todo: Execute Task 2: Add the Neo Host-Metadata Owner.
+- Active slice: Create skills/metadata.rs with SkillHostMetadata, SkillInterface, SkillToolDependency types. Wire into LoadedSkill. Implement load/serialize in metadata.rs. Add integration test.
+- Explicit non-edits: session/layout.rs, workflow/mod.rs, workflow/runtime.rs, .gitignore (all unrelated dirty). No discovery.rs, no context.rs changes yet.
 - Completed todos:
 - Investigate Neo and Codex skill package structures.
 - Write and self-review the approved design spec.
 - Write the executable implementation plan and constrained handoff prompt.
 - Validate task-owned Aegis artifacts and commit the initial documentation bundle.
 - Amend the spec, Task 6, and handoff for create-skill and self-evo.
+- Task 0: Resume-Safe Start and Dirty-Tree Fence.
+- Task 1: Retire Inactive Manifest Surfaces (commit 1a245be5).
 - Evidence refs:
 - docs/aegis/specs/2026-07-22-skill-package-completion-design.md
 - docs/aegis/plans/2026-07-22-skill-package-completion.md
-- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json
-- docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md
+- Commit 1a245be5: removed SkillType, skill_type, slash_commands, parse_skill_type
 - Blocked on: none
-- Next step: Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order; Task 6 must validate both built-in authors.
+- Next step: Create metadata.rs, add host_metadata to LoadedSkill, implement loader/serializer, add test, commit.
 
 ## DriftCheckDraft
 

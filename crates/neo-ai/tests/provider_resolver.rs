@@ -147,7 +147,6 @@ fn production_registry_includes_google_generative_ai_credentials() {
         google.api_key_env_vars,
         vec!["GEMINI_API_KEY", "GOOGLE_API_KEY"]
     );
-
 }
 
 #[test]

@@ -16,12 +16,12 @@ pub mod metadata;
 pub use arguments::{
     SkillArgumentError, SkillInvocation, expand_skill_body, parse_skill_invocation,
 };
+pub use context::render_skill_context;
 pub use discovery::{SkillSource, discover_skills};
 pub use metadata::{
     SkillHostMetadata, SkillInterface, SkillToolDependency, load_host_metadata,
     serialize_host_metadata,
 };
-pub use context::render_skill_context;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,7 +166,10 @@ impl SkillStore {
             }
         }
 
-        Self { skills, diagnostics }
+        Self {
+            skills,
+            diagnostics,
+        }
     }
 
     #[must_use]

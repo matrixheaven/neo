@@ -22,10 +22,7 @@ pub fn render_skill_context(skill: &LoadedSkill, instructions: &str) -> String {
     if !skill.host_metadata.dependencies.is_empty() {
         xml.push_str("\n<dependencies>\n");
         for dep in &skill.host_metadata.dependencies {
-            xml.push_str(&format!(
-                "  <mcp value=\"{}\">",
-                escape_xml(&dep.value)
-            ));
+            xml.push_str(&format!("  <mcp value=\"{}\">", escape_xml(&dep.value)));
             if let Some(ref desc) = dep.description {
                 xml.push_str(&escape_xml(desc));
             }
@@ -59,8 +56,8 @@ fn escape_xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::{LoadedSkill, SkillToolDependency};
     use crate::skills::{SkillHostMetadata, SkillInterface, SkillManifest, SkillSource};
-    use crate::skills::{SkillToolDependency, LoadedSkill};
     use std::path::PathBuf;
 
     fn make_skill(

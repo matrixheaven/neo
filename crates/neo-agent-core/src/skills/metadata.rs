@@ -166,7 +166,10 @@ pub fn serialize_host_metadata(metadata: &SkillHostMetadata) -> Option<String> {
     let mut yaml = "interface:\n".to_owned();
     if let Some(iface) = &metadata.interface {
         if let Some(ref name) = iface.display_name {
-            yaml.push_str(&format!("  display_name: \"{}\"\n", escape_yaml_string(name)));
+            yaml.push_str(&format!(
+                "  display_name: \"{}\"\n",
+                escape_yaml_string(name)
+            ));
         }
         if let Some(ref desc) = iface.short_description {
             yaml.push_str(&format!(

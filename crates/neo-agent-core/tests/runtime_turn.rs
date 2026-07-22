@@ -5646,9 +5646,11 @@ async fn runtime_appends_available_skills_snapshot_only_when_changed() {
         "---\nname: beta\ndescription: Beta skill\n---\nBody.\n",
     )
     .expect("write beta");
-    handle.replace(
-        SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new()),
-    );
+    handle.replace(SkillStore::load(
+        &[],
+        &[skills_dir.path().to_path_buf()],
+        Vec::new(),
+    ));
 
     let second = runtime
         .run_turn(&mut context, AgentMessage::user_text("second"))

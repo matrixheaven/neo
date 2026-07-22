@@ -1,4 +1,5 @@
 target
+.tmp
 .neo
 .references/
 .DS_Store

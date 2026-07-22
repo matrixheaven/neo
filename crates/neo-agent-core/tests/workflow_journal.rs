@@ -79,7 +79,10 @@ fn journal_writes_and_reads_append_only_records() {
 
     let mut writer = JournalWriter::open(&jpath).unwrap();
     writer
-        .append(&state_changed(0, WorkflowState::Running, WorkflowState::Running), &limits)
+        .append(
+            &state_changed(0, WorkflowState::Running, WorkflowState::Running),
+            &limits,
+        )
         .unwrap();
     writer
         .append(&invocation_started(1, "inv_1", 0), &limits)
@@ -98,7 +101,10 @@ fn journal_writes_and_reads_append_only_records() {
     let mut writer2 = JournalWriter::open(&jpath).unwrap();
     assert_eq!(writer2.next_seq(), 3);
     writer2
-        .append(&state_changed(3, WorkflowState::Running, WorkflowState::Completed), &limits)
+        .append(
+            &state_changed(3, WorkflowState::Running, WorkflowState::Completed),
+            &limits,
+        )
         .unwrap();
 
     let records2 = read_journal(&jpath).unwrap();
@@ -113,7 +119,10 @@ fn incomplete_invocation_is_detected_without_reexecution() {
 
     let mut writer = JournalWriter::open(&jpath).unwrap();
     writer
-        .append(&state_changed(0, WorkflowState::Running, WorkflowState::Running), &limits)
+        .append(
+            &state_changed(0, WorkflowState::Running, WorkflowState::Running),
+            &limits,
+        )
         .unwrap();
     writer
         .append(&invocation_started(1, "inv_1", 0), &limits)
@@ -150,8 +159,18 @@ fn journal_rejects_malformed_sequence() {
     let jpath = dir.path().join("journal.jsonl");
 
     // Write records with a sequence gap
-    let r0 = serde_json::to_string(&state_changed(0, WorkflowState::Running, WorkflowState::Running)).unwrap();
-    let r2 = serde_json::to_string(&state_changed(2, WorkflowState::Running, WorkflowState::Completed)).unwrap();
+    let r0 = serde_json::to_string(&state_changed(
+        0,
+        WorkflowState::Running,
+        WorkflowState::Running,
+    ))
+    .unwrap();
+    let r2 = serde_json::to_string(&state_changed(
+        2,
+        WorkflowState::Running,
+        WorkflowState::Completed,
+    ))
+    .unwrap();
     std::fs::write(&jpath, format!("{r0}\n{r2}\n")).unwrap();
 
     let err = read_journal(&jpath).unwrap_err();

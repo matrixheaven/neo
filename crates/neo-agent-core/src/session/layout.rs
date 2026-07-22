@@ -62,3 +62,10 @@ pub fn main_agent_goals_dir(session_dir: &Path) -> PathBuf {
 pub fn relative_agent_record_dir(agent_id: &str) -> PathBuf {
     PathBuf::from(AGENTS_DIR).join(agent_id)
 }
+
+pub const WORKFLOWS_DIR: &str = "workflows";
+
+#[must_use]
+pub fn workflows_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join(WORKFLOWS_DIR)
+}

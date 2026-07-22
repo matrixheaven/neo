@@ -269,8 +269,7 @@ mod tests {
             let index = SessionIndex::from_path(index_path.clone());
             let barrier = barrier.clone();
             writers.push(std::thread::spawn(move || {
-                let session_id =
-                    format!("session_00000000-0000-4000-8000-{writer:012x}");
+                let session_id = format!("session_00000000-0000-4000-8000-{writer:012x}");
                 let entry = SessionIndexEntry {
                     session_dir: PathBuf::from(format!("bucket/{session_id}")),
                     workdir: PathBuf::from(format!("workspace/{writer}")),
