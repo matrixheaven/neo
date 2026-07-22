@@ -25,4 +25,3 @@ concurrent Workflow surface, and Windows filesystem evidence remains a platform
 CI concern rather than a hidden completion claim.
 
 Method Pack output remains advisory and does not grant completion authority.
-

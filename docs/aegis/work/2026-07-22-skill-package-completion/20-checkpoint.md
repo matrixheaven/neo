@@ -41,4 +41,3 @@
 - Windows reparse behavior requires Windows CI for release-grade evidence.
 - Existing Workflow/task-browser worktree and index changes remain outside this
   task and must not be staged or committed here.
-

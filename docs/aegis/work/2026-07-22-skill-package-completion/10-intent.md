@@ -58,4 +58,3 @@
 
 These records are advisory Method Pack evidence, not authoritative runtime
 decisions or completion authority.
-

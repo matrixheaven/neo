@@ -66,4 +66,3 @@ ADR: `docs/aegis/adr/ADR-0003-neo-skill-package-contract.md`
   CI for release-grade platform evidence.
 - Declared MCP dependencies are informational. Availability still depends on
   the user's existing Neo MCP configuration.
-
