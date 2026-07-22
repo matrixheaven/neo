@@ -53,7 +53,7 @@ pub(super) fn execute_invoke_skill(
     let invocation = request.into_invocation();
 
     match crate::skills::expand_skill_body(&skill, &invocation) {
-        Ok(body) => ToolResult::ok(body),
+        Ok(body) => ToolResult::ok(crate::skills::render_skill_context(&skill, &body)),
         Err(err) => ToolResult::error(format!(
             "failed to expand skill `{}`: {err}",
             invocation.name
@@ -182,7 +182,9 @@ disableModelInvocation: {manual_only}
             })),
         );
 
-        assert_eq!(result, ToolResult::ok("Review src/lib.rs.\n"));
+        assert!(result.content.contains("name=\"review\""));
+        assert!(result.content.contains("Review src/lib.rs."));
+        assert!(result.content.contains("<neo-skill-loaded"));
     }
 
     #[test]
@@ -238,8 +240,10 @@ disableModelInvocation: {manual_only}
             })),
         );
 
-        assert_eq!(first, ToolResult::ok("Review src/lib.rs.\n"));
-        assert_eq!(second, ToolResult::ok("Summarize src/main.rs.\n"));
+        assert!(first.content.contains("name=\"review\""));
+        assert!(first.content.contains("Review src/lib.rs."));
+        assert!(second.content.contains("name=\"summarize\""));
+        assert!(second.content.contains("Summarize src/main.rs."));
     }
 
     #[test]

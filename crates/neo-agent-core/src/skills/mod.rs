@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod arguments;
 pub mod builtin;
+pub mod context;
 pub mod discovery;
 pub mod metadata;
 
@@ -20,6 +21,7 @@ pub use metadata::{
     SkillHostMetadata, SkillInterface, SkillToolDependency, load_host_metadata,
     serialize_host_metadata,
 };
+pub use context::render_skill_context;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

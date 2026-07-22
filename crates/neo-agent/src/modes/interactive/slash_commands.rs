@@ -357,10 +357,9 @@ impl InteractiveController {
             let (expanded_skill, _) =
                 expand_slash_skill(&invocation.name, &invocation.args, skill)?;
             names.push(invocation.name.clone());
-            loaded_blocks.push(render_loaded_skill_block(
+            loaded_blocks.push(neo_agent_core::skills::render_skill_context(
                 skill,
-                invocation.args.as_str(),
-                expanded_skill.as_str(),
+                &expanded_skill,
             ));
         }
 
@@ -459,29 +458,6 @@ fn render_user_slash_skill_context(
         context.push_str("\n</neo-user-request>");
     }
     context
-}
-
-fn render_loaded_skill_block(
-    skill: &neo_agent_core::skills::LoadedSkill,
-    args: &str,
-    body: &str,
-) -> String {
-    format!(
-        "<neo-skill-loaded name=\"{}\" trigger=\"user-slash\" source=\"{}\" dir=\"{}\" args=\"{}\">\n{}\n</neo-skill-loaded>",
-        escape_xml_attr(&skill.name),
-        escape_xml_attr(skill_source_label(skill.source)),
-        escape_xml_attr(&skill.root.to_string_lossy()),
-        escape_xml_attr(args),
-        body
-    )
-}
-
-const fn skill_source_label(source: neo_agent_core::skills::SkillSource) -> &'static str {
-    match source {
-        neo_agent_core::skills::SkillSource::Builtin => "builtin",
-        neo_agent_core::skills::SkillSource::Extra => "extra",
-        neo_agent_core::skills::SkillSource::User => "user",
-    }
 }
 
 fn escape_xml_attr(text: &str) -> String {
