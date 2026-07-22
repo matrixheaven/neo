@@ -61,6 +61,9 @@ impl SessionIndex {
         use std::io::Write;
         validate_session_id(&entry.session_id)
             .map_err(|_| SessionIndexError::InvalidId(entry.session_id.clone()))?;
+        let mut line =
+            serde_json::to_vec(entry).map_err(|source| SessionIndexError::Json { source })?;
+        line.push(b'\n');
         if let Some(parent) = self.index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -68,9 +71,8 @@ impl SessionIndex {
             .create(true)
             .append(true)
             .open(&self.index_path)?;
-        let line =
-            serde_json::to_string(entry).map_err(|source| SessionIndexError::Json { source })?;
-        writeln!(file, "{line}")?;
+        file.lock()?;
+        file.write_all(&line)?;
         Ok(())
     }
 
@@ -227,6 +229,8 @@ fn parse_index_entry_line(line: &str) -> Option<SessionIndexEntry> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use tempfile::TempDir;
 
     use super::*;
@@ -250,6 +254,39 @@ mod tests {
             found.as_ref().unwrap().workdir,
             PathBuf::from("/home/user/neo")
         );
+    }
+
+    #[test]
+    fn concurrent_handles_append_complete_records() {
+        const WRITERS: usize = 32;
+
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join(INDEX_FILENAME);
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let mut writers = Vec::with_capacity(WRITERS);
+
+        for writer in 0..WRITERS {
+            let index = SessionIndex::from_path(index_path.clone());
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                let session_id =
+                    format!("session_00000000-0000-4000-8000-{writer:012x}");
+                let entry = SessionIndexEntry {
+                    session_dir: PathBuf::from(format!("bucket/{session_id}")),
+                    workdir: PathBuf::from(format!("workspace/{writer}")),
+                    session_id,
+                };
+                barrier.wait();
+                index.append(&entry).unwrap();
+            }));
+        }
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let entries = SessionIndex::from_path(index_path).list_all().unwrap();
+        assert_eq!(entries.len(), WRITERS);
     }
 
     #[test]
