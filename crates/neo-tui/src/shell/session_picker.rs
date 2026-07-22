@@ -478,13 +478,26 @@ fn single_line(text: &str) -> String {
 }
 
 fn home_alias(path: &Path) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let home = PathBuf::from(&home);
-        if let Ok(rel) = path.strip_prefix(&home) {
-            return format!("~/{}", rel.display());
-        }
+    home_alias_with_home(path, user_home_dir().as_deref())
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+
+    home.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+fn home_alias_with_home(path: &Path, home: Option<&Path>) -> String {
+    let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) else {
+        return path.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        return "~".to_owned();
     }
-    path.display().to_string()
+    Path::new("~").join(relative).display().to_string()
 }
 
 /// Truncate a plain (unstyled) string to at most `max_width` display columns,
@@ -605,6 +618,22 @@ mod tests {
         assert!(visible_width(&out) <= 8);
         assert!(out.starts_with('\u{2026}'));
         assert!(out.ends_with("结尾"));
+    }
+
+    #[test]
+    fn home_alias_uses_native_path_components() {
+        let home = PathBuf::from("users").join("alice");
+        let workspace = home.join("Workspace").join("neo");
+
+        assert_eq!(
+            home_alias_with_home(&workspace, Some(&home)),
+            Path::new("~")
+                .join("Workspace")
+                .join("neo")
+                .display()
+                .to_string()
+        );
+        assert_eq!(home_alias_with_home(&home, Some(&home)), "~");
     }
 
     #[test]
