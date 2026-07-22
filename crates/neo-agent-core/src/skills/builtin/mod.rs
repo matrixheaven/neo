@@ -7,7 +7,7 @@ use crate::{
     session::atomic_file::{
         AtomicWriteStatus, replace_existing_file_atomic_status, write_file_atomic_create_new,
     },
-    skills::{LoadedSkill, SkillManifest, SkillSource},
+    skills::{LoadedSkill, SkillHostMetadata, SkillManifest, SkillSource},
 };
 
 const SUB_SKILL: &str = include_str!("sub-skill.md");
@@ -94,6 +94,7 @@ fn load_builtin_skill(source: &str) -> Result<LoadedSkill, BuiltinSkillError> {
         manifest,
         body: body.trim_start_matches('\n').to_owned(),
         source: SkillSource::Builtin,
+        host_metadata: SkillHostMetadata::default(),
     })
 }
 

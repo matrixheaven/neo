@@ -282,6 +282,7 @@ disableModelInvocation: {manual_only}
             },
             body: String::new(),
             source: SkillSource::default(),
+            host_metadata: crate::skills::SkillHostMetadata::default(),
         };
         let manual = crate::skills::LoadedSkill {
             manifest: SkillManifest {

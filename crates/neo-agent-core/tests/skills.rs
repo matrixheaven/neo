@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use neo_agent_core::skills::{
-    LoadedSkill, SkillArgument, SkillInvocation, SkillLoadError, SkillManifest, SkillSource,
-    SkillStore,
+    LoadedSkill, SkillArgument, SkillHostMetadata, SkillInvocation, SkillLoadError,
+    SkillManifest, SkillSource, SkillStore,
     builtin::builtin_skills,
     discovery::{discover_skills, user_skill_dirs},
     expand_skill_body, load_skill_file, parse_skill_invocation,
@@ -109,6 +109,7 @@ fn expand_skill_body_replaces_named_and_positional_arguments() {
         },
         body: "Review $target in $mode mode. Also see $0 and $1.".into(),
         source: SkillSource::default(),
+        host_metadata: SkillHostMetadata::default(),
     };
     let invocation = SkillInvocation {
         name: "review".into(),
@@ -139,6 +140,7 @@ fn expand_skill_body_appends_arguments_when_no_placeholders() {
         },
         body: "Summarize the following.".into(),
         source: SkillSource::default(),
+        host_metadata: SkillHostMetadata::default(),
     };
     let invocation = SkillInvocation {
         name: "summarize".into(),
@@ -172,6 +174,7 @@ fn expand_skill_body_substitutes_undeclared_named_argument_via_placeholder() {
         },
         body: "Explore the idea: $task".into(),
         source: SkillSource::default(),
+        host_metadata: SkillHostMetadata::default(),
     };
     let mut named = HashMap::new();
     named.insert("task".to_string(), "refactor skills".to_string());
@@ -203,6 +206,7 @@ fn expand_skill_body_passes_undeclared_argument_through_when_no_placeholder() {
         },
         body: "Start the brainstorming process.".into(),
         source: SkillSource::default(),
+        host_metadata: SkillHostMetadata::default(),
     };
     let mut named = HashMap::new();
     named.insert("task".to_string(), "refactor skills".to_string());
@@ -241,6 +245,7 @@ fn expand_skill_body_still_fails_on_missing_required_argument() {
         },
         body: "Review $target.".into(),
         source: SkillSource::default(),
+        host_metadata: SkillHostMetadata::default(),
     };
     // An undeclared arg is passed but the required `target` is missing.
     let mut named = HashMap::new();
@@ -504,6 +509,82 @@ No retired fields.
     assert!(!skill.manifest.auto_invokable());
     assert_eq!(skill.manifest.arguments.len(), 1);
     assert_eq!(skill.manifest.arguments[0].name, "target");
+}
+
+#[test]
+fn neo_host_metadata_loads_and_invalid_optional_metadata_falls_back() {
+    use neo_agent_core::skills::SkillHostMetadata;
+
+    // Valid sidecar.
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join("agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    write(
+        dir.path().join("SKILL.md"),
+        r"---
+name: schema-review
+description: Review schemas
+---
+# Schema Review
+",
+    );
+    write(
+        agents_dir.join("neo.yaml"),
+        r#"interface:
+  display_name: "Schema Review"
+  short_description: "Review JSON schemas"
+dependencies:
+  tools:
+    - type: mcp
+      value: jsonSchemaRegistry
+      description: "Registry MCP"
+"#,
+    );
+
+    let skill = load_skill_file(&dir.path().join("SKILL.md"), SkillSource::default()).unwrap();
+
+    assert_eq!(skill.display_name(), "Schema Review");
+    assert_eq!(skill.short_description(), Some("Review JSON schemas"));
+    assert_eq!(skill.host_metadata.dependencies.len(), 1);
+    assert_eq!(
+        skill.host_metadata.dependencies[0].value,
+        "jsonSchemaRegistry"
+    );
+
+    // Malformed sidecar — skill still loads, metadata falls back.
+    let dir2 = tempfile::tempdir().unwrap();
+    let agents_dir2 = dir2.path().join("agents");
+    fs::create_dir_all(&agents_dir2).unwrap();
+    write(
+        dir2.path().join("SKILL.md"),
+        r"---
+name: malformed
+description: Broken sidecar
+---
+Body.
+",
+    );
+    write(agents_dir2.join("neo.yaml"), "%%% not yaml %%%");
+
+    let skill2 = load_skill_file(&dir2.path().join("SKILL.md"), SkillSource::default()).unwrap();
+
+    assert_eq!(skill2.host_metadata, SkillHostMetadata::default());
+
+    // No sidecar file at all.
+    let dir3 = tempfile::tempdir().unwrap();
+    write(
+        dir3.path().join("SKILL.md"),
+        r"---
+name: no-sidecar
+description: No agents dir
+---
+Body.
+",
+    );
+
+    let skill3 = load_skill_file(&dir3.path().join("SKILL.md"), SkillSource::default()).unwrap();
+
+    assert_eq!(skill3.host_metadata, SkillHostMetadata::default());
 }
 
 fn write(path: impl AsRef<Path>, content: &str) {

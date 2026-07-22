@@ -10,11 +10,16 @@ use serde::{Deserialize, Serialize};
 pub mod arguments;
 pub mod builtin;
 pub mod discovery;
+pub mod metadata;
 
 pub use arguments::{
     SkillArgumentError, SkillInvocation, expand_skill_body, parse_skill_invocation,
 };
 pub use discovery::{SkillSource, discover_skills};
+pub use metadata::{
+    SkillHostMetadata, SkillInterface, SkillToolDependency, load_host_metadata,
+    serialize_host_metadata,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,12 +63,23 @@ pub struct LoadedSkill {
     pub manifest: SkillManifest,
     pub body: String,
     pub source: SkillSource,
+    pub host_metadata: SkillHostMetadata,
 }
 
 impl LoadedSkill {
     #[must_use]
     pub fn is_builtin_extracted(&self) -> bool {
         self.root.components().any(|c| c.as_os_str() == ".builtin")
+    }
+
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.host_metadata.display_name(&self.name)
+    }
+
+    #[must_use]
+    pub fn short_description(&self) -> Option<&str> {
+        self.host_metadata.short_description()
     }
 }
 
@@ -294,6 +310,7 @@ pub fn load_skill_file(
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let name = manifest.name.clone();
+    let (host_metadata, _diagnostics) = metadata::load_host_metadata(&root);
 
     Ok(LoadedSkill {
         name,
@@ -301,6 +318,7 @@ pub fn load_skill_file(
         manifest,
         body: body.trim_start_matches('\n').to_owned(),
         source: skill_source,
+        host_metadata,
     })
 }
 
