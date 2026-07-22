@@ -45,7 +45,7 @@ pub(super) fn execute_invoke_skill(
     };
     if skill_is_manual_only(&skill) {
         return ToolResult::error(format!(
-            "skill `{}` is type `flow` and can only be invoked manually via /skill:{}",
+            "skill `{}` is marked manual-only and can only be invoked via /skill:{}",
             request.skill_name, request.skill_name
         ));
     }
@@ -124,17 +124,17 @@ pub(super) fn format_skill_tool_arguments(tool_arguments: &serde_json::Value) ->
 }
 
 fn skill_is_manual_only(skill: &crate::skills::LoadedSkill) -> bool {
-    matches!(skill.manifest.skill_type, crate::skills::SkillType::Flow)
+    skill.manifest.disable_model_invocation
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillStore, SkillType};
+    use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillStore};
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn write_skill(root: &std::path::Path, name: &str, skill_type: &str, body: &str) {
+    fn write_skill(root: &std::path::Path, name: &str, manual_only: bool, body: &str) {
         let skill_dir = root.join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(
@@ -143,10 +143,10 @@ mod tests {
                 r"---
 name: {name}
 description: {name} skill
-type: {skill_type}
 arguments:
   - name: target
     required: true
+disableModelInvocation: {manual_only}
 ---
 {body}
 "
@@ -168,7 +168,7 @@ arguments:
     #[test]
     fn execute_invoke_skill_expands_named_string_arguments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_skill(temp.path(), "review", "prompt", "Review $target.");
+        write_skill(temp.path(), "review", false, "Review $target.");
         let store = skill_store(temp.path());
 
         let result = execute_invoke_skill(
@@ -188,7 +188,7 @@ arguments:
     #[test]
     fn execute_invoke_skill_rejects_disabled_missing_and_flow_cases() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_skill(temp.path(), "manual-flow", "flow", "Manual only.");
+        write_skill(temp.path(), "manual-flow", true, "Manual only.");
         let store = skill_store(temp.path());
 
         let no_store = execute_invoke_skill(None, &skill_arguments(json!({"skill": "review"})));
@@ -212,15 +212,15 @@ arguments:
         );
         assert_eq!(
             flow.content,
-            "skill `manual-flow` is type `flow` and can only be invoked manually via /skill:manual-flow"
+            "skill `manual-flow` is marked manual-only and can only be invoked via /skill:manual-flow"
         );
     }
 
     #[test]
     fn execute_invoke_skill_allows_multiple_invocations_in_same_turn() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_skill(temp.path(), "review", "prompt", "Review $target.");
-        write_skill(temp.path(), "summarize", "prompt", "Summarize $target.");
+        write_skill(temp.path(), "review", false, "Review $target.");
+        write_skill(temp.path(), "summarize", false, "Summarize $target.");
         let store = skill_store(temp.path());
 
         let first = execute_invoke_skill(
@@ -269,32 +269,30 @@ arguments:
     }
 
     #[test]
-    fn skill_is_manual_only_tracks_flow_manifest_type() {
-        let prompt = crate::skills::LoadedSkill {
-            name: "prompt".to_owned(),
-            root: PathBuf::from("/tmp/prompt"),
+    fn skill_is_manual_only_tracks_disable_model_invocation() {
+        let auto = crate::skills::LoadedSkill {
+            name: "auto".to_owned(),
+            root: PathBuf::from("/tmp/auto"),
             manifest: SkillManifest {
-                name: "prompt".to_owned(),
-                description: "Prompt".to_owned(),
-                skill_type: SkillType::Prompt,
+                name: "auto".to_owned(),
+                description: "Auto".to_owned(),
                 when_to_use: None,
                 disable_model_invocation: false,
                 arguments: Vec::<SkillArgument>::new(),
-                slash_commands: Vec::new(),
             },
             body: String::new(),
             source: SkillSource::default(),
         };
-        let flow = crate::skills::LoadedSkill {
+        let manual = crate::skills::LoadedSkill {
             manifest: SkillManifest {
-                skill_type: SkillType::Flow,
-                ..prompt.manifest.clone()
+                disable_model_invocation: true,
+                ..auto.manifest.clone()
             },
-            ..prompt.clone()
+            ..auto.clone()
         };
 
-        assert!(!skill_is_manual_only(&prompt));
-        assert!(skill_is_manual_only(&flow));
+        assert!(!skill_is_manual_only(&auto));
+        assert!(skill_is_manual_only(&manual));
     }
 
     #[test]

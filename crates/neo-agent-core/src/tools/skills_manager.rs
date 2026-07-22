@@ -74,13 +74,9 @@ pub struct CreateSkillArgs {
         description = "Short description of what the skill does. Stored in the skill frontmatter."
     )]
     pub description: String,
-    /// Skill type: prompt, inline, or flow. Defaults to prompt.
-    #[serde(default)]
-    #[schemars(description = "Skill type: prompt, inline, or flow. Defaults to 'prompt'.")]
-    pub skill_type: String,
     /// Markdown body of the skill. Do not include YAML frontmatter.
     #[schemars(
-        description = "Markdown body of the skill. Do not include YAML frontmatter; CreateSkill generates frontmatter from name, description, and skill_type."
+        description = "Markdown body of the skill. Do not include YAML frontmatter; CreateSkill generates frontmatter from name and description."
     )]
     pub body: String,
     /// Optional text resources to write under references/, scripts/, or assets/.
@@ -268,7 +264,6 @@ impl Tool for CreateSkillTool {
          ---\n\
          name: deploy-staging\n\
          description: Deploys the app to staging. Use when the user asks to deploy or push to the staging environment.\n\
-         type: prompt\n\
          whenToUse: When the user asks to deploy to staging, push to staging, or update the staging environment.\n\
          ---\n\n\
          # Deploy to Staging\n\n\
@@ -278,9 +273,6 @@ impl Tool for CreateSkillTool {
          Frontmatter fields:\n\
          - name (required): Skill identifier, must match the directory name.\n\
          - description (required): One-line summary of what the skill does.\n\
-         - type (required): One of \"prompt\" (injected as a context message before the user's \
-         message), \"inline\" (expanded directly into the prompt), or \"flow\" (multi-step \
-         interactive workflow).\n\
          - whenToUse (recommended): Natural language trigger description for automatic skill selection.\n\n\
          If a skill with the same name already exists, the existing skill directory is backed up \
          under ~/.neo/backups/skills/<timestamp>/<name>/ before being overwritten.\n\n\
@@ -288,9 +280,9 @@ impl Tool for CreateSkillTool {
          Parameters:\n\
          - name: Directory name for the skill under ~/.neo/skills/.\n\
          - description: Short description of what the skill does.\n\
-         - skill_type: \"prompt\", \"inline\", or \"flow\". Defaults to \"prompt\".\n\
+         - description: Short description of what the skill does.\n\
          - body: Markdown body only. Do not include YAML frontmatter; this tool generates \
-         frontmatter from name, description, and skill_type.\n\
+         frontmatter from name and description.\n\
          - resources: Optional UTF-8 text files under references/, scripts/, or assets/. \
          Resource paths must be relative and cannot target SKILL.md."
     }
@@ -312,12 +304,10 @@ impl Tool for CreateSkillTool {
         Box::pin(async move {
             let args = args?;
             validate_skill_name(&args.name)?;
-            let skill_type = parse_skill_type(&args.skill_type)?;
             let resources = validate_resources(&args.resources)?;
             let frontmatter = CreateSkillFrontmatter {
                 name: &args.name,
                 description: &args.description,
-                skill_type,
             };
             let frontmatter =
                 serde_yaml::to_string(&frontmatter).map_err(|err| ToolError::InvalidInput {
@@ -390,8 +380,6 @@ fn ensure_safe_home_subdirectory(home: &Path, child: &Path) -> Result<PathBuf, T
 struct CreateSkillFrontmatter<'a> {
     name: &'a str,
     description: &'a str,
-    #[serde(rename = "type")]
-    skill_type: crate::skills::SkillType,
 }
 
 #[derive(Debug, Clone)]
@@ -615,17 +603,6 @@ fn is_windows_reserved_basename(name: &str) -> bool {
             | "lpt8"
             | "lpt9"
     )
-}
-
-fn parse_skill_type(value: &str) -> Result<crate::skills::SkillType, ToolError> {
-    match value {
-        "" | "prompt" => Ok(crate::skills::SkillType::Prompt),
-        "inline" => Ok(crate::skills::SkillType::Inline),
-        "flow" => Ok(crate::skills::SkillType::Flow),
-        other => Err(invalid_create_skill_input(format!(
-            "invalid skill_type {other:?}: expected 'prompt', 'inline', or 'flow'"
-        ))),
-    }
 }
 
 fn invalid_create_skill_input(message: String) -> ToolError {
@@ -1412,10 +1389,9 @@ mod tests {
             .join("SKILL.md");
         let content = fs::read_to_string(&path).await.expect("read");
         assert!(content.contains("name: test-skill"));
-        assert!(content.contains("type: prompt"));
         assert!(
             !content.contains(
-                "---\nname: test-skill\ndescription: A test skill\ntype: prompt\n---\n\n---"
+                "---\nname: test-skill\ndescription: A test skill\n---\n\n---"
             ),
             "CreateSkill body is plain Markdown and must not be treated as a second frontmatter block"
         );
@@ -1861,16 +1837,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_skill_supports_custom_type() {
+    async fn create_skill_output_uses_canonical_frontmatter() {
         let temp = tempfile::tempdir().expect("tempdir");
         let tool = CreateSkillTool::new(temp.path());
         let result = tool
             .execute(
                 &make_ctx(),
                 json!({
-                    "name": "inline-skill",
-                    "description": "An inline skill",
-                    "skill_type": "inline",
+                    "name": "canonical-skill",
+                    "description": "Has canonical frontmatter only",
                     "body": "# Body"
                 }),
             )
@@ -1881,10 +1856,14 @@ mod tests {
         let path = temp
             .path()
             .join("skills")
-            .join("inline-skill")
+            .join("canonical-skill")
             .join("SKILL.md");
         let content = fs::read_to_string(&path).await.expect("read");
-        assert!(content.contains("type: inline"));
+        assert!(content.contains("name: canonical-skill"));
+        assert!(content.contains("description: Has canonical frontmatter only"));
+        assert!(!content.contains("type:"));
+        assert!(!content.contains("skill_type"));
+        assert!(!content.contains("slash"));
     }
 
     #[tokio::test]

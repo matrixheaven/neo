@@ -21,8 +21,6 @@ pub use discovery::{SkillSource, discover_skills};
 pub struct SkillManifest {
     pub name: String,
     pub description: String,
-    #[serde(default, rename = "type")]
-    pub skill_type: SkillType,
     #[serde(default, alias = "whenToUse", alias = "when_to_use")]
     pub when_to_use: Option<String>,
     #[serde(
@@ -33,24 +31,13 @@ pub struct SkillManifest {
     pub disable_model_invocation: bool,
     #[serde(default)]
     pub arguments: Vec<SkillArgument>,
-    #[serde(default, alias = "slashCommands", alias = "slash_commands")]
-    pub slash_commands: Vec<String>,
 }
 
 impl SkillManifest {
     #[must_use]
-    pub fn auto_invokable(&self) -> bool {
-        !self.disable_model_invocation && !matches!(self.skill_type, SkillType::Flow)
+    pub const fn auto_invokable(&self) -> bool {
+        !self.disable_model_invocation
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SkillType {
-    #[default]
-    Prompt,
-    Inline,
-    Flow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

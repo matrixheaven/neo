@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs, path::Path};
 
 use neo_agent_core::skills::{
     LoadedSkill, SkillArgument, SkillInvocation, SkillLoadError, SkillManifest, SkillSource,
-    SkillStore, SkillType,
+    SkillStore,
     builtin::builtin_skills,
     discovery::{discover_skills, user_skill_dirs},
     expand_skill_body, load_skill_file, parse_skill_invocation,
@@ -17,7 +17,6 @@ fn load_skill_parses_yaml_frontmatter_and_body() {
         r"---
 name: reviewer
 description: Review repository changes
-type: prompt
 whenToUse: When the user asks for a code review
 ---
 
@@ -31,7 +30,7 @@ Use focused findings.
 
     assert_eq!(skill.manifest.name, "reviewer");
     assert_eq!(skill.manifest.description, "Review repository changes");
-    assert!(matches!(skill.manifest.skill_type, SkillType::Prompt));
+    assert!(!skill.manifest.disable_model_invocation);
     assert_eq!(
         skill.manifest.when_to_use,
         Some("When the user asks for a code review".into())
@@ -91,7 +90,6 @@ fn expand_skill_body_replaces_named_and_positional_arguments() {
         manifest: SkillManifest {
             name: "review".into(),
             description: "Review".into(),
-            skill_type: SkillType::Prompt,
             when_to_use: None,
             disable_model_invocation: false,
             arguments: vec![
@@ -108,7 +106,6 @@ fn expand_skill_body_replaces_named_and_positional_arguments() {
                     default: Some("quick".into()),
                 },
             ],
-            slash_commands: vec![],
         },
         body: "Review $target in $mode mode. Also see $0 and $1.".into(),
         source: SkillSource::default(),
@@ -136,11 +133,9 @@ fn expand_skill_body_appends_arguments_when_no_placeholders() {
         manifest: SkillManifest {
             name: "summarize".into(),
             description: "Summarize".into(),
-            skill_type: SkillType::Prompt,
             when_to_use: None,
             disable_model_invocation: false,
             arguments: vec![],
-            slash_commands: vec![],
         },
         body: "Summarize the following.".into(),
         source: SkillSource::default(),
@@ -171,11 +166,9 @@ fn expand_skill_body_substitutes_undeclared_named_argument_via_placeholder() {
         manifest: SkillManifest {
             name: "brainstorming".into(),
             description: "Brainstorm".into(),
-            skill_type: SkillType::Prompt,
             when_to_use: None,
             disable_model_invocation: false,
             arguments: vec![],
-            slash_commands: vec![],
         },
         body: "Explore the idea: $task".into(),
         source: SkillSource::default(),
@@ -204,11 +197,9 @@ fn expand_skill_body_passes_undeclared_argument_through_when_no_placeholder() {
         manifest: SkillManifest {
             name: "brainstorming".into(),
             description: "Brainstorm".into(),
-            skill_type: SkillType::Prompt,
             when_to_use: None,
             disable_model_invocation: false,
             arguments: vec![],
-            slash_commands: vec![],
         },
         body: "Start the brainstorming process.".into(),
         source: SkillSource::default(),
@@ -239,7 +230,6 @@ fn expand_skill_body_still_fails_on_missing_required_argument() {
         manifest: SkillManifest {
             name: "review".into(),
             description: "Review".into(),
-            skill_type: SkillType::Prompt,
             when_to_use: None,
             disable_model_invocation: false,
             arguments: vec![SkillArgument {
@@ -248,7 +238,6 @@ fn expand_skill_body_still_fails_on_missing_required_argument() {
                 required: true,
                 default: None,
             }],
-            slash_commands: vec![],
         },
         body: "Review $target.".into(),
         source: SkillSource::default(),
@@ -461,7 +450,6 @@ fn skill_manifest_serializes_with_stable_shape() {
     let manifest = SkillManifest {
         name: "shape".into(),
         description: "Stable manifest".into(),
-        skill_type: SkillType::Prompt,
         when_to_use: Some("When needed".into()),
         disable_model_invocation: true,
         arguments: vec![SkillArgument {
@@ -470,7 +458,6 @@ fn skill_manifest_serializes_with_stable_shape() {
             required: true,
             default: None,
         }],
-        slash_commands: vec!["/shape".into()],
     };
 
     let value = serde_json::to_value(&manifest).unwrap();
@@ -480,15 +467,43 @@ fn skill_manifest_serializes_with_stable_shape() {
         json!({
             "name": "shape",
             "description": "Stable manifest",
-            "type": "prompt",
             "whenToUse": "When needed",
             "disableModelInvocation": true,
             "arguments": [
                 { "name": "target", "description": "target file", "required": true }
-            ],
-            "slashCommands": ["/shape"]
+            ]
         })
     );
+}
+
+#[test]
+fn loads_canonical_manifest_without_retired_execution_types() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path().join("SKILL.md"),
+        r"---
+name: canonical
+description: Has only canonical fields
+disableModelInvocation: true
+arguments:
+  - name: target
+    required: true
+---
+
+# Canonical
+
+No retired fields.
+",
+    );
+
+    let skill = load_skill_file(&dir.path().join("SKILL.md"), SkillSource::default()).unwrap();
+
+    assert_eq!(skill.manifest.name, "canonical");
+    assert_eq!(skill.manifest.description, "Has only canonical fields");
+    assert!(skill.manifest.disable_model_invocation);
+    assert!(!skill.manifest.auto_invokable());
+    assert_eq!(skill.manifest.arguments.len(), 1);
+    assert_eq!(skill.manifest.arguments[0].name, "target");
 }
 
 fn write(path: impl AsRef<Path>, content: &str) {
