@@ -254,24 +254,25 @@ fn is_complete_apc_sequence(data: &str) -> SequenceStatus {
 /// Returns (sequences, remainder).
 fn extract_complete_sequences(buffer: &str) -> (Vec<String>, String) {
     let mut sequences = Vec::new();
-    let chars: Vec<char> = buffer.chars().collect();
     let mut pos = 0;
 
-    while pos < chars.len() {
-        let remaining: String = chars[pos..].iter().collect();
+    while pos < buffer.len() {
+        let remaining = &buffer[pos..];
 
         if remaining.starts_with(ESC) {
             // Find the end of this escape sequence
-            let mut seq_end = 1;
             let mut found = false;
 
-            while seq_end <= remaining.len() {
-                let candidate: String = remaining[..seq_end].to_owned();
-                match is_complete_sequence(&candidate) {
+            for seq_end in remaining
+                .char_indices()
+                .map(|(index, character)| index + character.len_utf8())
+            {
+                let candidate = &remaining[..seq_end];
+                match is_complete_sequence(candidate) {
                     SequenceStatus::Complete => {
                         // WezTerm ESC ESC workaround
                         if candidate == "\x1b\x1b" {
-                            let next_char = remaining.chars().nth(seq_end);
+                            let next_char = remaining[seq_end..].chars().next();
                             if matches!(next_char, Some('[' | ']' | 'O' | 'P' | '_')) {
                                 sequences.push(ESC.to_owned());
                                 pos += 1;
@@ -279,16 +280,14 @@ fn extract_complete_sequences(buffer: &str) -> (Vec<String>, String) {
                                 break;
                             }
                         }
-                        sequences.push(candidate);
+                        sequences.push(candidate.to_owned());
                         pos += seq_end;
                         found = true;
                         break;
                     }
-                    SequenceStatus::Incomplete => {
-                        seq_end += 1;
-                    }
+                    SequenceStatus::Incomplete => {}
                     SequenceStatus::NotEscape => {
-                        sequences.push(candidate);
+                        sequences.push(candidate.to_owned());
                         pos += seq_end;
                         found = true;
                         break;
@@ -298,13 +297,16 @@ fn extract_complete_sequences(buffer: &str) -> (Vec<String>, String) {
 
             if !found {
                 // Ran out of characters — incomplete sequence
-                return (sequences, remaining);
+                return (sequences, remaining.to_owned());
             }
         } else {
             // Not an escape sequence — take a single character
-            let ch = chars[pos];
+            let ch = remaining
+                .chars()
+                .next()
+                .expect("non-empty remaining input must contain a character");
             sequences.push(ch.to_string());
-            pos += 1;
+            pos += ch.len_utf8();
         }
     }
 
@@ -1872,6 +1874,13 @@ mod tests {
         assert_eq!(events, vec![RawEvent::Key("\x1b\x1b[A".to_owned())]);
         assert_eq!(parse_key("\x1b\x1b[A"), Some("alt+up".to_owned()));
         assert!(matches_key("\x1b\x1b[A", "alt+up"));
+    }
+
+    #[test]
+    fn meta_cjk_sequence_preserves_multibyte_character() {
+        let mut parser = RawInputParser::new();
+        let events = parser.feed_bytes("\x1b你".as_bytes());
+        assert_eq!(events, vec![RawEvent::Key("\x1b你".to_owned())]);
     }
 
     #[test]
