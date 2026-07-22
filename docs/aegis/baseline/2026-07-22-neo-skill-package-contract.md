@@ -56,13 +56,15 @@ ADR: `docs/aegis/adr/ADR-0003-neo-skill-package-contract.md`
   tests are not sufficient behavior evidence.
 - A real-home probe must distinguish physical files from followed symlink
   views and confirm the active host contains all expected Aegis links.
-- Windows reparse behavior remains platform-CI evidence; the macOS host cannot
-  execute Windows-specific filesystem paths.
+- Windows tests must fail when directory or file symlink fixtures cannot be
+  created; silently skipping reparse-point assertions is not valid evidence.
+- Release-grade platform evidence includes a clean native Windows x64 run and
+  a clean Linux ARM64 run of the exact discovery and sidecar no-follow tests.
 
 ## Residual Risk
 
-- Symlink and sidecar target behavior is exercised directly on macOS. Windows
-  uses the shared reparse-point guard and conditional tests, but needs Windows
-  CI for release-grade platform evidence.
+- The targeted platform matrix is recorded at commit `d13a9b47`: native
+  Windows 11 x64 and Fedora ARM64 both passed `cargo check` plus the exact
+  directory-symlink discovery and sidecar no-follow tests with zero warnings.
 - Declared MCP dependencies are informational. Availability still depends on
   the user's existing Neo MCP configuration.

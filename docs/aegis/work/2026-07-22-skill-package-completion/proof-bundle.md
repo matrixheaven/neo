@@ -28,7 +28,7 @@ This proof bundle is an advisory Aegis Method Pack record. It does not determine
 
 ## Drift Check
 
-- Scope status: Implementation and repair stayed inside the approved local skill-package owners; unrelated Workflow changes were not edited.
-- Compatibility status: Canonical slash labels, user/extra/builtin precedence, resources, shared activation, complete catalogs, and Aegis symlink-view roots passed targeted checks.
-- Retirement status: Retired manifest/tool fields, duplicate renderer, and fail-closed discovery have no production or shipped built-in matches; no compatibility fallback was reintroduced.
+- Scope status: Cross-platform repair stayed inside Skill tests and platform-only import/constant gating; concurrent Workflow files were not edited or staged.
+- Compatibility status: Canonical slash labels, user/extra/builtin precedence, resources, shared activation, complete catalogs, Aegis symlink views, and author contracts remain unchanged; final native Windows x64 and Fedora ARM64 matrices passed.
+- Retirement status: Retired manifest/tool fields, duplicate renderer, and fail-closed discovery remain absent. Windows tests can no longer silently skip symlink assertions, and the Unix-only sidecar test gate was replaced by explicit Unix/Windows helpers. No compatibility fallback or duplicate owner was introduced.
 - Advisory decision: continue

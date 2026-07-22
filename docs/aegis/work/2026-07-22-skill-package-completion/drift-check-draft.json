@@ -6,12 +6,9 @@
     "docs/aegis/adr/ADR-0003-neo-skill-package-contract.md",
     "docs/aegis/baseline/2026-07-22-neo-skill-package-contract.md"
   ],
-  "scopeStatus": "Implementation and repair stayed inside the approved local skill-package owners; unrelated Workflow changes were not edited.",
-  "compatStatus": "Canonical slash labels, user/extra/builtin precedence, resources, shared activation, complete catalogs, and Aegis symlink-view roots passed targeted checks.",
-  "retirementStatus": "Retired manifest/tool fields, duplicate renderer, and fail-closed discovery have no production or shipped built-in matches; no compatibility fallback was reintroduced.",
-  "newRiskSignals": [
-    "Windows reparse behavior requires Windows CI for release-grade evidence.",
-    "Full Clippy remains blocked by seven unrelated Workflow errors; macOS linked tests report an unrelated mlua-sys deployment-target warning."
-  ],
+  "scopeStatus": "Cross-platform repair stayed inside Skill tests and platform-only import/constant gating; concurrent Workflow files were not edited or staged.",
+  "compatStatus": "Canonical slash labels, user/extra/builtin precedence, resources, shared activation, complete catalogs, Aegis symlink views, and author contracts remain unchanged; final native Windows x64 and Fedora ARM64 matrices passed.",
+  "retirementStatus": "Retired manifest/tool fields, duplicate renderer, and fail-closed discovery remain absent. Windows tests can no longer silently skip symlink assertions, and the Unix-only sidecar test gate was replaced by explicit Unix/Windows helpers. No compatibility fallback or duplicate owner was introduced.",
+  "newRiskSignals": [],
   "decision": "continue"
 }

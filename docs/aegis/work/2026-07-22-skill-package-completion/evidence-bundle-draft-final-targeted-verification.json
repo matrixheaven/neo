@@ -1,8 +1,8 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "artifactKey": "final-targeted-verification",
-  "type": "targeted-runtime-verification",
-  "source": "fresh cargo nextest/cargo test/cargo check/retirement-search results on 2026-07-22",
-  "summary": "Core integration 8 passed; core lib 8 passed plus raw author contract 1 passed; neo binary 3 passed; cargo fmt and cargo check passed; all three retirement searches returned no matches. Clippy was blocked only by seven Workflow errors outside this task.",
-  "verifier": "Codex primary agent"
+  "type": "targeted-and-cross-platform-runtime-verification",
+  "source": "fresh local targeted tests plus clean d13a9b47 archives on Fedora ARM64, native Windows 11 x64, and Windows ARM64",
+  "summary": "Core integration 8 passed; core lib 8 passed plus the raw author contract; neo binary 3 passed; formatting, checks, and retirement searches passed. Fedora ARM64 and native Windows x64 each passed clean cargo check and both exact filesystem tests with zero warnings. Windows ARM64 passed the same matrix, and PE x64 versions of both tests passed under Windows emulation. Windows symlink fixture creation is mandatory, so these results cannot silently skip the reparse assertions.",
+  "verifier": "Codex primary agent and independent platform agents"
 }

@@ -2,11 +2,14 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-22-skill-package-completion",
   "lastCheckpointRef": "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json",
-  "resumeInstruction": "Resume at final workspace validation and scoped commit; do not rerun broad exploration or edit unrelated Workflow/task-browser files.",
+  "resumeInstruction": "No Skill work remains; read the final evidence before any future release claim and do not touch unrelated Workflow changes.",
   "knownPartialWork": [
     "Restore symlink-view discovery and canonical slash labels.",
     "Complete typed metadata, CreateSkill preflight/reporting, both built-in author contracts, docs, ADR, and baseline.",
-    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe."
+    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe.",
+    "Enforce Windows directory-symlink fixture creation and cross-platform sidecar no-follow coverage.",
+    "Remove platform-only Rust warnings.",
+    "Verify d13a9b47 on native Windows 11 x64 and Fedora ARM64 clean archives."
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-07-22-skill-package-completion/10-intent.md",
@@ -14,7 +17,6 @@
     "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "Do not assume full Clippy is green; its seven current errors are in unrelated Workflow files.",
-    "Do not stage existing RunWorkflow INDEX entries or pre-staged task-browser changes."
+    "Do not treat concurrent Workflow worktree or index changes as part of Skill acceptance."
   ]
 }

@@ -6,7 +6,7 @@
   ],
   "impactStatement": "docs/aegis/work/2026-07-22-skill-package-completion/impact-statement-draft.json",
   "compatPlan": "Existing references/scripts/assets packages, NEO_SKILL_DIR expansion, manual /skill activation, Skill tool invocation, tier precedence, Aegis symlink views, transcript SkillInvocation events, and session replay remain functional.",
-  "retirementPlan": "Retired manifest/tool fields, duplicate renderer, and fail-closed discovery have no production or shipped built-in matches; no compatibility fallback was reintroduced.",
+  "retirementPlan": "Retired manifest/tool fields, duplicate renderer, and fail-closed discovery remain absent. Windows tests can no longer silently skip symlink assertions, and the Unix-only sidecar test gate was replaced by explicit Unix/Windows helpers. No compatibility fallback or duplicate owner was introduced.",
   "evidenceBundle": [
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-baseline-readback.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json",

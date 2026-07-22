@@ -1,13 +1,16 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-22-skill-package-completion",
-  "currentTodo": "Commit verified Skill package closure.",
+  "currentTodo": "Cross-platform Skill package acceptance complete.",
   "completedTodos": [
     "Restore symlink-view discovery and canonical slash labels.",
     "Complete typed metadata, CreateSkill preflight/reporting, both built-in author contracts, docs, ADR, and baseline.",
-    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe."
+    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe.",
+    "Enforce Windows directory-symlink fixture creation and cross-platform sidecar no-follow coverage.",
+    "Remove platform-only Rust warnings.",
+    "Verify d13a9b47 on native Windows 11 x64 and Fedora ARM64 clean archives."
   ],
-  "activeSlice": "Final evidence, workspace structure validation, and scoped commit only.",
+  "activeSlice": "Closed after final cross-platform evidence and scoped documentation commit.",
   "evidenceRefs": [
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-final-targeted-verification.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-fresh-agent-author-comparison.json",
@@ -15,6 +18,6 @@
     "docs/aegis/adr/ADR-0003-neo-skill-package-contract.md"
   ],
   "blockedOn": null,
-  "nextStep": "Run workspace bundle/check, inspect exact task diff, commit only task-owned paths, and do not push.",
+  "nextStep": "None inside the Skill scope; preserve concurrent Workflow changes.",
   "updatedAt": "2026-07-22"
 }

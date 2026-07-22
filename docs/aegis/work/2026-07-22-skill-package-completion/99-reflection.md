@@ -19,9 +19,16 @@ test now parses the YAML mapping and asserts the exact built-in key set.
 Fresh-agent comparisons additionally prove author behavior that static prompt
 assertions cannot establish.
 
+The final platform review found a second false-green class: Windows directory
+symlink creation could fail and silently skip assertions, while the sidecar
+no-follow test did not compile on Windows. Commit `5503db1d` made fixture
+creation mandatory and extended the sidecar test to Unix and Windows. Commit
+`d13a9b47` then removed the remaining platform-only compiler warnings.
+
 Complexity stayed bounded by the planned owner split. The final repair added no
-fallback or compatibility branch. Remaining lint/linker issues belong to the
-concurrent Workflow surface, and Windows filesystem evidence remains a platform
-CI concern rather than a hidden completion claim.
+fallback or compatibility branch. Native Windows 11 x64 and Fedora ARM64 clean
+archives passed the final targeted matrix with zero warnings; Windows ARM64 and
+x64-emulated binaries passed as supplemental evidence. The platform concern is
+now closed rather than left as a hidden completion claim.
 
 Method Pack output remains advisory and does not grant completion authority.
