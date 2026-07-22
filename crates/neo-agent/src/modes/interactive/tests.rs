@@ -10572,6 +10572,31 @@ async fn slash_yolo_updates_permission_mode_while_turn_is_running() {
 }
 
 #[tokio::test]
+async fn permission_picker_keeps_working_status_while_turn_is_running() {
+    let mut controller = running_turn_controller().await;
+
+    controller.open_permission_picker();
+    for _ in 0..2 {
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move permission selection");
+    }
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("select permission mode");
+
+    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+    assert_eq!(
+        controller.chrome().working_label().as_deref(),
+        Some("working · esc interrupt")
+    );
+
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
 async fn slash_permissions_degrades_to_hint_while_turn_is_running() {
     let mut controller = running_turn_controller().await;
 

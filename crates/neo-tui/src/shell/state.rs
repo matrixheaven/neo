@@ -270,6 +270,10 @@ impl NeoChromeState {
         self.permission_mode = mode;
     }
 
+    pub fn restore_streaming_mode(&mut self) {
+        self.mode = ChromeMode::Streaming;
+    }
+
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
         match self.permission_mode {

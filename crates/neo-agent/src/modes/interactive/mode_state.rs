@@ -39,6 +39,9 @@ impl InteractiveController {
             *live = mode;
         }
         self.tui.chrome_mut().set_permission_mode(mode);
+        if self.active_turn.is_some() {
+            self.tui.chrome_mut().restore_streaming_mode();
+        }
         self.push_status(format!("Permission Mode: {}", mode.label()));
     }
 
