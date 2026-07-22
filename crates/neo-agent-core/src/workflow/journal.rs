@@ -177,6 +177,7 @@ pub fn read_journal(path: &Path) -> Result<Vec<JournalRecord>, WorkflowError> {
     Ok(records)
 }
 
+#[derive(Debug)]
 pub struct IncompleteInvocation {
     pub invocation_id: String,
     pub call_index: u64,
