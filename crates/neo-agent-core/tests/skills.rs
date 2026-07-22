@@ -641,6 +641,45 @@ Body.
     assert_eq!(skill3.host_metadata, SkillHostMetadata::default());
 }
 
+#[test]
+fn host_metadata_does_not_change_model_visible_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join("agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    write(
+        dir.path().join("SKILL.md"),
+        r"---
+name: fancy-skill
+description: Model-facing description
+---
+# Fancy Skill
+",
+    );
+    write(
+        agents_dir.join("neo.yaml"),
+        r#"interface:
+  display_name: "Fancy Display"
+  short_description: "Human picker summary"
+dependencies:
+  tools:
+    - type: mcp
+      value: someServer
+"#,
+    );
+
+    let (skills, _) = discover_skills(dir.path(), SkillSource::default());
+    let skill = &skills[0];
+    let store = SkillStore::load(&[], &[dir.path().to_path_buf()], vec![]);
+    let catalog = store.available_skills_prompt();
+
+    // Sidecar metadata must NOT appear in the model-visible catalog.
+    assert!(!catalog.contains("Fancy Display"));
+    assert!(!catalog.contains("Human picker summary"));
+    assert!(!catalog.contains("someServer"));
+    // Canonical manifest description still appears.
+    assert!(catalog.contains("Model-facing description"));
+}
+
 fn write(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().unwrap()).unwrap();

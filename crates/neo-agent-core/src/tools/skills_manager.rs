@@ -179,12 +179,39 @@ impl Tool for ListSkillsTool {
                 for skill in skills {
                     let resources = skill_resource_summary(&skill.root)
                         .map_or_else(String::new, |summary| format!(" {summary}"));
-                    lines.push(format!(
-                        "  {}: {}{}",
+                    let display = skill.display_name();
+                    let label = if display != skill.name.as_str() {
+                        format!(" ({display})")
+                    } else {
+                        String::new()
+                    };
+                    let mut entry = format!(
+                        "  {}{}: {}{}",
                         skill.name,
+                        label,
                         skill.root.display(),
                         resources
-                    ));
+                    );
+                    if let Some(short) = skill.short_description() {
+                        entry.push_str(&format!(" — {short}"));
+                    }
+                    if !skill.host_metadata.dependencies.is_empty() {
+                        let deps: Vec<_> = skill
+                            .host_metadata
+                            .dependencies
+                            .iter()
+                            .map(|d| d.value.as_str())
+                            .collect();
+                        entry.push_str(&format!("  [needs: {}]", deps.join(", ")));
+                    }
+                    lines.push(entry);
+                }
+            }
+            let diags = store.diagnostics();
+            if !diags.is_empty() {
+                lines.push(String::new());
+                for d in diags {
+                    lines.push(format!("⚠ {}: {}", d.path.display(), d.message));
                 }
             }
             Ok(ToolResult::ok(lines.join("\n")))
