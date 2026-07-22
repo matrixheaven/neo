@@ -97,12 +97,70 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Whether the MIME type is one that providers accept for vision (base64).
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn is_vision_mime(mime: &str) -> bool {
     matches!(
         mime,
         "image/png" | "image/jpeg" | "image/gif" | "image/webp"
     )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_output_error(cmd: &str, status: &str, stderr: &[u8]) -> String {
+    let stderr = &stderr[..stderr.len().min(512)];
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("{cmd} exited with {status}")
+    } else {
+        format!("{cmd} exited with {status}: {stderr}")
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_linux_image_output(
+    cmd: &str,
+    success: bool,
+    status: &str,
+    stdout: Vec<u8>,
+    stderr: &[u8],
+) -> Result<ClipboardImage, String> {
+    if !success {
+        return Err(linux_output_error(cmd, status, stderr));
+    }
+    let Some(mime) = detect_image_mime(&stdout).filter(|mime| is_vision_mime(mime)) else {
+        return Err(format!("{cmd} returned invalid image data"));
+    };
+    Ok(ClipboardImage {
+        bytes: stdout,
+        mime_type: mime.to_owned(),
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_targets_include_png(stdout: &[u8]) -> bool {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .any(|target| target.trim_ascii() == b"image/png")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_clipboard_failure(
+    image_error: Option<String>,
+    confirmed_no_image: bool,
+    probe_error: Option<String>,
+) -> ClipboardError {
+    if let Some(error) = image_error {
+        ClipboardError::ReadFailed(error)
+    } else if confirmed_no_image {
+        ClipboardError::NoImage
+    } else if let Some(error) = probe_error {
+        ClipboardError::ReadFailed(error)
+    } else {
+        ClipboardError::ReadFailed(
+            "no clipboard image backend found (wl-paste or xclip)".to_owned(),
+        )
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -253,49 +311,68 @@ mod macos {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{ClipboardError, ClipboardImage, Command, detect_image_mime, is_vision_mime};
+    use super::{
+        ClipboardError, ClipboardImage, Command, classify_linux_image_output,
+        linux_clipboard_failure, linux_output_error, linux_targets_include_png,
+    };
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
-        let candidates: [(&str, &[&str]); 2] = [
-            ("wl-paste", &["--type", "image/png"]),
+        let candidates: [(&str, &[&str], &[&str]); 2] = [
+            ("wl-paste", &["--list-types"], &["--type", "image/png"]),
             (
                 "xclip",
+                &["-selection", "clipboard", "-t", "TARGETS", "-o"],
                 &["-selection", "clipboard", "-t", "image/png", "-o"],
             ),
         ];
 
-        // Track the last real error — if a command exists but fails to execute
-        // (e.g. permission denied), we surface it instead of silently returning
-        // `NoImage`. A `NotFound` is expected: only one of wl-paste/xclip will
-        // be installed depending on the display server (Wayland vs X11).
-        let mut spawn_error: Option<String> = None;
+        let mut image_error = None;
+        let mut probe_error = None;
+        let mut confirmed_no_image = false;
 
-        for (cmd, args) in candidates {
-            let out = match Command::new(cmd).args(args).output() {
+        for (cmd, probe_args, read_args) in candidates {
+            let probe = match Command::new(cmd).args(probe_args).output() {
                 Ok(out) => out,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    spawn_error = Some(format!("{cmd}: {e}"));
+                    probe_error = Some(format!("{cmd}: {e}"));
+                    continue;
+                }
+            };
+            if !probe.status.success() {
+                probe_error = Some(linux_output_error(
+                    cmd,
+                    &probe.status.to_string(),
+                    &probe.stderr,
+                ));
+                continue;
+            }
+            if !linux_targets_include_png(&probe.stdout) {
+                confirmed_no_image = true;
+                continue;
+            }
+
+            let out = match Command::new(cmd).args(read_args).output() {
+                Ok(out) => out,
+                Err(e) => {
+                    image_error = Some(format!("{cmd}: {e}"));
                     continue;
                 }
             };
 
-            if out.status.success()
-                && !out.stdout.is_empty()
-                && let Some(m) = detect_image_mime(&out.stdout)
-                && is_vision_mime(m)
-            {
-                return Ok(ClipboardImage {
-                    bytes: out.stdout,
-                    mime_type: m.to_owned(),
-                });
+            let success = out.status.success();
+            let status = out.status.to_string();
+            match classify_linux_image_output(cmd, success, &status, out.stdout, &out.stderr) {
+                Ok(image) => return Ok(image),
+                Err(error) => image_error = Some(error),
             }
         }
 
-        match spawn_error {
-            Some(msg) => Err(ClipboardError::ReadFailed(msg)),
-            None => Err(ClipboardError::NoImage),
-        }
+        Err(linux_clipboard_failure(
+            image_error,
+            confirmed_no_image,
+            probe_error,
+        ))
     }
 }
 
@@ -332,5 +409,56 @@ mod windows {
             mime_type: mime.to_owned(),
         })
         // `tmp_path` drops here and deletes the temporary file.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ClipboardError, classify_linux_image_output, linux_clipboard_failure,
+        linux_targets_include_png,
+    };
+
+    #[test]
+    fn linux_clipboard_probes_targets_before_reading_image() {
+        assert!(linux_targets_include_png(b"text/plain\r\n image/png \n"));
+        assert!(linux_targets_include_png(b"\xff-invalid\nimage/png\n"));
+        assert!(!linux_targets_include_png(b"text/plain\nUTF8_STRING\n"));
+
+        let mut stderr = vec![b'x'; 600];
+        stderr.extend_from_slice(b"unbounded-tail");
+        let failed =
+            classify_linux_image_output("wl-paste", false, "exit status: 1", Vec::new(), &stderr);
+        let Err(failed) = failed else {
+            panic!("non-zero exit must be a read failure");
+        };
+        assert!(failed.contains("wl-paste exited with"));
+        assert!(!failed.contains("unbounded-tail"));
+
+        let invalid = classify_linux_image_output(
+            "xclip",
+            true,
+            "exit status: 0",
+            b"not an image".to_vec(),
+            &[],
+        );
+        assert!(matches!(invalid, Err(error) if error == "xclip returned invalid image data"));
+
+        assert!(matches!(
+            linux_clipboard_failure(
+                Some("advertised image read failed".to_owned()),
+                true,
+                Some("probe failed".to_owned()),
+            ),
+            ClipboardError::ReadFailed(error) if error == "advertised image read failed"
+        ));
+        assert!(matches!(
+            linux_clipboard_failure(None, true, Some("probe failed".to_owned())),
+            ClipboardError::NoImage
+        ));
+        assert!(matches!(
+            linux_clipboard_failure(None, false, None),
+            ClipboardError::ReadFailed(error) if error.contains("wl-paste or xclip")
+        ));
     }
 }
