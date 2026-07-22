@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "targeted-workspace-validation",
+  "type": "structural-validation",
+  "source": "aegis-workspace.py validate-artifact for all ten task JSON sidecars; INDEX.md coverage inspection",
+  "summary": "All task-owned JSON artifacts passed schema validation and every task-owned Markdown/JSON artifact is indexed.",
+  "verifier": "Codex primary agent"
+}

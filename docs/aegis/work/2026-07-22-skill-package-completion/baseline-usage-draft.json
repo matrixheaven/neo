@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-22-skill-package-completion",
+  "requiredBaselineRefs": [
+    "docs/aegis/specs/2026-07-09-skill-resources-design.md",
+    "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
+    "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
+    "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+  ],
+  "deliveredContextRefs": [],
+  "acknowledgedBeforePlanRefs": [
+    "docs/aegis/specs/2026-07-09-skill-resources-design.md",
+    "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
+    "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
+    "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+  ],
+  "citedInPlanRefs": [
+    "docs/aegis/specs/2026-07-09-skill-resources-design.md",
+    "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
+    "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
+    "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+  ],
+  "missingRefs": [],
+  "decision": "continue"
+}

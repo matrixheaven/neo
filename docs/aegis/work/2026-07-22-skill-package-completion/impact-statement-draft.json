@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "neo-agent-core/skills",
+    "neo-agent-core/runtime",
+    "neo-agent/interactive",
+    "documentation"
+  ],
+  "owners": [
+    "SkillStore",
+    "LoadedSkill",
+    "Skill invocation context renderer"
+  ],
+  "invariants": [
+    "SKILL.md remains the only automatically injected package entry point.",
+    "NEO_HOME/skills remains Neo's sole implicit user root; extra_skill_dirs and skill_path remain explicit roots.",
+    "Skill catalog updates remain deterministic full append-only snapshots and never silently omit skills."
+  ],
+  "compatBoundary": "Existing references/scripts/assets packages, NEO_SKILL_DIR expansion, manual /skill activation, Skill tool invocation, tier precedence, Aegis symlink views, transcript SkillInvocation events, and session replay remain functional.",
+  "nonGoals": [
+    "No project-local implicit skill discovery, marketplace, hosted sync, plugin runtime, remote/orchestrator provider, dynamic skill selector, silent catalog truncation, automatic MCP installation, binary CreateSkill payload, icon or brand-color UI."
+  ]
+}

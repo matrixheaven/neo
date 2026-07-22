@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-22-skill-package-completion",
+  "taskIntentRef": "docs/aegis/work/2026-07-22-skill-package-completion/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-07-09-skill-resources-design.md",
+    "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
+    "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
+    "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+  ],
+  "scopeStatus": "Documentation-only design and planning remained inside the approved local skill-package scope.",
+  "compatStatus": "Resource paths, invocation routes, catalog snapshots, discovery roots, transcript, sessions, permissions, and symlink views remain explicitly preserved.",
+  "retirementStatus": "Implementation plan has explicit delete-first tasks and lingering-reference checks for every obsolete owner.",
+  "newRiskSignals": [
+    "Implementation is intentionally deferred to the handoff executor and has no runtime verification yet."
+  ],
+  "decision": "continue"
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "Produce an approved-scope design spec, executable implementation plan, and resume-safe handoff for completing Neo's local skill package runtime.",
+  "goal": "Make Neo skill packages path-aware, resiliently discoverable, host-metadata capable, and honest about supported manifest semantics without adding remote distribution or duplicate owners.",
+  "successEvidence": [
+    "Indexed spec and plan define exact owners, contracts, retirement, focused tests, checkpoints, and handoff boundaries; Aegis workspace check passes; docs-only commit contains no unrelated worktree files."
+  ],
+  "stopCondition": "Done when documents are indexed, validated, and committed; needs-verification if structural checks fail; blocked if existing authority contradicts the approved direction; scope-exceeded if implementation begins.",
+  "nonGoals": [
+    "No project-local implicit skill discovery, marketplace, hosted sync, plugin runtime, remote/orchestrator provider, dynamic skill selector, silent catalog truncation, automatic MCP installation, binary CreateSkill payload, icon or brand-color UI."
+  ],
+  "scope": "Documentation-only design and planning for neo-agent-core skill loading/invocation/management and neo-agent TUI completion integration.",
+  "changeKinds": [
+    "architecture-plan"
+  ],
+  "riskHints": [
+    "Cross-module contract change, external user skill compatibility, symlink discovery, append-only catalog stability, and duplicate metadata owner risk."
+  ]
+}

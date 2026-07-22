@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "global-workspace-check-limit",
+  "type": "residual-risk",
+  "source": "aegis-workspace.py check --root /Users/chenyuanhao/Workspace/neo",
+  "summary": "Exit 1 is caused by unrelated historic unindexed work Markdown and an invalid legacy drift decision outside this task; no skill-package-completion artifact appeared in the failure list.",
+  "verifier": "Codex primary agent"
+}

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "document-structure",
+  "type": "static-document-check",
+  "source": "rtk rg required headings; placeholder scan; bare-command scan; rtk git diff --check",
+  "summary": "Spec and plan required sections present; Task 0-8 and Handoff Prompt present; no unresolved TODO/TBD/FIXME/placeholder markers; no bare repository commands; scoped tracked diff has no whitespace errors.",
+  "verifier": "Codex primary agent"
+}

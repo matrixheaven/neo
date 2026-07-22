@@ -148,3 +148,22 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/evidence-bundle-draft-final-main-ci.json | 2026-07-21-release-0-1-1-rc1 evidence final-main-ci |
 | 2026-07-21 | artifact | docs/aegis/work/2026-07-21-release-0-1-1-rc1/gate-input-pack.json | 2026-07-21-release-0-1-1-rc1 gate input pack |
 | 2026-07-21 | work | docs/aegis/work/2026-07-21-release-0-1-1-rc1/proof-bundle.md | 2026-07-21-release-0-1-1-rc1 proof bundle |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/10-intent.md | Neo Skill Package Completion intent |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/20-checkpoint.md | Neo Skill Package Completion checkpoint |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/90-evidence.md | Neo Skill Package Completion evidence |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/99-reflection.md | Neo Skill Package Completion reflection |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/task-intent-draft.json | Neo Skill Package Completion task intent draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/baseline-read-set-hint.json | Neo Skill Package Completion baseline read-set hint |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/baseline-usage-draft.json | Neo Skill Package Completion baseline usage draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/impact-statement-draft.json | Neo Skill Package Completion impact statement draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json | Neo Skill Package Completion todo checkpoint draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/drift-check-draft.json | Neo Skill Package Completion drift check draft |
+| 2026-07-22 | spec | docs/aegis/specs/2026-07-22-skill-package-completion-design.md | Neo Skill Package Completion Design |
+| 2026-07-22 | plan | docs/aegis/plans/2026-07-22-skill-package-completion.md | Neo Skill Package Completion Implementation Plan |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/resume-state-hint.json | 2026-07-22-skill-package-completion resume state hint |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-baseline-readback.json | 2026-07-22-skill-package-completion evidence baseline-readback |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-document-structure.json | 2026-07-22-skill-package-completion evidence document-structure |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/gate-input-pack.json | 2026-07-22-skill-package-completion gate input pack |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md | 2026-07-22-skill-package-completion proof bundle |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json | 2026-07-22-skill-package-completion evidence targeted-workspace-validation |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json | 2026-07-22-skill-package-completion evidence global-workspace-check-limit |

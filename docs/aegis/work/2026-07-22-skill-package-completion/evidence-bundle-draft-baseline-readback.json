@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "baseline-readback",
+  "type": "baseline-review",
+  "source": "Five required baseline documents read in full on 2026-07-22",
+  "summary": "The approved spec preserves resource, transcript, catalog, discovery-root, and symlink-view authority boundaries; the narrow Neo sidecar is an explicit successor design, not a fallback parser.",
+  "verifier": "Codex primary agent"
+}
