@@ -188,34 +188,6 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
 }
 
 #[test]
-fn openai_chat_sse_normalizer_accepts_cumulative_tool_argument_snapshots() {
-    let body = [
-        r#"data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"AskUserQuestion","arguments":"{\"questions\":"}}]}}]}"#,
-        "",
-        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"questions\":[{\"question\":\"3 × 7 = ?\"}]"}}]}}]}"#,
-        "",
-        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"questions\":[{\"question\":\"3 × 7 = ?\"}],\"background\":false}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
-        "",
-        "data: [DONE]",
-        "",
-    ]
-    .join("\n");
-
-    let events = normalize_openai_chat_sse(&body).expect("SSE should normalize");
-
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AiStreamEvent::ToolCallEnd { id, raw_arguments }
-            if id == "call-1"
-                && serde_json::from_str::<serde_json::Value>(raw_arguments).ok()
-                    == Some(json!({
-                        "questions": [{ "question": "3 × 7 = ?" }],
-                        "background": false
-                    }))
-    )));
-}
-
-#[test]
 fn openai_chat_sse_normalizer_rejects_truncated_stream_without_done() {
     let body = [
         r#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"partial"}}]}"#,

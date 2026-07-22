@@ -5,7 +5,7 @@ pub struct ToolCallChunk {
     pub index: Option<u64>,
     pub id: Option<String>,
     pub name: Option<String>,
-    pub arguments_fragment: Option<String>,
+    pub arguments_delta: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,14 +169,14 @@ fn update_slot(slot: &mut ToolCallSlot, chunk: ToolCallChunk) -> Vec<ToolCallAss
             });
         }
     }
-    if let Some(fragment) = chunk.arguments_fragment
-        && let Some(delta) = merge_argument_fragment(&mut slot.raw_arguments, &fragment)
-        && slot.started
-    {
-        out.push(ToolCallAssemblyEvent::ArgsDelta {
-            id: slot.stable_id.clone().expect("started tool call has an id"),
-            json_fragment: delta,
-        });
+    if let Some(delta) = chunk.arguments_delta.filter(|delta| !delta.is_empty()) {
+        slot.raw_arguments.push_str(&delta);
+        if slot.started {
+            out.push(ToolCallAssemblyEvent::ArgsDelta {
+                id: slot.stable_id.clone().expect("started tool call has an id"),
+                json_fragment: delta,
+            });
+        }
     }
     out
 }
@@ -186,27 +186,6 @@ fn fallback_id_for_key(key: ToolCallKey) -> String {
         ToolCallKey::Indexed(index) => format!("tool-{index}"),
         ToolCallKey::Unindexed => "tool-0".to_owned(),
     }
-}
-
-fn merge_argument_fragment(arguments: &mut String, fragment: &str) -> Option<String> {
-    if fragment.is_empty() {
-        return None;
-    }
-    if arguments.is_empty() {
-        arguments.push_str(fragment);
-        return Some(fragment.to_owned());
-    }
-    if fragment.starts_with(arguments.as_str()) {
-        let delta = fragment[arguments.len()..].to_owned();
-        arguments.clear();
-        arguments.push_str(fragment);
-        return (!delta.is_empty()).then_some(delta);
-    }
-    if arguments.starts_with(fragment) {
-        return None;
-    }
-    arguments.push_str(fragment);
-    Some(fragment.to_owned())
 }
 
 #[cfg(test)]
@@ -223,7 +202,7 @@ mod tests {
             index,
             id: id.map(str::to_owned),
             name: name.map(str::to_owned),
-            arguments_fragment: args.map(str::to_owned),
+            arguments_delta: args.map(str::to_owned),
         }
     }
 
@@ -452,42 +431,35 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_prefix_fragments_emit_only_new_suffix() {
+    fn repeated_prefix_delta_is_preserved() {
         let mut assembler = StreamingToolCallAssembler::new();
-        let first = assembler
+        assembler
             .ingest(chunk(
                 Some(0),
                 Some("call-1"),
                 Some("read"),
-                Some("{\"path\":"),
+                Some("{\"x\":\""),
             ))
             .unwrap();
-        let second = assembler
-            .ingest(chunk(
-                Some(0),
-                None,
-                None,
-                Some("{\"path\":\"Cargo.toml\"}"),
-            ))
+        let repeated = assembler
+            .ingest(chunk(Some(0), None, None, Some("{")))
             .unwrap();
+        assembler
+            .ingest(chunk(Some(0), None, None, Some("\"}")))
+            .unwrap();
+        let end = assembler.finish_all().unwrap();
 
         assert_eq!(
-            first.into_iter().chain(second).collect::<Vec<_>>(),
-            vec![
-                ToolCallAssemblyEvent::Start {
-                    id: "call-1".to_owned(),
-                    name: "read".to_owned(),
-                },
-                ToolCallAssemblyEvent::ArgsDelta {
-                    id: "call-1".to_owned(),
-                    json_fragment: "{\"path\":".to_owned(),
-                },
-                ToolCallAssemblyEvent::ArgsDelta {
-                    id: "call-1".to_owned(),
-                    json_fragment: "\"Cargo.toml\"}".to_owned(),
-                },
-            ]
+            repeated,
+            vec![ToolCallAssemblyEvent::ArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "{".to_owned(),
+            }]
         );
+        assert!(end.contains(&ToolCallAssemblyEvent::End {
+            id: "call-1".to_owned(),
+            raw_arguments: "{\"x\":\"{\"}".to_owned(),
+        }));
     }
 
     #[test]

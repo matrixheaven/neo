@@ -580,7 +580,7 @@ impl ParseState {
                 index: Some(index),
                 id: Some(call_id),
                 name: Some(name.to_owned()),
-                arguments_fragment: None,
+                arguments_delta: None,
             });
             match events {
                 Ok(events) => self.push_tool_events(events),
@@ -751,7 +751,7 @@ impl ParseState {
             index: Some(index),
             id: Some(id),
             name: self.item_names.get(item_id).cloned(),
-            arguments_fragment: fragment,
+            arguments_delta: fragment,
         });
         match events {
             Ok(events) => self.push_tool_events(events),

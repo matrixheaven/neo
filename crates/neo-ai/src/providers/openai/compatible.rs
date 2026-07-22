@@ -630,7 +630,7 @@ impl ParseState {
                 .get("name")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            arguments_fragment: function
+            arguments_delta: function
                 .get("arguments")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
