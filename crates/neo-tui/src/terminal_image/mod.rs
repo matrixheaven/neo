@@ -81,26 +81,17 @@ impl TerminalImageCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageRenderPolicy {
     protocol: ImageProtocolPreference,
-    fetch_remote_images: bool,
 }
 
 impl ImageRenderPolicy {
     #[must_use]
-    pub const fn new(protocol: ImageProtocolPreference, fetch_remote_images: bool) -> Self {
-        Self {
-            protocol,
-            fetch_remote_images,
-        }
+    pub const fn new(protocol: ImageProtocolPreference) -> Self {
+        Self { protocol }
     }
 
     #[must_use]
     pub const fn protocol(self) -> ImageProtocolPreference {
         self.protocol
-    }
-
-    #[must_use]
-    pub const fn fetch_remote_images(self) -> bool {
-        self.fetch_remote_images
     }
 
     #[must_use]
@@ -144,14 +135,6 @@ impl ImageRenderPolicy {
                 escape_sequence: None,
             };
         };
-        if image.is_remote() && !self.fetch_remote_images {
-            return RenderedInlineImage {
-                metadata,
-                protocol: NegotiatedImageProtocol::None,
-                lines: vec![fallback],
-                escape_sequence: None,
-            };
-        }
         self.render_inline_image_bytes(
             &image.id,
             &image.mime_type,
@@ -224,7 +207,7 @@ impl ImageRenderPolicy {
 
 impl Default for ImageRenderPolicy {
     fn default() -> Self {
-        Self::new(ImageProtocolPreference::Auto, false)
+        Self::new(ImageProtocolPreference::Auto)
     }
 }
 
@@ -432,10 +415,6 @@ impl InlineImage {
             InlineImagePayload::Bytes(bytes) => Some(bytes),
             InlineImagePayload::RemoteUrl(_) => None,
         }
-    }
-
-    fn is_remote(&self) -> bool {
-        matches!(&self.payload, InlineImagePayload::RemoteUrl(_))
     }
 }
 
@@ -815,12 +794,11 @@ mod tests {
             None::<String>,
             ImageSource::Generated,
         );
-        let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false)
-            .render_inline_image(
-                &image,
-                TerminalImageCapabilities::default().with_kitty(true),
-                &ImageDisplayOptions::bounded(1, 1),
-            );
+        let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty).render_inline_image(
+            &image,
+            TerminalImageCapabilities::default().with_kitty(true),
+            &ImageDisplayOptions::bounded(1, 1),
+        );
 
         assert_eq!(rendered.protocol, NegotiatedImageProtocol::Kitty);
         let sequence = rendered.escape_sequence.expect("Kitty sequence");
@@ -848,7 +826,7 @@ mod tests {
                 None::<String>,
                 ImageSource::Generated,
             );
-            let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false)
+            let rendered = ImageRenderPolicy::new(ImageProtocolPreference::Kitty)
                 .render_inline_image(
                     &image,
                     TerminalImageCapabilities::default().with_kitty(true),

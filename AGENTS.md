@@ -102,11 +102,11 @@ Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substr
 
 ### Config sections
 
-`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, fetch_remote_images, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates project instruction loading (`AGENTS.md` only).
+`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates project instruction loading (`AGENTS.md` only).
 
 ## Security
 
-No unsafe code. API keys inline (`api_key`) or env-ref (`api_key_env`); `neo config show` redacts secrets. Write/execute tools workspace-contained; `Read` allows absolute paths outside workspace. Remote image fetch disabled by default. Disabled MCP servers not started. Local-only surface.
+No unsafe code. API keys inline (`api_key`) or env-ref (`api_key_env`); `neo config show` redacts secrets. Write/execute tools workspace-contained; `Read` allows absolute paths outside workspace. Disabled MCP servers not started. Local-only surface.
 
 ## Persistent memory (ICM) — MANDATORY
 

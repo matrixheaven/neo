@@ -450,10 +450,7 @@ fn blocking_overlay_reuses_manual_alternate_surface() {
 #[test]
 fn automatic_viewport_falls_back_instead_of_splitting_kitty_image() {
     let mut transcript = TranscriptPane::new(40, 6);
-    transcript.set_image_render_policy(ImageRenderPolicy::new(
-        ImageProtocolPreference::Kitty,
-        false,
-    ));
+    transcript.set_image_render_policy(ImageRenderPolicy::new(ImageProtocolPreference::Kitty));
     transcript.set_image_capabilities(TerminalImageCapabilities::default().with_kitty(true));
     transcript.push_user_message_with_images(
         "look",

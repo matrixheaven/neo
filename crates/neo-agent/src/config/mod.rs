@@ -248,8 +248,6 @@ pub struct TuiConfig {
     #[serde(default)]
     pub image_protocol: ImageProtocolPreference,
     #[serde(default)]
-    pub fetch_remote_images: bool,
-    #[serde(default)]
     pub keybindings: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub completion_notification: NotificationMode,
@@ -261,7 +259,6 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             image_protocol: ImageProtocolPreference::default(),
-            fetch_remote_images: false,
             keybindings: BTreeMap::new(),
             completion_notification: NotificationMode::Bell,
             question_notification: NotificationMode::None,

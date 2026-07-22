@@ -290,8 +290,6 @@ pub(crate) struct FileTuiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) image_protocol: Option<ImageProtocolPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) fetch_remote_images: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) keybindings: Option<BTreeMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_notification: Option<NotificationMode>,

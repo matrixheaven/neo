@@ -192,7 +192,6 @@ max_background_log_bytes = 10485760
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `image_protocol` | `auto`\|`kitty`\|`iterm2`\|`sixel`\|`none` | `auto` | 图片渲染协议偏好 |
-| `fetch_remote_images` | bool | `false` | 是否自动抓取远程图片 URL |
 | `keybindings` | map<string, string[]> | `{}` | 自定义键位绑定（action → 按键列表） |
 | `completion_notification` | `none`\|`bell`\|`system`\|`all` | `bell` | 任务完成通知方式 |
 | `question_notification` | `none`\|`bell`\|`system`\|`all` | `none` | `AskUserQuestion` 触发通知方式 |

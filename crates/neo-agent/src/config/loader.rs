@@ -314,7 +314,6 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
     };
     TuiConfig {
         image_protocol: tui.image_protocol.unwrap_or_default(),
-        fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
         keybindings: tui.keybindings.unwrap_or_default(),
         completion_notification: tui.completion_notification.unwrap_or_default(),
         question_notification: tui.question_notification.unwrap_or(NotificationMode::None),

@@ -1367,7 +1367,7 @@ fn transcript_pane_inline_images_are_structured_entries() {
     ));
 
     let sequences = runtime.inline_image_sequences(
-        ImageRenderPolicy::new(ImageProtocolPreference::Iterm2, false),
+        ImageRenderPolicy::new(ImageProtocolPreference::Iterm2),
         TerminalImageCapabilities::default().with_iterm2(true),
     );
     assert_eq!(sequences.len(), 1);
@@ -1376,10 +1376,7 @@ fn transcript_pane_inline_images_are_structured_entries() {
 #[test]
 fn transcript_user_images_render_thumbnail_inside_normal_frame() {
     let mut chrome = NeoChromeState::new("neo", "session", "openai/gpt-4.1", "/tmp/neo-ws");
-    chrome.set_image_render_policy(ImageRenderPolicy::new(
-        ImageProtocolPreference::Kitty,
-        false,
-    ));
+    chrome.set_image_render_policy(ImageRenderPolicy::new(ImageProtocolPreference::Kitty));
     chrome.set_image_capabilities(TerminalImageCapabilities::default().with_kitty(true));
     let mut transcript = TranscriptPane::new(100, 20);
     transcript.push_user_message_with_images(

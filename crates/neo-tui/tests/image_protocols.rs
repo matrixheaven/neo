@@ -178,22 +178,22 @@ fn image_protocol_errors_have_stable_messages() {
 #[test]
 fn image_protocol_auto_negotiates_available_terminal_protocol() {
     assert_eq!(
-        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto)
             .negotiate(TerminalImageCapabilities::default().with_kitty(true)),
         NegotiatedImageProtocol::Kitty
     );
     assert_eq!(
-        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto)
             .negotiate(TerminalImageCapabilities::default().with_iterm2(true)),
         NegotiatedImageProtocol::Iterm2
     );
     assert_eq!(
-        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto)
             .negotiate(TerminalImageCapabilities::default().with_sixel(true)),
         NegotiatedImageProtocol::None
     );
     assert_eq!(
-        ImageRenderPolicy::new(ImageProtocolPreference::None, true).negotiate(
+        ImageRenderPolicy::new(ImageProtocolPreference::None).negotiate(
             TerminalImageCapabilities::default()
                 .with_kitty(true)
                 .with_iterm2(true)
@@ -204,8 +204,8 @@ fn image_protocol_auto_negotiates_available_terminal_protocol() {
 }
 
 #[test]
-fn image_render_policy_keeps_remote_images_metadata_only_by_default() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+fn image_render_policy_keeps_remote_images_metadata_only() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty);
     let remote = InlineImage::remote_url(
         "img-remote",
         "image/png",
@@ -230,7 +230,7 @@ fn image_render_policy_keeps_remote_images_metadata_only_by_default() {
 
 #[test]
 fn image_render_policy_falls_back_for_invalid_local_payload() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty);
     let local = InlineImage::bytes(
         "img-local",
         "image/png",
@@ -257,7 +257,7 @@ fn image_render_policy_falls_back_for_invalid_local_payload() {
 
 #[test]
 fn terminal_image_thumbnail_uses_bounded_kitty_cell_dimensions() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty);
     let mut png = Vec::new();
     PngEncoder::new(&mut png)
         .write_image(&[0, 0, 0], 1, 1, ColorType::Rgb8.into())
@@ -286,7 +286,7 @@ fn terminal_image_thumbnail_uses_bounded_kitty_cell_dimensions() {
 
 #[test]
 fn terminal_image_thumbnail_uses_bounded_iterm2_cell_dimensions() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Iterm2, false);
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Iterm2);
     let image = InlineImage::bytes(
         "img-wide",
         "image/png",
@@ -310,7 +310,7 @@ fn terminal_image_thumbnail_uses_bounded_iterm2_cell_dimensions() {
 
 #[test]
 fn terminal_image_thumbnail_falls_back_without_inline_support_or_space() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Auto, false);
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Auto);
     let image = InlineImage::bytes(
         "img-local",
         "image/png",
@@ -332,7 +332,7 @@ fn terminal_image_thumbnail_falls_back_without_inline_support_or_space() {
 
 #[test]
 fn terminal_image_thumbnail_does_not_fake_sixel_for_encoded_image_bytes() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Sixel, false);
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Sixel);
     let image = InlineImage::bytes(
         "img-local",
         "image/png",

@@ -139,10 +139,7 @@ impl InteractiveController {
             .set_permission_mode(config.permission_mode);
         self.tui
             .chrome_mut()
-            .set_image_render_policy(ImageRenderPolicy::new(
-                config.tui.image_protocol,
-                config.tui.fetch_remote_images,
-            ));
+            .set_image_render_policy(ImageRenderPolicy::new(config.tui.image_protocol));
         let capabilities = detect_terminal_capabilities(
             config.tui.image_protocol,
             std::io::stdout().is_terminal(),
