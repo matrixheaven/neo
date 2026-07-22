@@ -159,8 +159,9 @@ design is the requirement owner for implementation.
 | `crates/neo-agent/src/modes/interactive/slash_commands.rs` | Manual invocation calls shared renderer; delete local markup renderer. |
 | `crates/neo-agent/src/modes/interactive/prompt_completion.rs` | Host display metadata with canonical insertion. |
 | `crates/neo-agent/src/modes/interactive/tests.rs` | One manual-context and one completion integration check. |
-| `crates/neo-agent-core/src/skills/builtin/create-skill.md` | Canonical authoring contract and host metadata guidance. |
-| `crates/neo-agent-core/src/skills/builtin/self-evo.md` | Canonical generated-skill contract. |
+| `crates/neo-agent-core/src/skills/builtin/mod.rs` | One consolidated regression test for both shipped authoring contracts. |
+| `crates/neo-agent-core/src/skills/builtin/create-skill.md` | Requirement-driven single-skill authoring and verification contract. |
+| `crates/neo-agent-core/src/skills/builtin/self-evo.md` | Evidence-driven, zero-or-more sequential skill distillation contract. |
 | `docs/en/customization/skills.md` | English package/manifest/migration docs. |
 | `docs/zh/customization/skills.md` | Chinese package/manifest/migration docs. |
 
@@ -173,8 +174,8 @@ epochs, MCP connection management, config discovery roots, or multi-agent code.
 - Pressure: `skills_manager.rs` is over 2,500 lines;
   `interactive/tests.rs` is also large.
 - Governance: add only argument/wiring code to `skills_manager.rs`; put sidecar
-  logic in `metadata.rs`. Add only two behavior-distinct integration tests and
-  reuse existing helpers.
+  logic in `metadata.rs`. Consolidate existing built-in prompt assertions into
+  one contract test rather than adding parallel substring tests.
 - Recommendation: new cohesive owner files for metadata/context; edit discovery
   in place; no unrelated extraction.
 - Budget result: `at-risk but governed`.
@@ -199,9 +200,9 @@ execution boundary required by the long-task protocol.
 
 1. Run `rtk icm recall-context "Neo skill package completion execution" --limit 5`.
 2. Run `rtk git status --short` and record pre-existing unrelated paths in the
-   checkpoint. At documentation closeout these included `.gitignore` and
-   `crates/neo-agent/src/clipboard.rs`; treat the live status as authoritative
-   because the shared worktree may change after handoff.
+   checkpoint. At this amendment's closeout this included `.gitignore`; treat
+   the live status as authoritative because the shared worktree may change
+   after handoff.
 3. Read only the baseline and owner files named above. Use CodeGraph/cx before
    broader source search. Do not re-explore `.references/codex` unless a spec
    statement cannot be mapped to Neo code.
@@ -273,8 +274,9 @@ field.
    rtk rg -n "SkillType|skill_type|slash_commands|slashCommands" crates/neo-agent-core/src crates/neo-agent/src docs/en/customization/skills.md docs/zh/customization/skills.md
    ```
 
-   At this stage only the two user docs and the planned migration text may
-   remain; production Rust matches must be zero.
+   At this stage the two built-in authoring files and user docs may still carry
+   the old authoring examples scheduled for Tasks 6 and 7; production Rust
+   matches must be zero.
 
 4. Commit only this slice:
 
@@ -532,17 +534,20 @@ dependency summaries.
    rtk git commit -m "feat(skills): surface Neo package metadata"
    ```
 
-## Task 6: Add Typed Sidecar Authoring
+## Task 6: Add Typed Sidecar Authoring and Upgrade Both Built-in Authors
 
 **Files:**
 
 - Modify `crates/neo-agent-core/src/tools/skills_manager.rs`
 - Modify `crates/neo-agent-core/src/skills/metadata.rs`
+- Modify `crates/neo-agent-core/src/skills/builtin/mod.rs`
 - Modify `crates/neo-agent-core/src/skills/builtin/create-skill.md`
 - Modify `crates/neo-agent-core/src/skills/builtin/self-evo.md`
 
 **Why:** A first-class package field that only hand editing can create leaves
-Neo's built-in authoring workflow incomplete.
+Neo's built-in authoring workflow incomplete. Both shipped authors currently
+teach retired `type` / `skill_type` fields, so updating only the Rust tool would
+immediately regenerate obsolete packages.
 
 **Change Necessity:** `CreateSkill` already owns safe package writes and whole
 package backup. Reuse it; do not create another metadata-writing tool.
@@ -566,30 +571,80 @@ optional dependency description. Reject an empty supplied object. Validate all
 metadata before any backup or write. Write `agents/neo.yaml` atomically through
 the same safe-directory/reparse policy used for package resources.
 
-Update authoring skill instructions to emit canonical manifest fields, add
-host metadata only when it improves a real picker/list/dependency use case, and
-never synthesize icon, brand, transport, URL, or installer data.
+**Built-in author boundaries:**
+
+- `create-skill` is requirement-driven and creates one focused package. It asks
+  for a concrete capability when invoked without one, selects resources and
+  host metadata only for real consumers, calls `CreateSkill` once, then
+  verifies through `ListSkills` and a representative behavior check.
+- `self-evo` is evidence-driven and requires an explicit history scope. It may
+  create zero skills, rejects session narrative/project-only facts/secrets,
+  deduplicates against `ListSkills`, and creates/verifies candidates one at a
+  time. A failure stops the next candidate.
+- both remain `disableModelInvocation: true`, remove their own `type: prompt`,
+  call `CreateSkill` without `skill_type`, and never write files directly;
+- both omit `host_metadata` when it would only restate name/description. They
+  declare an MCP dependency only when the body requires an existing configured
+  server identifier, without inventing connection or installer data.
 
 **Verification:**
 
-1. Add one manager test
+1. Before editing either built-in skill, use `aegis:writing-skills` to run and
+   record one baseline behavior scenario per author:
+   - `create-skill`: request a resource-backed skill with a distinct display
+     label and a known MCP dependency; record any retired fields, phantom
+     resources, fabricated metadata, direct writes, or missing verification.
+   - `self-evo`: provide a noisy scope with one strong repeatable workflow and
+     one weak candidate; record any narrative copying, vague/batch creation,
+     retired fields, missing deduplication, or skipped per-skill verification.
+2. Add one manager test
    `create_skill_writes_and_preserves_typed_host_metadata` covering initial
    creation, omitted-on-update preservation, and active-store reload.
-2. Run:
+3. Update both built-in files to the approved shared and author-specific
+   contracts. Preserve their distinct input sources; do not merge them or add a
+   shared authoring abstraction.
+4. In `skills/builtin/mod.rs`, consolidate the existing author prompt checks
+   into `builtin_skill_authors_use_canonical_package_contract`. Inspect the raw
+   built-in frontmatter and loaded bodies for both authors. Assert common
+   canonical fields/manual-only behavior and the distinct requirement-driven
+   versus evidence-driven rules. Replace
+   `builtin_skills_include_create_skill`,
+   `self_evo_builtin_requires_scope_and_verify_section`, and
+   `create_skill_builtin_requires_verify_and_create_skill_tool` rather than
+   retaining parallel substring-only tests. Update the stale extraction fixture
+   to use canonical frontmatter while preserving its refresh assertion.
+5. Run the tool behavior test:
 
    ```bash
    rtk cargo nextest run -p neo-agent-core --lib create_skill_writes_and_preserves_typed_host_metadata
    ```
 
-3. Re-run one existing exact symlink/reparse rejection test from
-   `skills_manager` against the new `agents` path behavior where platform
-   applicable.
-4. Inspect `skills_manager.rs`: sidecar parse/serialization logic must remain in
-   `metadata.rs`; this file gets input and safe-write orchestration only.
-5. Commit:
+6. Run the built-in author contract test:
 
    ```bash
-   rtk git add crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/metadata.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md
+   rtk cargo nextest run -p neo-agent-core --lib builtin_skill_authors_use_canonical_package_contract
+   ```
+
+7. Re-run one existing exact symlink/reparse rejection test from
+   `skills_manager` against the new `agents` path behavior where platform
+   applicable.
+8. Re-run the two baseline scenarios with fresh agents and the revised built-in
+   skill loaded. Record whether each author now emits canonical `CreateSkill`
+   input, observes its stop conditions, and performs post-create verification.
+   Do not claim prompt completion from Rust substring assertions alone.
+9. Inspect `skills_manager.rs`: sidecar parse/serialization logic must remain in
+   `metadata.rs`; this file gets input and safe-write orchestration only.
+10. Run the final authoring retirement search:
+
+   ```bash
+   rtk rg -n "SkillType|skill_type|slash_commands|slashCommands|type: (prompt|inline|flow)" crates/neo-agent-core/src/skills/builtin crates/neo-agent-core/src/tools/skills_manager.rs
+   ```
+
+   It must return no matches.
+11. Commit:
+
+   ```bash
+   rtk git add crates/neo-agent-core/src/tools/skills_manager.rs crates/neo-agent-core/src/skills/metadata.rs crates/neo-agent-core/src/skills/builtin/mod.rs crates/neo-agent-core/src/skills/builtin/create-skill.md crates/neo-agent-core/src/skills/builtin/self-evo.md
    rtk git commit -m "feat(skills): author Neo package metadata"
    ```
 
@@ -665,10 +720,11 @@ the approved spec; no new product code should appear here.
 
    ```bash
    rtk rg -n "SkillType|skill_type|slash_commands|slashCommands" crates/neo-agent-core/src crates/neo-agent/src
+   rtk rg -n "type: (prompt|inline|flow)" crates/neo-agent-core/src/skills/builtin
    rtk rg -n "render_loaded_skill_block" crates/neo-agent-core/src crates/neo-agent/src
    ```
 
-   Both commands must return no production matches.
+   All three commands must return no production or shipped built-in matches.
 4. Run scoped whitespace validation by listing every touched path explicitly:
 
    ```bash
@@ -769,6 +825,8 @@ INTENT LOCK:
 - Make automatic and manual skill activation use one path-aware context envelope.
 - Make discovery deterministic, bounded, symlink-cycle safe, and fail-soft per skill.
 - Add a narrow agents/neo.yaml for current Neo host consumers.
+- Make create-skill and self-evo emit and verify that canonical package shape while
+  preserving their distinct requirement-driven and evidence-driven roles.
 - Retire manifest surfaces that do not have independent runtime semantics.
 
 CANONICAL OWNERS:
@@ -778,6 +836,9 @@ CANONICAL OWNERS:
 - SkillStore/discovery: package loading, precedence, limits, and diagnostics.
 - skills/context.rs: the only model-visible activated skill envelope.
 - Existing append-only catalog owner: complete deterministic snapshots; no selector.
+- create-skill: one requirement-driven package through CreateSkill, then verification.
+- self-evo: explicit-scope evidence distillation; zero is valid; candidates are written
+  and verified sequentially through CreateSkill.
 
 MANDATORY PRESERVATION:
 - SKILL.md remains the only package file automatically injected.
@@ -799,6 +860,8 @@ MANDATORY RETIREMENT, NO FALLBACKS:
 - Delete fail-closed recursive discovery; do not add caller retries or a second scanner.
 - Never parse agents/openai.yaml as a fallback and never put invocation policy in both
   SKILL.md and agents/neo.yaml.
+- Both built-in author files must remove type: prompt and every skill_type instruction;
+  do not leave shipped prompts capable of regenerating retired fields.
 
 HARD NON-GOALS:
 - No project-local/.agents skill roots, marketplace, hosted sync, plugin runtime,
@@ -818,13 +881,16 @@ EXECUTION PROTOCOL:
 5. Commit each verified logical slice with the specified conventional message. Stage
    explicit paths only. Never use git add -A, stash, reset, checkout/restore, clean,
    rebase, amend, force push, or any worktree-discarding command. Do not push.
-6. The worktree is shared and dirty. At documentation closeout unrelated changes existed
-   in .gitignore and crates/neo-agent/src/clipboard.rs. This snapshot is not exhaustive:
-   re-read live status and do not touch, stage, revert, or include unrelated changes. If
-   they break broad checks, skip those checks and report it; never revert them.
+6. The worktree is shared and dirty. At this amendment's closeout an unrelated change
+   existed in .gitignore. This snapshot is not exhaustive: re-read live status and do not
+   touch, stage, revert, or include unrelated changes. If they break broad checks, skip
+   those checks and report it; never revert them.
 7. Keep skills_manager.rs wiring-only for the new feature. Put sidecar logic in
    skills/metadata.rs and activation rendering in skills/context.rs.
-8. Before completion, request an independent defect-first review, run Aegis verification-
+8. Task 6 is incomplete until create-skill and self-evo each have a recorded baseline
+   behavior scenario, revised contract, exact Rust contract test, and fresh-agent
+   post-change scenario. Substring tests alone are not skill-behavior evidence.
+9. Before completion, request an independent defect-first review, run Aegis verification-
    before-completion, perform the ADR backfill check, run lingering-reference searches,
    and report exact evidence plus residual risk.
 
@@ -835,7 +901,8 @@ already-approved design unless a listed drift/rewind condition actually occurs.
 
 ## 8. Plan Self-Review
 
-- Spec coverage: every acceptance row maps to Tasks 1 through 8.
+- Spec coverage: every acceptance row maps to Tasks 1 through 8, including
+  separate `create-skill` and `self-evo` authoring evidence in Task 6.
 - Placeholder scan: no unresolved implementation placeholders; staging commands
   explicitly tell the executor to resolve and enumerate direct paths.
 - Type consistency: manifest, sidecar, snapshot, and renderer ownership are

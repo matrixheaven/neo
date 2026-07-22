@@ -25,6 +25,8 @@ Success means:
 - discovery is deterministic, bounded, symlink-cycle safe, and fail-soft per
   skill;
 - optional Neo host metadata has real TUI and activation consumers;
+- both built-in skill authors emit and verify the same canonical package
+  contract instead of preserving retired manifest or tool fields;
 - the model-visible catalog remains deterministic, append-only, and complete;
 - manifest fields describe behavior Neo actually implements;
 - existing resource packages, configured roots, manual activation, model
@@ -367,6 +369,60 @@ validation, atomic writes, preservation of unmentioned resources, and hot
 reload remain unchanged. `agents/neo.yaml` receives the same symlink/reparse
 and atomic-write safety as `SKILL.md`.
 
+### Built-in authoring skills
+
+`create-skill` and `self-evo` remain separate built-in, manual-only skills
+because they have different evidence sources. They share `CreateSkill` as the
+only package writer; neither writes package files directly or introduces a
+second authoring schema.
+
+Shared contract:
+
+- both built-in `SKILL.md` files use only `name`, `description`, and
+  `disableModelInvocation: true` in their own frontmatter;
+- both call `CreateSkill` without `skill_type` and never emit manifest `type`
+  or `slashCommands` fields;
+- both may supply `resources` and the typed `host_metadata` object in the same
+  call as the body;
+- `host_metadata` is omitted unless a distinct human-facing label/summary or a
+  concrete configured MCP server dependency has a real consumer;
+- display metadata must not merely duplicate canonical name/description, and
+  an MCP dependency is declared only when the generated body actually requires
+  that server identifier;
+- neither invents icon, brand, transport, command, URL, installer, permission,
+  or `agents/openai.yaml` data;
+- both call `ListSkills` after each successful write and report package path,
+  backup result, reload result, resources, sidecar creation, and remaining
+  verification;
+- neither copies credentials, secrets, raw transcripts, transient logs,
+  unresolved scratch notes, or project-only policy into a reusable package.
+
+`create-skill` is requirement-driven:
+
+- no argument or no concrete capability triggers `AskUserQuestion` before
+  drafting;
+- it creates one focused skill from concrete triggers, inputs, expected
+  outputs, failure modes, and verification evidence;
+- it uses resources only when they make the package smaller, deterministic, or
+  reusable, and never references a resource absent from the same tool call or
+  an existing preserved package;
+- it includes a behavior-oriented `## Verify` section and performs the
+  strongest available representative check after creation.
+
+`self-evo` is evidence-driven:
+
+- no argument is not a scope; it asks for `current`, a day count, a session id,
+  or a concrete topic before reading history;
+- it may create no skill when the selected evidence contains no repeatable
+  cross-session technique, workflow, reference, or deterministic helper;
+- each accepted pattern becomes one focused skill; multiple candidates are
+  created and verified sequentially, stopping before the next candidate when
+  creation, reload, or verification fails;
+- it extracts the reusable rule and supporting artifact rather than narrating
+  how one session was solved;
+- it deduplicates against `ListSkills` and updates an existing canonical skill
+  only when the evidence supports replacement and the backup is reported.
+
 ## 13. Error and Security Boundaries
 
 - Required `SKILL.md` failure skips that skill and records a diagnostic.
@@ -434,7 +490,9 @@ automatically.
 | Catalog stability | Exact catalog test proves display metadata does not change model-visible identity/prose. |
 | TUI display | Exact completion test proves display label, canonical insertion, and short-description fallback. |
 | Typed authoring | Exact CreateSkill test writes `agents/neo.yaml`, preserves it when omitted on update, and reloads. |
-| Retirement | Lingering-reference search finds no production `SkillType`, `skill_type`, or `slash_commands`. |
+| `create-skill` authoring | Exact built-in contract test proves canonical frontmatter/tool fields, manual-only invocation, conditional metadata/resources, and post-create verification guidance. |
+| `self-evo` authoring | Exact built-in contract test proves explicit scope, zero-result allowance, sequential candidate verification, deduplication, and canonical package fields. |
+| Retirement | Lingering-reference search finds no production `SkillType`, `skill_type`, `slash_commands`, or shipped `type: prompt/inline/flow`. |
 | Cross-platform safety | Existing path/reparse tests remain green plus focused sidecar path test. |
 | Documentation | English and Chinese docs show identical canonical fields, package layout, and migration. |
 
@@ -474,7 +532,7 @@ the design.
   stays in one sidecar, and every retained sidecar field has a named consumer.
 - Scope check: pass; one long-running workstream with owner-separated slices.
 - Ambiguity check: pass; retired fields, metadata precedence, failure behavior,
-  scan limits, and non-goals are explicit.
+  scan limits, both built-in author roles, and non-goals are explicit.
 - Boundary check: pass; discovery roots, append-only catalog, transcript,
   permission, session, and local-only invariants are preserved.
 - Existence check: `agents/neo.yaml`, `metadata.rs`, and `context.rs` are

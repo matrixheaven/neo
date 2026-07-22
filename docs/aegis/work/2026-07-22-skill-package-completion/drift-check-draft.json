@@ -7,13 +7,14 @@
     "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
     "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
     "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
-    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md",
+    "docs/aegis/specs/2026-07-22-skill-package-completion-design.md"
   ],
-  "scopeStatus": "Documentation-only design and planning remained inside the approved local skill-package scope.",
-  "compatStatus": "Resource paths, invocation routes, catalog snapshots, discovery roots, transcript, sessions, permissions, and symlink views remain explicitly preserved.",
-  "retirementStatus": "Implementation plan has explicit delete-first tasks and lingering-reference checks for every obsolete owner.",
+  "scopeStatus": "The amendment stays inside the approved local skill-package authoring boundary and changes documentation only.",
+  "compatStatus": "CreateSkill remains the only writer; both built-ins remain manual-only and preserve resources, backup, reload, and ListSkills behavior.",
+  "retirementStatus": "Both shipped author prompts and the stale extraction fixture have explicit implementation tasks and searches to remove type: prompt and skill_type without fallback.",
   "newRiskSignals": [
-    "Implementation is intentionally deferred to the handoff executor and has no runtime verification yet."
+    "Built-in prompt behavior remains unimplemented and requires baseline plus post-change fresh-agent evidence in Task 6."
   ],
   "decision": "continue"
 }

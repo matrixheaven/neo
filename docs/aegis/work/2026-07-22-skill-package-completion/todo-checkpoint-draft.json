@@ -6,15 +6,17 @@
     "Investigate Neo and Codex skill package structures.",
     "Write and self-review the approved design spec.",
     "Write the executable implementation plan and constrained handoff prompt.",
-    "Validate task-owned Aegis artifacts and prepare the documentation commit."
+    "Validate task-owned Aegis artifacts and commit the initial documentation bundle.",
+    "Amend the spec, Task 6, and handoff for create-skill and self-evo."
   ],
-  "activeSlice": "Handoff ready; no source implementation has started.",
+  "activeSlice": "Handoff ready after built-in author contract amendment; no source implementation has started.",
   "evidenceRefs": [
     "docs/aegis/specs/2026-07-22-skill-package-completion-design.md",
     "docs/aegis/plans/2026-07-22-skill-package-completion.md",
+    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md"
   ],
-  "blockedOn": "Repository-wide Aegis check has unrelated historic workspace failures; use targeted task validation until separately repaired.",
-  "nextStep": "Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order.",
+  "blockedOn": null,
+  "nextStep": "Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order; Task 6 must validate both built-in authors.",
   "updatedAt": "2026-07-22"
 }

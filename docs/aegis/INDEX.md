@@ -167,3 +167,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | work | docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md | 2026-07-22-skill-package-completion proof bundle |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json | 2026-07-22-skill-package-completion evidence targeted-workspace-validation |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json | 2026-07-22-skill-package-completion evidence global-workspace-check-limit |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json | 2026-07-22-skill-package-completion evidence builtin-author-contract-amendment |

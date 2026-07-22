@@ -5,13 +5,15 @@
     "docs/aegis/specs/2026-07-13-skill-invocation-transcript-design.md",
     "docs/aegis/specs/2026-07-20-append-only-skill-catalog-brief.md",
     "docs/aegis/adr/ADR-0001-aegis-dual-host-skill-discovery.md",
-    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md"
+    "docs/aegis/baseline/2026-07-18-aegis-dual-host-install.md",
+    "docs/aegis/specs/2026-07-22-skill-package-completion-design.md"
   ],
   "impactStatement": "docs/aegis/work/2026-07-22-skill-package-completion/impact-statement-draft.json",
   "compatPlan": "Existing references/scripts/assets packages, NEO_SKILL_DIR expansion, manual /skill activation, Skill tool invocation, tier precedence, Aegis symlink views, transcript SkillInvocation events, and session replay remain functional.",
-  "retirementPlan": "Implementation plan has explicit delete-first tasks and lingering-reference checks for every obsolete owner.",
+  "retirementPlan": "Both shipped author prompts and the stale extraction fixture have explicit implementation tasks and searches to remove type: prompt and skill_type without fallback.",
   "evidenceBundle": [
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-baseline-readback.json",
+    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-document-structure.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json",
     "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json"

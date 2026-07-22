@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "builtin-author-contract-amendment",
+  "type": "plan-amendment",
+  "source": "Current create-skill.md, self-evo.md, builtin loader tests, approved design spec, and implementation plan",
+  "summary": "Spec and Task 6 now give create-skill and self-evo separate requirement-driven/evidence-driven contracts, shared canonical CreateSkill fields, conditional host metadata/resources, baseline and post-change behavior scenarios, a consolidated regression test, and explicit retirement checks.",
+  "verifier": "Codex primary agent"
+}

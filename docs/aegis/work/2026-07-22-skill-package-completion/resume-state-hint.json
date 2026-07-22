@@ -2,12 +2,13 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-22-skill-package-completion",
   "lastCheckpointRef": "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json",
-  "resumeInstruction": "Read the approved spec, plan, this checkpoint, and required baselines. Do not repeat broad Neo/Codex discovery. Preserve the dirty-tree fence and start with Task 0.",
+  "resumeInstruction": "Read the approved spec, amended plan, this checkpoint, and required baselines. Do not repeat broad Neo/Codex discovery. Preserve the dirty-tree fence and start with Task 0.",
   "knownPartialWork": [
     "Investigate Neo and Codex skill package structures.",
     "Write and self-review the approved design spec.",
     "Write the executable implementation plan and constrained handoff prompt.",
-    "Validate task-owned Aegis artifacts and prepare the documentation commit."
+    "Validate task-owned Aegis artifacts and commit the initial documentation bundle.",
+    "Amend the spec, Task 6, and handoff for create-skill and self-evo."
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-07-22-skill-package-completion/10-intent.md",
@@ -15,6 +16,6 @@
     "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "Do not treat the documentation commit as runtime implementation evidence or stage unrelated dirty files."
+    "Do not treat documentation as runtime evidence, merge create-skill and self-evo, skip their behavior scenarios, treat prompt substring tests as sufficient, or stage unrelated dirty files."
   ]
 }

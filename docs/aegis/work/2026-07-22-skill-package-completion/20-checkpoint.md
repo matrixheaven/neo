@@ -53,3 +53,56 @@
 - docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md
 - Blocked on: Repository-wide Aegis check has unrelated historic workspace failures; use targeted task validation until separately repaired.
 - Next step: Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order.
+
+## Checkpoint Update
+
+- Current todo: Begin implementation with Task 0: Resume-Safe Start and Dirty-Tree Fence.
+- Active slice: Handoff ready after built-in author contract amendment; no source implementation has started.
+- Completed todos:
+- Investigate Neo and Codex skill package structures.
+- Write and self-review the approved design spec.
+- Write the executable implementation plan and constrained handoff prompt.
+- Validate task-owned Aegis artifacts and commit the initial documentation bundle.
+- Amend the spec, Task 6, and handoff for create-skill and self-evo.
+- Evidence refs:
+- docs/aegis/specs/2026-07-22-skill-package-completion-design.md
+- docs/aegis/plans/2026-07-22-skill-package-completion.md
+- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json
+- Blocked on: none
+- Next step: Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order; Task 6 must validate both built-in authors.
+
+## DriftCheckDraft
+
+- Scope status: The amendment stays inside the approved local skill-package authoring boundary and changes documentation only.
+- Compatibility status: CreateSkill remains the only writer; both built-ins remain manual-only and preserve resources, backup, reload, and ListSkills behavior.
+- Retirement status: Both shipped author prompts now have explicit implementation tasks and tests to remove type: prompt and skill_type without fallback.
+- New risk signals:
+- Built-in prompt behavior remains unimplemented and requires baseline plus post-change fresh-agent evidence in Task 6.
+- Advisory decision: continue
+
+## Checkpoint Update
+
+- Current todo: Begin implementation with Task 0: Resume-Safe Start and Dirty-Tree Fence.
+- Active slice: Handoff ready after built-in author contract amendment; no source implementation has started.
+- Completed todos:
+- Investigate Neo and Codex skill package structures.
+- Write and self-review the approved design spec.
+- Write the executable implementation plan and constrained handoff prompt.
+- Validate task-owned Aegis artifacts and commit the initial documentation bundle.
+- Amend the spec, Task 6, and handoff for create-skill and self-evo.
+- Evidence refs:
+- docs/aegis/specs/2026-07-22-skill-package-completion-design.md
+- docs/aegis/plans/2026-07-22-skill-package-completion.md
+- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json
+- docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md
+- Blocked on: none
+- Next step: Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order; Task 6 must validate both built-in authors.
+
+## DriftCheckDraft
+
+- Scope status: The amendment stays inside the approved local skill-package authoring boundary and changes documentation only.
+- Compatibility status: CreateSkill remains the only writer; both built-ins remain manual-only and preserve resources, backup, reload, and ListSkills behavior.
+- Retirement status: Both shipped author prompts and the stale extraction fixture have explicit implementation tasks and searches to remove type: prompt and skill_type without fallback.
+- New risk signals:
+- Built-in prompt behavior remains unimplemented and requires baseline plus post-change fresh-agent evidence in Task 6.
+- Advisory decision: continue

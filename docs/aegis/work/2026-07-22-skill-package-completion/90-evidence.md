@@ -31,3 +31,11 @@
 - Source: aegis-workspace.py check --root /Users/chenyuanhao/Workspace/neo
 - Summary: Exit 1 is caused by unrelated historic unindexed work Markdown and an invalid legacy drift decision outside this task; no skill-package-completion artifact appeared in the failure list.
 - Verifier: Codex primary agent
+
+## EvidenceBundleDraft
+
+- Artifact key: builtin-author-contract-amendment
+- Type: plan-amendment
+- Source: Current create-skill.md, self-evo.md, builtin loader tests, approved design spec, and implementation plan
+- Summary: Spec and Task 6 now give create-skill and self-evo separate requirement-driven/evidence-driven contracts, shared canonical CreateSkill fields, conditional host metadata/resources, baseline and post-change behavior scenarios, a consolidated regression test, and explicit retirement checks.
+- Verifier: Codex primary agent
