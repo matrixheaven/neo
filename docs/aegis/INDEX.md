@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-22 | spec | docs/aegis/specs/2026-07-22-non-blocking-instruction-cycles-design.md | Non-Blocking Instruction Import Cycles |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-batch-edit.md | Neo Batch Edit Prepared Execution Implementation Plan |
 | 2026-07-20 | spec | docs/aegis/specs/2026-07-20-batch-edit-design.md | Neo Batch Edit Prepared Execution Design |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-runworkflow-dynamic-workflow.md | RunWorkflow Neo-Native Dynamic Workflow Implementation Plan |
