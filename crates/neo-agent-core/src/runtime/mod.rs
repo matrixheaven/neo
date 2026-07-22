@@ -20,6 +20,7 @@ mod tokens;
 mod tool_arguments;
 mod tool_dispatch;
 mod turn_loop;
+pub mod workflow_dispatch;
 
 pub use agent::*;
 pub use config::*;
@@ -29,3 +30,4 @@ pub use instruction_context::*;
 pub use queue::*;
 pub(crate) use tokens::*;
 pub use tool_dispatch::emit_repaired_tool_arguments_warning;
+pub use workflow_dispatch::*;
