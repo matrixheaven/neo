@@ -9929,6 +9929,7 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         },
         runtime: RuntimeConfig::default(),
         background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+        workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
         multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
         tui: TuiConfig::default(),
         theme: crate::themes::ResolvedTheme::default(),
@@ -10232,6 +10233,44 @@ async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("Started fresh session"));
     assert!(!snapshot.contains("permission refactor"));
+}
+
+#[tokio::test]
+async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join("sessions"));
+    let mut controller = controller_for_config(&config);
+
+    controller.type_text("/workflow");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("/workflow submits");
+    assert!(config.workflow_capability.is_available().await);
+
+    controller.refresh_config();
+    let refreshed = controller.local_config.as_ref().expect("refreshed config");
+    assert!(refreshed.workflow_capability.is_available().await);
+    let agent_config = crate::modes::run::agent_config_for_app(
+        neo_ai::ModelSpec {
+            provider: neo_ai::ProviderId("test-provider".to_owned()),
+            model: "test-model".to_owned(),
+            api: neo_ai::ApiKind::Local,
+            capabilities: neo_ai::ModelCapabilities::tool_chat(),
+        },
+        refreshed,
+        None,
+        None,
+    )
+    .expect("agent config");
+    assert!(agent_config.workflow_capability.is_available().await);
+
+    controller.type_text("/clear");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("/clear submits");
+    assert!(!agent_config.workflow_capability.is_available().await);
 }
 
 #[tokio::test]

@@ -91,6 +91,9 @@ pub struct AppConfig {
     /// `TaskList`/`TaskOutput` can observe them on later turns.
     #[serde(skip)]
     pub background_tasks: BackgroundTaskManager,
+    /// Session-scoped, non-serializable authority for one workflow launch.
+    #[serde(skip)]
+    pub workflow_capability: neo_agent_core::workflow::WorkflowCapability,
     /// Shared multi-agent runtime for Delegate/DelegateSwarm tasks in this app session.
     #[serde(skip)]
     pub multi_agent: MultiAgentRuntime,
@@ -128,6 +131,7 @@ impl AppConfig {
         self.live_permission_mode = Arc::clone(&current.live_permission_mode);
         self.workspace_policy = Arc::clone(&current.workspace_policy);
         self.background_tasks = current.background_tasks.clone();
+        self.workflow_capability = current.workflow_capability.clone();
         self.multi_agent = current.multi_agent.clone();
         self.runtime.shell = current.runtime.shell;
         self.runtime.shell_runtime = current.runtime.shell_runtime.clone();

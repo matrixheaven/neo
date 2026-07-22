@@ -68,6 +68,7 @@ impl InteractiveController {
                     // interrupting the running turn.
                     return true;
                 }
+                self.workflow_capability.revoke().await;
             }
             "/resume" | "/sessions" => self.open_session_picker(),
             "/fork" => {

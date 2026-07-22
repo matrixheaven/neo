@@ -10,12 +10,12 @@ use tokio::sync::Mutex;
 /// The capability is runtime state, never a model-visible token value. It
 /// expires when one workflow is durably launched, the user cancels, `/new`
 /// resets the session, or the process exits.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WorkflowCapability {
     inner: Arc<Mutex<WorkflowCapabilityState>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct WorkflowCapabilityState {
     available: bool,
 }

@@ -533,6 +533,16 @@ impl AgentConfig {
         self
     }
 
+    /// Replace the shared one-shot workflow launch capability.
+    #[must_use]
+    pub fn with_workflow_capability(
+        mut self,
+        workflow_capability: crate::workflow::WorkflowCapability,
+    ) -> Self {
+        self.workflow_capability = workflow_capability;
+        self
+    }
+
     /// Replace the shared multi-agent runtime.
     #[must_use]
     pub fn with_multi_agent(mut self, multi_agent: MultiAgentRuntime) -> Self {

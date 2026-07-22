@@ -923,6 +923,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1016,6 +1017,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1085,6 +1087,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1138,6 +1141,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1212,6 +1216,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1294,6 +1299,7 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1407,6 +1413,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -2782,6 +2789,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
