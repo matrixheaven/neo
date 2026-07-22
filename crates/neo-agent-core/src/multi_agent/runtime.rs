@@ -119,13 +119,13 @@ fn default_context() -> DelegateContext {
 struct MultiAgentState {
     names: DisplayNamePool,
     next_created_index: u64,
-    next_cancel_generation: u64,
+    next_live_generation: u64,
     agent_order: BTreeMap<String, u64>,
     swarm_order: BTreeMap<String, u64>,
     agents: BTreeMap<String, AgentSnapshot>,
     retry_activity_starts: BTreeMap<String, usize>,
     swarms: BTreeMap<String, super::SwarmSnapshot>,
-    steer_handles: BTreeMap<String, SteerInputHandle>,
+    steer_handles: BTreeMap<String, LiveAgentSteer>,
     /// Live cancellation tokens for actively running child agents. Registered
     /// when a child run starts, removed when it finishes. Cancelling a token
     /// here stops the child's model stream immediately.
@@ -153,9 +153,12 @@ impl MultiAgentState {
         }
     }
 
-    fn next_cancel_generation(&mut self) -> u64 {
-        let generation = self.next_cancel_generation;
-        self.next_cancel_generation = self.next_cancel_generation.saturating_add(1);
+    fn next_live_generation(&mut self) -> u64 {
+        let generation = self.next_live_generation;
+        self.next_live_generation = self
+            .next_live_generation
+            .checked_add(1)
+            .expect("live generation overflow");
         generation
     }
 }
@@ -769,7 +772,7 @@ impl MultiAgentRuntime {
             .expect("multi-agent state poisoned")
             .steer_handles
             .get(agent_id)
-            .cloned();
+            .map(|entry| entry.handle.clone());
         let Some(handle) = handle else {
             return false;
         };
@@ -1681,14 +1684,22 @@ impl MultiAgentRuntime {
 
     fn register_live_steer(&self, agent_id: &str) -> LiveSteerRegistration {
         let handle = SteerInputHandle::new();
-        self.state
-            .lock()
-            .expect("multi-agent state poisoned")
-            .steer_handles
-            .insert(agent_id.to_owned(), handle.clone());
+        let generation = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let generation = state.next_live_generation();
+            state.steer_handles.insert(
+                agent_id.to_owned(),
+                LiveAgentSteer {
+                    handle: handle.clone(),
+                    generation,
+                },
+            );
+            generation
+        };
         LiveSteerRegistration {
             runtime: self.clone(),
             agent_id: agent_id.to_owned(),
+            generation,
             handle,
         }
     }
@@ -1708,7 +1719,7 @@ impl MultiAgentRuntime {
         }
         let generation = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let generation = state.next_cancel_generation();
+            let generation = state.next_live_generation();
             state.agent_cancel_tokens.insert(
                 agent_id.to_owned(),
                 LiveAgentCancel {
@@ -1822,6 +1833,7 @@ fn apply_terminal_delegate_update(
 struct LiveSteerRegistration {
     runtime: MultiAgentRuntime,
     agent_id: String,
+    generation: u64,
     handle: SteerInputHandle,
 }
 
@@ -1833,12 +1845,18 @@ impl LiveSteerRegistration {
 
 impl Drop for LiveSteerRegistration {
     fn drop(&mut self) {
-        self.runtime
+        let mut state = self
+            .runtime
             .state
             .lock()
-            .expect("multi-agent state poisoned")
+            .expect("multi-agent state poisoned");
+        if state
             .steer_handles
-            .remove(&self.agent_id);
+            .get(&self.agent_id)
+            .is_some_and(|entry| entry.generation == self.generation)
+        {
+            state.steer_handles.remove(&self.agent_id);
+        }
     }
 }
 
@@ -1874,6 +1892,12 @@ impl Drop for LiveCancelRegistration {
             state.agent_cancel_tokens.remove(&self.agent_id);
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct LiveAgentSteer {
+    handle: SteerInputHandle,
+    generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -3914,6 +3938,75 @@ mod tests {
                 .contains_key("agent_test"),
             "dropping the active live-cancel guard should unregister its token"
         );
+    }
+
+    #[test]
+    fn live_steer_guard_does_not_remove_replacement() {
+        let runtime = MultiAgentRuntime::new();
+        let first = runtime.register_live_steer("agent_test");
+        let second = runtime.register_live_steer("agent_test");
+        let second_handle = second.handle();
+
+        drop(first);
+
+        assert!(runtime.deliver_live_message(
+            "agent_test",
+            &crate::multi_agent::DelegateMailboxMessage {
+                id: "message_test".to_owned(),
+                text: "keep replacement".to_owned(),
+                delivered: false,
+            },
+        ));
+        assert_eq!(second_handle.pending(), 1);
+
+        drop(second);
+
+        assert!(
+            !runtime
+                .state
+                .lock()
+                .expect("multi-agent state poisoned")
+                .steer_handles
+                .contains_key("agent_test")
+        );
+    }
+
+    #[test]
+    fn live_generation_overflow_panics_without_replacing_steer() {
+        let runtime = MultiAgentRuntime::new();
+        let existing = runtime.register_live_steer("agent_test");
+        let existing_handle = existing.handle();
+        runtime
+            .state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .next_live_generation = u64::MAX;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.register_live_steer("agent_test")
+        }));
+
+        assert!(result.is_err(), "generation overflow must panic");
+        let state = runtime
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let preserved = state
+            .steer_handles
+            .get("agent_test")
+            .expect("existing steer entry must remain");
+        assert_eq!(preserved.generation, existing.generation);
+        drop(state);
+        runtime.state.clear_poison();
+        assert!(runtime.deliver_live_message(
+            "agent_test",
+            &crate::multi_agent::DelegateMailboxMessage {
+                id: "message_after_overflow".to_owned(),
+                text: "keep existing handle".to_owned(),
+                delivered: false,
+            },
+        ));
+        assert_eq!(existing_handle.pending(), 1);
     }
 
     #[test]
