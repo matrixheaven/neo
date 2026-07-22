@@ -2771,7 +2771,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn create_skill_rejects_symlinked_sidecar_before_overwriting_skill() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2787,8 +2787,7 @@ mod tests {
         fs::write(&outside_sidecar, "outside")
             .await
             .expect("write outside sidecar");
-        std::os::unix::fs::symlink(&outside_sidecar, agents_dir.join("neo.yaml"))
-            .expect("symlink sidecar");
+        create_file_symlink(&outside_sidecar, &agents_dir.join("neo.yaml"));
 
         let error = CreateSkillTool::new(temp.path())
             .execute(
@@ -2824,6 +2823,16 @@ mod tests {
             "outside"
         );
         assert!(!temp.path().join("backups").exists());
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("symlink sidecar");
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_file(target, link).expect("symlink sidecar");
     }
 
     #[tokio::test]

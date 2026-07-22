@@ -786,7 +786,8 @@ fn create_dir_symlink(target: &Path, link: &Path) -> bool {
 
 #[cfg(windows)]
 fn create_dir_symlink(target: &Path, link: &Path) -> bool {
-    std::os::windows::fs::symlink_dir(target, link).is_ok()
+    std::os::windows::fs::symlink_dir(target, link).expect("create directory symlink");
+    true
 }
 
 #[cfg(not(any(unix, windows)))]
