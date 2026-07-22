@@ -168,3 +168,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json | 2026-07-22-skill-package-completion evidence targeted-workspace-validation |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json | 2026-07-22-skill-package-completion evidence global-workspace-check-limit |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json | 2026-07-22-skill-package-completion evidence builtin-author-contract-amendment |
+| 2026-07-22 | spec | docs/aegis/specs/2026-07-22-flat-batch-edit-design.md | Neo Flat Batch Edit Contract Design |
+| 2026-07-22 | plan | docs/aegis/plans/2026-07-22-flat-batch-edit.md | Neo Flat Batch Edit Contract Implementation Plan |

@@ -1,6 +1,6 @@
 # Neo Batch Edit Prepared Execution Design
 
-Status: Approved
+Status: Superseded by `docs/aegis/specs/2026-07-22-flat-batch-edit-design.md`
 Date: 2026-07-20
 
 ## Goal
