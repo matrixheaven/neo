@@ -133,9 +133,10 @@ impl McpClient for RmcpClient {
     }
 
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpToolResponse, McpError> {
-        let args = match arguments {
-            Value::Object(map) => map,
-            _ => serde_json::Map::new(),
+        let Value::Object(args) = arguments else {
+            return Err(McpError::protocol(
+                "MCP tool arguments must be a JSON object",
+            ));
         };
         let params = CallToolRequestParams::new(name.to_owned()).with_arguments(args);
         let request = ClientRequest::from(CallToolRequest::new(params));
@@ -297,6 +298,35 @@ mod tests {
                 .is_cancelled(),
             "server task must finish through cancellation"
         );
+    }
+
+    #[tokio::test]
+    async fn non_object_tool_arguments_do_not_reach_peer() {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server = HangingServer {
+            request_started: Arc::new(Notify::new()),
+        };
+        let server_task = tokio::spawn(async move {
+            let service = server.serve(server_transport).await.expect("server starts");
+            service.waiting().await.expect("server task joins");
+        });
+        let service = ().serve(client_transport).await.expect("client starts");
+        let client = RmcpClient::new(service, None, None);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.call_tool("hang", serde_json::json!([])),
+        )
+        .await
+        .expect("invalid arguments must fail without waiting for the peer")
+        .expect_err("non-object arguments must be rejected");
+
+        assert_eq!(error.message(), "MCP tool arguments must be a JSON object");
+        client.shutdown().await.expect("client shuts down");
+        server_task.abort();
+        if let Err(error) = server_task.await {
+            assert!(error.is_cancelled(), "server task failed: {error}");
+        }
     }
 
     #[tokio::test]
