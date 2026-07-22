@@ -1,298 +1,619 @@
-use neo_agent_core::workflow::{
-    JournalRecord, JournalWriter, WorkflowActor, WorkflowId, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus,
-    WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash, find_incomplete_invocations,
-    journal_path, read_journal,
-};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
-fn test_limits() -> WorkflowLimits {
-    WorkflowLimits::default()
+use neo_agent_core::AgentTokenUsage;
+use neo_agent_core::workflow::{
+    JournalRecord, JournalWriter, WorkflowActor, WorkflowHandle, WorkflowInvocationKind,
+    WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus,
+    WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash, journal_path,
+    read_journal,
+};
+use tokio::sync::Notify;
+
+fn launch_request() -> WorkflowLaunchRequest {
+    WorkflowLaunchRequest {
+        name: "test-run".to_owned(),
+        description: "test".to_owned(),
+        phases: vec![WorkflowPhase {
+            id: "build".to_owned(),
+            description: "build it".to_owned(),
+        }],
+        script: "neo.phase('build')".to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "/workflow".to_owned(),
+        parent_run_id: None,
+    }
 }
 
-async fn create_test_run(runtime: &WorkflowRuntime, session_dir: &std::path::Path) -> neo_agent_core::workflow::WorkflowHandle {
+async fn create_run(runtime: &WorkflowRuntime, session_dir: &Path) -> WorkflowHandle {
     runtime
-        .create_run(
-            session_dir,
-            WorkflowLaunchRequest {
-                name: "test-run".to_owned(),
-                description: "test".to_owned(),
-                phases: vec![WorkflowPhase {
-                    id: "build".to_owned(),
-                    description: "build it".to_owned(),
-                }],
-                script: "neo.phase('build')".to_owned(),
-                args: serde_json::json!({}),
-                launch_source: "/workflow".to_owned(),
-                parent_run_id: None,
-            },
-        )
+        .create_run(session_dir, launch_request())
         .await
         .expect("create run")
 }
 
-#[tokio::test]
-async fn workflow_returns_running_before_worker_finishes() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
+fn completed(summary: &str) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: true,
+        status: WorkflowOutcomeStatus::Completed,
+        summary: summary.to_owned(),
+        details: serde_json::json!({}),
+        actual_usage: None,
+        child_refs: Vec::new(),
+    }
+}
 
-    let handle = create_test_run(&runtime, dir.path()).await;
-    let snap = handle.snapshot().await;
-    assert_eq!(snap.state, WorkflowState::Running);
-    assert_eq!(snap.name, "test-run");
-    assert!(!snap.run_id.0.is_empty());
+fn completed_with_usage(input_tokens: u32, output_tokens: u32) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        actual_usage: Some(AgentTokenUsage {
+            input_tokens,
+            output_tokens,
+            input_cache_read_tokens: 0,
+            input_cache_write_tokens: 0,
+        }),
+        ..completed("used provider")
+    }
+}
 
-    // run.json exists
-    let rdir = neo_agent_core::workflow::run_dir(dir.path(), &handle.run_id);
-    assert!(rdir.join("run.json").exists());
-
-    // journal exists with initial state record
-    let jpath = journal_path(dir.path(), &handle.run_id);
-    assert!(jpath.exists());
-    let records = read_journal(&jpath).unwrap();
-    assert_eq!(records.len(), 1);
-    assert!(matches!(records[0], JournalRecord::StateChanged { .. }));
+async fn wait_for_state(handle: &WorkflowHandle, expected: WorkflowState) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.snapshot().await.state == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow reached expected state");
 }
 
 #[tokio::test]
-async fn incomplete_invocation_is_never_reexecuted() {
+async fn workflow_returns_running_after_durable_create_and_starts_bound_worker() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-
-    let handle = create_test_run(&runtime, dir.path()).await;
-
-    // Manually write an incomplete invocation into the journal
-    let jpath = journal_path(dir.path(), &handle.run_id);
-    let mut writer = JournalWriter::open(&jpath).unwrap();
-    let limits = test_limits();
-    writer
-        .append(
-            &JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms: 2000,
-                invocation_id: "inv_incomplete".to_owned(),
-                call_index: 0,
-                kind: WorkflowInvocationKind::Delegate,
-                canonical_input: serde_json::json!({"task": "audit"}),
-                canonical_input_hash: canonical_input_hash(&serde_json::json!({"task": "audit"})),
-            },
-            &limits,
-        )
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let root = dir.path().to_path_buf();
+    runtime
+        .bind_runner({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_handle, metadata| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                let run_dir = neo_agent_core::workflow::run_dir(&root, &metadata.run_id);
+                async move {
+                    assert!(run_dir.join("run.json").exists());
+                    assert_eq!(read_journal(&run_dir.join("journal.jsonl"))?.len(), 1);
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+            }
+        })
         .unwrap();
 
-    let records = read_journal(&jpath).unwrap();
-    let incomplete = find_incomplete_invocations(&records);
-    assert!(!incomplete.is_empty());
-
-    // Rehydrate should finish incomplete invocations as interrupted
-    let runtime2 = WorkflowRuntime::new(test_limits());
-    let handles = runtime2.rehydrate(dir.path()).await.unwrap();
-    assert_eq!(handles.len(), 1);
-
-    let recovered_records = read_journal(&jpath).unwrap();
-    let has_finish = recovered_records.iter().any(|r| {
-        matches!(r, JournalRecord::InvocationFinished {
-            invocation_id,
-            outcome: WorkflowInvocationOutcome {
-                status: WorkflowOutcomeStatus::Interrupted,
-                ..
-            },
-            ..
-        } if invocation_id == "inv_incomplete")
-    });
-    assert!(has_finish);
+    let handle = create_run(&runtime, dir.path()).await;
+    started.notified().await;
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
+    release.notify_one();
+    wait_for_state(&handle, WorkflowState::Completed).await;
 }
 
 #[tokio::test]
-async fn host_exit_rehydrates_running_run_as_paused() {
+async fn invoke_persists_start_before_effect_and_finish_after_effect() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let path = journal_path(dir.path(), &handle.run_id);
+    let observed_start = Arc::new(AtomicBool::new(false));
 
-    let handle = create_test_run(&runtime, dir.path()).await;
-    let run_id = handle.run_id.clone();
+    let outcome = handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"task": "audit"}),
+            true,
+            {
+                let path = path.clone();
+                let observed_start = Arc::clone(&observed_start);
+                move |invocation| async move {
+                    observed_start.store(
+                        matches!(
+                            read_journal(&path).unwrap().last(),
+                            Some(JournalRecord::InvocationStarted { invocation_id, .. })
+                                if invocation_id == &invocation.invocation_id
+                        ),
+                        Ordering::Release,
+                    );
+                    completed_with_usage(3, 2)
+                }
+            },
+        )
+        .await
+        .unwrap();
 
-    // Drop the runtime (simulating host exit) and create a new one
+    assert!(outcome.ok);
+    assert!(observed_start.load(Ordering::Acquire));
+    let records = read_journal(&path).unwrap();
+    assert!(matches!(
+        records[1],
+        JournalRecord::InvocationStarted { .. }
+    ));
+    assert!(matches!(
+        records[2],
+        JournalRecord::InvocationFinished { .. }
+    ));
+    let output = handle.output().await.unwrap();
+    assert_eq!(output.actual_usage.unwrap().input_tokens, 3);
+    serde_json::to_value(output).expect("WorkflowOutput serializes");
+}
+
+#[tokio::test]
+async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"task": "audit"}),
+            true,
+            {
+                let effects = Arc::clone(&effects);
+                move |_| async move {
+                    effects.fetch_add(1, Ordering::AcqRel);
+                    completed("audit")
+                }
+            },
+        )
+        .await
+        .unwrap();
     drop(handle);
     drop(runtime);
 
-    let runtime2 = WorkflowRuntime::new(test_limits());
-    let handles = runtime2.rehydrate(dir.path()).await.unwrap();
-    assert_eq!(handles.len(), 1);
-    let snap = handles[0].snapshot().await;
-    assert_eq!(snap.state, WorkflowState::Paused);
-    assert_eq!(snap.terminal_reason.as_deref(), Some("host_exit"));
-    assert_eq!(snap.run_id.0, run_id.0);
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    recovered
+        .bind_runner({
+            let effects = Arc::clone(&effects);
+            move |handle, _metadata| {
+                let effects = Arc::clone(&effects);
+                async move {
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "audit"}),
+                            true,
+                            {
+                                let effects = Arc::clone(&effects);
+                                move |_| async move {
+                                    effects.fetch_add(10, Ordering::AcqRel);
+                                    completed("must replay")
+                                }
+                            },
+                        )
+                        .await?;
+                    handle
+                        .invoke(
+                            1,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "build"}),
+                            true,
+                            {
+                                let effects = Arc::clone(&effects);
+                                move |_| async move {
+                                    effects.fetch_add(1, Ordering::AcqRel);
+                                    completed("build")
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+    recovered_handle.resume(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    assert_eq!(effects.load(Ordering::Acquire), 2);
 }
 
 #[tokio::test]
-async fn pause_and_resume_workflow() {
+async fn replay_mismatch_starts_live_effect() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-
-    let handle = create_test_run(&runtime, dir.path()).await;
-
-    // Force state to running -> paused manually (normally via worker boundary)
-    runtime
-        .transition_state(&handle.run_id, WorkflowState::Paused, "test_pause", WorkflowActor::Human)
-        .await
-        .unwrap();
-
-    let snap = handle.snapshot().await;
-    assert_eq!(snap.state, WorkflowState::Paused);
-
-    handle.resume(WorkflowActor::Human).await.unwrap();
-    let snap2 = handle.snapshot().await;
-    assert_eq!(snap2.state, WorkflowState::Running);
-}
-
-#[tokio::test]
-async fn stop_cancels_workflow() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-
-    let handle = create_test_run(&runtime, dir.path()).await;
-
-    handle.stop(WorkflowActor::Human).await.unwrap();
-    let snap = handle.snapshot().await;
-    assert_eq!(snap.state, WorkflowState::Cancelled);
-}
-
-#[tokio::test]
-async fn terminal_workflow_has_terminal_child_records() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-
-    let handle = create_test_run(&runtime, dir.path()).await;
-
-    // Simulate: start + finish a child invocation, then complete
-    let jpath = journal_path(dir.path(), &handle.run_id);
-    let limits = test_limits();
-    let mut writer = JournalWriter::open(&jpath).unwrap();
-    let inv_id = "inv_child";
-
-    writer
-        .append(
-            &JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms: 2000,
-                invocation_id: inv_id.to_owned(),
-                call_index: 0,
-                kind: WorkflowInvocationKind::Delegate,
-                canonical_input: serde_json::json!({"task": "audit"}),
-                canonical_input_hash: canonical_input_hash(&serde_json::json!({"task": "audit"})),
-            },
-            &limits,
-        )
-        .unwrap();
-
-    writer
-        .append(
-            &JournalRecord::InvocationFinished {
-                seq: writer.next_seq(),
-                timestamp_ms: 3000,
-                invocation_id: inv_id.to_owned(),
-                outcome: WorkflowInvocationOutcome {
-                    ok: true,
-                    status: WorkflowOutcomeStatus::Completed,
-                    summary: "done".to_owned(),
-                    details: serde_json::json!({}),
-                    actual_usage: None,
-                    child_refs: vec![],
-                },
-            },
-            &limits,
-        )
-        .unwrap();
-
-    // Now transition to completed
-    runtime
-        .transition_state(
-            &handle.run_id,
-            WorkflowState::Completed,
-            "all children done",
-            WorkflowActor::Runtime,
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"task": "old"}),
+            true,
+            |_| async { completed("old") },
         )
         .await
         .unwrap();
+    drop(handle);
+    drop(runtime);
 
-    let records = read_journal(&jpath).unwrap();
-    let incomplete = find_incomplete_invocations(&records);
-    // No child should be incomplete when entering Completed
-    assert!(incomplete.is_empty(), "incomplete: {incomplete:?}");
+    let effects = Arc::new(AtomicUsize::new(0));
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    recovered
+        .bind_runner({
+            let effects = Arc::clone(&effects);
+            move |handle, _metadata| {
+                let effects = Arc::clone(&effects);
+                async move {
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "edited"}),
+                            true,
+                            move |_| async move {
+                                effects.fetch_add(1, Ordering::AcqRel);
+                                completed("edited")
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+    recovered_handle.resume(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    assert_eq!(effects.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]
-async fn replay_prefix_matches_existing_records() {
+async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-    let handle = create_test_run(&runtime, dir.path()).await;
-
-    let jpath = journal_path(dir.path(), &handle.run_id);
-    let limits = test_limits();
-    let mut writer = JournalWriter::open(&jpath).unwrap();
-
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let path = journal_path(dir.path(), &handle.run_id);
+    let mut writer = JournalWriter::open(&path).unwrap();
     let input = serde_json::json!({"task": "audit"});
-    let hash = canonical_input_hash(&input);
-
     writer
         .append(
             &JournalRecord::InvocationStarted {
                 seq: writer.next_seq(),
-                timestamp_ms: 2000,
-                invocation_id: "inv_1".to_owned(),
+                timestamp_ms: 2,
+                invocation_id: "inv_incomplete".to_owned(),
                 call_index: 0,
                 kind: WorkflowInvocationKind::Delegate,
                 canonical_input: input.clone(),
-                canonical_input_hash: hash.clone(),
+                canonical_input_hash: canonical_input_hash(&input),
             },
-            &limits,
+            &WorkflowLimits::default(),
         )
         .unwrap();
-    writer
-        .append(
-            &JournalRecord::InvocationFinished {
-                seq: writer.next_seq(),
-                timestamp_ms: 3000,
-                invocation_id: "inv_1".to_owned(),
-                outcome: WorkflowInvocationOutcome {
-                    ok: true,
-                    status: WorkflowOutcomeStatus::Completed,
-                    summary: "done".to_owned(),
-                    details: serde_json::json!({}),
-                    actual_usage: None,
-                    child_refs: vec![],
-                },
-            },
-            &limits,
-        )
-        .unwrap();
+    drop(handle);
+    drop(runtime);
 
-    let records = read_journal(&jpath).unwrap();
-    let new_calls = vec![
-        (0u64, WorkflowInvocationKind::Delegate, input.clone()),
-        (1u64, WorkflowInvocationKind::Delegate, serde_json::json!({"task": "build"})),
-    ];
-    let prefix =
-        neo_agent_core::workflow::compute_replay_prefix(&records, &new_calls);
-    assert_eq!(prefix.first_live_call_index, 1);
-    assert!(!prefix.matched_records.is_empty());
+    let effects = Arc::new(AtomicUsize::new(0));
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    recovered
+        .bind_runner({
+            let effects = Arc::clone(&effects);
+            move |handle, _metadata| {
+                let effects = Arc::clone(&effects);
+                async move {
+                    let outcome = handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "audit"}),
+                            true,
+                            move |_| async move {
+                                effects.fetch_add(1, Ordering::AcqRel);
+                                completed("unexpected retry")
+                            },
+                        )
+                        .await?;
+                    assert_eq!(outcome.status, WorkflowOutcomeStatus::Interrupted);
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+    recovered_handle.resume(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    assert_eq!(effects.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]
-async fn snapshot_is_consistent_with_journal_state() {
+async fn recovery_resolver_adopts_known_terminal_child_result() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = WorkflowRuntime::new(test_limits());
-    let handle = create_test_run(&runtime, dir.path()).await;
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let path = journal_path(dir.path(), &handle.run_id);
+    let mut writer = JournalWriter::open(&path).unwrap();
+    let input = serde_json::json!({"task": "audit"});
+    writer
+        .append(
+            &JournalRecord::InvocationStarted {
+                seq: writer.next_seq(),
+                timestamp_ms: 2,
+                invocation_id: "child_7".to_owned(),
+                call_index: 0,
+                kind: WorkflowInvocationKind::Delegate,
+                canonical_input: input.clone(),
+                canonical_input_hash: canonical_input_hash(&input),
+            },
+            &WorkflowLimits::default(),
+        )
+        .unwrap();
+    drop(handle);
+    drop(runtime);
 
-    let snap = runtime.snapshot(&handle.run_id).await.unwrap();
-    assert_eq!(snap.state, WorkflowState::Running);
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    recovered
+        .bind_recovery_resolver(|invocation| async move {
+            tokio::task::yield_now().await;
+            (invocation.invocation_id == "child_7").then(|| completed("adopted child"))
+        })
+        .unwrap();
+    recovered.rehydrate(dir.path()).await.unwrap();
+    assert!(read_journal(&path).unwrap().iter().any(|record| {
+        matches!(record, JournalRecord::InvocationFinished { invocation_id, outcome, .. }
+            if invocation_id == "child_7" && outcome.summary == "adopted child")
+    }));
+}
 
-    // transition to failed
+#[tokio::test]
+async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let worker_starts = Arc::new(AtomicUsize::new(0));
+    let effects = Arc::new(AtomicUsize::new(0));
     runtime
-        .transition_state(&handle.run_id, WorkflowState::Failed, "error", WorkflowActor::Runtime)
+        .bind_runner({
+            let worker_starts = Arc::clone(&worker_starts);
+            let effects = Arc::clone(&effects);
+            move |handle, _metadata| {
+                let worker_starts = Arc::clone(&worker_starts);
+                let effects = Arc::clone(&effects);
+                async move {
+                    worker_starts.fetch_add(1, Ordering::AcqRel);
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "audit"}),
+                            true,
+                            {
+                                let handle = handle.clone();
+                                move |_| async move {
+                                    effects.fetch_add(1, Ordering::AcqRel);
+                                    while !handle.is_pause_requested() {
+                                        tokio::task::yield_now().await;
+                                    }
+                                    completed("boundary reached")
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let handle = create_run(&runtime, dir.path()).await;
+    while effects.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    handle.pause(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&handle, WorkflowState::Paused).await;
+    assert!(
+        read_journal(&journal_path(dir.path(), &handle.run_id))
+            .unwrap()
+            .iter()
+            .any(|record| {
+                matches!(
+                    record,
+                    JournalRecord::StateChanged {
+                        new: WorkflowState::Paused,
+                        actor: WorkflowActor::Human,
+                        ..
+                    }
+                )
+            })
+    );
+    let run_id = handle.run_id.clone();
+    handle.resume(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&handle, WorkflowState::Completed).await;
+    assert_eq!(handle.run_id, run_id);
+    assert_eq!(worker_starts.load(Ordering::Acquire), 2);
+    assert_eq!(effects.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let effect_started = Arc::new(Notify::new());
+    let effect_cancelled = Arc::new(Notify::new());
+    let allow_settlement = Arc::new(Notify::new());
+    let effect_settled = Arc::new(AtomicBool::new(false));
+    runtime
+        .bind_runner({
+            let effect_started = Arc::clone(&effect_started);
+            let effect_cancelled = Arc::clone(&effect_cancelled);
+            let allow_settlement = Arc::clone(&allow_settlement);
+            let effect_settled = Arc::clone(&effect_settled);
+            move |handle, _metadata| {
+                let effect_started = Arc::clone(&effect_started);
+                let effect_cancelled = Arc::clone(&effect_cancelled);
+                let allow_settlement = Arc::clone(&allow_settlement);
+                let effect_settled = Arc::clone(&effect_settled);
+                async move {
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "long"}),
+                            true,
+                            move |invocation| async move {
+                                effect_started.notify_one();
+                                invocation.cancel_token.cancelled().await;
+                                effect_cancelled.notify_one();
+                                allow_settlement.notified().await;
+                                effect_settled.store(true, Ordering::Release);
+                                WorkflowInvocationOutcome {
+                                    ok: false,
+                                    status: WorkflowOutcomeStatus::Cancelled,
+                                    summary: "canonical child cancelled".to_owned(),
+                                    details: serde_json::json!({
+                                        "invocation_id": invocation.invocation_id,
+                                    }),
+                                    actual_usage: None,
+                                    child_refs: Vec::new(),
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+    let handle = create_run(&runtime, dir.path()).await;
+    effect_started.notified().await;
+    handle.stop(WorkflowActor::Human).await.unwrap();
+    effect_cancelled.notified().await;
+    handle.stop(WorkflowActor::Model).await.unwrap();
+    allow_settlement.notify_one();
+    wait_for_state(&handle, WorkflowState::Cancelled).await;
+    assert!(effect_settled.load(Ordering::Acquire));
+
+    let records = read_journal(&journal_path(dir.path(), &handle.run_id)).unwrap();
+    let finish = records
+        .iter()
+        .position(|record| matches!(record, JournalRecord::InvocationFinished { .. }))
+        .unwrap();
+    let terminal = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                JournalRecord::StateChanged {
+                    new: WorkflowState::Cancelled,
+                    actor: WorkflowActor::Human,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(finish < terminal);
+}
+
+#[tokio::test]
+async fn corrupt_run_is_rehydrated_as_inspectable_failed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("workflows").join("wf_corrupt");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), b"not-json").unwrap();
+
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handles = runtime.rehydrate(dir.path()).await.unwrap();
+    assert_eq!(handles.len(), 1);
+    let snapshot = handles[0].snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Failed);
+    assert!(
+        snapshot
+            .terminal_reason
+            .unwrap()
+            .contains("corrupt run metadata")
+    );
+    let output = handles[0].output().await.unwrap();
+    assert_eq!(output.metadata.run_id.0, "wf_corrupt");
+    serde_json::to_value(output).unwrap();
+}
+
+#[tokio::test]
+async fn token_cap_uses_actual_usage_and_blocks_only_next_provider_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = WorkflowLimits {
+        token_cap: Some(5),
+        ..WorkflowLimits::default()
+    };
+    let runtime = WorkflowRuntime::new(limits);
+    let handle = create_run(&runtime, dir.path()).await;
+    let effects = Arc::new(AtomicUsize::new(0));
+
+    handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"estimated_tokens": 1_000_000}),
+            true,
+            {
+                let effects = Arc::clone(&effects);
+                move |_| async move {
+                    effects.fetch_add(1, Ordering::AcqRel);
+                    completed_with_usage(3, 2)
+                }
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .invoke(
+            1,
+            WorkflowInvocationKind::Log,
+            serde_json::json!({"message": "local"}),
+            false,
+            {
+                let effects = Arc::clone(&effects);
+                move |_| async move {
+                    effects.fetch_add(1, Ordering::AcqRel);
+                    completed("local")
+                }
+            },
+        )
+        .await
+        .unwrap();
+    let blocked = handle
+        .invoke(
+            2,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"task": "blocked"}),
+            true,
+            {
+                let effects = Arc::clone(&effects);
+                move |_| async move {
+                    effects.fetch_add(100, Ordering::AcqRel);
+                    completed("must not run")
+                }
+            },
+        )
         .await
         .unwrap();
 
-    let snap2 = runtime.snapshot(&handle.run_id).await.unwrap();
-    assert_eq!(snap2.state, WorkflowState::Failed);
-    assert!(snap2.terminal_reason.is_some());
+    assert_eq!(blocked.status, WorkflowOutcomeStatus::ResourceLimited);
+    assert_eq!(effects.load(Ordering::Acquire), 2);
+    assert_eq!(
+        handle.snapshot().await.state,
+        WorkflowState::ResourceLimited
+    );
+    assert_eq!(
+        handle
+            .output()
+            .await
+            .unwrap()
+            .actual_usage
+            .unwrap()
+            .input_tokens,
+        3
+    );
 }
