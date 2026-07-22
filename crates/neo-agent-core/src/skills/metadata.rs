@@ -6,9 +6,7 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
-use crate::skills::SkillLoadError;
+use serde::Deserialize;
 
 /// Parsed host metadata from `agents/neo.yaml`.
 ///
@@ -70,6 +68,7 @@ struct DepsFile {
 
 #[derive(Debug, Deserialize)]
 struct DepToolFile {
+    #[allow(dead_code)]
     #[serde(rename = "type")]
     dep_type: DependencyType,
     value: String,

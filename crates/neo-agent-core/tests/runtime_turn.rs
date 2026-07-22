@@ -5613,8 +5613,7 @@ async fn runtime_appends_available_skills_snapshot_only_when_changed() {
         )
         .expect("write skill");
     }
-    let initial = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
-        .expect("load initial skills");
+    let initial = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new());
     let handle = SkillStoreHandle::new(initial);
     let harness =
         FakeHarness::from_turns([final_done_turn(), final_done_turn(), final_done_turn()]);
@@ -5648,8 +5647,7 @@ async fn runtime_appends_available_skills_snapshot_only_when_changed() {
     )
     .expect("write beta");
     handle.replace(
-        SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
-            .expect("reload changed skills"),
+        SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new()),
     );
 
     let second = runtime
@@ -5720,8 +5718,7 @@ Review the current change carefully.
 ",
     )
     .expect("write skill");
-    let skill_store = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
-        .expect("load skill store");
+    let skill_store = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new());
 
     let harness = FakeHarness::from_turns([
         vec![

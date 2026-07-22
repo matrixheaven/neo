@@ -302,7 +302,7 @@ Brainstorm.
 ",
     );
 
-    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let skills = discover_skills(dir.path(), SkillSource::default()).0;
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
     assert!(names.contains(&"superpowers"));
@@ -322,7 +322,7 @@ Root skill.
 ",
     );
 
-    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let skills = discover_skills(dir.path(), SkillSource::default()).0;
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
     assert_eq!(names, vec!["package-root"]);
@@ -357,7 +357,7 @@ Resource dir.
         );
     }
 
-    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let skills = discover_skills(dir.path(), SkillSource::default()).0;
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
     assert_eq!(names, vec!["parent"]);
@@ -389,10 +389,64 @@ Child skill.
 ",
     );
 
-    let skills = discover_skills(dir.path(), SkillSource::default()).unwrap();
+    let skills = discover_skills(dir.path(), SkillSource::default()).0;
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
     assert_eq!(names, vec!["parent", "parent/child"]);
+}
+
+#[test]
+fn discovery_is_bounded_cycle_safe_and_keeps_valid_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Valid sibling.
+    write(
+        dir.path().join("valid").join("SKILL.md"),
+        r"---
+name: valid
+description: Valid skill
+---
+Valid body.
+",
+    );
+
+    // Malformed sibling.
+    write(
+        dir.path().join("malformed").join("SKILL.md"),
+        r"---
+name: [invalid
+---
+Broken.
+",
+    );
+
+    // Symlink cycle on Unix.
+    #[cfg(unix)]
+    {
+        let cycle_dir = dir.path().join("cycle");
+        std::fs::create_dir(&cycle_dir).unwrap();
+        let inner = cycle_dir.join("loop");
+        std::os::unix::fs::symlink(&cycle_dir, &inner).unwrap();
+        write(
+            cycle_dir.join("SKILL.md"),
+            r"---
+name: cycle
+description: Cycle skill
+---
+Cycle body.
+",
+        );
+    }
+
+    let (skills, diagnostics) = discover_skills(dir.path(), SkillSource::default());
+    let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(names.contains(&"valid"), "valid sibling missing: {names:?}");
+
+    let malformed_diag = diagnostics
+        .iter()
+        .any(|d| d.path.ends_with("malformed/SKILL.md"));
+    assert!(malformed_diag, "expected diagnostic for malformed skill");
 }
 
 #[test]
@@ -415,7 +469,7 @@ user
 ",
     );
 
-    let store = SkillStore::load(&[user_dir.path().join("skills")], &[], Vec::new()).unwrap();
+    let store = SkillStore::load(&[user_dir.path().join("skills")], &[], Vec::new());
 
     assert_eq!(
         store.get("shared").unwrap().manifest.description,

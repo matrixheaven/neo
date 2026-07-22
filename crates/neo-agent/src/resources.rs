@@ -196,7 +196,7 @@ pub(crate) fn load_skill_store(
     if let Some(user_dir) = user_dir {
         user.extend(discovery::user_skill_dirs(user_dir));
     }
-    SkillStore::load(&user, &extra, builtin_skills()?).map_err(anyhow::Error::from)
+    Ok(SkillStore::load(&user, &extra, builtin_skills()?))
 }
 
 fn normalize_prompt(prompt: &str) -> String {

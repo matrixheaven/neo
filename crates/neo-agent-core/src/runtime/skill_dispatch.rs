@@ -161,7 +161,7 @@ disableModelInvocation: {manual_only}
 
     fn skill_store(root: &std::path::Path) -> SkillStoreHandle {
         SkillStoreHandle::new(
-            SkillStore::load(&[], &[root.to_path_buf()], Vec::new()).expect("skill store"),
+            SkillStore::load(&[], &[root.to_path_buf()], Vec::new()),
         )
     }
 

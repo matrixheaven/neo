@@ -160,12 +160,7 @@ impl Tool for ListSkillsTool {
             } else {
                 Vec::new()
             };
-            let store = SkillStore::load(&user_dirs, &extra_dirs, builtin).map_err(|err| {
-                ToolError::InvalidInput {
-                    tool: "ListSkills".to_owned(),
-                    message: err.to_string(),
-                }
-            })?;
+            let store = SkillStore::load(&user_dirs, &extra_dirs, builtin);
             let mut lines = Vec::new();
             for (source, tier) in [
                 (SkillSource::User, "user"),
@@ -2344,14 +2339,16 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let user_skills = temp.path().join("skills");
         let handle = SkillStoreHandle::new(
-            SkillStore::load(std::slice::from_ref(&user_skills), &[], Vec::new())
-                .expect("initial store"),
+            SkillStore::load(std::slice::from_ref(&user_skills), &[], Vec::new()),
         );
         let reload_root = user_skills.clone();
         let tool =
             CreateSkillTool::new(temp.path()).with_skill_store_reload(handle.clone(), move || {
-                SkillStore::load(std::slice::from_ref(&reload_root), &[], Vec::new())
-                    .map_err(|err| err.to_string())
+                Ok(SkillStore::load(
+                    std::slice::from_ref(&reload_root),
+                    &[],
+                    Vec::new(),
+                ))
             });
 
         let result = tool

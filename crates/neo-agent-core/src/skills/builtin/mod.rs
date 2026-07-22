@@ -45,8 +45,8 @@ pub fn extract_builtin_skills(
     }
 
     // Discover extracted skills on disk. This is what the runtime will actually use.
-    let skills = crate::skills::discovery::discover_skills(&builtin_dir, SkillSource::Builtin)
-        .map_err(BuiltinSkillError::Load)?;
+    let (skills, _diagnostics) =
+        crate::skills::discovery::discover_skills(&builtin_dir, SkillSource::Builtin);
     Ok(skills
         .into_iter()
         .filter(|skill| !REMOVED_BUILTINS.contains(&skill.name.as_str()))

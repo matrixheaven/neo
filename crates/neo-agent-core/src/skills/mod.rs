@@ -99,9 +99,27 @@ pub enum SkillLoadError {
     },
 }
 
+/// Non-fatal diagnostic recorded during discovery or loading.
+#[derive(Debug, Clone)]
+pub struct SkillDiagnostic {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl SkillDiagnostic {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SkillStore {
     skills: HashMap<String, LoadedSkill>,
+    diagnostics: Vec<SkillDiagnostic>,
 }
 
 impl SkillStore {
@@ -112,8 +130,9 @@ impl SkillStore {
         user_dirs: &[PathBuf],
         extra_dirs: &[PathBuf],
         builtin_skills: Vec<LoadedSkill>,
-    ) -> Result<Self, SkillLoadError> {
+    ) -> Self {
         let mut skills: HashMap<String, LoadedSkill> = HashMap::new();
+        let mut diagnostics: Vec<SkillDiagnostic> = Vec::new();
 
         // Extract built-in skills into the first user dir (usually ~/.neo) so
         // they are visible on disk and can be overridden by user skills.
@@ -127,13 +146,17 @@ impl SkillStore {
         }
 
         for dir in extra_dirs {
-            for skill in discover_skills(dir, SkillSource::Extra)? {
+            let (extra_skills, extra_diags) = discover_skills(dir, SkillSource::Extra);
+            diagnostics.extend(extra_diags);
+            for skill in extra_skills {
                 skills.insert(skill.name.clone(), skill);
             }
         }
 
         for dir in user_dirs {
-            for skill in discover_skills(dir, SkillSource::User)? {
+            let (user_skills, user_diags) = discover_skills(dir, SkillSource::User);
+            diagnostics.extend(user_diags);
+            for skill in user_skills {
                 if skill.is_builtin_extracted() {
                     continue;
                 }
@@ -141,7 +164,7 @@ impl SkillStore {
             }
         }
 
-        Ok(Self { skills })
+        Self { skills, diagnostics }
     }
 
     #[must_use]
@@ -161,6 +184,11 @@ impl SkillStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[SkillDiagnostic] {
+        &self.diagnostics
     }
 
     #[must_use]
