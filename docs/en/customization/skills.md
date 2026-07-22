@@ -14,13 +14,14 @@ Skill scanning is loaded centrally by `SkillStore::load`, defined in `crates/neo
 
 ## Skill Package Layout
 
-A skill package is a directory whose canonical entry point is `SKILL.md`. `SKILL.md` is the only file Neo loads into context automatically; any supporting file must be named explicitly from the skill instructions, usually with `${NEO_SKILL_DIR}` so the model can resolve it relative to the package root.
+A skill package is a directory whose canonical entry point is `SKILL.md`. `SKILL.md` is the only file Neo loads into context automatically; any supporting file must be named explicitly from the skill instructions. Package authors may use paths relative to the root shown in the loaded-skill envelope, or the `${NEO_SKILL_DIR}` placeholder which remains supported.
 
 Canonical packages use these paths:
 
 | Path | Purpose |
 | --- | --- |
 | `SKILL.md` | Required skill manifest and instructions; the only automatic context entry point |
+| `agents/neo.yaml` | Optional Neo host metadata (display labels, MCP dependencies); never model-facing prose |
 | `references/` | Optional text references such as checklists, policy notes, schemas, or long examples that the skill can ask the model to read |
 | `scripts/` | Optional helper scripts that the skill can tell the model to run, for example `${NEO_SKILL_DIR}/scripts/check_schema.py` |
 | `assets/` | Optional manually managed assets such as templates, sample files, or binary media |
@@ -35,7 +36,6 @@ Resource directories inside a skill package are not scanned for nested skills. P
 ---
 name: deploy-staging
 description: Deploys the app to staging. Use when the user asks to deploy.
-type: prompt
 whenToUse: When the user asks to deploy to staging or update the staging environment.
 ---
 
@@ -52,13 +52,11 @@ whenToUse: When the user asks to deploy to staging or update the staging environ
 | --- | --- | --- |
 | `name` | ✅ | Skill identifier; must match the directory name; child skill packages form a `parent/child` name |
 | `description` | ✅ | One-line summary, referenced by the model when selecting |
-| `type` | ✅ | `prompt` (injected as a context message, default) / `inline` (expanded directly into the prompt) / `flow` (multi-step interactive workflow) |
 | `whenToUse` | recommended | Natural-language trigger description, used for auto-activation |
 | `disableModelInvocation` | bool | When `true`, excludes the skill from model auto-invocation listings; intended for explicit `/skill:<name>` use |
 | `arguments` | array | Declarative parameters (`name` / `description` / `required` / `default`) |
-| `slashCommands` | array | Parsed metadata reserved for slash-command integrations; not currently bound as aliases |
 
-> Skills with `type: flow` never participate in auto-activation; `disableModelInvocation: true` also excludes them from model auto-invocation listings.
+> Skills with `disableModelInvocation: true` never participate in auto-activation.
 
 ## Three-Tier Scan Priority
 
@@ -82,18 +80,46 @@ skill_path = ["~/work/more-skills"]
 
 Neo ships with the following skills (source in `crates/neo-agent-core/src/skills/builtin/`):
 
-| Skill | Type | Description |
-| --- | --- | --- |
-| `mcp-config` | prompt | Configure MCP servers, handle OAuth login, edit `[[mcp.servers]]` |
-| `sub-skill` | prompt | Review, group, and reorganize the skill library into hierarchical sub-skill bundles |
-| `self-evo` | prompt | Summarize a concrete current, recent, session, or topic scope into reusable skills |
-| `create-skill` | prompt | Create a Neo skill from the user's requirements, including verification guidance |
+| Skill | Description |
+| --- | --- |
+| `mcp-config` | Configure MCP servers, handle OAuth login, edit `[[mcp.servers]]` |
+| `sub-skill` | Review, group, and reorganize the skill library into hierarchical sub-skill bundles |
+| `self-evo` | Summarize a concrete current, recent, session, or topic scope into reusable skills |
+| `create-skill` | Create a Neo skill from the user's requirements, including verification guidance |
 
 Workflow-authoring built-ins such as `self-evo` and `create-skill` have `disableModelInvocation: true`, meaning they require explicit user invocation. Neo refreshes shipped built-ins under `~/.neo/skills/.builtin/` from the current binary; put custom copies outside `.builtin/`.
 
 `/skill:self-evo` without arguments asks for a distillation scope before creating skills. In Auto permission mode, Neo opens an interactive preflight before the model turn so the workflow does not block unattended execution later.
 
 `/skill:create-skill` creates one focused skill through the `CreateSkill` tool. If no requirement is provided, it asks for the desired capability before drafting. Created skills include verification guidance and are reloaded into the active skill store when `CreateSkill` succeeds.
+
+## agents/neo.yaml Host Metadata
+
+An optional sidecar at `<skill-root>/agents/neo.yaml` carries Neo-specific display metadata and declared MCP dependencies:
+
+```yaml
+interface:
+  display_name: "Schema Review"
+  short_description: "Review JSON schemas against project rules"
+
+dependencies:
+  tools:
+    - type: mcp
+      value: jsonSchemaRegistry
+      description: "Schema registry MCP server"
+```
+
+**Fields and consumers:**
+
+| Field | Consumer |
+| --- | --- |
+| `interface.display_name` | TUI completion label and `ListSkills` human label |
+| `interface.short_description` | TUI completion description and `ListSkills` summary |
+| `dependencies.tools[].type` | Only `mcp` is accepted |
+| `dependencies.tools[].value` | Activation envelope and `ListSkills` dependency summary |
+| `dependencies.tools[].description` | Activation envelope detail |
+
+The sidecar is optional; absence falls back to manifest `name`/`description`. Invalid metadata is diagnosed but never hides the skill. Declared dependencies do not install or start MCP servers — they tell the model which server is needed.
 
 ## Activation Methods
 
@@ -104,7 +130,7 @@ Workflow-authoring built-ins such as `self-evo` and `create-skill` have `disable
 | `Skill` tool | Model | Programmatic invocation, often orchestrated by other skills |
 | `mcp__<server>__authenticate` | Model / User | Specialized tool for MCP OAuth, handled under the `mcp-config` skill |
 
-Prerequisites for model auto-activation: `disableModelInvocation` is false and `type` is not `flow` (determined by `SkillManifest::auto_invokable`).
+Prerequisites for model auto-activation: `disableModelInvocation` is false (determined by `SkillManifest::auto_invokable`).
 
 ## Creating Custom Skills
 
@@ -117,7 +143,6 @@ The model can invoke the `CreateSkill` tool directly in conversation to generate
 {
   "name": "schema-review",
   "description": "Reviews JSON schemas against project rules.",
-  "skill_type": "prompt", // prompt / inline / flow, default prompt
   "body": "# Schema Review\n\nReview schemas using `${NEO_SKILL_DIR}/references/schema-rules.md`. Run `${NEO_SKILL_DIR}/scripts/check_schema.py` when validation is needed.\n\n## Verify\nReport any schema rule violations.",
   "resources": [
     {
@@ -143,6 +168,17 @@ $EDITOR ~/.neo/skills/deploy-staging/SKILL.md
 ```
 
 The file must start with YAML frontmatter delimited by `---`, followed by a Markdown body. On the next Neo startup or after a skill rescan, you can invoke it with `/skill:deploy-staging`.
+
+## Migration from retired manifest fields
+
+Neo no longer recognises `type` (`prompt`/`inline`/`flow`), `skill_type`, or `slashCommands`/`slash_commands` in `SKILL.md` frontmatter or `CreateSkill` input:
+
+- **`type: prompt` / `type: inline`**: simply remove the field; all skills use the same prompt injection path.
+- **`type: flow`**: replace with `disableModelInvocation: true`.
+- **`skill_type` in CreateSkill input**: remove the field; `CreateSkill` no longer accepts it.
+- **Slash aliases**: invoke skills through the canonical `/skill:<name>` rather than declared aliases.
+
+Existing `SKILL.md` files with these fields continue to load (unknown YAML is ignored), but authoring tools and documentation only reference the canonical fields above.
 
 ### Management Tools
 
