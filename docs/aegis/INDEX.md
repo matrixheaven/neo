@@ -7,6 +7,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | --- | --- | --- | --- |
 | 2026-07-22 | plan | docs/aegis/plans/2026-07-22-non-blocking-instruction-cycles.md | Non-Blocking Instruction Import Cycles Implementation Plan |
 | 2026-07-22 | spec | docs/aegis/specs/2026-07-22-non-blocking-instruction-cycles-design.md | Non-Blocking Instruction Import Cycles |
+| 2026-07-22 | baseline | docs/aegis/baseline/2026-07-22-instruction-import-contract.md | Instruction Import Contract Baseline |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-batch-edit.md | Neo Batch Edit Prepared Execution Implementation Plan |
 | 2026-07-20 | spec | docs/aegis/specs/2026-07-20-batch-edit-design.md | Neo Batch Edit Prepared Execution Design |
 | 2026-07-20 | plan | docs/aegis/plans/2026-07-20-runworkflow-dynamic-workflow.md | RunWorkflow Neo-Native Dynamic Workflow Implementation Plan |
@@ -172,3 +173,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json | 2026-07-22-skill-package-completion evidence builtin-author-contract-amendment |
 | 2026-07-22 | spec | docs/aegis/specs/2026-07-22-flat-batch-edit-design.md | Neo Flat Batch Edit Contract Design |
 | 2026-07-22 | plan | docs/aegis/plans/2026-07-22-flat-batch-edit.md | Neo Flat Batch Edit Contract Implementation Plan |
+| 2026-07-22 | adr | docs/aegis/adr/ADR-0002-non-blocking-instruction-import-cycles.md | ADR-0002 - Exact AGENTS.md Discovery and Non-Blocking Import Cycles |

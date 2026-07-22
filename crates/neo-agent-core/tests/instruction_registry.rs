@@ -224,12 +224,17 @@ fn resolver_selects_only_exact_agents_name_and_rejects_canonical_escape() {
     );
 
     let (_temp, workspace) = workspace_fixture();
+    let docs = workspace.join("docs/customization");
+    fs::create_dir_all(&docs).expect("docs directory");
+    fs::write(docs.join("agents.md"), "[self](./agents.md)\n").expect("ordinary docs file");
+    let resolver = InstructionResolver::new(&config_for(&workspace, None)).expect("resolver");
+    let scopes = resolver.discover_scopes(&[docs]).expect("discover scopes");
+    assert!(scopes.nested.is_empty());
 
     // A `..` import that canonicalizes outside both roots is untrusted.
     let outside = workspace.parent().expect("root").join("outside.md");
     fs::write(&outside, "SECRET\n").expect("outside file");
     fs::write(workspace.join("AGENTS.md"), "@../outside.md\n").expect("agents file");
-    let resolver = InstructionResolver::new(&config_for(&workspace, None)).expect("resolver");
     let err = resolver
         .load_bundle(&workspace)
         .expect_err("escape must be rejected");
@@ -237,11 +242,18 @@ fn resolver_selects_only_exact_agents_name_and_rejects_canonical_escape() {
 }
 
 #[tokio::test]
-async fn indirect_markdown_link_cycle_expands_once_and_proceeds_after_visibility() {
+async fn depth_six_cycle_back_edge_expands_once_and_proceeds_after_visibility() {
     let (_temp, workspace) = workspace_fixture();
-    fs::write(workspace.join("AGENTS.md"), "ROOT BODY\n[A](./a.md)\n").expect("agents file");
-    fs::write(workspace.join("a.md"), "A BODY\n[B](./b.md)\n").expect("a file");
-    fs::write(workspace.join("b.md"), "B BODY\n[A again](./a.md)\n").expect("b file");
+    fs::write(workspace.join("AGENTS.md"), "ROOT BODY\n[A1](./a1.md)\n").expect("agents file");
+    fs::write(workspace.join("a1.md"), "A1 BODY\n[A2](./a2.md)\n").expect("a1 file");
+    fs::write(workspace.join("a2.md"), "A2 BODY\n[A3](./a3.md)\n").expect("a2 file");
+    fs::write(workspace.join("a3.md"), "A3 BODY\n[A4](./a4.md)\n").expect("a3 file");
+    fs::write(workspace.join("a4.md"), "A4 BODY\n[A5](./a5.md)\n").expect("a4 file");
+    fs::write(
+        workspace.join("a5.md"),
+        "A5 BODY\n[Root again](./AGENTS.md)\n",
+    )
+    .expect("a5 file");
     let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
     let mut state = AgentInstructionState::default();
 
@@ -259,7 +271,14 @@ async fn indirect_markdown_link_cycle_expands_once_and_proceeds_after_visibility
     assert_eq!(epoch.outcome, InstructionEpochOutcome::Activated);
     assert!(epoch.failure.is_none());
     let content = epoch.model_content.as_deref().expect("model content");
-    for body in ["ROOT BODY", "A BODY", "B BODY"] {
+    for body in [
+        "ROOT BODY",
+        "A1 BODY",
+        "A2 BODY",
+        "A3 BODY",
+        "A4 BODY",
+        "A5 BODY",
+    ] {
         assert_eq!(content.matches(body).count(), 1, "{body}: {content}");
     }
 

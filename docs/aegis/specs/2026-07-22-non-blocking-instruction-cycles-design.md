@@ -3,6 +3,8 @@
 Status: `approved`
 Date: `2026-07-22`
 ArchitectureReviewRequired: `yes`
+Supersedes: filename matching, cycle handling, and ambiguity-failure clauses in
+`docs/aegis/specs/2026-07-17-path-scoped-agents-instructions-design.md`
 
 ## Goal
 
@@ -81,6 +83,7 @@ No live session data is rewritten or deleted.
 
 ## ADR Signal
 
-This changes the durable instruction discovery and import contracts. Completion
-must evaluate an ADR or baseline amendment after implementation evidence exists;
-this design does not pre-authorize that record.
+This changes the durable instruction discovery and import contracts. The
+implemented decision is recorded by
+`docs/aegis/adr/ADR-0002-non-blocking-instruction-import-cycles.md` and reflected
+in the current instruction-contract baseline.
