@@ -1,10 +1,10 @@
 use serde_json::json;
 
+use neo_ai::providers::fake::FakeModelClient;
+
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 use crate::AgentEvent;
-use crate::workflow::{
-    LuaWorkflowRunner, WorkflowEventContext, WorkflowId, WorkflowSnapshot, WorkflowState,
-};
+use crate::workflow::{LuaWorkflowRunner, WorkflowId, WorkflowSnapshot, WorkflowState};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct RunWorkflowInput {
@@ -30,13 +30,12 @@ impl Tool for RunWorkflowTool {
         schema::<RunWorkflowInput>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: RunWorkflowInput = parse_input(self.name(), input)?;
-            let runner = LuaWorkflowRunner::new();
             let turn = ctx.current_turn.unwrap_or_default();
             let workflow_id = WorkflowId(format!("workflow-{turn}-{}", uuid::Uuid::new_v4()));
+
             ctx.emit_event(AgentEvent::WorkflowStarted {
                 turn,
                 workflow: workflow_snapshot(
@@ -46,108 +45,98 @@ impl Tool for RunWorkflowTool {
                     Vec::new(),
                 ),
             });
-            let event_context = WorkflowEventContext {
-                turn,
-                id: workflow_id.clone(),
-                title: input.title.clone(),
+
+            // Temporary foreground bridge: create a minimal dispatch handle and
+            // run synchronously. This will be replaced by full background launch
+            // in Task 5 (capability + launch approval).
+            let dispatch = crate::runtime::WorkflowDispatchHandle {
+                config: ctx.child_config.clone().unwrap_or_else(|| {
+                    crate::AgentConfig::for_model(neo_ai::ModelSpec {
+                        provider: neo_ai::ProviderId("in-workflow".to_owned()),
+                        model: "in-workflow".to_owned(),
+                        api: neo_ai::ApiKind::OpenAi,
+                        capabilities: neo_ai::ModelCapabilities::chat(),
+                    })
+                }),
+                model_client: ctx
+                    .child_model
+                    .clone()
+                    .unwrap_or_else(|| std::sync::Arc::new(FakeModelClient::new(vec![]))),
+                registry: ctx.child_tools.clone().unwrap_or_else(|| {
+                    std::sync::Arc::new(super::ToolRegistry::with_builtin_tools())
+                }),
+                process_supervisor: super::ProcessSupervisor::default(),
+                context: crate::AgentContext::new(),
+                tool_access: Some(ctx.access.clone()),
             };
-            match runner
-                .run_script_with_context(ctx, event_context, &input.script)
-                .await
-            {
+
+            let handle =
+                crate::workflow::WorkflowRuntime::new(crate::workflow::WorkflowLimits::default())
+                    .create_run(
+                        &std::env::temp_dir(),
+                        crate::workflow::WorkflowLaunchRequest {
+                            name: input.title.clone(),
+                            description: String::new(),
+                            phases: vec![],
+                            script: input.script.clone(),
+                            args: json!({}),
+                            launch_source: "RunWorkflow".to_owned(),
+                            parent_run_id: None,
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|_| panic!("workflow launch failed"));
+
+            let runner = LuaWorkflowRunner::new(
+                dispatch,
+                handle,
+                crate::workflow::WorkflowLimits::default(),
+            );
+
+            match runner.execute(&input.script, json!({})).await {
                 Ok(return_value) => {
-                    let steps = runner.recorder().steps();
-                    let reports = runner.recorder().reports();
-                    let report_preview = format_report_preview(&reports);
-                    let failed = steps.iter().any(|step| step.state == WorkflowState::Failed);
-                    let state = if failed {
-                        WorkflowState::Failed
-                    } else {
-                        WorkflowState::Completed
-                    };
-                    let snapshot =
-                        workflow_snapshot(workflow_id, input.title.clone(), state, steps.clone());
-                    ctx.emit_event(AgentEvent::WorkflowFinished {
-                        turn,
-                        workflow: snapshot.clone(),
-                    });
-                    let reports_details: Vec<serde_json::Value> = reports
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| json!({ "index": index + 1, "value": value }))
-                        .collect();
-                    let result = if failed {
-                        let content = format!(
-                            "workflow: {}\nstatus: failed\nsteps: {}\n{}result: {}",
-                            input.title,
-                            steps.len(),
-                            if report_preview.is_empty() {
-                                String::new()
-                            } else {
-                                format!("reports:\n{report_preview}\n")
-                            },
-                            format_workflow_result(return_value.as_ref()),
-                        );
-                        ToolResult::error(content)
-                    } else {
-                        let content = format!(
-                            "workflow: {}\nstatus: completed\nsteps: {}\n{}result: {}",
-                            input.title,
-                            steps.len(),
-                            if report_preview.is_empty() {
-                                String::new()
-                            } else {
-                                format!("reports:\n{report_preview}\n")
-                            },
-                            format_workflow_result(return_value.as_ref()),
-                        );
-                        ToolResult::ok(content)
-                    };
-                    Ok(result.with_details(json!({
-                        "kind": "workflow",
-                        "title": input.title,
-                        "id": snapshot.id.0,
-                        "status": if failed { "failed" } else { "completed" },
-                        "steps": steps,
-                        "reports": reports_details,
-                        "result": return_value,
-                    })))
-                }
-                Err(err) => {
-                    let steps = runner.recorder().steps();
-                    let reports = runner.recorder().reports();
-                    let report_preview = format_report_preview(&reports);
-                    let reports_details: Vec<serde_json::Value> = reports
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| json!({ "index": index + 1, "value": value }))
-                        .collect();
                     let snapshot = workflow_snapshot(
                         workflow_id,
                         input.title.clone(),
-                        WorkflowState::Failed,
-                        steps.clone(),
+                        WorkflowState::Completed,
+                        Vec::new(),
                     );
                     ctx.emit_event(AgentEvent::WorkflowFinished {
                         turn,
                         workflow: snapshot.clone(),
                     });
-                    let content = if report_preview.is_empty() {
-                        format!("workflow: {}\nstatus: failed\nerror: {}", input.title, err)
-                    } else {
-                        format!(
-                            "workflow: {}\nstatus: failed\nerror: {}\nreports:\n{}",
-                            input.title, err, report_preview
-                        )
-                    };
+                    let result = format!(
+                        "workflow: {}\nstatus: completed\nresult: {}",
+                        input.title,
+                        format_workflow_result(return_value.as_ref()),
+                    );
+                    Ok(ToolResult::ok(result).with_details(json!({
+                        "kind": "workflow",
+                        "title": input.title,
+                        "id": snapshot.id.0,
+                        "status": "completed",
+                        "result": return_value,
+                    })))
+                }
+                Err(err) => {
+                    let snapshot = workflow_snapshot(
+                        workflow_id,
+                        input.title.clone(),
+                        WorkflowState::Failed,
+                        Vec::new(),
+                    );
+                    ctx.emit_event(AgentEvent::WorkflowFinished {
+                        turn,
+                        workflow: snapshot.clone(),
+                    });
+                    let content =
+                        format!("workflow: {}\nstatus: failed\nerror: {}", input.title, err);
                     Ok(ToolResult::error(content).with_details(json!({
                         "kind": "workflow",
                         "title": input.title,
                         "id": snapshot.id.0,
                         "status": "failed",
                         "error": err.to_string(),
-                        "steps": steps,
-                        "reports": reports_details,
                     })))
                 }
             }
@@ -157,25 +146,6 @@ impl Tool for RunWorkflowTool {
 
 fn format_workflow_result(result: Option<&serde_json::Value>) -> String {
     result.map_or_else(|| "null".to_owned(), serde_json::Value::to_string)
-}
-
-fn format_report_preview(reports: &[serde_json::Value]) -> String {
-    reports
-        .iter()
-        .take(5)
-        .enumerate()
-        .map(|(index, value)| format!("report {}: {}", index + 1, compact_json(value)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn compact_json(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        other => {
-            serde_json::to_string(other).unwrap_or_else(|_| "<unserializable report>".to_owned())
-        }
-    }
 }
 
 fn workflow_snapshot(
