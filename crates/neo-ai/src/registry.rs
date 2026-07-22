@@ -82,19 +82,9 @@ pub struct ProviderSpec {
     /// Takes priority over `api_key_env_vars` during credential resolution.
     pub api_key: Option<String>,
     pub api_key_env_vars: Vec<String>,
-    pub ambient_auth_env_vars: Vec<Vec<String>>,
     /// Protocol type declared in config.toml `[providers.<id>].type`.
     /// The resolver uses this to select the wire client.
     pub provider_type: ApiType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderCredentialStatus {
-    pub provider: String,
-    pub configured: bool,
-    pub env_keys: Vec<String>,
-    pub authenticated_label: Option<String>,
-    pub missing_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -133,31 +123,6 @@ impl ProviderRegistry {
     }
 
     #[must_use]
-    pub fn credential_status_from(
-        &self,
-        provider: &str,
-        env: &BTreeMap<String, String>,
-    ) -> Option<ProviderCredentialStatus> {
-        let spec = self.get(provider)?;
-        let env_keys = configured_env_keys(spec, env);
-        let authenticated = spec.ambient_auth_env_vars.iter().any(|group| {
-            group
-                .iter()
-                .all(|key| env_value(env, key).is_some_and(|value| !value.is_empty()))
-        });
-        let configured = !env_keys.is_empty() || authenticated;
-        let missing_reason = (!configured).then(|| missing_reason(spec));
-
-        Some(ProviderCredentialStatus {
-            provider: provider.to_owned(),
-            configured,
-            env_keys,
-            authenticated_label: authenticated.then(|| "<authenticated>".to_owned()),
-            missing_reason,
-        })
-    }
-
-    #[must_use]
     pub fn resolver(&self) -> ProviderResolver {
         ProviderResolver {
             registry: self.clone(),
@@ -191,7 +156,7 @@ impl ProviderResolver {
             }
         })?;
 
-        // Credential: inline api_key > env vars > ambient auth
+        // Credential: inline api_key > env vars.
         let api_key = provider
             .api_key
             .clone()
@@ -233,28 +198,11 @@ fn api_key_from_provider(
     })
 }
 
-fn configured_env_keys(provider: &ProviderSpec, env: &BTreeMap<String, String>) -> Vec<String> {
-    provider
-        .api_key_env_vars
-        .iter()
-        .filter(|key| env_value(env, key).is_some_and(|value| !value.is_empty()))
-        .cloned()
-        .collect()
-}
-
 fn missing_reason(provider: &ProviderSpec) -> String {
-    let mut options: Vec<String> = provider.api_key_env_vars.clone();
-    options.extend(
-        provider
-            .ambient_auth_env_vars
-            .iter()
-            .map(|group| group.join(" + ")),
-    );
-
-    match options.as_slice() {
+    match provider.api_key_env_vars.as_slice() {
         [] => "no environment credential sources are registered".to_owned(),
         [key] => format!("missing {key}"),
-        _ => format!("missing one of: {}", options.join("; ")),
+        options => format!("missing one of: {}", options.join("; ")),
     }
 }
 
@@ -334,7 +282,6 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             ApiType::OpenAiResponse,
             Some("https://api.openai.com/v1"),
             &["OPENAI_API_KEY"],
-            &[],
         ),
         provider(
             "anthropic",
@@ -342,7 +289,6 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             ApiType::Anthropic,
             Some("https://api.anthropic.com/v1"),
             &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-            &[],
         ),
         provider(
             "google",
@@ -350,7 +296,6 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             ApiType::Google,
             Some("https://generativelanguage.googleapis.com/v1beta"),
             &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            &[],
         ),
         provider(
             "openrouter",
@@ -358,22 +303,6 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             ApiType::OpenAi,
             Some("https://openrouter.ai/api/v1"),
             &["OPENROUTER_API_KEY"],
-            &[],
-        ),
-        provider(
-            "amazon-bedrock",
-            "Amazon Bedrock",
-            ApiType::Anthropic,
-            None,
-            &[],
-            &[
-                &["AWS_PROFILE"],
-                &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
-                &["AWS_BEARER_TOKEN_BEDROCK"],
-                &["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"],
-                &["AWS_CONTAINER_CREDENTIALS_FULL_URI"],
-                &["AWS_WEB_IDENTITY_TOKEN_FILE"],
-            ],
         ),
     ]
 }
@@ -384,7 +313,6 @@ fn provider(
     provider_type: ApiType,
     base_url: Option<&str>,
     api_key_env_vars: &[&str],
-    ambient_auth_env_vars: &[&[&str]],
 ) -> ProviderSpec {
     ProviderSpec {
         id: id.to_owned(),
@@ -394,10 +322,6 @@ fn provider(
         api_key_env_vars: api_key_env_vars
             .iter()
             .map(|value| (*value).to_owned())
-            .collect(),
-        ambient_auth_env_vars: ambient_auth_env_vars
-            .iter()
-            .map(|group| group.iter().map(|value| (*value).to_owned()).collect())
             .collect(),
         provider_type,
     }

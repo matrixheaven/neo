@@ -256,7 +256,6 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
                 base_url: provider_config.base_url.clone(),
                 api_key: provider_config.api_key.clone(),
                 api_key_env_vars: provider_config.api_key_env.iter().cloned().collect(),
-                ambient_auth_env_vars: vec![],
                 provider_type,
             }
         };

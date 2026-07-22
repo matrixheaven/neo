@@ -27,7 +27,7 @@ pub use options::{
 };
 pub use reasoning::ReasoningPolicy;
 pub use registry::{
-    ModelRegistry, ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec,
+    ModelRegistry, ProviderRegistry, ProviderResolver, ProviderSpec,
 };
 pub use stream::collect_tool_arguments;
 pub use tool_schema::schema_for;
