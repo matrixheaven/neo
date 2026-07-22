@@ -4,7 +4,7 @@
 //! `https://models.dev/api.json`, inferring provider wire types, and
 //! converting catalog entries into neo's config format.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,6 +13,9 @@ use crate::{ApiType, ReasoningBudget, ReasoningCapability, ReasoningEffort};
 
 /// Public catalog endpoint.
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
+
+const CATALOG_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A provider entry in the models.dev catalog.
 #[derive(Debug, Clone, Deserialize)]
@@ -113,7 +116,13 @@ pub async fn fetch_catalog() -> Result<BTreeMap<String, CatalogEntry>, crate::er
 pub async fn fetch_catalog_from(
     url: &str,
 ) -> Result<BTreeMap<String, CatalogEntry>, crate::error::AiError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(CATALOG_CONNECT_TIMEOUT)
+        .timeout(CATALOG_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| crate::error::AiError::Transport {
+            message: e.to_string(),
+        })?;
     let resp = client
         .get(url)
         .header("Accept", "application/json")
@@ -131,8 +140,16 @@ pub async fn fetch_catalog_from(
 
     resp.json::<BTreeMap<String, CatalogEntry>>()
         .await
-        .map_err(|e| crate::error::AiError::Protocol {
-            message: e.to_string(),
+        .map_err(|e| {
+            if e.is_timeout() {
+                crate::error::AiError::Transport {
+                    message: e.to_string(),
+                }
+            } else {
+                crate::error::AiError::Protocol {
+                    message: e.to_string(),
+                }
+            }
         })
 }
 
@@ -346,6 +363,36 @@ pub fn catalog_to_provider_config(
 mod tests {
     use super::*;
     use crate::{ReasoningBudget, ReasoningCapability, ReasoningEffort};
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_catalog_response_hits_request_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local catalog server");
+        let address = listener.local_addr().expect("catalog server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept catalog request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n",
+                )
+                .await
+                .expect("write stalled catalog response headers");
+            std::future::pending::<()>().await;
+        });
+
+        let error = tokio::time::timeout(
+            CATALOG_REQUEST_TIMEOUT + Duration::from_secs(1),
+            fetch_catalog_from(&format!("http://{address}/catalog")),
+        )
+        .await
+        .expect("catalog client deadline must beat the test guard")
+        .expect_err("stalled catalog response must time out");
+
+        assert!(matches!(error, crate::error::AiError::Transport { .. }));
+        server.abort();
+    }
 
     #[test]
     fn test_infer_api_type_anthropic() {
