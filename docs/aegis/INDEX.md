@@ -171,11 +171,24 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json | 2026-07-22-skill-package-completion evidence targeted-workspace-validation |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json | 2026-07-22-skill-package-completion evidence global-workspace-check-limit |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json | 2026-07-22-skill-package-completion evidence builtin-author-contract-amendment |
+| 2026-07-22 | spec | docs/aegis/specs/2026-07-22-flat-batch-edit-design.md | Neo Flat Batch Edit Contract Design |
+| 2026-07-22 | plan | docs/aegis/plans/2026-07-22-flat-batch-edit.md | Neo Flat Batch Edit Contract Implementation Plan |
+| 2026-07-22 | adr | docs/aegis/adr/ADR-0002-non-blocking-instruction-import-cycles.md | ADR-0002 - Exact AGENTS.md Discovery and Non-Blocking Import Cycles |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/10-intent.md | RunWorkflow implementation audit and repair intent |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/20-checkpoint.md | RunWorkflow implementation audit and repair checkpoint |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/90-evidence.md | RunWorkflow implementation audit and repair evidence |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/99-reflection.md | RunWorkflow implementation audit and repair reflection |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/task-intent-draft.json | RunWorkflow implementation audit and repair task intent draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/baseline-read-set-hint.json | RunWorkflow implementation audit and repair baseline read-set hint |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/baseline-usage-draft.json | RunWorkflow implementation audit and repair baseline usage draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/impact-statement-draft.json | RunWorkflow implementation audit and repair impact statement draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/todo-checkpoint-draft.json | RunWorkflow implementation audit and repair todo checkpoint draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/drift-check-draft.json | RunWorkflow implementation audit and repair drift check draft |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/evidence-bundle-draft-independent-audit.json | 2026-07-22-runworkflow-audit-repair evidence independent-audit |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/evidence-bundle-draft-exact-test-attempt.json | 2026-07-22-runworkflow-audit-repair evidence exact-test-attempt |
+| 2026-07-22 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/resume-state-hint.json | 2026-07-22-runworkflow-audit-repair resume state hint |
 | 2026-07-22 | adr | docs/aegis/adr/ADR-0003-neo-skill-package-contract.md | ADR-0003 - Neo local skill package contract |
 | 2026-07-22 | baseline | docs/aegis/baseline/2026-07-22-neo-skill-package-contract.md | Neo skill package contract baseline |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-final-targeted-verification.json | 2026-07-22-skill-package-completion evidence final-targeted-verification |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-fresh-agent-author-comparison.json | 2026-07-22-skill-package-completion evidence fresh-agent-author-comparison |
 | 2026-07-22 | artifact | docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-real-home-symlink-probe.json | 2026-07-22-skill-package-completion evidence real-home-symlink-probe |
-| 2026-07-22 | spec | docs/aegis/specs/2026-07-22-flat-batch-edit-design.md | Neo Flat Batch Edit Contract Design |
-| 2026-07-22 | plan | docs/aegis/plans/2026-07-22-flat-batch-edit.md | Neo Flat Batch Edit Contract Implementation Plan |
-| 2026-07-22 | adr | docs/aegis/adr/ADR-0002-non-blocking-instruction-import-cycles.md | ADR-0002 - Exact AGENTS.md Discovery and Non-Blocking Import Cycles |

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,38 +22,53 @@ const fn default_expected_matches() -> usize {
 #[serde(deny_unknown_fields)]
 struct EditInput {
     #[schemars(
-        description = "Ordered list of existing UTF-8 files to edit. Declaration order is the commit order."
+        description = "Non-empty ordered exact-text edits. Declaration order is meaningful."
     )]
-    files: Vec<EditFileInput>,
+    edits: Vec<EditOperationInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct EditFileInput {
+struct EditOperationInput {
     #[schemars(
-        description = "Path to an existing file to edit. Relative paths resolve against the working directory."
+        description = "Path to an existing file. Relative paths resolve against the working directory."
     )]
     path: PathBuf,
     #[schemars(
-        description = "Ordered exact replacements applied to staged content for this file. Declaration order is meaningful."
-    )]
-    replacements: Vec<EditReplacementInput>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct EditReplacementInput {
-    #[schemars(
-        description = "Exact existing UTF-8 text to replace. Matching is character-for-character with no normalization."
+        description = "Exact non-empty current UTF-8 text to replace. Include enough context to make it unique."
     )]
     old: String,
-    #[schemars(description = "Replacement text. Empty string removes the matched text.")]
+    #[schemars(description = "Replacement text. Empty removes the matched text.")]
     new: String,
     #[serde(default = "default_expected_matches")]
     #[schemars(
-        description = "Exact number of non-overlapping matches that must be present in the current staged content. Defaults to 1."
+        description = "Optional exact non-overlapping match count for this edit. Defaults to 1."
     )]
     expected_matches: usize,
+}
+
+#[derive(Debug)]
+struct EditFilePlan {
+    path: PathBuf,
+    edits: Vec<(usize, EditOperationInput)>,
+}
+
+fn group_edits(input: EditInput) -> Vec<EditFilePlan> {
+    let mut file_indices = HashMap::<PathBuf, usize>::new();
+    let mut files = Vec::<EditFilePlan>::new();
+    for (edit_index, edit) in input.edits.into_iter().enumerate() {
+        if let Some(&file_index) = file_indices.get(&edit.path) {
+            files[file_index].edits.push((edit_index, edit));
+        } else {
+            let path = edit.path.clone();
+            file_indices.insert(path.clone(), files.len());
+            files.push(EditFilePlan {
+                path,
+                edits: vec![(edit_index, edit)],
+            });
+        }
+    }
+    files
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,31 +112,23 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply ordered exact replacements to existing UTF-8 regular files inside the workspace.\n\n\
-         Edit is the only exact-replacement tool. Use Write to create files or fully overwrite them. \
-         Edit never creates, deletes, moves, or follows symlinks / reparse points.\n\n\
-         Parameters:\n\
-         - files: Non-empty ordered array of file edits. Commit order matches declaration order.\n\
-         - files[].path: Existing file path. Relative paths resolve against the working directory.\n\
-         - files[].replacements: Non-empty ordered array of exact replacements for that file.\n\
-         - replacements[].old: Non-empty exact UTF-8 substring to match. No whitespace, newline, or \
-         Unicode normalization is applied.\n\
-         - replacements[].new: Replacement text (may be empty to delete the match).\n\
-         - replacements[].expected_matches: Exact non-overlapping match count required in the current \
-         staged content for that file. Defaults to 1. Actual count must equal this value.\n\n\
-         Semantics:\n\
-         - Replacements inside one file run in declaration order against staged content.\n\
-         - The whole call is prepared before any write. Any prepare failure writes nothing.\n\
-         - After approval, every target is rechecked; stale content fails with zero writes.\n\
-         - Files commit atomically one-by-one in declaration order. There is no cross-file transaction \
-         and no automatic rollback.\n\
-         - Partial commit is a failed tool result that reports committed, failed, and not_attempted files.\n\n\
-         Guidelines:\n\
-         - Always Read target files first and supply the observed exact match counts.\n\
-         - Group all replacements for one file into that file's replacements array.\n\
-         - Prefer Write for new files or full-file rewrites.\n\
-         - After any failure, re-read affected files and issue a fresh Edit call. Never blindly replay \
-         the same Edit arguments."
+        "Apply ordered exact-text edits to existing UTF-8 files.\n\n\
+         Use exactly this input shape:\n\
+         {\"edits\":[{\"path\":\"src/file.rs\",\"old\":\"exact existing text\",\"new\":\"replacement text\"}]}\n\n\
+         Each edits[] item is one replacement and contains:\n\
+         - path: existing file path\n\
+         - old: exact current text to replace\n\
+         - new: replacement text; empty deletes old\n\
+         - expected_matches: optional exact match count, default 1\n\n\
+         Read each target before editing. For the normal single-match case, omit \
+         expected_matches and include enough surrounding text in old to make it unique. \
+         Set expected_matches only when intentionally replacing an observed exact count \
+         greater than 1.\n\n\
+         Items run in declaration order. Later edits to the same path see the staged \
+         result of earlier edits. The entire call is prepared before any write.\n\n\
+         If a match-count or stale-content error occurs, use the returned evidence to \
+         construct a fresh Edit call. Do not replay the failed arguments.\n\n\
+         Use Write to create files or replace complete file contents."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -154,27 +161,27 @@ impl PreparedEdit {
     ) -> Result<Arc<Self>, ToolResult> {
         let input: EditInput = parse_edit_input(arguments)?;
         validate_edit_input(&input)?;
+        let total_edits = input.edits.len();
+        let file_plans = group_edits(input);
 
-        let mut prepared_files = Vec::with_capacity(input.files.len());
+        let mut prepared_files = Vec::with_capacity(file_plans.len());
         let mut seen_targets = HashSet::new();
-        let mut total_replacements = 0usize;
 
-        for (file_index, file) in input.files.iter().enumerate() {
-            // Check the model-supplied path before workspace resolution follows links.
-            let absolute_candidate = if file.path.is_absolute() {
-                file.path.clone()
+        for (file_index, plan) in file_plans.iter().enumerate() {
+            let absolute_candidate = if plan.path.is_absolute() {
+                plan.path.clone()
             } else {
-                context.workspace_root().join(&file.path)
+                context.workspace_root().join(&plan.path)
             };
             match std::fs::symlink_metadata(&absolute_candidate) {
                 Ok(metadata) if is_reparse_or_symlink(&metadata) => {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!(
                             "refusing symlink or reparse point target: {}",
-                            file.path.display()
+                            plan.path.display()
                         ),
                         "Edit only supports existing UTF-8 regular files.",
                     ));
@@ -183,8 +190,8 @@ impl PreparedEdit {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
-                        format!("target is not a regular file: {}", file.path.display()),
+                        Some(plan.path.display().to_string()),
+                        format!("target is not a regular file: {}", plan.path.display()),
                         "Edit only supports existing UTF-8 regular files.",
                     ));
                 }
@@ -193,8 +200,8 @@ impl PreparedEdit {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
-                        format!("file does not exist: {}", file.path.display()),
+                        Some(plan.path.display().to_string()),
+                        format!("file does not exist: {}", plan.path.display()),
                         "Use Write to create new files, or re-read existing targets first.",
                     ));
                 }
@@ -202,10 +209,10 @@ impl PreparedEdit {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!(
                             "failed to read metadata for {}: {error}",
-                            file.path.display()
+                            plan.path.display()
                         ),
                         "Re-read the file and submit a fresh Edit call.",
                     ));
@@ -213,12 +220,12 @@ impl PreparedEdit {
             }
 
             let resolved = context
-                .resolve_parent_for_write(&file.path)
+                .resolve_parent_for_write(&plan.path)
                 .map_err(|error| {
                     prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!("path resolution failed: {error}"),
                         "Re-read the path and submit a fresh Edit call.",
                     )
@@ -228,7 +235,7 @@ impl PreparedEdit {
                     prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!("failed to resolve existing target: {error}"),
                         "Re-read the path and submit a fresh Edit call.",
                     )
@@ -239,20 +246,19 @@ impl PreparedEdit {
                 return Err(prepare_failed(
                     Some(file_index),
                     None,
-                    Some(file.path.display().to_string()),
+                    Some(plan.path.display().to_string()),
                     format!("duplicate effective target path: {}", resolved.display()),
-                    "Remove duplicate paths and submit a fresh Edit call.",
+                    "Use one consistent path spelling per target and submit a fresh Edit call.",
                 ));
             }
 
-            // Re-check resolved path (non-followed candidate already checked above).
             let bytes = match read_regular_file_no_follow(&resolved) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!("failed to read {}: {error}", resolved.display()),
                         "Edit only supports existing UTF-8 regular files. Re-read the file and submit a fresh Edit call.",
                     ));
@@ -264,7 +270,7 @@ impl PreparedEdit {
                     return Err(prepare_failed(
                         Some(file_index),
                         None,
-                        Some(file.path.display().to_string()),
+                        Some(plan.path.display().to_string()),
                         format!("file is not valid UTF-8: {}", resolved.display()),
                         "Edit only supports existing UTF-8 regular files.",
                     ));
@@ -272,10 +278,10 @@ impl PreparedEdit {
             };
 
             let mut staged = original.clone();
-            for (replacement_index, replacement) in file.replacements.iter().enumerate() {
-                let actual = count_non_overlapping(&staged, &replacement.old);
-                if actual != replacement.expected_matches {
-                    let lines = match_line_numbers(&staged, &replacement.old);
+            for (edit_index, edit) in &plan.edits {
+                let actual = count_non_overlapping(&staged, &edit.old);
+                if actual != edit.expected_matches {
+                    let lines = match_line_numbers(&staged, &edit.old);
                     let line_list = if lines.is_empty() {
                         "none".to_owned()
                     } else {
@@ -287,32 +293,34 @@ impl PreparedEdit {
                     };
                     return Err(prepare_failed(
                         Some(file_index),
-                        Some(replacement_index),
-                        Some(file.path.display().to_string()),
+                        Some(*edit_index),
+                        Some(plan.path.display().to_string()),
                         format!(
                             "expected {} exact matches · found {actual}; matches at lines {line_list}",
-                            replacement.expected_matches
+                            edit.expected_matches
                         ),
-                        "Re-read the file and submit a new Edit call.",
+                        &format!(
+                            "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
+                        ),
                     ));
                 }
-                staged = replace_non_overlapping(&staged, &replacement.old, &replacement.new);
+                staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
             }
 
             if staged == original {
                 return Err(prepare_failed(
                     Some(file_index),
                     None,
-                    Some(file.path.display().to_string()),
+                    Some(plan.path.display().to_string()),
                     format!(
                         "file is unchanged after replacements: {}",
-                        file.path.display()
+                        plan.path.display()
                     ),
                     "Remove no-op replacements and submit a fresh Edit call.",
                 ));
             }
 
-            let display_path = file.path.to_string_lossy();
+            let display_path = plan.path.to_string_lossy();
             let diff = unified_diff(&display_path, &original, &staged);
             let (added, removed) = diff_stats(&diff);
             let fingerprint = EditFingerprint {
@@ -321,13 +329,12 @@ impl PreparedEdit {
                 sha256: sha256_bytes(&bytes),
             };
 
-            total_replacements += file.replacements.len();
             prepared_files.push(PreparedEditFile {
-                requested_path: file.path.clone(),
+                requested_path: plan.path.clone(),
                 resolved_path: resolved,
                 fingerprint,
                 staged,
-                replacements: file.replacements.len(),
+                replacements: plan.edits.len(),
                 added,
                 removed,
                 diff,
@@ -348,7 +355,7 @@ impl PreparedEdit {
 
         Ok(Arc::new(Self {
             files: prepared_files,
-            replacements: total_replacements,
+            replacements: total_edits,
             added,
             removed,
         }))
@@ -769,68 +776,57 @@ fn parse_edit_input(arguments: &serde_json::Value) -> Result<EditInput, ToolResu
             None,
             None,
             format!("invalid Edit arguments: {error}"),
-            "Submit a fresh Edit call using the files[] contract.",
+            "Submit exactly {\"edits\":[{\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}]}.",
         )),
     }
 }
 
 fn validate_edit_input(input: &EditInput) -> Result<(), ToolResult> {
-    if input.files.is_empty() {
+    if input.edits.is_empty() {
         return Err(prepare_failed(
             None,
             None,
             None,
-            "files must be a non-empty array".to_owned(),
-            "Group at least one existing file into files[] and submit a fresh Edit call.",
+            "edits must be a non-empty array".to_owned(),
+            "Supply at least one edit item and submit a fresh Edit call.",
         ));
     }
-    for (file_index, file) in input.files.iter().enumerate() {
-        if file.path.as_os_str().is_empty() {
+    for (edit_index, edit) in input.edits.iter().enumerate() {
+        if edit.path.as_os_str().is_empty() {
             return Err(prepare_failed(
-                Some(file_index),
                 None,
+                Some(edit_index),
                 None,
                 "path must be non-empty".to_owned(),
                 "Provide a non-empty path and submit a fresh Edit call.",
             ));
         }
-        if file.replacements.is_empty() {
+        if edit.old.is_empty() {
             return Err(prepare_failed(
-                Some(file_index),
                 None,
-                Some(file.path.display().to_string()),
-                "replacements must be a non-empty array".to_owned(),
-                "Add at least one replacement for this file.",
+                Some(edit_index),
+                Some(edit.path.display().to_string()),
+                "old must be a non-empty string".to_owned(),
+                "Supply exact non-empty old text from a fresh Read.",
             ));
         }
-        for (replacement_index, replacement) in file.replacements.iter().enumerate() {
-            if replacement.old.is_empty() {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    Some(replacement_index),
-                    Some(file.path.display().to_string()),
-                    "old must be a non-empty string".to_owned(),
-                    "Supply exact non-empty old text from a fresh Read.",
-                ));
-            }
-            if replacement.expected_matches < 1 {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    Some(replacement_index),
-                    Some(file.path.display().to_string()),
-                    "expected_matches must be at least 1".to_owned(),
-                    "Use the observed exact match count (default 1).",
-                ));
-            }
-            if replacement.old == replacement.new {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    Some(replacement_index),
-                    Some(file.path.display().to_string()),
-                    "old and new are identical (no-op replacement)".to_owned(),
-                    "Remove no-op replacements and submit a fresh Edit call.",
-                ));
-            }
+        if edit.expected_matches < 1 {
+            return Err(prepare_failed(
+                None,
+                Some(edit_index),
+                Some(edit.path.display().to_string()),
+                "expected_matches must be at least 1".to_owned(),
+                "Use the observed exact match count (default 1).",
+            ));
+        }
+        if edit.old == edit.new {
+            return Err(prepare_failed(
+                None,
+                Some(edit_index),
+                Some(edit.path.display().to_string()),
+                "old and new are identical (no-op replacement)".to_owned(),
+                "Remove no-op replacements and submit a fresh Edit call.",
+            ));
         }
     }
     Ok(())
@@ -838,7 +834,7 @@ fn validate_edit_input(input: &EditInput) -> Result<(), ToolResult> {
 
 fn prepare_failed(
     file_index: Option<usize>,
-    replacement_index: Option<usize>,
+    edit_index: Option<usize>,
     path: Option<String>,
     message: String,
     guidance: &str,
@@ -848,8 +844,8 @@ fn prepare_failed(
         content.push_str(" · ");
         content.push_str(path);
     }
-    if let Some(replacement_index) = replacement_index {
-        content.push_str(&format!(" · replacement {replacement_index}"));
+    if let Some(edit_index) = edit_index {
+        content.push_str(&format!(" · edit {edit_index}"));
     }
     content.push('\n');
     content.push_str(&message);
@@ -864,8 +860,8 @@ fn prepare_failed(
     if let Some(file_index) = file_index {
         details["file_index"] = json!(file_index);
     }
-    if let Some(replacement_index) = replacement_index {
-        details["replacement_index"] = json!(replacement_index);
+    if let Some(edit_index) = edit_index {
+        details["edit_index"] = json!(edit_index);
     }
     if let Some(path) = path {
         details["path"] = json!(path);
@@ -1064,10 +1060,7 @@ mod workspace_policy_tests {
             .execute(
                 &ctx,
                 json!({
-                    "files": [{
-                        "path": path,
-                        "replacements": [{ "old": "before", "new": "after" }]
-                    }]
+                    "edits": [{ "path": path, "old": "before", "new": "after" }]
                 }),
             )
             .await
@@ -1092,13 +1085,10 @@ mod workspace_policy_tests {
         let prepared = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [{
-                    "path": "existing.txt",
-                    "replacements": [{ "old": "before", "new": "after" }]
-                }, {
-                    "path": "second.txt",
-                    "replacements": [{ "old": "second", "new": "SECOND" }]
-                }]
+                "edits": [
+                    { "path": "existing.txt", "old": "before", "new": "after" },
+                    { "path": "second.txt", "old": "second", "new": "SECOND" }
+                ]
             }),
         )
         .await
@@ -1168,10 +1158,10 @@ mod workspace_policy_tests {
         let prepared = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [
-                    { "path": "a.txt", "replacements": [{ "old": "aaa", "new": "AAA" }] },
-                    { "path": "b.txt", "replacements": [{ "old": "bbb", "new": "BBB" }] },
-                    { "path": "c.txt", "replacements": [{ "old": "ccc", "new": "CCC" }] }
+                "edits": [
+                    { "path": "a.txt", "old": "aaa", "new": "AAA" },
+                    { "path": "b.txt", "old": "bbb", "new": "BBB" },
+                    { "path": "c.txt", "old": "ccc", "new": "CCC" }
                 ]
             }),
         )
@@ -1245,14 +1235,11 @@ mod workspace_policy_tests {
         let unknown = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [{
-                    "path": "file.txt",
-                    "replacements": [{ "old": "before", "new": "after", "extra": true }]
-                }]
+                "edits": [{ "path": "file.txt", "old": "before", "new": "after", "extra": true }]
             }),
         )
         .await
-        .expect_err("nested unknown field");
+        .expect_err("unknown field on edit item");
         assert_eq!(
             unknown.details.expect("unknown details")["status"],
             "prepare_failed"
@@ -1261,13 +1248,10 @@ mod workspace_policy_tests {
         let duplicate = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [{
-                    "path": "file.txt",
-                    "replacements": [{ "old": "before", "new": "after" }]
-                }, {
-                    "path": "./file.txt",
-                    "replacements": [{ "old": "before", "new": "AFTER" }]
-                }]
+                "edits": [
+                    { "path": "file.txt", "old": "before", "new": "after" },
+                    { "path": "./file.txt", "old": "before", "new": "AFTER" }
+                ]
             }),
         )
         .await
@@ -1281,10 +1265,7 @@ mod workspace_policy_tests {
         let non_utf8 = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [{
-                    "path": "binary.bin",
-                    "replacements": [{ "old": "before", "new": "after" }]
-                }]
+                "edits": [{ "path": "binary.bin", "old": "before", "new": "after" }]
             }),
         )
         .await
@@ -1309,10 +1290,7 @@ mod workspace_policy_tests {
         let prepared = PreparedEdit::prepare(
             &context,
             &json!({
-                "files": [{
-                    "path": "target.txt",
-                    "replacements": [{ "old": "before", "new": "after" }]
-                }]
+                "edits": [{ "path": "target.txt", "old": "before", "new": "after" }]
             }),
         )
         .await

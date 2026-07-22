@@ -2068,7 +2068,7 @@ fn write_streaming_preview_reuses_final_format() {
 }
 
 #[test]
-fn edit_streaming_preview_shows_progress() {
+fn edit_streaming_preview_shows_flat_intent() {
     use neo_agent_core::AgentEvent;
     use neo_tui::primitive::strip_ansi;
 
@@ -2081,9 +2081,7 @@ fn edit_streaming_preview_shows_progress() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "edit-1".to_owned(),
-        json_fragment:
-            r#"{"files":[{"path":"src/foo.rs","replacements":[{"old":"foo","new":"bar"}]}]}"#
-                .to_owned(),
+        json_fragment: r#"{"edits":[{"path":"src/foo.rs","old":"foo","new":"bar"}]}"#.to_owned(),
     });
 
     let frame = runtime
@@ -2094,10 +2092,9 @@ fn edit_streaming_preview_shows_progress() {
         .collect::<Vec<_>>();
 
     assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("src/foo.rs") || line.contains("replacements")),
-        "Edit streaming should show path or replacement intent: {frame:?}"
+        frame.iter().any(|line| line.contains("src/foo.rs"))
+            && frame.iter().any(|line| line.contains("unverified intent")),
+        "Edit streaming should show path and unverified intent: {frame:?}"
     );
 }
 

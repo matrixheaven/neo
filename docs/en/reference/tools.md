@@ -10,7 +10,7 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 | --- | --- |
 | `Read` | Read a UTF-8 text file, with support for paginated reading by line offset. |
 | `Write` | Create or fully overwrite UTF-8 files inside the workspace via `files[]` (each with `path` and `content`). Prepares the whole batch before any write, approves a verified projection in Ask mode, commits files atomically in declaration order, and reports partial commits truthfully. Existing targets must be UTF-8 regular files (rejects binary, symlink, directory). No-op overwrites (content unchanged) fail the whole batch. Legacy top-level `path`/`content` is not accepted. |
-| `Edit` | Apply ordered exact replacements across existing UTF-8 regular files via `files[]` / `replacements[]` / `expected_matches` (default 1). Prepares the whole batch before any write, approves a verified diff in Ask mode, commits files atomically in declaration order, and reports partial commits truthfully. Does not create files (use `Write`). Legacy top-level `path`/`old`/`new`/`replace_all` is not accepted. |
+| `Edit` | Apply ordered exact-text edits to existing UTF-8 files via a flat `edits[]` array. Each item owns `path`, `old`, `new`, and optional `expected_matches` (default 1). Prepares the whole batch before any write, approves a verified diff in Ask mode, commits files atomically in first-appearance order, and reports partial commits truthfully. Does not create files (use `Write`). The nested `files[]`/`replacements[]` shape is not accepted. |
 | `List` | List directory contents as a two-level tree. |
 | `Glob` | Match file/directory paths by glob pattern, sorted by modification time. |
 | `Find` | Locate workspace paths by a substring of their file or directory name. |
@@ -18,10 +18,11 @@ Source location: [`crates/neo-agent-core/src/tools/`](../../../crates/neo-agent-
 
 ### Edit staging and commit contract
 
-`Edit` accepts `files[]` in declaration order. Each file contains `path` and an
-ordered `replacements[]`; every replacement contains `old`, `new`, and optional
-`expected_matches` (default `1`). Matching and replacement use the staged result
-of the previous replacement in that file, so order is observable.
+`Edit` accepts a flat `edits[]` array in declaration order. Each item contains
+`path`, `old`, `new`, and optional `expected_matches` (default `1`). Edits to
+the same path are grouped and applied in declaration order against staged
+content, so later edits see earlier staged results. The first appearance of a
+path establishes file presentation and commit order.
 
 Before any write, Neo resolves every target, reads every existing UTF-8 regular
 file without following link-like targets, applies the whole ordered batch in
@@ -30,12 +31,12 @@ error fails the whole call with zero writes. In Ask mode the user approves that
 verified diff. Neo then rechecks the resolved targets and contents; a stale
 target before the first commit also produces zero writes.
 
-Files commit in the staged declaration order. Each file replacement is atomic,
-but the batch is not a cross-file transaction: after a file commits, a later
-stale check, I/O failure, durability failure, or cancellation does not roll it
-back. Structured results distinguish `committed`, `prepare_failed`, `stale`,
-`cancelled`, `commit_failed`, `partial_commit`, and `durability_uncertain`, with
-per-file `committed`, `committed_unsynced`, `failed`, or `not_attempted` states.
+Files commit in first-appearance order. Each file write is atomic, but the batch
+is not a cross-file transaction: after a file commits, a later stale check, I/O
+failure, durability failure, or cancellation does not roll it back. Structured
+results distinguish `committed`, `prepare_failed`, `stale`, `cancelled`,
+`commit_failed`, `partial_commit`, and `durability_uncertain`, with per-file
+`committed`, `committed_unsynced`, `failed`, or `not_attempted` states.
 
 Cancellation before the first commit writes nothing. During commit it prevents
 the next file from starting and never interrupts an in-progress atomic replace.

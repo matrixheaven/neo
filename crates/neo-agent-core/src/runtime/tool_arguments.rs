@@ -363,7 +363,8 @@ impl InstructionScopeProbe {
         primary_workspace: &Path,
     ) -> Vec<Self> {
         match name {
-            "Edit" | "Write" => files_parent_scope_probes(arguments, primary_workspace),
+            "Edit" => edits_parent_scope_probes(arguments, primary_workspace),
+            "Write" => files_parent_scope_probes(arguments, primary_workspace),
             "Read" => {
                 let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
                     return Vec::new();
@@ -420,9 +421,42 @@ impl InstructionScopeProbe {
     }
 }
 
+/// Collect parent-directory probes for every `edits[].path`, preserving
+/// declaration order and deduplicating identical canonical directories.
+fn edits_parent_scope_probes(
+    arguments: &serde_json::Value,
+    primary_workspace: &Path,
+) -> Vec<InstructionScopeProbe> {
+    let Some(edits) = arguments.get("edits").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut probes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for edit in edits {
+        let Some(path) = edit.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(resolved) = resolve_probe_path(path, primary_workspace) else {
+            continue;
+        };
+        let Some(parent) = resolved.parent() else {
+            continue;
+        };
+        let Some(directory) = probe_existing_directory(parent, primary_workspace) else {
+            continue;
+        };
+        let key = directory.as_os_str().to_owned();
+        if seen.insert(key) {
+            probes.push(InstructionScopeProbe {
+                target_directory: directory,
+            });
+        }
+    }
+    probes
+}
+
 /// Collect parent-directory probes for every `files[].path`, preserving
-/// declaration order and deduplicating identical canonical directories. Shared
-/// by Edit and Write, whose canonical schemas both carry a `files` array.
+/// declaration order and deduplicating identical canonical directories.
 fn files_parent_scope_probes(
     arguments: &serde_json::Value,
     primary_workspace: &Path,
@@ -648,12 +682,12 @@ mod tests {
             Vec::<PathBuf>::new(),
             "Read external absolute path"
         );
-        // Edit and Write probe every files[].path parent directory.
+        // Edit probes every edits[].path parent; Write probes files[].path.
         assert_eq!(
             probe(
                 "Edit",
                 json!({
-                    "files": [{ "path": "nested/file.txt", "replacements": [{ "old": "a", "new": "b" }] }]
+                    "edits": [{ "path": "nested/file.txt", "old": "a", "new": "b" }]
                 })
             ),
             vec![nested.clone()],
@@ -764,10 +798,10 @@ mod tests {
         let probes = InstructionScopeProbe::from_prepared_tool(
             "Edit",
             &json!({
-                "files": [
-                    { "path": "a/one.txt", "replacements": [{ "old": "1", "new": "x" }] },
-                    { "path": "b/two.txt", "replacements": [{ "old": "2", "new": "y" }] },
-                    { "path": "a/one.txt", "replacements": [{ "old": "x", "new": "z" }] }
+                "edits": [
+                    { "path": "a/one.txt", "old": "1", "new": "x" },
+                    { "path": "b/two.txt", "old": "2", "new": "y" },
+                    { "path": "a/one.txt", "old": "x", "new": "z" }
                 ]
             }),
             &workspace,

@@ -2761,20 +2761,17 @@ fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option
 }
 
 fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
-    let files = arguments.get("files")?.as_array()?;
-    if files.is_empty() {
+    let edits = arguments.get("edits")?.as_array()?;
+    if edits.is_empty() {
         return None;
     }
-    let mut replacements = 0usize;
-    let mut paths = Vec::new();
-    for file in files {
-        if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
+    let mut paths: Vec<&str> = Vec::new();
+    for edit in edits {
+        if let Some(path) = edit.get("path").and_then(serde_json::Value::as_str)
+            && !paths.contains(&path)
+        {
             paths.push(path);
         }
-        replacements += file
-            .get("replacements")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, Vec::len);
     }
     let head = paths.first().copied().unwrap_or("?");
     let tail = paths.last().copied().unwrap_or(head);
@@ -2787,8 +2784,8 @@ fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
     };
     Some(bounded_edit_summary(format!(
         "{} files · {} replacements · {path_part}",
-        files.len(),
-        replacements
+        paths.len(),
+        edits.len()
     )))
 }
 
@@ -3243,10 +3240,11 @@ mod tests {
         let summary = summarize_tool_arguments(
             "Edit",
             &serde_json::json!({
-                "files": [
-                    {"path": "src/a.rs", "replacements": [{"old":"a","new":"A"}]},
-                    {"path": "src/b.rs", "replacements": [{"old":"b","new":"B"},{"old":"c","new":"C"}]},
-                    {"path": "src/c.rs", "replacements": [{"old":"d","new":"D"}]}
+                "edits": [
+                    {"path": "src/a.rs", "old": "a", "new": "A"},
+                    {"path": "src/b.rs", "old": "b", "new": "B"},
+                    {"path": "src/c.rs", "old": "c", "new": "C"},
+                    {"path": "src/a.rs", "old": "x", "new": "X"}
                 ]
             }),
         )
@@ -3267,7 +3265,7 @@ mod tests {
             id: "e1".to_owned(),
             name: "Edit".to_owned(),
             arguments: serde_json::json!({
-                "files": [{"path":"a.rs","replacements":[{"old":"a","new":"A"}]}]
+                "edits": [{"path":"a.rs","old":"a","new":"A"}]
             }),
         };
         assert!(apply_tool_activity_event(

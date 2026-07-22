@@ -181,42 +181,39 @@ fn render_streaming_or_intent(
 ) -> Vec<Line> {
     let muted = Style::default().fg(theme.text_muted);
     let args = arguments.unwrap_or("");
-    let Some(files) = serde_json::from_str::<Value>(args)
+    let Some(edits) = serde_json::from_str::<Value>(args)
         .ok()
-        .and_then(|value| value.get("files").and_then(Value::as_array).cloned())
+        .and_then(|value| value.get("edits").and_then(Value::as_array).cloned())
     else {
         return styled_wrapped("receiving structured changes...", width, muted);
     };
-    if files.is_empty() {
+    if edits.is_empty() {
         return styled_wrapped("receiving structured changes...", width, muted);
     }
 
-    let replacements = files
-        .iter()
-        .map(|file| {
-            file.get("replacements")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len)
-        })
-        .sum::<usize>();
+    let mut path_counts: Vec<(&str, usize)> = Vec::new();
+    for edit in &edits {
+        let path = edit.get("path").and_then(Value::as_str).unwrap_or("?");
+        if let Some(entry) = path_counts.iter_mut().find(|(p, _)| *p == path) {
+            entry.1 += 1;
+        } else {
+            path_counts.push((path, 1));
+        }
+    }
     let mut rows = styled_wrapped(
         &format!(
-            "{} files · {replacements} replacements · unverified intent",
-            files.len()
+            "{} files · {} replacements · unverified intent",
+            path_counts.len(),
+            edits.len()
         ),
         width,
         muted,
     );
-    for file in &files {
-        let path = file.get("path").and_then(Value::as_str).unwrap_or("?");
-        let count = file
-            .get("replacements")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
+    for (path, count) in &path_counts {
         rows.extend(render_code_frame(
             Line::from_spans(vec![
                 Span::styled("? ", muted),
-                Span::styled(path.to_owned(), Style::default().fg(theme.text_primary)),
+                Span::styled((*path).to_owned(), Style::default().fg(theme.text_primary)),
                 Span::styled(format!(" · {count} replacements"), muted),
             ]),
             Vec::new(),

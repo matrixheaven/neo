@@ -10,7 +10,7 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | --- | --- |
 | `Read` | 读取 UTF-8 文本文件，支持按行偏移分页读取。 |
 | `Write` | 通过 `files[]`（每项含 `path` 和 `content`）创建或完整覆盖工作区内 UTF-8 文件。整批 prepare 后才写入，Ask 模式批准已验证投影，按声明顺序逐文件原子提交，并如实报告 partial commit。已有目标必须是 UTF-8 常规文件（拒绝二进制、符号链接、目录）。无变更覆盖（内容相同）导致整批失败。不接受旧版顶层 `path`/`content`。 |
-| `Edit` | 通过有序 `files[]` / `replacements[]` / `expected_matches`（默认 1）对已有 UTF-8 常规文件做精确替换。整批 prepare 后才写入，Ask 模式批准已验证 diff，按声明顺序逐文件原子提交，并如实报告 partial commit。不创建文件（用 `Write`）。不接受旧版顶层 `path`/`old`/`new`/`replace_all`。 |
+| `Edit` | 通过扁平 `edits[]` 数组对已有 UTF-8 文件做有序精确文本编辑。每项包含 `path`、`old`、`new` 与可选 `expected_matches`（默认 1）。整批 prepare 后才写入，Ask 模式批准已验证 diff，按首次出现顺序逐文件原子提交，并如实报告 partial commit。不创建文件（用 `Write`）。不接受嵌套 `files[]`/`replacements[]` 格式。 |
 | `List` | 以两层树形列出目录内容。 |
 | `Glob` | 按 glob 模式匹配文件/目录路径，按修改时间排序。 |
 | `Find` | 按文件/目录名子串查找工作区路径。 |
@@ -18,17 +18,16 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 ### Edit 暂存与提交合同
 
-`Edit` 按声明顺序接收 `files[]`。每个文件包含 `path` 和有序的
-`replacements[]`；每条替换包含 `old`、`new` 与可选的
-`expected_matches`（默认 `1`）。同一文件内，后一条替换在前一条替换的暂存结果上
-匹配并应用，因此顺序具有可见语义。
+`Edit` 按声明顺序接收扁平 `edits[]` 数组。每项包含 `path`、`old`、`new`
+与可选 `expected_matches`（默认 `1`）。同一路径的编辑按声明顺序分组并作用于暂存
+内容，后续编辑可见先前暂存结果。路径首次出现决定文件展示和提交顺序。
 
 任何写入之前，Neo 会解析所有目标，以不跟随链接类目标的方式读取每个已有 UTF-8
 常规文件，在内存中应用完整有序批次，验证精确匹配数，并生成审批 diff。任一 prepare
 错误都会让整次调用以零写入失败。Ask 模式中，用户批准的是这份已验证 diff。随后 Neo
 重新检查解析后的目标与内容；首次提交前发现 stale 同样是零写入。
 
-文件按暂存后的声明顺序提交。每个文件的替换是原子的，但整批不是跨文件事务：一个文件
+文件按首次出现顺序提交。每个文件的写入是原子的，但整批不是跨文件事务：一个文件
 提交后，后续 stale、I/O 失败、持久性失败或取消都不会回滚它。结构化结果区分
 `committed`、`prepare_failed`、`stale`、`cancelled`、`commit_failed`、
 `partial_commit` 与 `durability_uncertain`；逐文件状态为 `committed`、
