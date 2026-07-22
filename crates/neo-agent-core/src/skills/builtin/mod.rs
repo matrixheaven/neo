@@ -20,8 +20,6 @@ const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuiltinSkillError {
-    #[error("failed to load built-in skill: {0}")]
-    Load(#[from] crate::skills::SkillLoadError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
