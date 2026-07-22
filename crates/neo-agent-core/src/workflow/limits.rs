@@ -29,11 +29,9 @@ const TERMINAL_TAIL_RESERVE: u64 = 64 * 1024; // 64 KiB
 
 impl WorkflowLimits {
     #[must_use]
-    pub fn invocation_reservation_bytes(&self) -> u64 {
-        // Reserve: one start record (max record size is overkill; use a
-        // reasonable upper bound for start) + one max-size finish + terminal tail.
-        // Start records are small; use 1 MiB as generous upper bound.
-        let start_reserve = 1024 * 1024;
-        start_reserve + self.journal_record_bytes + TERMINAL_TAIL_RESERVE
+    pub fn invocation_reservation_bytes(&self, start_record_bytes: u64) -> Option<u64> {
+        start_record_bytes
+            .checked_add(self.journal_record_bytes)
+            .and_then(|bytes| bytes.checked_add(TERMINAL_TAIL_RESERVE))
     }
 }

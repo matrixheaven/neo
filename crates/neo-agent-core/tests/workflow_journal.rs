@@ -5,6 +5,7 @@ use neo_agent_core::workflow::{
     journal_path, read_journal, read_run_metadata, run_dir, write_run_metadata,
 };
 use serde_json::json;
+use std::path::Path;
 
 fn test_limits() -> WorkflowLimits {
     WorkflowLimits::default()
@@ -178,6 +179,84 @@ fn journal_rejects_malformed_sequence() {
 }
 
 #[test]
+fn journal_append_rejects_wrong_sequence_and_hash_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let jpath = dir.path().join("journal.jsonl");
+    let limits = test_limits();
+    let mut writer = JournalWriter::open(&jpath).unwrap();
+
+    let wrong_seq = state_changed(1, WorkflowState::Running, WorkflowState::Running);
+    let err = writer.append(&wrong_seq, &limits).unwrap_err();
+    assert!(err.to_string().contains("expected 0, got 1"));
+
+    let mut wrong_hash = invocation_started(0, "inv_bad_hash", 0);
+    if let JournalRecord::InvocationStarted {
+        canonical_input_hash,
+        ..
+    } = &mut wrong_hash
+    {
+        *canonical_input_hash = "not-the-canonical-hash".to_owned();
+    }
+    let err = writer.append(&wrong_hash, &limits).unwrap_err();
+    assert!(err.to_string().contains("canonical input hash mismatch"));
+    assert_eq!(writer.bytes_written(), 0);
+    assert!(read_journal(&jpath).unwrap().is_empty());
+}
+
+#[test]
+fn journal_rejects_incoherent_invocation_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let jpath = dir.path().join("journal.jsonl");
+    let limits = test_limits();
+    let mut writer = JournalWriter::open(&jpath).unwrap();
+
+    let err = writer
+        .append(&invocation_finished(0, "inv_1", true), &limits)
+        .unwrap_err();
+    assert!(err.to_string().contains("without invocation_started"));
+
+    writer
+        .append(&invocation_started(0, "inv_1", 0), &limits)
+        .unwrap();
+    writer
+        .append(&invocation_finished(1, "inv_1", true), &limits)
+        .unwrap();
+    let err = writer
+        .append(&invocation_finished(2, "inv_1", true), &limits)
+        .unwrap_err();
+    assert!(err.to_string().contains("duplicate invocation_finished"));
+    assert_eq!(read_journal(&jpath).unwrap().len(), 2);
+}
+
+#[test]
+fn journal_read_rejects_invalid_hash_and_truncated_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let jpath = dir.path().join("journal.jsonl");
+    let mut wrong_hash = invocation_started(0, "inv_bad_hash", 0);
+    if let JournalRecord::InvocationStarted {
+        canonical_input_hash,
+        ..
+    } = &mut wrong_hash
+    {
+        *canonical_input_hash = "bad".to_owned();
+    }
+    let line = serde_json::to_string(&wrong_hash).unwrap();
+    std::fs::write(&jpath, format!("{line}\n")).unwrap();
+    let err = read_journal(&jpath).unwrap_err();
+    assert!(err.to_string().contains("canonical input hash mismatch"));
+
+    let valid = serde_json::to_string(&state_changed(
+        0,
+        WorkflowState::Running,
+        WorkflowState::Running,
+    ))
+    .unwrap();
+    std::fs::write(&jpath, valid).unwrap();
+    let err = read_journal(&jpath).unwrap_err();
+    assert!(err.to_string().contains("truncated record"));
+}
+
+#[test]
 fn journal_rejects_oversized_record() {
     let dir = tempfile::tempdir().unwrap();
     let jpath = dir.path().join("journal.jsonl");
@@ -188,14 +267,15 @@ fn journal_rejects_oversized_record() {
     };
 
     let mut writer = JournalWriter::open(&jpath).unwrap();
+    let canonical_input = json!({"task": "x".repeat(200)});
     let big_record = JournalRecord::InvocationStarted {
         seq: 0,
         timestamp_ms: 1000,
         invocation_id: "inv_big".to_owned(),
         call_index: 0,
         kind: WorkflowInvocationKind::Delegate,
-        canonical_input: json!({"task": "x".repeat(200)}),
-        canonical_input_hash: "hash".to_owned(),
+        canonical_input_hash: canonical_input_hash(&canonical_input),
+        canonical_input,
     };
 
     let err = writer.append(&big_record, &limits).unwrap_err();
@@ -204,18 +284,41 @@ fn journal_rejects_oversized_record() {
 
 #[test]
 fn journal_reservation_prevents_exceeding_total() {
-    let dir = tempfile::tempdir().unwrap();
-    let jpath = dir.path().join("journal.jsonl");
+    let start = invocation_started(0, "inv_reservation", 0);
+    let start_bytes = u64::try_from(serde_json::to_vec(&start).unwrap().len()).unwrap() + 1;
+    let record_limit = start_bytes + 128;
+    let exact_total = start_bytes + record_limit + 64 * 1024;
 
-    let limits = WorkflowLimits {
-        journal_total_bytes: 500, // tiny total
-        journal_record_bytes: 16 * 1024 * 1024,
+    let exact_dir = tempfile::tempdir().unwrap();
+    let exact_path = exact_dir.path().join("journal.jsonl");
+    let exact_limits = WorkflowLimits {
+        journal_record_bytes: record_limit,
+        journal_total_bytes: exact_total,
         ..WorkflowLimits::default()
     };
+    let mut exact_writer = JournalWriter::open(&exact_path).unwrap();
+    assert!(
+        exact_writer
+            .has_reservation_for_invocation(&start, &exact_limits)
+            .unwrap()
+    );
+    exact_writer.append(&start, &exact_limits).unwrap();
 
-    let mut writer = JournalWriter::open(&jpath).unwrap();
-    // The reservation check should fail because the total is too small
-    assert!(!writer.has_reservation_for_invocation(&limits));
+    let short_dir = tempfile::tempdir().unwrap();
+    let short_path = short_dir.path().join("journal.jsonl");
+    let short_limits = WorkflowLimits {
+        journal_total_bytes: exact_total - 1,
+        ..exact_limits
+    };
+    let mut short_writer = JournalWriter::open(&short_path).unwrap();
+    assert!(
+        !short_writer
+            .has_reservation_for_invocation(&start, &short_limits)
+            .unwrap()
+    );
+    let err = short_writer.append(&start, &short_limits).unwrap_err();
+    assert!(err.to_string().contains("journal total size limit"));
+    assert_eq!(short_writer.bytes_written(), 0);
 }
 
 #[test]
@@ -233,7 +336,29 @@ fn run_metadata_round_trips_through_pathbuf_directory() {
     assert_eq!(loaded, metadata);
 
     let jpath = journal_path(session_dir, &run_id);
-    assert!(jpath.ends_with("workflows/run_abc123/journal.jsonl"));
+    assert!(
+        jpath.ends_with(
+            Path::new("workflows")
+                .join("run_abc123")
+                .join("journal.jsonl")
+        )
+    );
+}
+
+#[test]
+fn run_metadata_creation_does_not_overwrite_existing_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdir = dir.path().join("run");
+    let limits = test_limits();
+    let original = sample_metadata("run_immutable");
+
+    write_run_metadata(&rdir, &original, &limits).unwrap();
+    let mut replacement = original.clone();
+    replacement.name = "replacement".to_owned();
+    let err = write_run_metadata(&rdir, &replacement, &limits).unwrap_err();
+
+    assert!(err.to_string().contains("already exists"));
+    assert_eq!(read_run_metadata(&rdir).unwrap(), original);
 }
 
 #[test]
