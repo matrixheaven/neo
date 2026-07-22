@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(not(windows))]
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::terminal::size;
@@ -62,7 +65,9 @@ impl GeometryObservation {
     }
 }
 
+#[cfg(not(windows))]
 const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(windows))]
 const CSI_REQUEST_CURSOR: &[u8] = b"\x1b[6n";
 
 pub(crate) trait TerminalEvents {

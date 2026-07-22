@@ -759,8 +759,6 @@ dependencies:
 "#,
     );
 
-    let (skills, _) = discover_skills(dir.path(), SkillSource::default());
-    let skill = &skills[0];
     let store = SkillStore::load(&[], &[dir.path().to_path_buf()], vec![]);
     let catalog = store.available_skills_prompt();
 
