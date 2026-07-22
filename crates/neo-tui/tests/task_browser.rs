@@ -104,6 +104,39 @@ fn task_browser_request_stop_on_finished_task_sets_footer_message() {
 }
 
 #[test]
+fn task_browser_pause_resume_only_targets_workflows() {
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![item(
+        "bash-run",
+        TaskBrowserStatus::Running,
+    )]));
+    assert_eq!(state.handle_action(TaskBrowserAction::RequestPause), None);
+    assert_eq!(
+        state.footer_message(),
+        Some("Only workflow tasks can be paused.")
+    );
+
+    let mut workflow = item("workflow-run", TaskBrowserStatus::Running);
+    workflow.kind = TaskBrowserKind::Workflow;
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![workflow]));
+    assert_eq!(
+        state.handle_action(TaskBrowserAction::RequestPause),
+        Some("workflow-run".to_owned())
+    );
+    assert_eq!(state.pause_confirmation_task_id(), Some("workflow-run"));
+    assert_eq!(state.handle_action(TaskBrowserAction::Cancel), None);
+
+    let mut workflow = item("workflow-run", TaskBrowserStatus::Paused);
+    workflow.kind = TaskBrowserKind::Workflow;
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![workflow]));
+    assert_eq!(
+        state.handle_action(TaskBrowserAction::RequestResume),
+        Some("workflow-run".to_owned())
+    );
+    assert_eq!(state.resume_confirmation_task_id(), Some("workflow-run"));
+}
+
+#[test]
 fn task_browser_page_down_scrolls_output_when_output_focused() {
     let mut item = item("bash-run", TaskBrowserStatus::Running);
     item.preview_lines = (0..20).map(|line| format!("line {line}")).collect();

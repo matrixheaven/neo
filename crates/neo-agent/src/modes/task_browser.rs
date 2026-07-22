@@ -243,6 +243,7 @@ fn map_status(status: BackgroundTaskStatus) -> TaskBrowserStatus {
     match status {
         BackgroundTaskStatus::Running => TaskBrowserStatus::Running,
         BackgroundTaskStatus::WaitingForUser => TaskBrowserStatus::Waiting,
+        BackgroundTaskStatus::Paused => TaskBrowserStatus::Paused,
         BackgroundTaskStatus::Completed => TaskBrowserStatus::Completed,
         BackgroundTaskStatus::Failed => TaskBrowserStatus::Failed,
         BackgroundTaskStatus::Cancelled => TaskBrowserStatus::Cancelled,

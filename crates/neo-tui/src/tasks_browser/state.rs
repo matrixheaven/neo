@@ -43,6 +43,10 @@ pub enum TaskBrowserAction {
     SelectPageDown,
     ToggleFilter,
     ToggleOutputFocus,
+    RequestPause,
+    ConfirmPause,
+    RequestResume,
+    ConfirmResume,
     RequestStop,
     ConfirmStop,
     Refresh,
@@ -57,6 +61,8 @@ pub struct TaskBrowserState {
     selected_task_id: Option<String>,
     output_scroll: usize,
     focus: TaskBrowserFocus,
+    pause_confirmation_task_id: Option<String>,
+    resume_confirmation_task_id: Option<String>,
     stop_confirmation_task_id: Option<String>,
     footer_message: Option<String>,
 }
@@ -70,6 +76,8 @@ impl TaskBrowserState {
             selected_task_id: None,
             output_scroll: 0,
             focus: TaskBrowserFocus::List,
+            pause_confirmation_task_id: None,
+            resume_confirmation_task_id: None,
             stop_confirmation_task_id: None,
             footer_message: None,
         }
@@ -93,6 +101,16 @@ impl TaskBrowserState {
     #[must_use]
     pub fn stop_confirmation_task_id(&self) -> Option<&str> {
         self.stop_confirmation_task_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn pause_confirmation_task_id(&self) -> Option<&str> {
+        self.pause_confirmation_task_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn resume_confirmation_task_id(&self) -> Option<&str> {
+        self.resume_confirmation_task_id.as_deref()
     }
 
     #[must_use]
@@ -178,6 +196,48 @@ impl TaskBrowserState {
                     TaskBrowserFocus::Output => TaskBrowserFocus::List,
                 };
             }
+            TaskBrowserAction::RequestPause => {
+                let item = self.selected_item()?;
+                if item.kind != super::view::TaskBrowserKind::Workflow {
+                    self.footer_message = Some("Only workflow tasks can be paused.".to_owned());
+                    return None;
+                }
+                if item.status != super::view::TaskBrowserStatus::Running {
+                    self.footer_message = Some("Only running workflows can be paused.".to_owned());
+                    return None;
+                }
+                let task_id = item.id.clone();
+                self.pause_confirmation_task_id = Some(task_id.clone());
+                self.resume_confirmation_task_id = None;
+                self.stop_confirmation_task_id = None;
+                self.footer_message = Some(format!("Pause {task_id}? Enter confirm   Esc cancel"));
+                return Some(task_id);
+            }
+            TaskBrowserAction::ConfirmPause => {
+                self.footer_message = None;
+                return self.pause_confirmation_task_id.take();
+            }
+            TaskBrowserAction::RequestResume => {
+                let item = self.selected_item()?;
+                if item.kind != super::view::TaskBrowserKind::Workflow {
+                    self.footer_message = Some("Only workflow tasks can be resumed.".to_owned());
+                    return None;
+                }
+                if item.status != super::view::TaskBrowserStatus::Paused {
+                    self.footer_message = Some("Only paused workflows can be resumed.".to_owned());
+                    return None;
+                }
+                let task_id = item.id.clone();
+                self.pause_confirmation_task_id = None;
+                self.resume_confirmation_task_id = Some(task_id.clone());
+                self.stop_confirmation_task_id = None;
+                self.footer_message = Some(format!("Resume {task_id}? Enter confirm   Esc cancel"));
+                return Some(task_id);
+            }
+            TaskBrowserAction::ConfirmResume => {
+                self.footer_message = None;
+                return self.resume_confirmation_task_id.take();
+            }
             TaskBrowserAction::RequestStop => {
                 let item = self.selected_item()?;
                 if !item.can_stop {
@@ -185,13 +245,21 @@ impl TaskBrowserState {
                     return None;
                 }
                 let task_id = item.id.clone();
+                self.pause_confirmation_task_id = None;
+                self.resume_confirmation_task_id = None;
                 self.stop_confirmation_task_id = Some(task_id.clone());
+                self.footer_message = None;
                 return Some(task_id);
             }
             TaskBrowserAction::ConfirmStop => return self.stop_confirmation_task_id.take(),
             TaskBrowserAction::Refresh => {}
             TaskBrowserAction::Cancel => {
-                if self.stop_confirmation_task_id.take().is_none() {
+                let cancelled_confirmation = self.pause_confirmation_task_id.take().is_some()
+                    | self.resume_confirmation_task_id.take().is_some()
+                    | self.stop_confirmation_task_id.take().is_some();
+                if cancelled_confirmation {
+                    self.footer_message = None;
+                } else {
                     return Some(CLOSE_TASK_BROWSER.to_owned());
                 }
             }

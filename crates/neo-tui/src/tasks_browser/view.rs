@@ -24,6 +24,7 @@ impl TaskBrowserKind {
 pub enum TaskBrowserStatus {
     Running,
     Waiting,
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -35,7 +36,7 @@ pub enum TaskBrowserStatus {
 impl TaskBrowserStatus {
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Running | Self::Waiting)
+        matches!(self, Self::Running | Self::Waiting | Self::Paused)
     }
 
     #[must_use]
@@ -43,6 +44,7 @@ impl TaskBrowserStatus {
         match self {
             Self::Running => "running",
             Self::Waiting => "waiting",
+            Self::Paused => "paused",
             Self::Completed => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -57,6 +59,7 @@ impl TaskBrowserStatus {
         match self {
             Self::Running => "●",
             Self::Waiting => "◼",
+            Self::Paused => "Ⅱ",
             Self::Completed => "✓",
             Self::Failed
             | Self::Cancelled

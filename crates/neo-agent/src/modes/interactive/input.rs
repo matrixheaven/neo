@@ -327,6 +327,10 @@ impl InteractiveController {
                 .map_or(Some(TaskBrowserAction::ToggleOutputFocus), |state| {
                     if state.stop_confirmation_task_id().is_some() {
                         Some(TaskBrowserAction::ConfirmStop)
+                    } else if state.pause_confirmation_task_id().is_some() {
+                        Some(TaskBrowserAction::ConfirmPause)
+                    } else if state.resume_confirmation_task_id().is_some() {
+                        Some(TaskBrowserAction::ConfirmResume)
                     } else {
                         Some(TaskBrowserAction::ToggleOutputFocus)
                     }
@@ -341,6 +345,8 @@ impl InteractiveController {
             InputEvent::MoveEnd => Some(TaskBrowserAction::SelectLast),
             InputEvent::Insert('q' | 'Q') => Some(TaskBrowserAction::Close),
             InputEvent::Insert('r' | 'R') => Some(TaskBrowserAction::Refresh),
+            InputEvent::Insert('p' | 'P') => Some(TaskBrowserAction::RequestPause),
+            InputEvent::Insert('u' | 'U') => Some(TaskBrowserAction::RequestResume),
             InputEvent::Insert('s' | 'S') => Some(TaskBrowserAction::RequestStop),
             InputEvent::Insert('o' | 'O') => Some(TaskBrowserAction::ToggleOutputFocus),
             InputEvent::Key(key) => {
@@ -377,6 +383,26 @@ impl InteractiveController {
                     .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmStop));
                 if let Some(task_id) = task_id {
                     self.stop_task_from_browser(task_id).await;
+                }
+            }
+            TaskBrowserAction::ConfirmPause => {
+                let task_id = self
+                    .tui
+                    .chrome_mut()
+                    .task_browser_state_mut()
+                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmPause));
+                if let Some(task_id) = task_id {
+                    self.control_workflow_from_browser(task_id, false).await;
+                }
+            }
+            TaskBrowserAction::ConfirmResume => {
+                let task_id = self
+                    .tui
+                    .chrome_mut()
+                    .task_browser_state_mut()
+                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmResume));
+                if let Some(task_id) = task_id {
+                    self.control_workflow_from_browser(task_id, true).await;
                 }
             }
             TaskBrowserAction::Cancel => {
@@ -455,13 +481,50 @@ impl InteractiveController {
         }
         let result = config
             .background_tasks
-            .stop(
+            .stop_with_actor(
                 &task_id,
                 "Stopped from Task Browser",
                 config.runtime.shell.max_output_bytes,
+                neo_agent_core::workflow::WorkflowActor::Human,
             )
             .await;
         match result {
+            Ok(_) => {
+                self.refresh_task_browser().await;
+            }
+            Err(error) => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(error.to_string());
+                }
+            }
+        }
+    }
+
+    async fn control_workflow_from_browser(&mut self, task_id: String, resume: bool) {
+        let Some(config) = self.local_config.as_ref() else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("No config available");
+            }
+            return;
+        };
+        let actor = neo_agent_core::workflow::WorkflowActor::Human;
+        let result = if resume {
+            config
+                .background_tasks
+                .resume_workflow(&task_id, actor)
+                .await
+        } else {
+            config
+                .background_tasks
+                .pause_workflow(&task_id, actor)
+                .await
+        };
+        match result {
+            Ok(result) if result.is_error => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(result.content);
+                }
+            }
             Ok(_) => {
                 self.refresh_task_browser().await;
             }

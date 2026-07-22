@@ -14414,6 +14414,117 @@ async fn task_browser_stop_confirmation_stops_selected_task() {
 }
 
 #[tokio::test]
+async fn task_browser_workflow_controls_use_human_handle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let config = test_config(temp.path(), sessions_dir.clone());
+    let runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+        neo_agent_core::workflow::WorkflowLimits::default(),
+    );
+    let handle = runtime
+        .create_run(
+            &sessions_dir,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "browser-controls".to_owned(),
+                description: "browser controls".to_owned(),
+                phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                    id: "work".to_owned(),
+                    description: "work".to_owned(),
+                }],
+                script: "neo.phase('work')".to_owned(),
+                args: serde_json::json!({}),
+                launch_source: "test".to_owned(),
+                parent_run_id: None,
+            },
+        )
+        .await
+        .expect("create workflow");
+    let run_id = handle.run_id.clone();
+    config
+        .background_tasks
+        .start_workflow(
+            run_id.0.clone(),
+            "browser controls".to_owned(),
+            handle.clone(),
+        )
+        .await;
+    controller.local_config = Some(config);
+    controller.type_text("/tasks");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show tasks");
+
+    controller
+        .handle_input_event(InputEvent::Insert('p'))
+        .await
+        .expect("request pause");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .pause_confirmation_task_id(),
+        Some(run_id.0.as_str())
+    );
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("confirm pause");
+    assert!(handle.is_pause_requested());
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Paused
+    );
+    runtime
+        .bind_runner(|handle, _metadata| async move {
+            handle.stop_token().cancelled().await;
+            Ok(())
+        })
+        .expect("bind test runner");
+    controller.refresh_task_browser().await;
+    controller
+        .handle_input_event(InputEvent::Insert('u'))
+        .await
+        .expect("request resume");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("confirm resume");
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Running
+    );
+
+    controller
+        .handle_input_event(InputEvent::Insert('s'))
+        .await
+        .expect("request stop");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("confirm stop");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handle.snapshot().await.state.is_terminal() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow reaches terminal state");
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Cancelled
+    );
+}
+
+#[tokio::test]
 async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
