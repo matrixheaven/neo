@@ -225,6 +225,7 @@ pub struct ToolContext {
     pub process_supervisor: ProcessSupervisor,
     pub background_tasks: BackgroundTaskManager,
     pub shell_runtime: ShellRuntime,
+    pub workflow_capability: crate::workflow::WorkflowCapability,
     /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
     /// Parent runtime config used to construct real child `AgentRuntime` instances.
@@ -305,6 +306,7 @@ impl ToolContext {
             process_supervisor: ProcessSupervisor::default(),
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
+            workflow_capability: crate::workflow::WorkflowCapability::default(),
             multi_agent: MultiAgentRuntime::new(),
             child_config: None,
             child_model: None,
@@ -364,6 +366,15 @@ impl ToolContext {
             .map_or(background_tasks.clone(), |tasks_dir| {
                 background_tasks.with_persistence_dir(tasks_dir)
             });
+        self
+    }
+
+    #[must_use]
+    pub fn with_workflow_capability(
+        mut self,
+        capability: crate::workflow::WorkflowCapability,
+    ) -> Self {
+        self.workflow_capability = capability;
         self
     }
 

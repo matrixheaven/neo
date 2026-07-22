@@ -4,7 +4,7 @@
 //! comparison (macOS maps `/var` to `/private/var`). Tests never touch the
 //! process environment or shared cwd.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -19,7 +19,7 @@ use neo_agent_core::instructions::{
     InstructionFingerprint, InstructionOmissionReason, InstructionPreflightDecision,
     InstructionReconcileKind, InstructionReconcileRequest, InstructionRegistry,
     InstructionRegistryConfig, InstructionResolver, InstructionScopeKind, MAX_SOURCE_BYTES,
-    SourceIo, SourceMetadata, find_agents_file, select_agents_file_name,
+    SourceIo, SourceMetadata, select_agents_file_name,
 };
 
 /// Creates a canonicalized tempdir root plus a `workspace` directory.
@@ -205,35 +205,25 @@ fn resolver_expands_local_markdown_links_but_not_images_code_or_urls() {
 }
 
 #[test]
-fn resolver_rejects_casefold_collision_and_canonical_escape() {
-    // Case-insensitive filesystems (default macOS/Windows) cannot hold two
-    // case-folded variants in one directory, so the collision path is tested
-    // through the pure entry classifier.
-    let variants = vec![OsString::from("AGENTS.md"), OsString::from("agents.MD")];
-    let err = select_agents_file_name(Path::new("dir"), &variants)
-        .expect_err("two case-folded variants are ambiguous");
+fn resolver_selects_only_exact_agents_name_and_rejects_canonical_escape() {
     assert_eq!(
-        err.failure_kind(),
-        InstructionFailureKind::AmbiguousAgentsFile
+        select_agents_file_name(&[
+            OsString::from("notes.txt"),
+            OsString::from("agents.md"),
+            OsString::from("Agents.md"),
+        ]),
+        None,
+    );
+    assert_eq!(
+        select_agents_file_name(&[
+            OsString::from("agents.md"),
+            OsString::from("AGENTS.md"),
+            OsString::from("Agents.md"),
+        ]),
+        Some(OsString::from("AGENTS.md")),
     );
 
-    let one = select_agents_file_name(
-        Path::new("dir"),
-        &[OsString::from("notes.txt"), OsString::from("Agents.md")],
-    )
-    .expect("single variant");
-    assert_eq!(one.as_deref(), Some(OsStr::new("Agents.md")));
-
-    let none = select_agents_file_name(Path::new("dir"), &[OsString::from("notes.txt")])
-        .expect("no variant");
-    assert!(none.is_none());
-
     let (_temp, workspace) = workspace_fixture();
-    fs::write(workspace.join("AGENTS.md"), "root\n").expect("agents file");
-    let found = find_agents_file(&workspace)
-        .expect("find")
-        .expect("present");
-    assert_eq!(found.file_name(), Some(OsStr::new("AGENTS.md")));
 
     // A `..` import that canonicalizes outside both roots is untrusted.
     let outside = workspace.parent().expect("root").join("outside.md");
@@ -244,6 +234,45 @@ fn resolver_rejects_casefold_collision_and_canonical_escape() {
         .load_bundle(&workspace)
         .expect_err("escape must be rejected");
     assert_eq!(err.failure_kind(), InstructionFailureKind::UntrustedImport);
+}
+
+#[tokio::test]
+async fn indirect_markdown_link_cycle_expands_once_and_proceeds_after_visibility() {
+    let (_temp, workspace) = workspace_fixture();
+    fs::write(workspace.join("AGENTS.md"), "ROOT BODY\n[A](./a.md)\n").expect("agents file");
+    fs::write(workspace.join("a.md"), "A BODY\n[B](./b.md)\n").expect("a file");
+    fs::write(workspace.join("b.md"), "B BODY\n[A again](./a.md)\n").expect("b file");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (epoch, fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    assert_eq!(epoch.outcome, InstructionEpochOutcome::Activated);
+    assert!(epoch.failure.is_none());
+    let content = epoch.model_content.as_deref().expect("model content");
+    for body in ["ROOT BODY", "A BODY", "B BODY"] {
+        assert_eq!(content.matches(body).count(), 1, "{body}: {content}");
+    }
+
+    state.apply_epoch(&epoch, &fingerprint);
+    expect_proceed(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![workspace]),
+                &state,
+            )
+            .await,
+        &mut state,
+    );
 }
 
 #[tokio::test]
@@ -1340,13 +1369,6 @@ async fn resolver_reports_every_atomic_structural_and_integrity_failure() {
     fs::create_dir_all(case.workspace.join("subdir")).expect("subdir");
     case.expect_failure(InstructionFailureKind::UnreadableSource);
 
-    // Include cycle.
-    let case = BundleCase::new();
-    case.write("AGENTS.md", b"@./a.md\n");
-    case.write("a.md", b"@./b.md\n");
-    case.write("b.md", b"@./a.md\n");
-    case.expect_failure(InstructionFailureKind::IncludeCycle);
-
     // Import depth 6 (maximum is 5).
     let case = BundleCase::new();
     write_depth_chain(&case.workspace);
@@ -1379,17 +1401,6 @@ async fn resolver_reports_every_atomic_structural_and_integrity_failure() {
     fs::write(&outside, b"SECRET\n").expect("outside");
     case.write("AGENTS.md", b"@../outside.md\n");
     case.expect_failure(InstructionFailureKind::UntrustedImport);
-
-    // Ambiguous case-folded AGENTS.md variants in one directory.
-    let err = select_agents_file_name(
-        Path::new("dir"),
-        &[OsString::from("AGENTS.md"), OsString::from("agents.MD")],
-    )
-    .expect_err("collision");
-    assert_eq!(
-        err.failure_kind(),
-        InstructionFailureKind::AmbiguousAgentsFile
-    );
 
     // Twice-changing unstable source.
     let case = BundleCase::new();

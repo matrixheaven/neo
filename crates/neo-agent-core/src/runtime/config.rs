@@ -155,6 +155,9 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub shell_runtime: ShellRuntime,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workflow_capability: crate::workflow::WorkflowCapability,
     /// Shared manual `/compact` request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by the TUI and taken by runtime compaction.
@@ -262,6 +265,7 @@ impl AgentConfig {
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
+            workflow_capability: crate::workflow::WorkflowCapability::default(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
             instruction_registry: None,

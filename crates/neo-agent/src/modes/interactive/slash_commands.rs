@@ -80,6 +80,12 @@ impl InteractiveController {
             "/mcp" => self.open_mcp_manager().await,
             "/add-workspace" => self.open_workspace_manager(),
             "/tasks" => self.show_background_tasks().await,
+            "/workflow" => {
+                self.workflow_capability.grant().await;
+                self.push_status(
+                    "Workflow launch capability granted. Call RunWorkflow to use it.".to_owned(),
+                );
+            }
             "/compact" => {
                 let instruction = slash_arg(prompt, "/compact").map(|arg| {
                     if arg.is_empty() {

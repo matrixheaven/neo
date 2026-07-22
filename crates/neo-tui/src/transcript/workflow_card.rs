@@ -50,6 +50,9 @@ impl WorkflowCardComponent {
             WorkflowState::Running => "running",
             WorkflowState::Completed => "completed",
             WorkflowState::Failed => "failed",
+            WorkflowState::Paused => "paused",
+            WorkflowState::Cancelled => "cancelled",
+            WorkflowState::ResourceLimited => "resource limited",
         };
 
         lines.push(
@@ -74,6 +77,9 @@ impl WorkflowCardComponent {
                 WorkflowState::Completed => "\u{2713}",
                 WorkflowState::Failed => "\u{2717}",
                 WorkflowState::Running => "\u{25cf}",
+                WorkflowState::Paused
+                | WorkflowState::Cancelled
+                | WorkflowState::ResourceLimited => "\u{25cf}",
             };
             lines.push(
                 Line::from_spans(vec![
@@ -104,6 +110,9 @@ fn workflow_state_color(state: WorkflowState, theme: &TuiTheme) -> Color {
         WorkflowState::Completed => theme.status_ok,
         WorkflowState::Failed => theme.status_error,
         WorkflowState::Running => theme.status_warn,
+        WorkflowState::Paused => theme.status_warn,
+        WorkflowState::Cancelled => theme.status_error,
+        WorkflowState::ResourceLimited => theme.status_error,
     }
 }
 
@@ -115,7 +124,10 @@ impl Component for WorkflowCardComponent {
     fn finalization(&self) -> Finalization {
         match self.snapshot.state {
             WorkflowState::Completed | WorkflowState::Failed => Finalization::Finalized,
-            WorkflowState::Running => Finalization::Live,
+            WorkflowState::Running | WorkflowState::Paused | WorkflowState::ResourceLimited => {
+                Finalization::Live
+            }
+            WorkflowState::Cancelled => Finalization::Finalized,
         }
     }
 }

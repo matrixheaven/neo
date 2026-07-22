@@ -33,6 +33,18 @@ impl Tool for RunWorkflowTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: RunWorkflowInput = parse_input(self.name(), input)?;
+
+            // Check for workflow launch capability. Only exact /workflow
+            // grants it; ordinary text or model inference cannot.
+            if !ctx.workflow_capability.is_available().await {
+                return Ok(ToolResult::error(
+                    "RunWorkflow requires a launch capability. Use the /workflow slash command first."
+                        .to_owned(),
+                ));
+            }
+            // Consume the capability on successful durable creation
+            ctx.workflow_capability.consume_if_available().await;
+
             let turn = ctx.current_turn.unwrap_or_default();
             let workflow_id = WorkflowId(format!("workflow-{turn}-{}", uuid::Uuid::new_v4()));
 

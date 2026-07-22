@@ -1,6 +1,6 @@
 use neo_agent_core::instructions::{
-    InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome, InstructionScopeData,
-    InstructionScopeKind,
+    InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome,
+    InstructionFailureKind, InstructionScopeData, InstructionScopeKind,
 };
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
@@ -1248,6 +1248,35 @@ async fn instruction_epoch_persists_once_and_replays_model_context() {
             .filter_map(Content::as_text)
             .collect::<String>(),
         "scoped rules body"
+    );
+}
+
+#[tokio::test]
+async fn jsonl_session_reads_historical_include_cycle_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut historical = serde_json::to_value(AgentEvent::InstructionEpoch {
+        epoch: instruction_epoch(1, "rev-1", None),
+    })
+    .expect("serialize epoch envelope");
+    historical["InstructionEpoch"]["epoch"]["outcome"] = serde_json::json!("blocked");
+    historical["InstructionEpoch"]["epoch"]["failure"] = serde_json::json!({
+        "display_path": "/workspace/AGENTS.md",
+        "kind": "include_cycle",
+        "fingerprint": "historical-cycle",
+        "detail": "historical include cycle",
+    });
+    write_jsonl_lines(&path, [historical]);
+
+    let events = JsonlSessionReader::read_all(&path)
+        .await
+        .expect("read historical epoch");
+    let Some(AgentEvent::InstructionEpoch { epoch }) = events.first() else {
+        panic!("expected historical instruction epoch");
+    };
+    assert_eq!(
+        epoch.failure.as_ref().map(|failure| failure.kind),
+        Some(InstructionFailureKind::IncludeCycle),
     );
 }
 

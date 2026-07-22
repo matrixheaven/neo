@@ -907,7 +907,11 @@ impl TranscriptStore {
             .position(|entry| matches!(entry, TranscriptEntry::Workflow { component } if component.id() == id));
         if let Some(index) = existing_index {
             if self.entries[index].finalization() == Finalization::Finalized
-                && snapshot.state == neo_agent_core::workflow::WorkflowState::Running
+                && matches!(
+                    snapshot.state,
+                    neo_agent_core::workflow::WorkflowState::Running
+                        | neo_agent_core::workflow::WorkflowState::Paused
+                )
             {
                 return;
             }

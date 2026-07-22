@@ -414,6 +414,7 @@ pub(crate) struct InteractiveController {
     /// into `TurnRequest`/`AppConfig`, and `set_permission_mode` writes here so
     /// a running turn picks up the new mode at its next tool call.
     live_permission_mode: Arc<RwLock<PermissionMode>>,
+    workflow_capability: neo_agent_core::workflow::WorkflowCapability,
     /// Workspace-scoped prompt history store. `None` for test controllers that
     /// do not exercise persistence. Real controllers seed `PromptState` from
     /// this on startup and append accepted prompts to it after each submit.
@@ -847,6 +848,7 @@ impl InteractiveController {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
+            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             prompt_history: None,
             trust_store: None,
             workspace_store: None,

@@ -1,9 +1,12 @@
+pub mod capability;
 mod error;
 pub mod journal;
 pub mod limits;
 mod lua;
 pub mod runtime;
 mod state;
+
+pub use capability::WorkflowCapability;
 
 pub use error::WorkflowError;
 pub use journal::{

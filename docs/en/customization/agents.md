@@ -76,7 +76,7 @@ A sub-agent has its own independent conversation history; only the result summar
 
 ## AGENTS.md
 
-`AGENTS.md` is Neo's only project instruction filename. Matching is case-insensitive for cross-platform behavior, but multiple case-folded variants in one directory are a blocking ambiguity (`Blocked: ambiguous AGENTS.md`). There is no `CLAUDE.md` fallback anywhere. Project instructions are session-scoped state: Neo delivers them as durable instruction epochs recorded in the session's JSONL event stream, and they never mutate the system prompt or earlier request bytes.
+`AGENTS.md` is Neo's only project instruction entry filename, and the stored directory entry must match exactly. Lowercase or mixed-case variants are ordinary documents, not instruction scopes. There is no `CLAUDE.md` fallback anywhere. Project instructions are session-scoped state: Neo delivers them as durable instruction epochs recorded in the session's JSONL event stream, and they never mutate the system prompt or earlier request bytes.
 
 Recommended content: stable information such as project conventions, standards, and build commands — not details that change frequently. `AGENTS.md` is complementary to skills: it is "the project's global statement to all agents", while skills are "reusable task flows".
 
@@ -141,7 +141,7 @@ Resolution rules:
 - Project and ancestor bundles may import only from the primary workspace or `$NEO_HOME`.
 - The user-global `$NEO_HOME/AGENTS.md` bundle may additionally import Markdown under the platform home. If the project is untrusted, its workspace subtree remains excluded.
 - Imported sources must be regular UTF-8 `.md` files; directories, devices, sockets, URLs, and other special files are rejected.
-- Canonical paths drive cycle detection and deduplication; a source imported more than once expands only at its first occurrence.
+- Canonical paths drive source-once traversal: the first import of a source expands it in place, while later imports of that source, including cycle back-edges, preserve Markdown links where applicable but insert no second copy of its body. Repeated and cyclic imports never block.
 - Imported content is wrapped in an `<included_instructions path="...">` provenance element; it replaces an `@` directive or follows a preserved Markdown link. Source bodies remain exact UTF-8 text.
 
 Structural safety limits (maximum recursive import depth 5, at most 32 sources per import graph, 1 MiB per source, 8 MiB per complete graph) are host safety limits, not the model-context budget:
@@ -170,10 +170,8 @@ One `AGENTS.md` plus its complete recursive import graph forms one atomic bundle
 | Missing import | `Blocked: missing import` |
 | Permission or I/O failure | `Blocked: unreadable source` |
 | Invalid UTF-8 | `Blocked: invalid encoding` |
-| Import cycle | `Blocked: include cycle` |
 | Structural limit exceeded | `Blocked: instruction limit exceeded` |
 | Canonical path leaves allowed roots | `Blocked: untrusted import` |
-| Multiple case-folded `AGENTS.md` variants | `Blocked: ambiguous AGENTS.md` |
 | Source changes repeatedly while read | `Blocked: unstable source` |
 
 A failed bundle never injects its successfully read subset; the model receives one compact failure notice containing paths and reasons. While a scope is blocked, read-only `Read`, `List`, `Grep`, `Find`, and `Glob` operations may proceed for diagnosis, but `Write`, `Edit`, `Bash`, and `Terminal` remain blocked, and a mixed batch containing any of them is blocked as a whole. When the source fingerprint changes, Neo retries resolution automatically; a complete successful bundle replaces the failure state through the ordinary activation path.

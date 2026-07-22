@@ -462,74 +462,40 @@ mod tests {
     }
 
     #[test]
-    fn trust_inputs_accept_only_agents_md_case_insensitively() {
-        for casing in &["agents.md", "Agents.md", "AGENTS.MD", "aGeNtS.Md"] {
+    fn trust_inputs_accept_only_exact_agents_md() {
+        for ignored in &[
+            "agents.md",
+            "Agents.md",
+            "AGENTS.MD",
+            "aGeNtS.Md",
+            "claude.md",
+        ] {
             let root = TempDir::new().expect("tempdir");
             let project = root.path().join("project");
             fs::create_dir_all(&project).expect("create project");
-            fs::write(project.join(casing), "rules").expect("write agents file");
+            fs::write(project.join(ignored), "rules").expect("write ignored file");
 
             let inputs = collect_project_trust_inputs(&project).expect("collect");
             assert!(
-                inputs
-                    .detected
-                    .iter()
-                    .any(|(_, kind)| *kind == TrustInputKind::ContextFile),
-                "failed to detect {casing} as a context file",
+                inputs.detected.is_empty(),
+                "{ignored} must not be a trust input: {:?}",
+                inputs.detected,
             );
         }
 
-        // A lone claude.md (any casing) is no longer a trust input.
         let root = TempDir::new().expect("tempdir");
         let project = root.path().join("project");
         fs::create_dir_all(&project).expect("create project");
-        fs::write(project.join("claude.md"), "rules").expect("write legacy file");
+        fs::write(project.join("AGENTS.md"), "rules").expect("write agents file");
 
         let inputs = collect_project_trust_inputs(&project).expect("collect");
         assert!(
-            inputs.detected.is_empty(),
-            "a lone claude.md must be ignored by trust discovery: {:?}",
+            inputs
+                .detected
+                .iter()
+                .any(|(_, kind)| *kind == TrustInputKind::ContextFile),
+            "exact AGENTS.md must be detected: {:?}",
             inputs.detected,
-        );
-    }
-
-    #[test]
-    fn trust_inputs_report_ambiguous_casefolded_agents_files() {
-        let root = TempDir::new().expect("tempdir");
-        let project = root.path().join("project");
-        fs::create_dir_all(&project).expect("create project");
-        fs::write(project.join("AGENTS.md"), "rules one").expect("write first variant");
-        fs::write(project.join("agents.md"), "rules two").expect("write second variant");
-
-        // Case-insensitive filesystems (default macOS/Windows) cannot hold two
-        // case-folded variants in one directory, so the collision is then
-        // unreachable through the filesystem.
-        let variant_count = fs::read_dir(&project)
-            .expect("read project dir")
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("agents.md")
-            })
-            .count();
-        if variant_count < 2 {
-            return;
-        }
-
-        let error = collect_project_trust_inputs(&project)
-            .expect_err("two case-folded AGENTS.md variants are ambiguous");
-        let instruction_error = error
-            .downcast_ref::<neo_agent_core::instructions::InstructionError>()
-            .expect("trust discovery propagates the registry's typed ambiguity");
-        assert!(
-            matches!(
-                instruction_error,
-                neo_agent_core::instructions::InstructionError::AmbiguousAgentsFile { candidates, .. }
-                if candidates.len() == 2
-            ),
-            "expected AmbiguousAgentsFile with both candidates, got {instruction_error}",
         );
     }
 }

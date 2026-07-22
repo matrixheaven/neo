@@ -6,7 +6,7 @@
 //! `AGENTS.md` files are discovered promptly.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -140,44 +140,23 @@ pub fn read_source_stable(io: &dyn SourceIo, path: &Path) -> Result<Vec<u8>, Ins
     }
 }
 
-/// Classifies directory entry names as the single AGENTS.md variant.
-///
-/// Matching is case-insensitive; the file contents are never read. Returns
-/// `Ok(None)` when no variant exists and an
-/// [`InstructionError::AmbiguousAgentsFile`] when several case-folded
-/// variants collide in one directory.
-///
-/// # Errors
-/// Returns [`InstructionError::AmbiguousAgentsFile`] on collision.
-pub fn select_agents_file_name(
-    directory: &Path,
-    entry_names: &[OsString],
-) -> Result<Option<OsString>, InstructionError> {
-    let mut matches: Vec<&OsString> = entry_names
+/// Selects the exact `AGENTS.md` directory entry, if present.
+#[must_use]
+pub fn select_agents_file_name(entry_names: &[OsString]) -> Option<OsString> {
+    entry_names
         .iter()
-        .filter(|name| name.to_string_lossy().eq_ignore_ascii_case("agents.md"))
-        .collect();
-    matches.sort();
-    matches.dedup();
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(Some(matches[0].clone())),
-        _ => Err(InstructionError::AmbiguousAgentsFile {
-            directory: directory.to_path_buf(),
-            candidates: matches.iter().map(|name| directory.join(name)).collect(),
-        }),
-    }
+        .find(|name| name.as_os_str() == OsStr::new("AGENTS.md"))
+        .cloned()
 }
 
-/// Finds the single AGENTS.md variant in `directory`, if any.
+/// Finds the exact `AGENTS.md` entry in `directory`, if any.
 ///
-/// Case-insensitive matching; multiple case-folded variants are a blocking
-/// ambiguity. A missing directory yields `Ok(None)` — no scope exists
-/// there, which is not an error. File contents are never read.
+/// A missing directory yields `Ok(None)` — no scope exists there, which is
+/// not an error. File contents are never read.
 ///
 /// # Errors
-/// Returns [`InstructionError::AmbiguousAgentsFile`] on collision and
-/// [`InstructionError::Io`] on directory-read failures other than `NotFound`.
+/// Returns [`InstructionError::Io`] on directory-read failures other than
+/// `NotFound`.
 pub fn find_agents_file(directory: &Path) -> Result<Option<PathBuf>, InstructionError> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -188,7 +167,7 @@ pub fn find_agents_file(directory: &Path) -> Result<Option<PathBuf>, Instruction
     for entry in entries {
         names.push(entry?.file_name());
     }
-    Ok(select_agents_file_name(directory, &names)?.map(|name| directory.join(name)))
+    Ok(select_agents_file_name(&names).map(|name| directory.join(name)))
 }
 
 /// The applicable scope set for one batch, canonicalized and deduplicated.
@@ -429,8 +408,8 @@ impl InstructionResolver {
     /// results are never cached across calls.
     ///
     /// # Errors
-    /// Returns [`InstructionError::AmbiguousAgentsFile`] when any scanned
-    /// directory holds colliding case-folded variants.
+    /// Returns [`InstructionError::Io`] when a scanned directory cannot be
+    /// read.
     pub fn discover_scopes(
         &self,
         target_directories: &[PathBuf],
@@ -563,7 +542,6 @@ impl InstructionResolver {
             resolver: self,
             global_bundle,
             visited: HashSet::new(),
-            stack: Vec::new(),
             sources: Vec::new(),
             source_identities: Vec::new(),
             total_bytes: 0,
@@ -589,7 +567,6 @@ struct ImportExpander<'a> {
     resolver: &'a InstructionResolver,
     global_bundle: bool,
     visited: HashSet<PathBuf>,
-    stack: Vec<PathBuf>,
     sources: Vec<PathBuf>,
     source_identities: Vec<(PathBuf, PathBuf)>,
     total_bytes: u64,
@@ -602,23 +579,18 @@ impl ImportExpander<'_> {
         canonical: &Path,
         depth: u32,
     ) -> Result<String, InstructionError> {
-        if depth > MAX_IMPORT_DEPTH {
-            return Err(InstructionError::LimitExceeded(format!(
-                "import depth exceeds {MAX_IMPORT_DEPTH} at `{}`",
-                canonical.display()
-            )));
-        }
-        if self.stack.contains(&canonical.to_path_buf()) {
-            return Err(InstructionError::IncludeCycle {
-                path: canonical.to_path_buf(),
-            });
-        }
         self.source_identities
             .push((source_path.to_path_buf(), canonical.to_path_buf()));
         if !self.visited.insert(canonical.to_path_buf()) {
             // A source imported more than once expands only at its first
             // occurrence; the repeated directive collapses to nothing.
             return Ok(String::new());
+        }
+        if depth > MAX_IMPORT_DEPTH {
+            return Err(InstructionError::LimitExceeded(format!(
+                "import depth exceeds {MAX_IMPORT_DEPTH} at `{}`",
+                canonical.display()
+            )));
         }
         let source_index = u32::try_from(self.sources.len())
             .unwrap_or(u32::MAX)
@@ -647,14 +619,11 @@ impl ImportExpander<'_> {
             content_fingerprint: sha256_hex(error.as_bytes()),
         })?;
         self.sources.push(canonical.to_path_buf());
-        self.stack.push(canonical.to_path_buf());
         let importer_dir = canonical
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let expanded = self.expand_lines(&text, &importer_dir, depth)?;
-        self.stack.pop();
-        Ok(expanded)
+        self.expand_lines(&text, &importer_dir, depth)
     }
 
     fn expand_lines(
@@ -690,8 +659,7 @@ impl ImportExpander<'_> {
             if fence.is_none()
                 && let Some(raw_target) = import_directive(trimmed)
             {
-                let (source_path, canonical) =
-                    self.resolve_import(importer_dir, raw_target, depth)?;
+                let (source_path, canonical) = self.resolve_import(importer_dir, raw_target)?;
                 let included = self.expand_canonical(&source_path, &canonical, depth + 1)?;
                 if included.is_empty() {
                     // Repeated import: the directive collapses entirely.
@@ -744,7 +712,7 @@ impl ImportExpander<'_> {
         let mut cursor = 0;
         for (range, target) in links {
             output.push_str(&text[cursor..range.end]);
-            let (source_path, canonical) = self.resolve_import(importer_dir, &target, depth)?;
+            let (source_path, canonical) = self.resolve_import(importer_dir, &target)?;
             let included = self.expand_canonical(&source_path, &canonical, depth + 1)?;
             if !included.is_empty() {
                 let display = escape_attribute(
@@ -773,13 +741,7 @@ impl ImportExpander<'_> {
         &self,
         importer_dir: &Path,
         raw_target: &str,
-        depth: u32,
     ) -> Result<(PathBuf, PathBuf), InstructionError> {
-        if depth + 1 > MAX_IMPORT_DEPTH {
-            return Err(InstructionError::LimitExceeded(format!(
-                "import depth exceeds {MAX_IMPORT_DEPTH} at `{raw_target}`"
-            )));
-        }
         let candidate = Path::new(raw_target);
         let joined =
             if let Ok(relative) = candidate.strip_prefix(Path::new("~")) {

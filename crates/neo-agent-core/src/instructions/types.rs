@@ -279,7 +279,8 @@ pub struct InstructionReplacement {
     pub new_revision: String,
 }
 
-/// Typed failure kinds for blocked instruction bundles.
+/// Typed failure kinds for blocked instruction bundles. `IncludeCycle` and
+/// `AmbiguousAgentsFile` remain for historical session decoding only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionFailureKind {
@@ -359,11 +360,6 @@ pub struct InstructionFingerprint {
 /// [`InstructionFailureKind`]; the engine never panics on filesystem state.
 #[derive(Debug, thiserror::Error)]
 pub enum InstructionError {
-    #[error("multiple case-folded AGENTS.md variants in `{directory}`: {}", candidates.iter().map(|c| format!("`{}`", c.display())).collect::<Vec<_>>().join(", "))]
-    AmbiguousAgentsFile {
-        directory: PathBuf,
-        candidates: Vec<PathBuf>,
-    },
     #[error("import `{path}` not found")]
     MissingImport { path: PathBuf },
     #[error("source `{path}` is unreadable: {reason}")]
@@ -373,8 +369,6 @@ pub enum InstructionError {
         path: PathBuf,
         content_fingerprint: String,
     },
-    #[error("import cycle reaches `{path}`")]
-    IncludeCycle { path: PathBuf },
     #[error("instruction limit exceeded: {0}")]
     LimitExceeded(String),
     #[error("import `{path}` canonicalizes outside the allowed instruction roots")]
@@ -390,11 +384,9 @@ impl InstructionError {
     #[must_use]
     pub fn failure_kind(&self) -> InstructionFailureKind {
         match self {
-            Self::AmbiguousAgentsFile { .. } => InstructionFailureKind::AmbiguousAgentsFile,
             Self::MissingImport { .. } => InstructionFailureKind::MissingImport,
             Self::UnreadableSource { .. } | Self::Io(_) => InstructionFailureKind::UnreadableSource,
             Self::InvalidEncoding { .. } => InstructionFailureKind::InvalidEncoding,
-            Self::IncludeCycle { .. } => InstructionFailureKind::IncludeCycle,
             Self::LimitExceeded(_) => InstructionFailureKind::LimitExceeded,
             Self::UntrustedImport { .. } => InstructionFailureKind::UntrustedImport,
             Self::UnstableSource { .. } => InstructionFailureKind::UnstableSource,
@@ -405,11 +397,9 @@ impl InstructionError {
     #[must_use]
     pub fn failure_path(&self) -> PathBuf {
         match self {
-            Self::AmbiguousAgentsFile { directory, .. } => directory.clone(),
             Self::MissingImport { path }
             | Self::UnreadableSource { path, .. }
             | Self::InvalidEncoding { path, .. }
-            | Self::IncludeCycle { path }
             | Self::UntrustedImport { path }
             | Self::UnstableSource { path } => path.clone(),
             Self::LimitExceeded(_) | Self::Io(_) => PathBuf::new(),
