@@ -794,6 +794,13 @@ model = "gpt-4.1"
     }
 
     #[test]
+    fn tui_config_rejects_removed_sixel_protocol() {
+        let result = toml::from_str::<TuiConfig>("image_protocol = \"sixel\"");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn tui_config_defaults_notification_fields() {
         use neo_tui::notify::NotificationMode;
 

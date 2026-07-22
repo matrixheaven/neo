@@ -191,7 +191,7 @@ Context compaction is enabled by default. Fresh config writes include this table
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `image_protocol` | `auto`\|`kitty`\|`iterm2`\|`sixel`\|`none` | `auto` | Image rendering protocol preference |
+| `image_protocol` | `auto`\|`kitty`\|`iterm2`\|`none` | `auto` | Image rendering protocol preference |
 | `keybindings` | map<string, string[]> | `{}` | Custom keybindings (action → list of keys) |
 | `completion_notification` | `none`\|`bell`\|`system`\|`all` | `bell` | Task completion notification method |
 | `question_notification` | `none`\|`bell`\|`system`\|`all` | `none` | Notification method triggered by `AskUserQuestion` |

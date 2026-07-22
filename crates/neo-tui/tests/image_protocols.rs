@@ -3,9 +3,8 @@ use neo_tui::shell::InlineImageRenderCache;
 use neo_tui::terminal_image::{
     ImageDisplayOptions, ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy,
     ImageSource, InlineImage, Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions,
-    KittyImageFormat, NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor,
-    TerminalImageCapabilities, encode_iterm2_inline_image, encode_kitty_graphics,
-    encode_sixel_image,
+    KittyImageFormat, NegotiatedImageProtocol, TerminalImageCapabilities,
+    encode_iterm2_inline_image, encode_kitty_graphics,
 };
 use neo_tui::transcript::InlineImageRender;
 
@@ -56,38 +55,6 @@ fn iterm2_inline_image_encodes_metadata_and_payload_as_osc_1337() {
 }
 
 #[test]
-fn sixel_image_encodes_indexed_pixels_as_dcs_sixel_payload() {
-    let encoded = encode_sixel_image(
-        &[0, 1, 1, 0],
-        &SixelImageOptions::new(
-            2,
-            2,
-            vec![
-                SixelPaletteColor::rgb_percent(100, 0, 0),
-                SixelPaletteColor::rgb_percent(0, 0, 100),
-            ],
-        ),
-    )
-    .expect("valid sixel image sequence");
-
-    assert_eq!(
-        encoded,
-        "\x1bPq\"1;1;2;2#0;2;100;0;0#1;2;0;0;100#0@A$#1A@\x1b\\"
-    );
-}
-
-#[test]
-fn sixel_image_encodes_pixels_across_six_row_bands() {
-    let encoded = encode_sixel_image(
-        &[0, 0, 0, 0, 0, 0, 0],
-        &SixelImageOptions::new(1, 7, vec![SixelPaletteColor::rgb_percent(0, 100, 0)]),
-    )
-    .expect("valid multi-band sixel image sequence");
-
-    assert_eq!(encoded, "\x1bPq\"1;1;1;7#0;2;0;100;0#0~-#0@\x1b\\");
-}
-
-#[test]
 fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
     assert_eq!(
         encode_kitty_graphics(b"", &KittyGraphicsOptions::new(KittyImageFormat::Png)),
@@ -104,41 +71,6 @@ fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
         encode_iterm2_inline_image(b"", &Iterm2InlineImageOptions::new()),
         Err(ImageProtocolError::EmptyImageData)
     );
-    assert_eq!(
-        encode_sixel_image(
-            &[],
-            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
-        ),
-        Err(ImageProtocolError::EmptyImageData)
-    );
-    assert_eq!(
-        encode_sixel_image(
-            &[0],
-            &SixelImageOptions::new(0, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
-        ),
-        Err(ImageProtocolError::InvalidDimension)
-    );
-    assert_eq!(
-        encode_sixel_image(
-            &[0, 0],
-            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
-        ),
-        Err(ImageProtocolError::InvalidPixelDataLength)
-    );
-    assert_eq!(
-        encode_sixel_image(
-            &[1],
-            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
-        ),
-        Err(ImageProtocolError::InvalidColorIndex)
-    );
-    assert_eq!(
-        encode_sixel_image(
-            &[0],
-            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(101, 0, 0)]),
-        ),
-        Err(ImageProtocolError::InvalidPalette)
-    );
 }
 
 #[test]
@@ -153,20 +85,8 @@ fn image_protocol_errors_have_stable_messages() {
             "kitty chunk size must be greater than zero",
         ),
         (
-            ImageProtocolError::InvalidColorIndex,
-            "sixel pixel data contains a palette index out of range",
-        ),
-        (
             ImageProtocolError::InvalidDimension,
             "image dimensions must be greater than zero",
-        ),
-        (
-            ImageProtocolError::InvalidPalette,
-            "sixel palette must not be empty and RGB percentage values must be <= 100",
-        ),
-        (
-            ImageProtocolError::InvalidPixelDataLength,
-            "sixel pixel data length must exactly match image width multiplied by height",
         ),
     ];
 
@@ -188,16 +108,10 @@ fn image_protocol_auto_negotiates_available_terminal_protocol() {
         NegotiatedImageProtocol::Iterm2
     );
     assert_eq!(
-        ImageRenderPolicy::new(ImageProtocolPreference::Auto)
-            .negotiate(TerminalImageCapabilities::default().with_sixel(true)),
-        NegotiatedImageProtocol::None
-    );
-    assert_eq!(
         ImageRenderPolicy::new(ImageProtocolPreference::None).negotiate(
             TerminalImageCapabilities::default()
                 .with_kitty(true)
                 .with_iterm2(true)
-                .with_sixel(true)
         ),
         NegotiatedImageProtocol::None
     );
@@ -321,30 +235,8 @@ fn terminal_image_thumbnail_falls_back_without_inline_support_or_space() {
 
     let rendered = policy.render_inline_image(
         &image,
-        TerminalImageCapabilities::default().with_sixel(true),
+        TerminalImageCapabilities::default(),
         &ImageDisplayOptions::thumbnail(640, 480, "[image #1 (640x480)]").with_max_cols(0),
-    );
-
-    assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
-    assert_eq!(rendered.lines, vec!["[image #1 (640x480)]"]);
-    assert!(rendered.escape_sequence.is_none());
-}
-
-#[test]
-fn terminal_image_thumbnail_does_not_fake_sixel_for_encoded_image_bytes() {
-    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Sixel);
-    let image = InlineImage::bytes(
-        "img-local",
-        "image/png",
-        [137, 80, 78, 71],
-        None::<String>,
-        ImageSource::Base64,
-    );
-
-    let rendered = policy.render_inline_image(
-        &image,
-        TerminalImageCapabilities::default().with_sixel(true),
-        &ImageDisplayOptions::thumbnail(640, 480, "[image #1 (640x480)]"),
     );
 
     assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);

@@ -2890,7 +2890,6 @@ fn auto_image_protocol_uses_positive_runtime_hints_on_local_terminals() {
 
     assert!(capabilities.kitty());
     assert!(!capabilities.iterm2());
-    assert!(!capabilities.sixel());
 }
 
 #[test]
@@ -2905,7 +2904,6 @@ fn auto_image_protocol_detects_ghostty_as_kitty_graphics() {
 
     assert!(capabilities.kitty());
     assert!(!capabilities.iterm2());
-    assert!(!capabilities.sixel());
 }
 
 #[test]
@@ -2944,7 +2942,6 @@ fn explicit_image_protocol_uses_matching_static_terminal_hints() {
 
     assert!(capabilities.kitty());
     assert!(!capabilities.iterm2());
-    assert!(!capabilities.sixel());
 }
 
 #[test]
@@ -2979,7 +2976,6 @@ fn terminal_capabilities_wt_session_disables_images_keeps_ansi() {
     assert!(capabilities.can_run_tui());
     assert!(!capabilities.image.kitty());
     assert!(!capabilities.image.iterm2());
-    assert!(!capabilities.image.sixel());
 }
 
 #[test]

@@ -95,8 +95,7 @@ fn detect_image_capabilities(
                 || term_program.contains("wezterm")
                 || term_program.contains("ghostty"),
         )
-        .with_iterm2(term_program.contains("iterm"))
-        .with_sixel(term.contains("sixel") || has_env("SIXEL"));
+        .with_iterm2(term_program.contains("iterm"));
 
     match protocol {
         ImageProtocolPreference::Kitty => {
@@ -104,9 +103,6 @@ fn detect_image_capabilities(
         }
         ImageProtocolPreference::Iterm2 => {
             TerminalImageCapabilities::default().with_iterm2(static_hints.iterm2())
-        }
-        ImageProtocolPreference::Sixel => {
-            TerminalImageCapabilities::default().with_sixel(static_hints.sixel())
         }
         ImageProtocolPreference::Auto => static_hints,
         ImageProtocolPreference::None => TerminalImageCapabilities::default(),

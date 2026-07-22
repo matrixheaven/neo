@@ -4,11 +4,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod iterm2;
 pub mod kitty;
-pub mod sixel;
 
 pub use iterm2::{Iterm2Dimension, Iterm2InlineImageOptions, encode_iterm2_inline_image};
 pub use kitty::{KittyGraphicsOptions, KittyImageFormat, encode_kitty_graphics};
-pub use sixel::{SixelImageOptions, SixelPaletteColor, encode_sixel_image};
 
 pub(super) const STRING_TERMINATOR: &str = "\x1b\\";
 const MAX_KITTY_IMAGE_DIMENSION: u32 = 16_384;
@@ -23,7 +21,6 @@ pub enum ImageProtocolPreference {
     Auto,
     Kitty,
     Iterm2,
-    Sixel,
     None,
 }
 
@@ -33,14 +30,12 @@ pub enum NegotiatedImageProtocol {
     None,
     Kitty,
     Iterm2,
-    Sixel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalImageCapabilities {
     kitty: bool,
     iterm2: bool,
-    sixel: bool,
 }
 
 impl TerminalImageCapabilities {
@@ -55,11 +50,6 @@ impl TerminalImageCapabilities {
     }
 
     #[must_use]
-    pub const fn sixel(self) -> bool {
-        self.sixel
-    }
-
-    #[must_use]
     pub const fn with_kitty(mut self, supported: bool) -> Self {
         self.kitty = supported;
         self
@@ -68,12 +58,6 @@ impl TerminalImageCapabilities {
     #[must_use]
     pub const fn with_iterm2(mut self, supported: bool) -> Self {
         self.iterm2 = supported;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_sixel(mut self, supported: bool) -> Self {
-        self.sixel = supported;
         self
     }
 }
@@ -110,10 +94,8 @@ impl ImageRenderPolicy {
             ImageProtocolPreference::Iterm2 if capabilities.iterm2 => {
                 NegotiatedImageProtocol::Iterm2
             }
-            ImageProtocolPreference::Sixel if capabilities.sixel => NegotiatedImageProtocol::Sixel,
             ImageProtocolPreference::Kitty
             | ImageProtocolPreference::Iterm2
-            | ImageProtocolPreference::Sixel
             | ImageProtocolPreference::None => NegotiatedImageProtocol::None,
         }
     }
@@ -185,7 +167,7 @@ impl ImageRenderPolicy {
                     .with_height(Iterm2Dimension::Cells(cell_height)),
             )
             .ok(),
-            NegotiatedImageProtocol::Sixel | NegotiatedImageProtocol::None => None,
+            NegotiatedImageProtocol::None => None,
         };
         let lines = escape_sequence.as_ref().map_or_else(
             || vec![fallback],
@@ -606,10 +588,7 @@ fn div_round(numerator: u64, denominator: u64) -> u64 {
 pub enum ImageProtocolError {
     EmptyImageData,
     InvalidChunkSize,
-    InvalidColorIndex,
     InvalidDimension,
-    InvalidPalette,
-    InvalidPixelDataLength,
 }
 
 impl ImageProtocolError {
@@ -617,14 +596,7 @@ impl ImageProtocolError {
         match self {
             Self::EmptyImageData => "image data must not be empty",
             Self::InvalidChunkSize => "kitty chunk size must be greater than zero",
-            Self::InvalidColorIndex => "sixel pixel data contains a palette index out of range",
             Self::InvalidDimension => "image dimensions must be greater than zero",
-            Self::InvalidPalette => {
-                "sixel palette must not be empty and RGB percentage values must be <= 100"
-            }
-            Self::InvalidPixelDataLength => {
-                "sixel pixel data length must exactly match image width multiplied by height"
-            }
         }
     }
 }
