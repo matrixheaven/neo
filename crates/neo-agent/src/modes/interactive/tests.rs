@@ -35,49 +35,6 @@ const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000602";
 const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000603";
 const SESSION_NEW: &str = "session_00000000-0000-4000-8000-000000000604";
 
-#[tokio::test]
-async fn interactive_session_path_uses_main_agent_wire() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
-    let path = super::controller_factory::create_interactive_session_path(&config)
-        .await
-        .expect("session path");
-
-    assert!(path.ends_with(Path::new("agents").join("main").join("wire.jsonl")));
-    let session_root = path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("session root");
-    assert!(session_root.join("state.json").is_file());
-    let session_id = session_root
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .expect("session id");
-    let neo_home = crate::config::neo_home().expect("neo home");
-    let indexed = neo_agent_core::session::SessionIndex::new(&neo_home)
-        .find(session_id)
-        .expect("read session index")
-        .expect("interactive session should be indexed");
-    assert_eq!(indexed.session_dir, workspace_sessions_dir(&config));
-    assert_eq!(indexed.workdir, config.project_dir);
-
-    let state = neo_agent_core::session::SessionStateStore::new(session_root)
-        .read()
-        .await
-        .expect("read session state");
-    let main = state.agents.get("main").expect("main agent record");
-    assert_eq!(
-        main.record_dir,
-        neo_agent_core::session::relative_agent_record_dir("main")
-    );
-    assert_eq!(main.kind, neo_agent_core::session::SessionAgentKind::Main);
-    assert_eq!(main.parent_agent_id, None);
-    assert_eq!(main.role, None);
-    assert_eq!(main.swarm_id, None);
-    assert_eq!(main.swarm_item, None);
-}
-
 fn test_workspace_root() -> PathBuf {
     let dir = std::env::temp_dir().join("neo-test-workspace");
     let _ = std::fs::create_dir_all(&dir);

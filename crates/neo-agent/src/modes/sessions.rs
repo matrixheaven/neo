@@ -8,9 +8,11 @@ use neo_agent_core::AgentMessage;
 use neo_agent_core::session::export::{ExportConversation, ExportMessage, HtmlExportOptions};
 use neo_agent_core::session::{
     JsonlSessionReader, SessionCompactionOptions, SessionIndex, SessionIndexEntry,
-    SessionMetadataStore, SessionSummary, compact_jsonl_session, validate_session_id,
+    SessionMetadataStore, SessionState, SessionStateStore, SessionSummary, compact_jsonl_session,
+    main_agent_wire_path, validate_session_id,
 };
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::config::{AppConfig, workspace_sessions_dir};
 
@@ -54,6 +56,56 @@ pub fn list(config: &AppConfig) -> anyhow::Result<String> {
 pub(crate) enum SessionPickerScope {
     Workspace,
     All,
+}
+
+pub(crate) struct CreatedSession {
+    pub session_id: String,
+    pub wire_path: PathBuf,
+}
+
+pub(crate) async fn create_new_session(config: &AppConfig) -> anyhow::Result<CreatedSession> {
+    let bucket_dir = workspace_sessions_dir(config);
+    tokio::fs::create_dir_all(&bucket_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create sessions directory {}",
+                bucket_dir.display()
+            )
+        })?;
+
+    loop {
+        let session_id = format!("session_{}", Uuid::new_v4());
+        let session_dir = bucket_dir.join(&session_id);
+        if tokio::fs::metadata(&session_dir).await.is_err() {
+            tokio::fs::create_dir_all(&session_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to create session directory {}",
+                        session_dir.display()
+                    )
+                })?;
+            let wire_path = main_agent_wire_path(&session_dir);
+            if let Some(parent) = wire_path.parent() {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                    format!("failed to create main agent directory {}", parent.display())
+                })?;
+            }
+            let mut state = SessionState::new();
+            state.ensure_main_agent();
+            SessionStateStore::new(&session_dir)
+                .write(&state)
+                .with_context(|| {
+                    format!("failed to write session state {}", session_dir.display())
+                })?;
+            index_new_session(config, &session_id)?;
+            return Ok(CreatedSession {
+                session_id,
+                wire_path,
+            });
+        }
+    }
 }
 
 pub(crate) fn index_new_session(config: &AppConfig, session_id: &str) -> anyhow::Result<()> {
@@ -376,7 +428,77 @@ fn message_role(message: &AgentMessage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use neo_agent_core::PermissionMode;
+
+    use crate::config::{Defaults, McpConfig, RuntimeConfig, TuiConfig};
+
     use super::*;
+
+    #[test]
+    fn create_new_session_initializes_shared_state_and_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let neo_home = temp.path().join("neo-home");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: neo_home.join("sessions"),
+            permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(std::sync::RwLock::new(PermissionMode::default())),
+            workspace_policy: Arc::new(std::sync::RwLock::new(None)),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            system_prompt_file: None,
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir: temp.path().join("project"),
+            config_path: neo_home.join("config.toml"),
+            config_file_exists: true,
+        };
+
+        temp_env::with_var("NEO_HOME", Some(neo_home.as_os_str()), || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(async {
+                let created = create_new_session(&config).await.expect("create session");
+                let session_dir = workspace_sessions_dir(&config).join(&created.session_id);
+
+                assert_eq!(created.wire_path, main_agent_wire_path(&session_dir));
+                validate_session_id(&created.session_id).expect("valid generated session id");
+                let state = SessionStateStore::new(&session_dir)
+                    .read()
+                    .await
+                    .expect("read session state");
+                assert_eq!(
+                    state.agents.get("main").map(|main| &main.record_dir),
+                    Some(&neo_agent_core::session::relative_agent_record_dir("main"))
+                );
+                let indexed = SessionIndex::new(&neo_home)
+                    .find(&created.session_id)
+                    .expect("read session index")
+                    .expect("session is indexed");
+                assert_eq!(indexed.session_dir, workspace_sessions_dir(&config));
+                assert_eq!(indexed.workdir, config.project_dir);
+            });
+        });
+    }
 
     #[test]
     fn human_transcript_outputs_prefer_user_display_text() {

@@ -18,8 +18,8 @@ pub(crate) use models_cli::list_configured_models;
 
 // Re-export session helpers used within this module.
 use session_mgmt::{
-    create_session_path, latest_session_id, record_initial_session_title, record_session_activity,
-    session_id_from_path, session_root_from_wire_path,
+    latest_session_id, record_initial_session_title, record_session_activity, session_id_from_path,
+    session_root_from_wire_path,
 };
 
 use std::{
@@ -112,8 +112,9 @@ async fn run_prompt_with_retry_notices(
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
-    let session_path = create_session_path(config).await?;
-    let session_id = session_id_from_path(&session_path)?;
+    let created = crate::modes::sessions::create_new_session(config).await?;
+    let session_path = created.wire_path;
+    let session_id = created.session_id;
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
@@ -351,8 +352,9 @@ async fn prepare_new_streaming_turn(
         .filter_map(|c| c.as_text())
         .collect::<Vec<_>>()
         .join(" ");
-    let session_path = create_session_path(config).await?;
-    let session_id = session_id_from_path(&session_path)?;
+    let created = crate::modes::sessions::create_new_session(config).await?;
+    let session_path = created.wire_path;
+    let session_id = created.session_id;
     let writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
@@ -864,7 +866,7 @@ mod tests {
         tool_registry_for_config,
     };
     use super::session_mgmt::{
-        create_session_path, latest_session_id, session_id_from_path, session_root_from_wire_path,
+        latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
     use super::{PendingApproval, run_prompt_with_runtime, runtime_for_config, user_message};
     use crate::config::{
@@ -1042,86 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn create_session_path_uses_named_uuid_session_ids() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config = AppConfig {
-            default_model: "test-model".to_owned(),
-            default_provider: "openai".to_owned(),
-            api_key_env: None,
-            providers: BTreeMap::new(),
-            models: BTreeMap::new(),
-            model_scope: Vec::new(),
-            sessions_dir: temp.path().join(".neo/sessions"),
-            permission_mode: PermissionMode::default(),
-            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
-                PermissionMode::default(),
-            )),
-            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            defaults: Defaults {
-                mode: "events".to_owned(),
-            },
-            runtime: RuntimeConfig::default(),
-            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
-            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
-            tui: TuiConfig::default(),
-            theme: crate::themes::ResolvedTheme::default(),
-            mcp: McpConfig::default(),
-            prompt_templates: Vec::new(),
-            system_prompt_file: None,
-            extra_skill_dirs: Vec::new(),
-            skill_path: Vec::new(),
-            project_trusted: true,
-            project_trust: crate::trust::ProjectTrustState::NotRequired,
-            project_dir: temp.path().to_path_buf(),
-            config_path: temp.path().join(".neo/config.toml"),
-            config_file_exists: true,
-        };
-
-        let neo_home = temp.path().join("neo-home");
-        temp_env::with_vars([("NEO_HOME", Some(neo_home.as_os_str()))], || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build test runtime");
-            runtime.block_on(async {
-                let path = create_session_path(&config)
-                    .await
-                    .expect("session path is created");
-                let session_dir = path
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .and_then(std::path::Path::parent)
-                    .expect("session directory");
-                let session_id = session_dir
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .expect("session id");
-
-                assert!(session_id.starts_with("session_"));
-                assert_eq!(session_id.len(), "session_".len() + 36);
-                assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
-                let indexed = neo_agent_core::session::SessionIndex::new(&neo_home)
-                    .find(session_id)
-                    .expect("read session index")
-                    .expect("run session should be indexed");
-                assert_eq!(
-                    indexed.session_dir,
-                    crate::config::workspace_sessions_dir(&config)
-                );
-                assert_eq!(indexed.workdir, config.project_dir);
-                assert!(
-                    path.ends_with(
-                        std::path::Path::new("agents")
-                            .join("main")
-                            .join("wire.jsonl")
-                    )
-                );
-                assert!(session_dir.join("state.json").is_file());
-            });
-        });
-    }
-
-    #[test]
     fn user_message_preserves_injection_origin() {
         let origin = MessageOrigin::injection("init");
 
@@ -1178,9 +1100,10 @@ mod tests {
             config_file_exists: true,
         };
 
-        let wire_path = create_session_path(&config)
+        let wire_path = crate::modes::sessions::create_new_session(&config)
             .await
-            .expect("session path is created");
+            .expect("session path is created")
+            .wire_path;
         let session_root =
             session_root_from_wire_path(&wire_path).expect("session root from wire path");
 

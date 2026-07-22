@@ -2,60 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use futures::StreamExt;
-use neo_agent_core::session::{
-    SessionMetadataStore, SessionState, SessionStateStore, main_agent_wire_path,
-};
+use neo_agent_core::session::{SessionMetadataStore, main_agent_wire_path};
 use neo_ai::{ChatMessage, ContentPart, RequestOptions};
-use uuid::Uuid;
 
 use crate::config::{AppConfig, workspace_sessions_dir};
 
 use super::PromptTurn;
-
-pub(super) async fn create_session_path(config: &AppConfig) -> anyhow::Result<PathBuf> {
-    let bucket_dir = workspace_sessions_dir(config);
-    tokio::fs::create_dir_all(&bucket_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create sessions directory {}",
-                bucket_dir.display()
-            )
-        })?;
-
-    loop {
-        let session_id = format!("session_{}", Uuid::new_v4());
-        let session_dir = bucket_dir.join(&session_id);
-        if tokio::fs::metadata(&session_dir).await.is_err() {
-            tokio::fs::create_dir_all(&session_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to create session directory {}",
-                        session_dir.display()
-                    )
-                })?;
-            let wire_path = initialize_session_dir(&session_dir).await?;
-            crate::modes::sessions::index_new_session(config, &session_id)?;
-            return Ok(wire_path);
-        }
-    }
-}
-
-async fn initialize_session_dir(session_dir: &Path) -> anyhow::Result<PathBuf> {
-    let wire_path = main_agent_wire_path(session_dir);
-    if let Some(parent) = wire_path.parent() {
-        tokio::fs::create_dir_all(parent).await.with_context(|| {
-            format!("failed to create main agent directory {}", parent.display())
-        })?;
-    }
-    let mut state = SessionState::new();
-    state.ensure_main_agent();
-    SessionStateStore::new(session_dir)
-        .write(&state)
-        .with_context(|| format!("failed to write session state {}", session_dir.display()))?;
-    Ok(wire_path)
-}
 
 pub(super) fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
     let session_dir = session_root_from_wire_path(path)?;

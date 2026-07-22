@@ -1,10 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use neo_agent_core::session::{
-    SessionState, SessionStateStore, main_agent_wire_path, validate_session_id,
-};
+use anyhow::Result;
 
 use super::{
     AppConfig, ContextWindow, InputResult, InteractiveController, KeybindingsManager,
@@ -264,78 +261,6 @@ pub(super) fn same_work_dir(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
-}
-
-pub(super) async fn create_interactive_session_path(config: &AppConfig) -> Result<PathBuf> {
-    let bucket_dir = workspace_sessions_dir(config);
-    tokio::fs::create_dir_all(&bucket_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create sessions directory {}",
-                bucket_dir.display()
-            )
-        })?;
-
-    loop {
-        let session_id = format!("session_{}", uuid::Uuid::new_v4());
-        let session_dir = bucket_dir.join(&session_id);
-        if tokio::fs::metadata(&session_dir).await.is_err() {
-            tokio::fs::create_dir_all(&session_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to create session directory {}",
-                        session_dir.display()
-                    )
-                })?;
-            let wire_path = initialize_session_dir(&session_dir).await?;
-            crate::modes::sessions::index_new_session(config, &session_id)?;
-            return Ok(wire_path);
-        }
-    }
-}
-
-async fn initialize_session_dir(session_dir: &Path) -> Result<PathBuf> {
-    let wire_path = main_agent_wire_path(session_dir);
-    if let Some(parent) = wire_path.parent() {
-        tokio::fs::create_dir_all(parent).await.with_context(|| {
-            format!("failed to create main agent directory {}", parent.display())
-        })?;
-    }
-    let mut state = SessionState::new();
-    state.ensure_main_agent();
-    SessionStateStore::new(session_dir)
-        .write(&state)
-        .with_context(|| format!("failed to write session state {}", session_dir.display()))?;
-    Ok(wire_path)
-}
-
-pub(super) fn session_id_from_wire_path(path: &Path) -> Result<String> {
-    if path.file_name().and_then(std::ffi::OsStr::to_str) != Some("wire.jsonl") {
-        anyhow::bail!("invalid wire path {}", path.display());
-    }
-    let main_dir = path
-        .parent()
-        .with_context(|| format!("invalid wire path {}", path.display()))?;
-    if main_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("main") {
-        anyhow::bail!("invalid wire path {}", path.display());
-    }
-    let agents_dir = main_dir
-        .parent()
-        .with_context(|| format!("invalid wire path {}", path.display()))?;
-    if agents_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("agents") {
-        anyhow::bail!("invalid wire path {}", path.display());
-    }
-    let session_dir = agents_dir
-        .parent()
-        .with_context(|| format!("invalid wire path {}", path.display()))?;
-    let id = session_dir
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
-    validate_session_id(id).map_err(|_| anyhow::anyhow!("invalid session id {id:?}"))?;
-    Ok(id.to_owned())
 }
 
 pub(super) fn current_unix_timestamp() -> String {
