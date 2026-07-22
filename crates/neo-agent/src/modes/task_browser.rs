@@ -19,6 +19,7 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
         BackgroundTaskKind::Question => TaskBrowserKind::Question,
         BackgroundTaskKind::Delegate => TaskBrowserKind::Delegate,
         BackgroundTaskKind::DelegateSwarm => TaskBrowserKind::DelegateSwarm,
+        BackgroundTaskKind::Workflow => TaskBrowserKind::Workflow,
     };
     let status = map_status(snapshot.status);
     let title = snapshot.delegate.as_ref().map_or_else(
@@ -125,6 +126,15 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
             }
             lines
         }
+        BackgroundTaskKind::Workflow => {
+            vec![
+                format!("id:          {}", snapshot.task_id),
+                format!("kind:        {}", snapshot.kind.as_str()),
+                format!("status:      {}", status.label()),
+                format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
+                format!("description: {}", snapshot.description),
+            ]
+        }
     }
 }
 
@@ -188,6 +198,9 @@ fn preview_lines(snapshot: &BackgroundTaskSnapshot) -> Vec<String> {
             } else {
                 vec!["No swarm data.".to_owned()]
             }
+        }
+        BackgroundTaskKind::Workflow => {
+            vec![format!("status: {}", snapshot.status.as_str())]
         }
     }
 }

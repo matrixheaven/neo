@@ -132,8 +132,9 @@ pub use ask_user::{
 };
 pub use background_tasks::{
     BackgroundTaskKind, BackgroundTaskManager, BackgroundTaskSnapshot, BackgroundTaskStatus,
-    CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskStopTool,
-    cap_output_details, cap_plain_output, format_collected_answers, task_list_result,
+    CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskPauseTool,
+    TaskResumeTool, TaskStopTool, cap_output_details, cap_plain_output, format_collected_answers,
+    task_list_result,
 };
 pub use bash::{
     ShellExecutionRequest, ShellExecutionResult, ShellTermination, execute_model_bash_for_runtime,
@@ -680,6 +681,8 @@ impl ToolRegistry {
         registry.register(background_tasks::TaskListTool);
         registry.register(background_tasks::TaskOutputTool);
         registry.register(background_tasks::TaskStopTool);
+        registry.register(background_tasks::TaskPauseTool);
+        registry.register(background_tasks::TaskResumeTool);
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
@@ -703,6 +706,8 @@ impl ToolRegistry {
         registry.register(background_tasks::TaskListTool);
         registry.register(background_tasks::TaskOutputTool);
         registry.register(background_tasks::TaskStopTool);
+        registry.register(background_tasks::TaskPauseTool);
+        registry.register(background_tasks::TaskResumeTool);
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);

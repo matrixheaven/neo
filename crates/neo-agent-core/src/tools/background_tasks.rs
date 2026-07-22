@@ -24,6 +24,7 @@ pub enum BackgroundTaskKind {
     Question,
     Delegate,
     DelegateSwarm,
+    Workflow,
 }
 
 impl BackgroundTaskKind {
@@ -34,6 +35,7 @@ impl BackgroundTaskKind {
             Self::Question => "question",
             Self::Delegate => "delegate",
             Self::DelegateSwarm => "delegate-swarm",
+            Self::Workflow => "workflow",
         }
     }
 }
@@ -132,6 +134,12 @@ enum BackgroundTaskState {
     DelegateSwarmFinished {
         status: BackgroundTaskStatus,
         snapshot: crate::multi_agent::SwarmSnapshot,
+    },
+    WorkflowRunning {
+        handle: crate::workflow::WorkflowHandle,
+    },
+    WorkflowFinished {
+        status: BackgroundTaskStatus,
     },
 }
 
@@ -488,6 +496,45 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Register a workflow background task with its runtime handle.
+    pub async fn start_workflow(
+        &self,
+        task_id: String,
+        description: String,
+        handle: crate::workflow::WorkflowHandle,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        tasks.insert(
+            task_id,
+            BackgroundTaskRecord {
+                description,
+                started_at: Instant::now(),
+                state: BackgroundTaskState::WorkflowRunning { handle },
+                detached: false,
+            },
+        );
+    }
+
+    /// Mark a workflow background task as finished.
+    pub async fn finish_workflow(&self, task_id: &str, status: BackgroundTaskStatus) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(record.state, BackgroundTaskState::WorkflowRunning { .. })
+        {
+            record.state = BackgroundTaskState::WorkflowFinished { status };
+        }
+    }
+
+    /// Get the workflow handle for a running workflow task.
+    pub async fn workflow_handle(&self, task_id: &str) -> Option<crate::workflow::WorkflowHandle> {
+        let tasks = self.inner.lock().await;
+        let record = tasks.get(task_id)?;
+        match &record.state {
+            BackgroundTaskState::WorkflowRunning { handle } => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
     pub async fn start_bash_foreground(
         &self,
         description: String,
@@ -724,6 +771,31 @@ impl BackgroundTaskManager {
                         description: record.description,
                         command,
                     }
+                }
+                BackgroundTaskState::WorkflowRunning { .. } => {
+                    // Stop a running workflow by cancelling it
+                    let record = tasks.get_mut(task_id).expect("record still exists");
+                    record.state = BackgroundTaskState::WorkflowFinished {
+                        status: BackgroundTaskStatus::Cancelled,
+                    };
+                    let snap = BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Workflow,
+                        status: BackgroundTaskStatus::Cancelled,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: None,
+                        swarm: None,
+                    };
+                    return Ok(snapshot_result(&snap, max_output_bytes));
+                }
+                BackgroundTaskState::WorkflowFinished { .. } => {
+                    return Ok(ToolResult::error(format!(
+                        "workflow {} already finished; terminal workflow state is immutable",
+                        task_id,
+                    )));
                 }
             }
         };
@@ -1014,6 +1086,8 @@ impl BackgroundTaskManager {
             | BackgroundTaskState::DelegateSwarmFinished { .. } => {
                 BackgroundTaskKind::DelegateSwarm
             }
+            BackgroundTaskState::WorkflowRunning { .. }
+            | BackgroundTaskState::WorkflowFinished { .. } => BackgroundTaskKind::Workflow,
         })
     }
 
@@ -1171,6 +1245,28 @@ impl BackgroundTaskManager {
                     swarm: Some(snapshot.clone()),
                 }
             }
+            BackgroundTaskState::WorkflowRunning { .. } => BackgroundTaskSnapshot {
+                task_id,
+                kind: BackgroundTaskKind::Workflow,
+                status: BackgroundTaskStatus::Running,
+                description,
+                elapsed,
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: None,
+            },
+            BackgroundTaskState::WorkflowFinished { status } => BackgroundTaskSnapshot {
+                task_id,
+                kind: BackgroundTaskKind::Workflow,
+                status: *status,
+                description,
+                elapsed,
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: None,
+            },
         }
     }
 }
@@ -1498,6 +1594,96 @@ fn status_from_agent_state(state: crate::multi_agent::AgentLifecycleState) -> Ba
         crate::multi_agent::AgentLifecycleState::Cancelled
         | crate::multi_agent::AgentLifecycleState::Interrupted => BackgroundTaskStatus::Cancelled,
         crate::multi_agent::AgentLifecycleState::TimedOut => BackgroundTaskStatus::TimedOut,
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TaskPauseInput {
+    #[schemars(description = "The workflow task ID to pause.")]
+    task_id: String,
+}
+
+pub struct TaskPauseTool;
+
+impl Tool for TaskPauseTool {
+    fn name(&self) -> &'static str {
+        "TaskPause"
+    }
+
+    fn description(&self) -> &'static str {
+        "Pause a running workflow task at the next durable invocation boundary.\n\n\
+         Only workflow tasks can be paused. Other task kinds return an unsupported error.\n\n\
+         The active delegate/swarm/bash child finishes before the workflow pauses.\n\
+         Use TaskResume to continue the paused workflow."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        schema::<TaskPauseInput>()
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let input: TaskPauseInput = parse_input(self.name(), input)?;
+            let Some(handle) = ctx.background_tasks.workflow_handle(&input.task_id).await else {
+                return Ok(ToolResult::error(format!(
+                    "TaskPause only supports workflow tasks, task `{}` not found or not a workflow",
+                    input.task_id
+                )));
+            };
+            handle
+                .pause(crate::workflow::WorkflowActor::Model)
+                .await
+                .map_err(|e| ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: format!("pause failed: {e}"),
+                })?;
+            Ok(ToolResult::ok(format!(
+                "workflow {} paused at next invocation boundary",
+                handle.run_id.0
+            )))
+        })
+    }
+}
+
+pub struct TaskResumeTool;
+
+impl Tool for TaskResumeTool {
+    fn name(&self) -> &'static str {
+        "TaskResume"
+    }
+
+    fn description(&self) -> &'static str {
+        "Resume a paused workflow task.\n\n\
+         Only paused workflow tasks can be resumed. Other task kinds return an unsupported error.\n\
+         The workflow re-executes its Lua source and replays matching invocations."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        schema::<TaskPauseInput>()
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let input: TaskPauseInput = parse_input(self.name(), input)?;
+            let Some(handle) = ctx.background_tasks.workflow_handle(&input.task_id).await else {
+                return Ok(ToolResult::error(format!(
+                    "TaskResume only supports workflow tasks, task `{}` not found or not a workflow",
+                    input.task_id
+                )));
+            };
+            handle
+                .resume(crate::workflow::WorkflowActor::Model)
+                .await
+                .map_err(|e| ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: format!("resume failed: {e}"),
+                })?;
+            Ok(ToolResult::ok(format!(
+                "workflow {} resumed",
+                handle.run_id.0
+            )))
+        })
     }
 }
 

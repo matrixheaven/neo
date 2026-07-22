@@ -4,6 +4,7 @@ pub enum TaskBrowserKind {
     Question,
     Delegate,
     DelegateSwarm,
+    Workflow,
 }
 
 impl TaskBrowserKind {
@@ -14,6 +15,7 @@ impl TaskBrowserKind {
             Self::Question => "question",
             Self::Delegate => "delegate",
             Self::DelegateSwarm => "delegate-swarm",
+            Self::Workflow => "workflow",
         }
     }
 }
