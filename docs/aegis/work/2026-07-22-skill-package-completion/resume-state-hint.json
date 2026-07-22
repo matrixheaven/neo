@@ -2,13 +2,11 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-22-skill-package-completion",
   "lastCheckpointRef": "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json",
-  "resumeInstruction": "Read the approved spec, amended plan, this checkpoint, and required baselines. Do not repeat broad Neo/Codex discovery. Preserve the dirty-tree fence and start with Task 0.",
+  "resumeInstruction": "Resume at final workspace validation and scoped commit; do not rerun broad exploration or edit unrelated Workflow/task-browser files.",
   "knownPartialWork": [
-    "Investigate Neo and Codex skill package structures.",
-    "Write and self-review the approved design spec.",
-    "Write the executable implementation plan and constrained handoff prompt.",
-    "Validate task-owned Aegis artifacts and commit the initial documentation bundle.",
-    "Amend the spec, Task 6, and handoff for create-skill and self-evo."
+    "Restore symlink-view discovery and canonical slash labels.",
+    "Complete typed metadata, CreateSkill preflight/reporting, both built-in author contracts, docs, ADR, and baseline.",
+    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe."
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-07-22-skill-package-completion/10-intent.md",
@@ -16,6 +14,7 @@
     "docs/aegis/work/2026-07-22-skill-package-completion/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "Do not treat documentation as runtime evidence, merge create-skill and self-evo, skip their behavior scenarios, treat prompt substring tests as sufficient, or stage unrelated dirty files."
+    "Do not assume full Clippy is green; its seven current errors are in unrelated Workflow files.",
+    "Do not stage existing RunWorkflow INDEX entries or pre-staged task-browser changes."
   ]
 }

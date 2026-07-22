@@ -1,5 +1,7 @@
 # Neo Skill Package Completion Implementation Plan
 
+Execution status: `completed with bounded external verification gaps`
+
 > Execution owner: use `aegis:executing-plans` for inline execution or
 > `aegis:subagent-driven-development` when the active host permits independent
 > agents. Maintain the existing long-task checkpoint throughout execution.
@@ -505,19 +507,20 @@ dependency summaries.
 
 **Steps:**
 
-1. Make completion labels use `skill.display_name()` while insertion remains
+1. Make completion labels and insertion both use
    `format!("/skill:{}", skill.name)`.
-2. Make completion descriptions use `skill.short_description()` with manifest
-   fallback.
+2. Make completion descriptions use `skill.display_name()` as an optional
+   prefix and `skill.short_description()` with manifest fallback.
 3. Keep `write_available_skill` on canonical name, manifest description, and
    `whenToUse`; add no display metadata.
 4. Extend `ListSkills` lines with optional display and dependency summaries,
    then append concise diagnostics after tier sections.
-5. Add `completion_uses_host_label_but_inserts_canonical_skill_name`.
+5. Add
+   `completion_keeps_full_skill_command_and_uses_host_description_fallback`.
 6. Run:
 
    ```bash
-   rtk cargo test --package neo-agent --bin neo -- modes::interactive::tests::completion_uses_host_label_but_inserts_canonical_skill_name --exact --nocapture --include-ignored
+   rtk cargo test --package neo-agent --bin neo -- modes::interactive::tests::completion_keeps_full_skill_command_and_uses_host_description_fallback --exact --nocapture --include-ignored
    ```
 
 7. Add/update core catalog test
@@ -719,7 +722,7 @@ the approved spec; no new product code should appear here.
 3. Run lingering-reference checks:
 
    ```bash
-   rtk rg -n "SkillType|skill_type|slash_commands|slashCommands" crates/neo-agent-core/src crates/neo-agent/src
+   rtk rg -n "SkillType|skill_type|slashCommands|slash_commands[[:space:]]*:" crates/neo-agent-core/src crates/neo-agent/src
    rtk rg -n "type: (prompt|inline|flow)" crates/neo-agent-core/src/skills/builtin
    rtk rg -n "render_loaded_skill_block" crates/neo-agent-core/src crates/neo-agent/src
    ```

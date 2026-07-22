@@ -100,12 +100,16 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
     if let Some(skill_store) = skill_store {
         for skill in skill_store.iter() {
             let value = format!("/skill:{}", skill.name);
-            let label = skill.display_name().to_owned();
-            let description = skill
+            let summary = skill
                 .short_description()
                 .map(ToOwned::to_owned)
-                .or_else(|| Some(skill.manifest.description.clone()));
-            items.push(PickerItem::new(value, label, description));
+                .unwrap_or_else(|| skill.manifest.description.clone());
+            let description = if skill.display_name() == skill.name {
+                summary
+            } else {
+                format!("{}: {summary}", skill.display_name())
+            };
+            items.push(PickerItem::new(value.clone(), value, Some(description)));
         }
     }
     items

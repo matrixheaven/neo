@@ -1,6 +1,6 @@
 # Neo Skill Package Completion Design
 
-Status: `approved direction; implementation not started`
+Status: `implemented and acceptance-verified`
 Date: `2026-07-22`
 ArchitectureReviewRequired: `yes`
 
@@ -198,7 +198,7 @@ Supported fields and consumers:
 
 | Field | Consumer |
 | --- | --- |
-| `interface.display_name` | TUI completion label and `ListSkills` human label |
+| `interface.display_name` | TUI completion description prefix and `ListSkills` human label |
 | `interface.short_description` | TUI completion description and `ListSkills` summary |
 | `dependencies.tools[].type` | Typed dependency parser; only `mcp` is accepted |
 | `dependencies.tools[].value` | Activation envelope and `ListSkills` dependency summary |
@@ -324,8 +324,9 @@ The append-only catalog keeps its existing owner and replacement semantics:
 
 TUI completion:
 
-- displays `interface.display_name` when present, otherwise canonical name;
-- inserts `/skill:<canonical-name>` regardless of display name;
+- displays and inserts the full `/skill:<canonical-name>` command regardless
+  of display name;
+- uses `interface.display_name` only as a prefix in the completion description;
 - displays `interface.short_description`, falling back to the manifest
   description;
 - uses existing text-only picker styling; no icons or branded color.

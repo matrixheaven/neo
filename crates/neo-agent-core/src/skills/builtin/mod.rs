@@ -111,6 +111,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builtin_skill_authors_use_canonical_package_contract() {
+        use std::collections::BTreeSet;
+
+        let skills = builtin_skills().expect("built-ins load");
+        let create_skill = skills
+            .iter()
+            .find(|skill| skill.name == "create-skill")
+            .expect("create-skill built-in");
+        let self_evo = skills
+            .iter()
+            .find(|skill| skill.name == "self-evo")
+            .expect("self-evo built-in");
+
+        for (raw, skill) in [(CREATE_SKILL, create_skill), (SELF_EVO, self_evo)] {
+            let (frontmatter, _) =
+                crate::skills::split_frontmatter(raw).expect("built-in must have raw frontmatter");
+            let frontmatter: serde_yaml::Mapping =
+                serde_yaml::from_str(frontmatter).expect("built-in frontmatter must be YAML");
+            let fields = frontmatter
+                .keys()
+                .map(|field| field.as_str().expect("frontmatter keys must be strings"))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                fields,
+                BTreeSet::from(["description", "disableModelInvocation", "name"]),
+                "{} must use only canonical built-in frontmatter fields",
+                skill.name
+            );
+            assert!(skill.manifest.disable_model_invocation, "{}", skill.name);
+            assert!(
+                !skill.body.contains(&["skill", "_type"].concat()),
+                "{}",
+                skill.name
+            );
+            assert!(
+                !skill.body.contains(&["slash", "Commands"].concat()),
+                "{}",
+                skill.name
+            );
+            assert!(
+                !skill.body.contains(&["slash", "_commands"].concat()),
+                "{}",
+                skill.name
+            );
+            for required in [
+                "credentials, secrets, raw transcripts",
+                "host_metadata",
+                "real consumer",
+                "ListSkills",
+                "strongest available representative behavior check",
+                "package path, backup result, reload result, resources",
+            ] {
+                assert!(
+                    skill.body.contains(required),
+                    "{} must contain authoring contract phrase {required:?}",
+                    skill.name
+                );
+            }
+        }
+
+        for required in [
+            "No-argument invocation is not a requirement",
+            "## Verify",
+            "CreateSkill",
+            "exactly once",
+            "AskUserQuestion",
+        ] {
+            assert!(create_skill.body.contains(required), "{required:?}");
+        }
+        for required in [
+            "No-argument invocation is not a scope",
+            "## Verify",
+            "CreateSkill.resources",
+            "Creating zero skills",
+            "ListSkills` before drafting",
+            "Deduplicate",
+            "Process candidates sequentially",
+            "stop before processing the next candidate",
+        ] {
+            assert!(self_evo.body.contains(required), "{required:?}");
+        }
+    }
+
+    #[test]
     fn concurrent_extraction_never_exposes_partial_skill_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let skills_dir = temp.path().join("skills");

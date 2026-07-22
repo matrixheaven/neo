@@ -57,7 +57,7 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::skills::{LoadedSkill, SkillToolDependency};
-    use crate::skills::{SkillHostMetadata, SkillInterface, SkillManifest, SkillSource};
+    use crate::skills::{SkillHostMetadata, SkillManifest, SkillSource};
     use std::path::PathBuf;
 
     fn make_skill(

@@ -143,18 +143,33 @@ impl SkillStore {
         } else {
             builtin_skills
         };
+        let mut builtin_names = HashMap::new();
         for skill in extracted {
-            skills.insert(skill.name.clone(), skill);
+            insert_tier_skill(
+                &mut skills,
+                &mut builtin_names,
+                &mut diagnostics,
+                "builtin",
+                skill,
+            );
         }
 
+        let mut extra_names = HashMap::new();
         for dir in extra_dirs {
             let (extra_skills, extra_diags) = discover_skills(dir, SkillSource::Extra);
             diagnostics.extend(extra_diags);
             for skill in extra_skills {
-                skills.insert(skill.name.clone(), skill);
+                insert_tier_skill(
+                    &mut skills,
+                    &mut extra_names,
+                    &mut diagnostics,
+                    "extra",
+                    skill,
+                );
             }
         }
 
+        let mut user_names = HashMap::new();
         for dir in user_dirs {
             let (user_skills, user_diags) = discover_skills(dir, SkillSource::User);
             diagnostics.extend(user_diags);
@@ -162,7 +177,13 @@ impl SkillStore {
                 if skill.is_builtin_extracted() {
                     continue;
                 }
-                skills.insert(skill.name.clone(), skill);
+                insert_tier_skill(
+                    &mut skills,
+                    &mut user_names,
+                    &mut diagnostics,
+                    "user",
+                    skill,
+                );
             }
         }
 
@@ -247,6 +268,27 @@ impl SkillStore {
     }
 }
 
+fn insert_tier_skill(
+    skills: &mut HashMap<String, LoadedSkill>,
+    tier_names: &mut HashMap<String, PathBuf>,
+    diagnostics: &mut Vec<SkillDiagnostic>,
+    tier: &str,
+    skill: LoadedSkill,
+) {
+    if let Some(previous_root) = tier_names.insert(skill.name.clone(), skill.root.clone()) {
+        diagnostics.push(SkillDiagnostic::new(
+            &skill.root,
+            format!(
+                "duplicate qualified skill name `{}` within {tier} tier; {} replaced {}",
+                skill.name,
+                skill.root.display(),
+                previous_root.display()
+            ),
+        ));
+    }
+    skills.insert(skill.name.clone(), skill);
+}
+
 fn write_available_skill(prompt: &mut String, skill: &LoadedSkill) {
     let _ = writeln!(prompt, "- {}: {}", skill.name, skill.manifest.description);
     if let Some(when) = &skill.manifest.when_to_use {
@@ -327,6 +369,13 @@ pub fn load_skill_file(
     path: &Path,
     skill_source: SkillSource,
 ) -> Result<LoadedSkill, SkillLoadError> {
+    load_skill_file_with_diagnostics(path, skill_source).map(|(skill, _)| skill)
+}
+
+pub(crate) fn load_skill_file_with_diagnostics(
+    path: &Path,
+    skill_source: SkillSource,
+) -> Result<(LoadedSkill, Vec<SkillDiagnostic>), SkillLoadError> {
     let source = std::fs::read_to_string(path).map_err(|source| SkillLoadError::ReadSkill {
         path: path.to_path_buf(),
         source,
@@ -343,16 +392,24 @@ pub fn load_skill_file(
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let name = manifest.name.clone();
-    let (host_metadata, _diagnostics) = metadata::load_host_metadata(&root);
+    let (host_metadata, metadata_diagnostics) = metadata::load_host_metadata(&root);
+    let sidecar_path = root.join("agents").join("neo.yaml");
+    let diagnostics = metadata_diagnostics
+        .into_iter()
+        .map(|message| SkillDiagnostic::new(&sidecar_path, message))
+        .collect();
 
-    Ok(LoadedSkill {
-        name,
-        root,
-        manifest,
-        body: body.trim_start_matches('\n').to_owned(),
-        source: skill_source,
-        host_metadata,
-    })
+    Ok((
+        LoadedSkill {
+            name,
+            root,
+            manifest,
+            body: body.trim_start_matches('\n').to_owned(),
+            source: skill_source,
+            host_metadata,
+        },
+        diagnostics,
+    ))
 }
 
 fn parse_skill_manifest(frontmatter: &str) -> Result<SkillManifest, serde_yaml::Error> {

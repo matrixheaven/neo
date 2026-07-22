@@ -14,7 +14,10 @@ use neo_agent_core::{
     FileWriteApprovalOperation, MessageOrigin, PendingQuestion, PermissionMode,
     PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
     ShellCommandOrigin, StopReason, ToolResult,
-    skills::{LoadedSkill, SkillManifest, SkillSource, SkillStore, SkillType},
+    skills::{
+        LoadedSkill, SkillHostMetadata, SkillInterface, SkillManifest, SkillSource, SkillStore,
+        SkillToolDependency,
+    },
 };
 use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction},
@@ -62,17 +65,15 @@ fn skill_store_with_refactor_skill() -> SkillStore {
             manifest: SkillManifest {
                 name: "refactor".to_owned(),
                 description: "Refactor with project conventions".to_owned(),
-                skill_type: SkillType::Prompt,
                 when_to_use: None,
                 disable_model_invocation: false,
                 arguments: Vec::new(),
-                slash_commands: Vec::new(),
             },
             body: "Refactor safely.".to_owned(),
             source: SkillSource::Builtin,
+            host_metadata: SkillHostMetadata::default(),
         }],
     )
-    .expect("skill store")
 }
 
 fn skill_store_with_two_prompt_skills() -> SkillStore {
@@ -82,37 +83,40 @@ fn skill_store_with_two_prompt_skills() -> SkillStore {
         vec![
             LoadedSkill {
                 name: "skill_one".to_owned(),
-                root: PathBuf::from("builtin/skill_one"),
+                root: test_workspace_root().join("builtin/skill_one"),
                 manifest: SkillManifest {
                     name: "skill_one".to_owned(),
                     description: "First skill".to_owned(),
-                    skill_type: SkillType::Prompt,
                     when_to_use: None,
                     disable_model_invocation: false,
                     arguments: Vec::new(),
-                    slash_commands: Vec::new(),
                 },
                 body: "ONE: $ARGUMENTS".to_owned(),
                 source: SkillSource::Builtin,
+                host_metadata: SkillHostMetadata {
+                    interface: None,
+                    dependencies: vec![SkillToolDependency {
+                        value: "reviewServer".to_owned(),
+                        description: Some("Review MCP server".to_owned()),
+                    }],
+                },
             },
             LoadedSkill {
                 name: "skill_two".to_owned(),
-                root: PathBuf::from("builtin/skill_two"),
+                root: test_workspace_root().join("builtin/skill_two"),
                 manifest: SkillManifest {
                     name: "skill_two".to_owned(),
                     description: "Second skill".to_owned(),
-                    skill_type: SkillType::Prompt,
                     when_to_use: None,
                     disable_model_invocation: false,
                     arguments: Vec::new(),
-                    slash_commands: Vec::new(),
                 },
                 body: "TWO: $ARGUMENTS".to_owned(),
                 source: SkillSource::Builtin,
+                host_metadata: SkillHostMetadata::default(),
             },
         ],
     )
-    .expect("skill store")
 }
 
 fn skill_store_with_interactive_preflight_skills() -> SkillStore {
@@ -126,14 +130,13 @@ fn skill_store_with_interactive_preflight_skills() -> SkillStore {
                 manifest: SkillManifest {
                     name: "self-evo".to_owned(),
                     description: "Distill session learning into reusable skills".to_owned(),
-                    skill_type: SkillType::Prompt,
                     when_to_use: None,
                     disable_model_invocation: true,
                     arguments: Vec::new(),
-                    slash_commands: Vec::new(),
                 },
                 body: "SELF EVO: $ARGUMENTS".to_owned(),
                 source: SkillSource::Builtin,
+                host_metadata: SkillHostMetadata::default(),
             },
             LoadedSkill {
                 name: "create-skill".to_owned(),
@@ -141,18 +144,16 @@ fn skill_store_with_interactive_preflight_skills() -> SkillStore {
                 manifest: SkillManifest {
                     name: "create-skill".to_owned(),
                     description: "Create a reusable skill from instructions".to_owned(),
-                    skill_type: SkillType::Prompt,
                     when_to_use: None,
                     disable_model_invocation: true,
                     arguments: Vec::new(),
-                    slash_commands: Vec::new(),
                 },
                 body: "CREATE SKILL: $ARGUMENTS".to_owned(),
                 source: SkillSource::Builtin,
+                host_metadata: SkillHostMetadata::default(),
             },
         ],
     )
-    .expect("skill store")
 }
 
 fn ordinary_approval_options(
@@ -2686,7 +2687,7 @@ async fn slash_completion_refreshes_skills_from_disk() {
     fs::create_dir_all(&skill_dir).expect("create skill dir");
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: fresh-skill\ndescription: Fresh from disk\ntype: prompt\n---\n\nUse me.",
+        "---\nname: fresh-skill\ndescription: Fresh from disk\n---\n\nUse me.",
     )
     .expect("write skill");
 
@@ -3098,7 +3099,7 @@ async fn slash_picker_commands_do_not_enter_streaming_mode() {
 }
 
 #[tokio::test]
-async fn inline_multi_skill_directives_activate_one_card_and_submit_stripped_prompt() {
+async fn manual_skill_context_uses_shared_path_aware_envelope() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
     let seen_requests = std::sync::Arc::clone(&requests);
     let stripped = "\
@@ -3174,7 +3175,16 @@ amigo";
         "{skill_context}"
     );
     assert!(
-        skill_context.contains("<neo-skill-loaded name=\"skill_one\" trigger=\"user-slash\""),
+        skill_context.contains(&format!(
+            "<neo-skill-loaded name=\"skill_one\" source=\"builtin\" root=\"{}\">",
+            test_workspace_root().join("builtin/skill_one").display()
+        )),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains(
+            "<dependencies>\n  <mcp value=\"reviewServer\">Review MCP server</mcp>\n</dependencies>"
+        ),
         "{skill_context}"
     );
     assert!(
@@ -3182,7 +3192,7 @@ amigo";
         "{skill_context}"
     );
     assert!(
-        skill_context.contains("ONE: test test test"),
+        skill_context.contains("<instructions>\nONE: test test test\n</instructions>"),
         "{skill_context}"
     );
     assert!(
@@ -3530,6 +3540,68 @@ fn slash_completions_include_dynamic_skill_commands_without_metadata() {
     assert!(!description.contains("provider:"), "{description}");
     assert!(!description.contains("trust:"), "{description}");
     assert!(!description.contains("source:"), "{description}");
+}
+
+#[tokio::test]
+async fn completion_keeps_full_skill_command_and_uses_host_description_fallback() {
+    let skill_store = SkillStore::load(
+        &[],
+        &[],
+        vec![LoadedSkill {
+            name: "schema-review".to_owned(),
+            root: test_workspace_root().join("schema-review"),
+            manifest: SkillManifest {
+                name: "schema-review".to_owned(),
+                description: "Manifest fallback".to_owned(),
+                when_to_use: None,
+                disable_model_invocation: false,
+                arguments: Vec::new(),
+            },
+            body: "Review schemas.".to_owned(),
+            source: SkillSource::User,
+            host_metadata: SkillHostMetadata {
+                interface: Some(SkillInterface {
+                    display_name: Some("Schema Review".to_owned()),
+                    short_description: None,
+                }),
+                dependencies: Vec::new(),
+            },
+        }],
+    );
+    let completions = prompt_completions(
+        &test_workspace_root(),
+        "/skill:schema",
+        Some(&skill_store),
+        true,
+    )
+    .expect("skill completions resolve");
+    let skill = completions
+        .iter()
+        .find(|item| item.value == "/skill:schema-review")
+        .expect("missing host-labelled skill command");
+
+    assert_eq!(skill.value, "/skill:schema-review");
+    assert_eq!(skill.label, "/skill:schema-review");
+    assert_eq!(
+        skill.description.as_deref(),
+        Some("Schema Review: Manifest fallback")
+    );
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.skill_store = Some(skill_store);
+    controller.type_text("/skill:schema");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("tab completes canonical skill command");
+
+    assert_eq!(controller.chrome().prompt().text, "/skill:schema-review");
 }
 
 #[test]

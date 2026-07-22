@@ -3,9 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{LoadedSkill, SkillDiagnostic, load_skill_file};
+use super::{LoadedSkill, SkillDiagnostic, load_skill_file_with_diagnostics};
 
-const RESOURCE_DIRS: &[&str] = &["references", "scripts", "assets"];
+const RESOURCE_DIRS: &[&str] = &["agents", "references", "scripts", "assets"];
 const MAX_DEPTH: usize = 6;
 const MAX_DIRECTORIES: usize = 2_000;
 const MAX_ENTRIES: usize = 20_000;
@@ -28,8 +28,25 @@ pub fn discover_skills(
 ) -> (Vec<LoadedSkill>, Vec<SkillDiagnostic>) {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
-    if !root.is_dir() {
-        return (skills, diagnostics);
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            diagnostics.push(SkillDiagnostic::new(
+                root,
+                "skill discovery root is not a directory".to_owned(),
+            ));
+            return (skills, diagnostics);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (skills, diagnostics);
+        }
+        Err(error) => {
+            diagnostics.push(SkillDiagnostic::new(
+                root,
+                format!("cannot inspect discovery root: {error}"),
+            ));
+            return (skills, diagnostics);
+        }
     }
 
     let mut visited: HashSet<PathBuf> = HashSet::new();
@@ -52,7 +69,7 @@ pub fn discover_skills(
     }
     stack.push((root.to_path_buf(), String::new(), 0));
 
-    while let Some((dir, prefix, depth)) = stack.pop() {
+    'walk: while let Some((dir, prefix, depth)) = stack.pop() {
         dir_count += 1;
         if dir_count > MAX_DIRECTORIES {
             diagnostics.push(SkillDiagnostic::new(
@@ -61,15 +78,12 @@ pub fn discover_skills(
             ));
             break;
         }
-        if depth >= MAX_DEPTH {
-            continue;
-        }
-
         let own_skill_file = dir.join("SKILL.md");
         let has_own_skill = own_skill_file.is_file();
         let own_prefix = if has_own_skill {
-            match load_skill_file(&own_skill_file, source) {
-                Ok(skill) => {
+            match load_skill_file_with_diagnostics(&own_skill_file, source) {
+                Ok((skill, load_diagnostics)) => {
+                    diagnostics.extend(load_diagnostics);
                     let name = if prefix.is_empty() {
                         skill.name.clone()
                     } else {
@@ -92,6 +106,10 @@ pub fn discover_skills(
             prefix.clone()
         };
 
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+
         let mut entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) => {
@@ -105,27 +123,29 @@ pub fn discover_skills(
 
         let mut subdirs: Vec<PathBuf> = Vec::new();
         loop {
+            let Some(entry) = entries.next() else {
+                break;
+            };
             entry_count += 1;
             if entry_count > MAX_ENTRIES {
                 diagnostics.push(SkillDiagnostic::new(
                     &dir,
                     format!("discovery entry limit reached ({MAX_ENTRIES})"),
                 ));
-                break;
+                break 'walk;
             }
-            let entry = match entries.next() {
-                Some(Ok(entry)) => entry,
-                Some(Err(err)) => {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
                     diagnostics.push(SkillDiagnostic::new(
                         &dir,
                         format!("failed to read directory entry: {err}"),
                     ));
                     continue;
                 }
-                None => break,
             };
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
+            let metadata = match std::fs::metadata(entry.path()) {
+                Ok(metadata) => metadata,
                 Err(err) => {
                     diagnostics.push(SkillDiagnostic::new(
                         entry.path(),
@@ -134,7 +154,7 @@ pub fn discover_skills(
                     continue;
                 }
             };
-            if !file_type.is_dir() {
+            if !metadata.is_dir() {
                 continue;
             }
             if has_own_skill

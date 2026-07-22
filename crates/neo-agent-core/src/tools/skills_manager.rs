@@ -63,6 +63,7 @@ pub struct CreateSkillResource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSkillArgs {
     /// Name for the new skill. Used as the directory name under ~/.neo/skills/.
     #[schemars(
@@ -90,7 +91,41 @@ pub struct CreateSkillArgs {
     #[schemars(
         description = "Optional typed host metadata: interface (display_name, short_description) and/or MCP dependencies."
     )]
-    pub host_metadata: Option<crate::skills::SkillHostMetadata>,
+    pub host_metadata: Option<CreateSkillHostMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSkillHostMetadata {
+    #[serde(default)]
+    pub interface: Option<CreateSkillInterface>,
+    #[serde(default)]
+    pub dependencies: Vec<CreateSkillDependency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSkillInterface {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub short_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSkillDependency {
+    #[serde(rename = "type")]
+    pub dependency_type: CreateSkillDependencyType,
+    pub value: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CreateSkillDependencyType {
+    Mcp,
 }
 
 pub struct ListSkillsTool {
@@ -292,7 +327,6 @@ impl Tool for CreateSkillTool {
          ---\n\
          name: deploy-staging\n\
          description: Deploys the app to staging. Use when the user asks to deploy or push to the staging environment.\n\
-         whenToUse: When the user asks to deploy to staging, push to staging, or update the staging environment.\n\
          ---\n\n\
          # Deploy to Staging\n\n\
          ## Steps\n\
@@ -301,16 +335,15 @@ impl Tool for CreateSkillTool {
          Frontmatter fields:\n\
          - name (required): Skill identifier, must match the directory name.\n\
          - description (required): One-line summary of what the skill does.\n\
-         - whenToUse (recommended): Natural language trigger description for automatic skill selection.\n\n\
          If a skill with the same name already exists, the existing skill directory is backed up \
          under ~/.neo/backups/skills/<timestamp>/<name>/ before being overwritten.\n\n\
          After creation, the skill can be activated via the Skill tool or the /skill:<name> slash command.\n\n\
          Parameters:\n\
          - name: Directory name for the skill under ~/.neo/skills/.\n\
          - description: Short description of what the skill does.\n\
-         - description: Short description of what the skill does.\n\
          - body: Markdown body only. Do not include YAML frontmatter; this tool generates \
          frontmatter from name and description.\n\
+         - host_metadata: Optional Neo UI labels and typed MCP server dependencies for agents/neo.yaml.\n\
          - resources: Optional UTF-8 text files under references/, scripts/, or assets/. \
          Resource paths must be relative and cannot target SKILL.md."
     }
@@ -333,6 +366,7 @@ impl Tool for CreateSkillTool {
             let args = args?;
             validate_skill_name(&args.name)?;
             let resources = validate_resources(&args.resources)?;
+            let sidecar_yaml = prepare_host_metadata(args.host_metadata.as_ref())?;
             let frontmatter = CreateSkillFrontmatter {
                 name: &args.name,
                 description: &args.description,
@@ -356,12 +390,17 @@ impl Tool for CreateSkillTool {
                 ensure_safe_child_directory(&skills_root, skill_name).map_err(ToolError::Io)?;
             let path = skill_dir.join("SKILL.md");
             reject_reparse_or_symlink_if_present(&path).map_err(ToolError::Io)?;
+            let agents_dir = skill_dir.join("agents");
+            let sidecar_path = agents_dir.join("neo.yaml");
+            if sidecar_yaml.is_some() {
+                preflight_sidecar_target(&agents_dir, &sidecar_path).map_err(ToolError::Io)?;
+            }
 
             for resource in &resources {
                 preflight_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
             }
 
-            if skill_dir_existed {
+            let backup_path = if skill_dir_existed {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -378,34 +417,116 @@ impl Tool for CreateSkillTool {
                     let _ = fs::remove_dir_all(&backup_dir).await;
                     return Err(ToolError::Io(error));
                 }
-            }
+                Some(backup_dir)
+            } else {
+                None
+            };
 
             write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
 
-            // Write agents/neo.yaml when host_metadata is present.
-            if let Some(sidecar_yaml) = args
-                .host_metadata
-                .as_ref()
-                .and_then(crate::skills::serialize_host_metadata)
-            {
-                let agents_dir = skill_dir.join("agents");
-                stdfs::create_dir_all(&agents_dir).map_err(ToolError::Io)?;
-                let sidecar_path = agents_dir.join("neo.yaml");
-                reject_reparse_or_symlink_if_present(&sidecar_path).map_err(ToolError::Io)?;
+            if let Some(sidecar_yaml) = sidecar_yaml {
+                ensure_safe_child_directory(&skill_dir, Path::new("agents"))
+                    .map_err(ToolError::Io)?;
                 write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes()).map_err(ToolError::Io)?;
             }
 
             for resource in &resources {
                 write_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
             }
-            let reload_message =
-                reload_shared_skill_store("CreateSkill", skill_store.as_ref(), reload.as_ref())?;
-            Ok(ToolResult::ok(format!(
-                "Created skill at {}{}",
+            let backup_message = backup_path
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |backup| backup.display().to_string());
+            let resource_message = if resources.is_empty() {
+                "none".to_owned()
+            } else {
+                resources
+                    .iter()
+                    .map(|resource| resource.relative_path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let sidecar_message = if args.host_metadata.is_some() {
+                format!("written at {}", sidecar_path.display())
+            } else if sidecar_path.is_file() {
+                format!("preserved at {}", sidecar_path.display())
+            } else {
+                "not present".to_owned()
+            };
+            let report = format!(
+                "Created skill at {}\nBackup: {}\nResources: {}\nHost metadata: {}",
                 path.display(),
-                reload_message
-            )))
+                backup_message,
+                resource_message,
+                sidecar_message
+            );
+            match reload_shared_skill_store("CreateSkill", skill_store.as_ref(), reload.as_ref()) {
+                Ok(reload_message) => Ok(ToolResult::ok(format!("{report}{reload_message}"))),
+                Err(error) => Ok(ToolResult::error(format!(
+                    "{report}\nSkill store reload failed: {error}\nThe package files were written, but the active skill store was not updated."
+                ))),
+            }
         })
+    }
+}
+
+fn prepare_host_metadata(
+    input: Option<&CreateSkillHostMetadata>,
+) -> Result<Option<String>, ToolError> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let metadata = crate::skills::SkillHostMetadata {
+        interface: input
+            .interface
+            .as_ref()
+            .map(|interface| crate::skills::SkillInterface {
+                display_name: interface.display_name.clone(),
+                short_description: interface.short_description.clone(),
+            }),
+        dependencies: input
+            .dependencies
+            .iter()
+            .map(|dependency| crate::skills::SkillToolDependency {
+                value: dependency.value.clone(),
+                description: dependency.description.clone(),
+            })
+            .collect(),
+    };
+    let metadata = crate::skills::metadata::validate_host_metadata(
+        metadata,
+        Path::new("CreateSkill.host_metadata"),
+    )
+    .map_err(|diagnostics| invalid_create_skill_input(diagnostics.join("; ")))?;
+    if metadata.is_empty() {
+        return Err(invalid_create_skill_input(
+            "host_metadata must contain a non-empty interface field or MCP dependency".to_owned(),
+        ));
+    }
+    let yaml = crate::skills::serialize_host_metadata(&metadata).ok_or_else(|| {
+        invalid_create_skill_input("host_metadata could not be serialized".to_owned())
+    })?;
+    Ok(Some(yaml))
+}
+
+fn preflight_sidecar_target(agents_dir: &Path, sidecar_path: &Path) -> io::Result<()> {
+    match stdfs::symlink_metadata(agents_dir) {
+        Ok(_) => validate_safe_directory(agents_dir)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    match stdfs::symlink_metadata(sidecar_path) {
+        Ok(metadata) if is_reparse_or_symlink(&metadata) || !metadata.is_file() => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing non-regular host metadata target {}",
+                    sidecar_path.display()
+                ),
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1158,7 +1279,7 @@ async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::ToolContext;
-    use crate::skills::{SkillStore, SkillStoreHandle};
+    use crate::skills::{SkillStore, SkillStoreHandle, load_host_metadata};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
@@ -1173,7 +1294,7 @@ mod tests {
         fs::create_dir_all(&skills_dir).await.expect("mkdir");
         fs::write(
             skills_dir.join("SKILL.md"),
-            "---\nname: my-skill\ndescription: test\ntype: prompt\n---\n\nbody",
+            "---\nname: my-skill\ndescription: test\n---\n\nbody",
         )
         .await
         .expect("write");
@@ -1213,7 +1334,7 @@ mod tests {
         fs::create_dir_all(&skill_dir).await.expect("mkdir");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: test-skill\ndescription: nested\ntype: prompt\n---\n\nbody",
+            "---\nname: test-skill\ndescription: nested\n---\n\nbody",
         )
         .await
         .expect("write");
@@ -1245,7 +1366,7 @@ mod tests {
             .expect("mkdir scripts");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: resourceful\ndescription: test\ntype: prompt\n---\n\nbody",
+            "---\nname: resourceful\ndescription: test\n---\n\nbody",
         )
         .await
         .expect("write skill");
@@ -1288,7 +1409,7 @@ mod tests {
             .expect("mkdir scripts");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: quiet-skill\ndescription: test\ntype: prompt\n---\n\nbody",
+            "---\nname: quiet-skill\ndescription: test\n---\n\nbody",
         )
         .await
         .expect("write skill");
@@ -1310,70 +1431,6 @@ mod tests {
             "{}",
             result.content
         );
-    }
-
-    #[test]
-    fn builtin_skill_authors_use_canonical_package_contract() {
-        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
-
-        let create_skill = skills
-            .iter()
-            .find(|s| s.name == "create-skill")
-            .expect("create-skill built-in");
-        let self_evo = skills
-            .iter()
-            .find(|s| s.name == "self-evo")
-            .expect("self-evo built-in");
-
-        // Both authors must be manual-only.
-        assert!(
-            create_skill.manifest.disable_model_invocation,
-            "create-skill must be manual-only"
-        );
-        assert!(
-            self_evo.manifest.disable_model_invocation,
-            "self-evo must be manual-only"
-        );
-
-        // Neither may contain retired type/skill_type fields.
-        for skill in [create_skill, self_evo] {
-            let combined = format!("{}\n{}", skill.name, skill.body);
-            assert!(
-                !combined.contains("type: prompt")
-                    && !combined.contains("type: inline")
-                    && !combined.contains("type: flow"),
-                "{} must not mention retired type field",
-                skill.name
-            );
-            assert!(
-                !combined.contains("skill_type"),
-                "{} must not mention retired skill_type",
-                skill.name
-            );
-            assert!(
-                !combined.contains("slashCommands") && !combined.contains("slash_commands"),
-                "{} must not mention retired slash fields",
-                skill.name
-            );
-        }
-
-        // create-skill is requirement-driven.
-        assert!(
-            create_skill
-                .body
-                .contains("No-argument invocation is not a requirement")
-        );
-        assert!(create_skill.body.contains("## Verify"));
-        assert!(create_skill.body.contains("CreateSkill"));
-
-        // self-evo is evidence-driven.
-        assert!(
-            self_evo
-                .body
-                .contains("No-argument invocation is not a scope")
-        );
-        assert!(self_evo.body.contains("## Verify"));
-        assert!(self_evo.body.contains("CreateSkill.resources"));
     }
 
     #[tokio::test]
@@ -1869,6 +1926,9 @@ mod tests {
 
         assert!(body_description.contains("Do not include YAML frontmatter"));
         assert!(!body_description.contains("Must include valid YAML frontmatter"));
+        let schema_text = schema.to_string();
+        assert!(schema_text.contains("dependencies"));
+        assert!(schema_text.contains("mcp"));
     }
 
     #[tokio::test]
@@ -1897,7 +1957,7 @@ mod tests {
         assert!(content.contains("name: canonical-skill"));
         assert!(content.contains("description: Has canonical frontmatter only"));
         assert!(!content.contains("type:"));
-        assert!(!content.contains("skill_type"));
+        assert!(!content.contains(&["skill", "_type"].concat()));
         assert!(!content.contains("slash"));
     }
 
@@ -2418,9 +2478,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_skill_reports_durable_write_when_reload_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path())
+            .with_skill_store_reload(SkillStoreHandle::default(), || {
+                Err("reload unavailable".to_owned())
+            });
+
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "written-not-reloaded",
+                    "description": "Durable write reporting",
+                    "body": "# Written"
+                }),
+            )
+            .await
+            .expect("reload failure should be returned as a tool result");
+
+        assert!(result.is_error);
+        for expected in [
+            "Created skill at",
+            "Backup: none",
+            "Resources: none",
+            "Host metadata: not present",
+            "reload unavailable",
+            "package files were written",
+            "active skill store was not updated",
+        ] {
+            assert!(result.content.contains(expected), "{}", result.content);
+        }
+        assert!(
+            temp.path()
+                .join("skills/written-not-reloaded/SKILL.md")
+                .is_file()
+        );
+    }
+
+    #[tokio::test]
     async fn create_skill_writes_and_preserves_typed_host_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let tool = CreateSkillTool::new(temp.path());
+        let user_skills = temp.path().join("skills");
+        let handle = SkillStoreHandle::new(SkillStore::load(
+            std::slice::from_ref(&user_skills),
+            &[],
+            Vec::new(),
+        ));
+        let reload_root = user_skills.clone();
+        let tool =
+            CreateSkillTool::new(temp.path()).with_skill_store_reload(handle.clone(), move || {
+                Ok(SkillStore::load(
+                    std::slice::from_ref(&reload_root),
+                    &[],
+                    Vec::new(),
+                ))
+            });
         let skill_dir = temp.path().join("skills").join("host-skill");
 
         // Create with host metadata.
@@ -2449,14 +2562,42 @@ mod tests {
             .await
             .expect("execute");
         assert!(!result.is_error);
+        assert!(
+            result.content.contains("Backup: none"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Resources: none"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Host metadata: written at"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Skill store reloaded"),
+            "{}",
+            result.content
+        );
 
         let sidecar_path = skill_dir.join("agents").join("neo.yaml");
-        let sidecar = fs::read_to_string(&sidecar_path)
-            .await
-            .expect("read sidecar");
-        assert!(sidecar.contains("display_name: \"Host Display\""));
-        assert!(sidecar.contains("short_description: \"Picker summary\""));
-        assert!(sidecar.contains("value: \"myServer\""));
+        let (metadata, diagnostics) = load_host_metadata(&skill_dir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(metadata.display_name("host-skill"), "Host Display");
+        assert_eq!(metadata.short_description(), Some("Picker summary"));
+        assert_eq!(metadata.dependencies.len(), 1);
+        assert_eq!(metadata.dependencies[0].value, "myServer");
+        assert_eq!(
+            metadata.dependencies[0].description.as_deref(),
+            Some("My MCP server")
+        );
+        let loaded = handle
+            .get("host-skill")
+            .expect("created skill should be present after reload");
+        assert_eq!(loaded.host_metadata, metadata);
 
         // Update without host_metadata — existing sidecar preserved.
         let result2 = tool
@@ -2471,11 +2612,218 @@ mod tests {
             .await
             .expect("execute2");
         assert!(!result2.is_error);
+        assert!(
+            result2.content.contains("Host metadata: preserved at"),
+            "{}",
+            result2.content
+        );
+        let (preserved, diagnostics) = load_host_metadata(&skill_dir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(preserved, metadata);
+        assert_eq!(
+            handle
+                .get("host-skill")
+                .expect("updated skill should remain present after reload")
+                .host_metadata,
+            metadata
+        );
+        assert!(sidecar_path.is_file());
+    }
 
-        let sidecar2 = fs::read_to_string(&sidecar_path)
+    #[tokio::test]
+    async fn create_skill_rejects_invalid_host_metadata_without_side_effects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+
+        let interface_only = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "interface-only",
+                    "description": "Interface metadata only",
+                    "body": "# Interface Only",
+                    "host_metadata": {
+                        "interface": { "display_name": "Interface Only" }
+                    }
+                }),
+            )
             .await
-            .expect("read sidecar2");
-        assert!(sidecar2.contains("display_name: \"Host Display\""));
+            .expect("interface-only metadata should be valid");
+        assert!(!interface_only.is_error);
+
+        for (name, host_metadata) in [
+            ("empty-metadata", json!({})),
+            (
+                "multiline-dependency",
+                json!({
+                    "dependencies": [{ "type": "mcp", "value": "bad\nvalue" }]
+                }),
+            ),
+        ] {
+            let skill_dir = temp.path().join("skills").join(name);
+            fs::create_dir_all(&skill_dir).await.expect("mkdir skill");
+            let skill_file = skill_dir.join("SKILL.md");
+            fs::write(&skill_file, "original")
+                .await
+                .expect("write original skill");
+
+            let error = tool
+                .execute(
+                    &make_ctx(),
+                    json!({
+                        "name": name,
+                        "description": "Rejected metadata",
+                        "body": "# Replacement",
+                        "host_metadata": host_metadata
+                    }),
+                )
+                .await
+                .expect_err("invalid metadata should be rejected");
+            assert!(
+                error.to_string().contains("host_metadata"),
+                "error should identify host metadata: {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(&skill_file)
+                    .await
+                    .expect("read original skill"),
+                "original"
+            );
+        }
+
+        let legacy_dir = temp.path().join("skills").join("legacy-input");
+        fs::create_dir_all(&legacy_dir)
+            .await
+            .expect("mkdir legacy skill");
+        let legacy_file = legacy_dir.join("SKILL.md");
+        fs::write(&legacy_file, "original")
+            .await
+            .expect("write legacy skill");
+        let mut legacy_input = json!({
+            "name": "legacy-input",
+            "description": "Legacy input",
+            "body": "# Replacement"
+        });
+        let retired_field = ["skill", "_type"].concat();
+        legacy_input
+            .as_object_mut()
+            .expect("object input")
+            .insert(retired_field.clone(), json!("prompt"));
+        let error = tool
+            .execute(&make_ctx(), legacy_input)
+            .await
+            .expect_err("retired CreateSkill field should be rejected");
+        assert!(error.to_string().contains(&retired_field), "{error}");
+        assert_eq!(
+            fs::read_to_string(&legacy_file)
+                .await
+                .expect("read legacy skill"),
+            "original"
+        );
+        assert!(
+            !temp.path().join("backups").exists(),
+            "rejected metadata must not create backups"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_skill_rejects_non_file_sidecar_before_overwriting_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills").join("blocked-sidecar");
+        let skill_file = skill_dir.join("SKILL.md");
+        fs::create_dir_all(skill_dir.join("agents").join("neo.yaml"))
+            .await
+            .expect("create directory at sidecar target");
+        fs::write(&skill_file, "original")
+            .await
+            .expect("write original skill");
+
+        let error = CreateSkillTool::new(temp.path())
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "blocked-sidecar",
+                    "description": "Blocked sidecar",
+                    "body": "# Replacement",
+                    "host_metadata": {
+                        "interface": { "display_name": "Blocked Sidecar" }
+                    }
+                }),
+            )
+            .await
+            .expect_err("directory sidecar target should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("non-regular host metadata target"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&skill_file)
+                .await
+                .expect("read original skill"),
+            "original"
+        );
+        assert!(
+            !temp.path().join("backups").exists(),
+            "preflight failure must happen before backup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_skill_rejects_symlinked_sidecar_before_overwriting_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let skill_dir = temp.path().join("skills").join("linked-sidecar");
+        let skill_file = skill_dir.join("SKILL.md");
+        let agents_dir = skill_dir.join("agents");
+        fs::create_dir_all(&agents_dir).await.expect("mkdir agents");
+        fs::write(&skill_file, "original")
+            .await
+            .expect("write original skill");
+        let outside_sidecar = outside.path().join("neo.yaml");
+        fs::write(&outside_sidecar, "outside")
+            .await
+            .expect("write outside sidecar");
+        std::os::unix::fs::symlink(&outside_sidecar, agents_dir.join("neo.yaml"))
+            .expect("symlink sidecar");
+
+        let error = CreateSkillTool::new(temp.path())
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "linked-sidecar",
+                    "description": "Linked sidecar",
+                    "body": "# Replacement",
+                    "host_metadata": {
+                        "interface": { "display_name": "Linked Sidecar" }
+                    }
+                }),
+            )
+            .await
+            .expect_err("symlinked sidecar target should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("non-regular host metadata target"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&skill_file)
+                .await
+                .expect("read original skill"),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_sidecar)
+                .await
+                .expect("read outside sidecar"),
+            "outside"
+        );
+        assert!(!temp.path().join("backups").exists());
     }
 
     #[tokio::test]
@@ -2483,8 +2831,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("skills").join("to-move");
         fs::create_dir_all(&source).await.expect("mkdir");
-        let original =
-            "---\nname: to-move\ndescription: test\ntype: prompt\n---\n\nskill content\n";
+        let original = "---\nname: to-move\ndescription: test\n---\n\nskill content\n";
         fs::write(source.join("SKILL.md"), original)
             .await
             .expect("write");

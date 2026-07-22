@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "final-targeted-verification",
+  "type": "targeted-runtime-verification",
+  "source": "fresh cargo nextest/cargo test/cargo check/retirement-search results on 2026-07-22",
+  "summary": "Core integration 8 passed; core lib 8 passed plus raw author contract 1 passed; neo binary 3 passed; cargo fmt and cargo check passed; all three retirement searches returned no matches. Clippy was blocked only by seven Workflow errors outside this task.",
+  "verifier": "Codex primary agent"
+}

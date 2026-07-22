@@ -1,22 +1,20 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-07-22-skill-package-completion",
-  "currentTodo": "Begin implementation with Task 0: Resume-Safe Start and Dirty-Tree Fence.",
+  "currentTodo": "Commit verified Skill package closure.",
   "completedTodos": [
-    "Investigate Neo and Codex skill package structures.",
-    "Write and self-review the approved design spec.",
-    "Write the executable implementation plan and constrained handoff prompt.",
-    "Validate task-owned Aegis artifacts and commit the initial documentation bundle.",
-    "Amend the spec, Task 6, and handoff for create-skill and self-evo."
+    "Restore symlink-view discovery and canonical slash labels.",
+    "Complete typed metadata, CreateSkill preflight/reporting, both built-in author contracts, docs, ADR, and baseline.",
+    "Run focused tests, fresh-agent comparisons, retirement searches, warning check, and real-home probe."
   ],
-  "activeSlice": "Handoff ready after built-in author contract amendment; no source implementation has started.",
+  "activeSlice": "Final evidence, workspace structure validation, and scoped commit only.",
   "evidenceRefs": [
-    "docs/aegis/specs/2026-07-22-skill-package-completion-design.md",
-    "docs/aegis/plans/2026-07-22-skill-package-completion.md",
-    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json",
-    "docs/aegis/work/2026-07-22-skill-package-completion/proof-bundle.md"
+    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-final-targeted-verification.json",
+    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-fresh-agent-author-comparison.json",
+    "docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-real-home-symlink-probe.json",
+    "docs/aegis/adr/ADR-0003-neo-skill-package-contract.md"
   ],
   "blockedOn": null,
-  "nextStep": "Execute plan Task 0 exactly, then continue Tasks 1 through 8 in order; Task 6 must validate both built-in authors.",
+  "nextStep": "Run workspace bundle/check, inspect exact task diff, commit only task-owned paths, and do not push.",
   "updatedAt": "2026-07-22"
 }

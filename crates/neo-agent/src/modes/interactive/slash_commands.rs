@@ -467,10 +467,6 @@ fn render_user_slash_skill_context(
     context
 }
 
-fn escape_xml_attr(text: &str) -> String {
-    escape_xml_text(text).replace('"', "&quot;")
-}
-
 fn escape_xml_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")

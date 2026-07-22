@@ -113,13 +113,22 @@ dependencies:
 
 | Field | Consumer |
 | --- | --- |
-| `interface.display_name` | TUI completion label and `ListSkills` human label |
+| `interface.display_name` | TUI completion description prefix and `ListSkills` human label |
 | `interface.short_description` | TUI completion description and `ListSkills` summary |
 | `dependencies.tools[].type` | Only `mcp` is accepted |
 | `dependencies.tools[].value` | Activation envelope and `ListSkills` dependency summary |
 | `dependencies.tools[].description` | Activation envelope detail |
 
 The sidecar is optional; absence falls back to manifest `name`/`description`. Invalid metadata is diagnosed but never hides the skill. Declared dependencies do not install or start MCP servers — they tell the model which server is needed.
+
+The completion candidate itself always displays and inserts the full canonical
+command, `/skill:<name>`. `display_name` only supplements its description; it
+never replaces the command shown in the candidate list.
+
+Neo does not discover implicit project-local or `.agents/skills` roots, load
+remote skill providers, render skill icons or brand colors, install declared
+dependencies, or accept binary `CreateSkill` payloads. Binary assets remain
+manually managed package files.
 
 ## Activation Methods
 
@@ -154,11 +163,24 @@ The model can invoke the `CreateSkill` tool directly in conversation to generate
       "content": "#!/usr/bin/env python3\nimport json\nimport sys\n\nfor path in sys.argv[1:]:\n    with open(path, encoding=\"utf-8\") as handle:\n        json.load(handle)\nprint(\"schemas parsed\")\n",
       "executable": true
     }
-  ]
+  ],
+  "host_metadata": {
+    "interface": {
+      "display_name": "Schema Review",
+      "short_description": "Review schemas against project rules"
+    },
+    "dependencies": [
+      {
+        "type": "mcp",
+        "value": "jsonSchemaRegistry",
+        "description": "Schema registry MCP server"
+      }
+    ]
+  }
 }
 ```
 
-The tool auto-generates frontmatter, writes `~/.neo/skills/<name>/SKILL.md`, writes optional text resources, backs up an existing skill package before overwrite to `~/.neo/backups/skills/<timestamp>/`, and reloads the active skill store when available.
+The tool auto-generates frontmatter, writes `~/.neo/skills/<name>/SKILL.md`, writes optional text resources and typed `host_metadata` to `agents/neo.yaml`, backs up an existing skill package before overwrite to `~/.neo/backups/skills/<timestamp>/`, and reloads the active skill store when available. Omitting `host_metadata` preserves an existing sidecar during updates; supplying it atomically replaces the complete sidecar.
 
 ### Creating Manually
 

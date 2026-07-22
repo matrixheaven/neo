@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(test)]
 use anyhow::Result;
 
 use super::{

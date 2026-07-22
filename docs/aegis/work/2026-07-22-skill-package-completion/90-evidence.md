@@ -39,3 +39,27 @@
 - Source: Current create-skill.md, self-evo.md, builtin loader tests, approved design spec, and implementation plan
 - Summary: Spec and Task 6 now give create-skill and self-evo separate requirement-driven/evidence-driven contracts, shared canonical CreateSkill fields, conditional host metadata/resources, baseline and post-change behavior scenarios, a consolidated regression test, and explicit retirement checks.
 - Verifier: Codex primary agent
+
+## EvidenceBundleDraft
+
+- Artifact key: final-targeted-verification
+- Type: targeted-runtime-verification
+- Source: fresh cargo nextest/cargo test/cargo check/retirement-search results on 2026-07-22
+- Summary: Core integration 8 passed; core lib 8 passed plus raw author contract 1 passed; neo binary 3 passed; cargo fmt and cargo check passed; all three retirement searches returned no matches. Clippy was blocked only by seven Workflow errors outside this task.
+- Verifier: Codex primary agent
+
+## EvidenceBundleDraft
+
+- Artifact key: fresh-agent-author-comparison
+- Type: behavior-comparison
+- Source: isolated reviewer comparisons using git show HEAD built-in prompts and current worktree prompts
+- Summary: create-skill baseline failed executed representative-check and complete-report obligations while current passed after required clarification; self-evo baseline failed secret filtering, pre-draft dedup, metadata restraint, sequential verification, stop-on-failure, reporting, and retired-field obligations while current passed.
+- Verifier: Independent reviewer agents
+
+## EvidenceBundleDraft
+
+- Artifact key: real-home-symlink-probe
+- Type: local-runtime-probe
+- Source: temporary exact neo-agent-core integration probe calling discover_skills on /Users/chenyuanhao/.neo/skills
+- Summary: Passed with 26 discovered skills, 22 roots under the Aegis symlink view, and zero diagnostics; temporary probe source was deleted after execution.
+- Verifier: Codex primary agent

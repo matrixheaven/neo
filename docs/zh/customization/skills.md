@@ -113,13 +113,20 @@ dependencies:
 
 | 字段 | 使用方 |
 | --- | --- |
-| `interface.display_name` | TUI 补全标签和 `ListSkills` 可读标签 |
+| `interface.display_name` | TUI 补全描述前缀和 `ListSkills` 可读标签 |
 | `interface.short_description` | TUI 补全描述和 `ListSkills` 摘要 |
 | `dependencies.tools[].type` | 仅接受 `mcp` |
 | `dependencies.tools[].value` | 激活信封和 `ListSkills` 依赖摘要 |
 | `dependencies.tools[].description` | 激活信封详情 |
 
 该附属文件是可选的；缺失时回退至 manifest 的 `name`/`description`。无效元数据会被诊断但不会隐藏该技能。声明的依赖不会安装或启动 MCP 服务器——它们仅告知模型需要哪个服务器。
+
+补全候选始终显示并插入完整的规范命令 `/skill:<name>`。`display_name`
+只补充候选描述，不会替换候选栏中显示的命令。
+
+Neo 不会隐式发现项目内或 `.agents/skills` 根目录，不会加载远程 Skill
+provider，不会渲染 Skill 图标或品牌色，不会安装声明的依赖，也不接受
+`CreateSkill` 的二进制 payload。二进制资源仍需作为包文件手动管理。
 
 ## 激活方式
 
@@ -154,11 +161,24 @@ dependencies:
       "content": "#!/usr/bin/env python3\nimport json\nimport sys\n\nfor path in sys.argv[1:]:\n    with open(path, encoding=\"utf-8\") as handle:\n        json.load(handle)\nprint(\"schemas parsed\")\n",
       "executable": true
     }
-  ]
+  ],
+  "host_metadata": {
+    "interface": {
+      "display_name": "Schema Review",
+      "short_description": "Review schemas against project rules"
+    },
+    "dependencies": [
+      {
+        "type": "mcp",
+        "value": "jsonSchemaRegistry",
+        "description": "Schema registry MCP server"
+      }
+    ]
+  }
 }
 ```
 
-工具会自动生成 frontmatter，写入 `~/.neo/skills/<name>/SKILL.md`，写入可选文本资源，在覆盖前把既有 Skill 包备份到 `~/.neo/backups/skills/<timestamp>/`，并在可用时重新加载当前会话的 skill store。
+工具会自动生成 frontmatter，写入 `~/.neo/skills/<name>/SKILL.md`，写入可选文本资源，并把 typed `host_metadata` 写入 `agents/neo.yaml`；覆盖前会把既有 Skill 包备份到 `~/.neo/backups/skills/<timestamp>/`，并在可用时重新加载当前会话的 skill store。更新时省略 `host_metadata` 会保留已有 sidecar；提供它则会原子替换完整 sidecar。
 
 ### 手动创建
 

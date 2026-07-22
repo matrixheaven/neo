@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "real-home-symlink-probe",
+  "type": "local-runtime-probe",
+  "source": "temporary exact neo-agent-core integration probe calling discover_skills on /Users/chenyuanhao/.neo/skills",
+  "summary": "Passed with 26 discovered skills, 22 roots under the Aegis symlink view, and zero diagnostics; temporary probe source was deleted after execution.",
+  "verifier": "Codex primary agent"
+}

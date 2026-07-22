@@ -18,7 +18,7 @@ pub(crate) use models_cli::list_configured_models;
 
 // Re-export session helpers used within this module.
 use session_mgmt::{
-    latest_session_id, record_initial_session_title, record_session_activity, session_id_from_path,
+    latest_session_id, record_initial_session_title, record_session_activity,
     session_root_from_wire_path,
 };
 

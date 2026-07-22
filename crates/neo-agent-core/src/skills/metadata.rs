@@ -9,12 +9,15 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+const MAX_DISPLAY_NAME_CHARS: usize = 64;
+const MAX_DESCRIPTION_CHARS: usize = 256;
+const MAX_DEPENDENCY_VALUE_CHARS: usize = 128;
+
 /// Parsed host metadata from `agents/neo.yaml`.
-///
-/// An absent or empty sidecar is normal and produces `SkillHostMetadata::default()`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillHostMetadata {
     pub interface: Option<SkillInterface>,
+    #[serde(default)]
     pub dependencies: Vec<SkillToolDependency>,
 }
 
@@ -25,34 +28,24 @@ pub struct SkillInterface {
     pub short_description: Option<String>,
 }
 
-/// Declared tool dependency (currently only MCP server identifiers).
+/// Declared MCP server dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillToolDependency {
     pub value: String,
     pub description: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// YAML wire shapes — kept separate from the public runtime types so the
-// deserializer owns validation (e.g. rejecting unsupported dependency types).
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum DependencyType {
-    Mcp,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct HostMetadataFile {
+    #[serde(default)]
     interface: Option<InterfaceFile>,
     #[serde(default)]
     dependencies: DepsFile,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct InterfaceFile {
     #[serde(default)]
     display_name: Option<String>,
@@ -61,26 +54,49 @@ struct InterfaceFile {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct DepsFile {
     #[serde(default)]
     tools: Vec<DepToolFile>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DepToolFile {
-    #[allow(dead_code)]
     #[serde(rename = "type")]
-    dep_type: DependencyType,
+    dep_type: String,
     value: String,
     #[serde(default)]
     description: Option<String>,
 }
 
+#[derive(Serialize)]
+struct HostMetadataOutput<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<&'a SkillInterface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependencies: Option<DepsOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct DepsOutput<'a> {
+    tools: Vec<DepToolOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct DepToolOutput<'a> {
+    #[serde(rename = "type")]
+    dep_type: &'static str,
+    value: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
+
 /// Load and validate `agents/neo.yaml` from `skill_root`.
 ///
-/// Returns metadata plus a list of non-fatal diagnostic strings. Missing file
-/// returns `(default(), [])`. Malformed YAML returns `(default(), [diagnostic])`.
+/// Missing or empty files return empty metadata without diagnostics. Structural
+/// YAML errors fall back to empty metadata. Invalid fields and unsupported
+/// dependency types are diagnosed and omitted without discarding valid fields.
 pub fn load_host_metadata(skill_root: &Path) -> (SkillHostMetadata, Vec<String>) {
     let sidecar_path = skill_root.join("agents").join("neo.yaml");
     let raw = match std::fs::read_to_string(&sidecar_path) {
@@ -101,113 +117,191 @@ pub fn load_host_metadata(skill_root: &Path) -> (SkillHostMetadata, Vec<String>)
     if raw.trim().is_empty() {
         return (SkillHostMetadata::default(), Vec::new());
     }
-    match parse_and_validate(&raw, &sidecar_path) {
-        Ok(metadata) => (metadata, Vec::new()),
-        Err(diagnostics) => (SkillHostMetadata::default(), diagnostics),
+    let file: HostMetadataFile = match serde_yaml::from_str(&raw) {
+        Ok(file) => file,
+        Err(error) => {
+            return (
+                SkillHostMetadata::default(),
+                vec![format!(
+                    "invalid host metadata in {}: {error}",
+                    sidecar_path.display()
+                )],
+            );
+        }
+    };
+    metadata_from_file(file, &sidecar_path)
+}
+
+fn metadata_from_file(file: HostMetadataFile, path: &Path) -> (SkillHostMetadata, Vec<String>) {
+    let mut diagnostics = Vec::new();
+    let interface = file.interface.and_then(|interface| {
+        let interface = SkillInterface {
+            display_name: normalize_string(
+                interface.display_name,
+                "interface.display_name",
+                MAX_DISPLAY_NAME_CHARS,
+                path,
+                &mut diagnostics,
+            ),
+            short_description: normalize_string(
+                interface.short_description,
+                "interface.short_description",
+                MAX_DESCRIPTION_CHARS,
+                path,
+                &mut diagnostics,
+            ),
+        };
+        (!interface.is_empty()).then_some(interface)
+    });
+
+    let mut dependencies = Vec::new();
+    for (index, dependency) in file.dependencies.tools.into_iter().enumerate() {
+        let field = format!("dependencies.tools[{index}]");
+        if dependency.dep_type.trim() != "mcp" {
+            diagnostics.push(format!(
+                "invalid host metadata in {}: {field}.type supports only `mcp`",
+                path.display()
+            ));
+            continue;
+        }
+        let Some(value) = normalize_string(
+            Some(dependency.value),
+            &format!("{field}.value"),
+            MAX_DEPENDENCY_VALUE_CHARS,
+            path,
+            &mut diagnostics,
+        ) else {
+            continue;
+        };
+        if value.starts_with("mcp__") {
+            diagnostics.push(format!(
+                "invalid host metadata in {}: {field}.value must be an MCP server identifier, not a namespaced tool name",
+                path.display()
+            ));
+            continue;
+        }
+        dependencies.push(SkillToolDependency {
+            value,
+            description: normalize_string(
+                dependency.description,
+                &format!("{field}.description"),
+                MAX_DESCRIPTION_CHARS,
+                path,
+                &mut diagnostics,
+            ),
+        });
+    }
+
+    (
+        SkillHostMetadata {
+            interface,
+            dependencies,
+        },
+        diagnostics,
+    )
+}
+
+fn normalize_string(
+    raw: Option<String>,
+    field: &str,
+    max_chars: usize,
+    path: &Path,
+    diagnostics: &mut Vec<String>,
+) -> Option<String> {
+    let raw = raw?;
+    let value = raw.trim();
+    let reason = if value.is_empty() {
+        Some("must not be empty".to_owned())
+    } else if value.contains(['\n', '\r']) {
+        Some("must be a single line".to_owned())
+    } else if value.chars().count() > max_chars {
+        Some(format!("must be at most {max_chars} characters"))
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        diagnostics.push(format!(
+            "invalid host metadata in {}: {field} {reason}",
+            path.display()
+        ));
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Normalize runtime metadata with the same field contract as the sidecar.
+pub(crate) fn validate_host_metadata(
+    metadata: SkillHostMetadata,
+    source: &Path,
+) -> Result<SkillHostMetadata, Vec<String>> {
+    let file = HostMetadataFile {
+        interface: metadata.interface.map(|interface| InterfaceFile {
+            display_name: interface.display_name,
+            short_description: interface.short_description,
+        }),
+        dependencies: DepsFile {
+            tools: metadata
+                .dependencies
+                .into_iter()
+                .map(|dependency| DepToolFile {
+                    dep_type: "mcp".to_owned(),
+                    value: dependency.value,
+                    description: dependency.description,
+                })
+                .collect(),
+        },
+    };
+    let (metadata, diagnostics) = metadata_from_file(file, source);
+    if diagnostics.is_empty() {
+        Ok(metadata)
+    } else {
+        Err(diagnostics)
     }
 }
 
-fn parse_and_validate(raw: &str, path: &Path) -> Result<SkillHostMetadata, Vec<String>> {
-    let file: HostMetadataFile = serde_yaml::from_str(raw).map_err(|err| {
-        vec![format!(
-            "invalid host metadata in {}: {err}",
-            path.display()
-        )]
-    })?;
-
-    Ok(SkillHostMetadata {
-        interface: file.interface.map(|iface| SkillInterface {
-            display_name: validate_display_name(iface.display_name),
-            short_description: validate_short_description(iface.short_description),
-        }),
-        dependencies: file
+/// Serialize host metadata to canonical `agents/neo.yaml` YAML.
+#[must_use]
+pub fn serialize_host_metadata(metadata: &SkillHostMetadata) -> Option<String> {
+    if metadata.is_empty() {
+        return None;
+    }
+    let dependencies = (!metadata.dependencies.is_empty()).then(|| DepsOutput {
+        tools: metadata
             .dependencies
-            .tools
-            .into_iter()
-            .map(|dep| SkillToolDependency {
-                value: dep.value,
-                description: dep.description,
+            .iter()
+            .map(|dependency| DepToolOutput {
+                dep_type: "mcp",
+                value: &dependency.value,
+                description: dependency.description.as_deref(),
             })
             .collect(),
+    });
+    serde_yaml::to_string(&HostMetadataOutput {
+        interface: metadata.interface.as_ref(),
+        dependencies,
     })
+    .ok()
 }
 
-fn validate_display_name(raw: Option<String>) -> Option<String> {
-    let value = raw.filter(|s| !s.is_empty())?;
-    let trimmed = value.trim();
-    if trimmed.chars().count() > 64 {
-        return None;
+impl SkillInterface {
+    fn is_empty(&self) -> bool {
+        self.display_name.is_none() && self.short_description.is_none()
     }
-    Some(trimmed.to_owned())
-}
-
-fn validate_short_description(raw: Option<String>) -> Option<String> {
-    let value = raw.filter(|s| !s.is_empty())?;
-    let trimmed = value.trim();
-    if trimmed.chars().count() > 256 {
-        return None;
-    }
-    Some(trimmed.to_owned())
-}
-
-/// Serialize host metadata to a canonical `agents/neo.yaml` string.
-///
-/// Returns `None` when there is no meaningful data to persist (empty interface
-/// and no dependencies).
-pub fn serialize_host_metadata(metadata: &SkillHostMetadata) -> Option<String> {
-    let has_interface = metadata
-        .interface
-        .as_ref()
-        .is_some_and(|iface| iface.display_name.is_some() || iface.short_description.is_some());
-    if !has_interface && metadata.dependencies.is_empty() {
-        return None;
-    }
-
-    let mut yaml = "interface:\n".to_owned();
-    if let Some(iface) = &metadata.interface {
-        if let Some(ref name) = iface.display_name {
-            yaml.push_str(&format!(
-                "  display_name: \"{}\"\n",
-                escape_yaml_string(name)
-            ));
-        }
-        if let Some(ref desc) = iface.short_description {
-            yaml.push_str(&format!(
-                "  short_description: \"{}\"\n",
-                escape_yaml_string(desc)
-            ));
-        }
-    }
-
-    if !metadata.dependencies.is_empty() {
-        yaml.push_str("\ndependencies:\n  tools:\n");
-        for dep in &metadata.dependencies {
-            yaml.push_str(&format!(
-                "    - type: mcp\n      value: \"{}\"\n",
-                escape_yaml_string(&dep.value)
-            ));
-            if let Some(ref desc) = dep.description {
-                yaml.push_str(&format!(
-                    "      description: \"{}\"\n",
-                    escape_yaml_string(desc)
-                ));
-            }
-        }
-    }
-    Some(yaml)
-}
-
-fn escape_yaml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 impl SkillHostMetadata {
+    /// Whether the sidecar has no meaningful fields.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.interface.as_ref().is_none_or(SkillInterface::is_empty) && self.dependencies.is_empty()
+    }
+
     /// Human-readable display name, falling back to the canonical skill name.
     #[must_use]
     pub fn display_name<'a>(&'a self, canonical_name: &'a str) -> &'a str {
         self.interface
             .as_ref()
-            .and_then(|iface| iface.display_name.as_deref())
+            .and_then(|interface| interface.display_name.as_deref())
             .unwrap_or(canonical_name)
     }
 
@@ -216,7 +310,7 @@ impl SkillHostMetadata {
     pub fn short_description(&self) -> Option<&str> {
         self.interface
             .as_ref()
-            .and_then(|iface| iface.short_description.as_deref())
+            .and_then(|interface| interface.short_description.as_deref())
     }
 }
 
@@ -225,7 +319,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serialize_roundtrips_through_parse() {
+    fn serialization_roundtrips_through_sidecar_parser() {
         let original = SkillHostMetadata {
             interface: Some(SkillInterface {
                 display_name: Some("Schema Review".into()),
@@ -237,11 +331,23 @@ mod tests {
             }],
         };
         let serialized = serialize_host_metadata(&original).expect("non-empty");
-        let parsed = match parse_and_validate(&serialized, Path::new("test")) {
-            Ok(v) => v,
-            Err(d) => panic!("failed to parse own serialization: {d:?}"),
-        };
+        let file: HostMetadataFile = serde_yaml::from_str(&serialized).expect("parse YAML");
+        let (parsed, diagnostics) = metadata_from_file(file, Path::new("test"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn invalid_fields_are_diagnosed_without_discarding_valid_fields() {
+        let file: HostMetadataFile = serde_yaml::from_str(
+            "interface:\n  display_name: '  Schema Review  '\n  short_description: |\n    invalid\n    multiline\ndependencies:\n  tools:\n    - type: http\n      value: ignored\n    - type: mcp\n      value: '  registry  '\n      description: Registry MCP\n",
+        )
+        .expect("parse YAML");
+        let (metadata, diagnostics) = metadata_from_file(file, Path::new("agents/neo.yaml"));
+        assert_eq!(metadata.display_name("fallback"), "Schema Review");
+        assert_eq!(metadata.short_description(), None);
+        assert_eq!(metadata.dependencies[0].value, "registry");
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
     }
 
     #[test]

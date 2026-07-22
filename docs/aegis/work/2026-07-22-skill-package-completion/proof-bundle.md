@@ -6,8 +6,8 @@ This proof bundle is an advisory Aegis Method Pack record. It does not determine
 
 ## Task Intent
 
-- Requested outcome: Produce an approved-scope design spec, executable implementation plan, and resume-safe handoff for completing Neo's local skill package runtime.
-- Scope: Documentation-only design and planning for neo-agent-core skill loading/invocation/management and neo-agent TUI completion integration.
+- Requested outcome: Design, implement, repair, and finally accept Neo's local skill package runtime, including both built-in author skills.
+- Scope: neo-agent-core skill package owners, neo-agent completion and activation consumers, both built-in author skills, bilingual docs, Aegis evidence, ADR, and baseline.
 
 ## Impact
 
@@ -20,12 +20,15 @@ This proof bundle is an advisory Aegis Method Pack record. It does not determine
 - docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-baseline-readback.json
 - docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-builtin-author-contract-amendment.json
 - docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-document-structure.json
+- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-final-targeted-verification.json
+- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-fresh-agent-author-comparison.json
 - docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-global-workspace-check-limit.json
+- docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-real-home-symlink-probe.json
 - docs/aegis/work/2026-07-22-skill-package-completion/evidence-bundle-draft-targeted-workspace-validation.json
 
 ## Drift Check
 
-- Scope status: The amendment stays inside the approved local skill-package authoring boundary and changes documentation only.
-- Compatibility status: CreateSkill remains the only writer; both built-ins remain manual-only and preserve resources, backup, reload, and ListSkills behavior.
-- Retirement status: Both shipped author prompts and the stale extraction fixture have explicit implementation tasks and searches to remove type: prompt and skill_type without fallback.
+- Scope status: Implementation and repair stayed inside the approved local skill-package owners; unrelated Workflow changes were not edited.
+- Compatibility status: Canonical slash labels, user/extra/builtin precedence, resources, shared activation, complete catalogs, and Aegis symlink-view roots passed targeted checks.
+- Retirement status: Retired manifest/tool fields, duplicate renderer, and fail-closed discovery have no production or shipped built-in matches; no compatibility fallback was reintroduced.
 - Advisory decision: continue

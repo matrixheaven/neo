@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "fresh-agent-author-comparison",
+  "type": "behavior-comparison",
+  "source": "isolated reviewer comparisons using git show HEAD built-in prompts and current worktree prompts",
+  "summary": "create-skill baseline failed executed representative-check and complete-report obligations while current passed after required clarification; self-evo baseline failed secret filtering, pre-draft dedup, metadata restraint, sequential verification, stop-on-failure, reporting, and retired-field obligations while current passed.",
+  "verifier": "Independent reviewer agents"
+}

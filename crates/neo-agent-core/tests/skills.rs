@@ -340,7 +340,7 @@ description: Parent skill
 Parent skill.
 ",
     );
-    for resource_dir in ["references", "scripts", "assets"] {
+    for resource_dir in ["agents", "references", "scripts", "assets"] {
         write(
             dir.path()
                 .join("parent")
@@ -398,10 +398,11 @@ Child skill.
 #[test]
 fn discovery_is_bounded_cycle_safe_and_keeps_valid_siblings() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
 
     // Valid sibling.
     write(
-        dir.path().join("valid").join("SKILL.md"),
+        root.join("valid").join("SKILL.md"),
         r"---
 name: valid
 description: Valid skill
@@ -409,10 +410,14 @@ description: Valid skill
 Valid body.
 ",
     );
+    write(
+        root.join("valid").join("agents").join("neo.yaml"),
+        "display_name: [invalid\n",
+    );
 
     // Malformed sibling.
     write(
-        dir.path().join("malformed").join("SKILL.md"),
+        root.join("malformed").join("SKILL.md"),
         r"---
 name: [invalid
 ---
@@ -420,33 +425,120 @@ Broken.
 ",
     );
 
-    // Symlink cycle on Unix.
-    #[cfg(unix)]
-    {
-        let cycle_dir = dir.path().join("cycle");
-        std::fs::create_dir(&cycle_dir).unwrap();
-        let inner = cycle_dir.join("loop");
-        std::os::unix::fs::symlink(&cycle_dir, &inner).unwrap();
-        write(
-            cycle_dir.join("SKILL.md"),
-            r"---
+    let depth_six = (1..=6).fold(root.clone(), |path, depth| {
+        path.join(format!("depth-{depth}"))
+    });
+    write(
+        depth_six.join("SKILL.md"),
+        r"---
+name: depth-six
+description: Depth six skill
+---
+Depth six body.
+",
+    );
+
+    let linked_target = dir.path().join("linked-target");
+    write(
+        linked_target.join("SKILL.md"),
+        r"---
+name: linked
+description: Linked skill
+---
+Linked body.
+",
+    );
+    let linked_view = root.join("linked-view");
+    let linked_created = create_dir_symlink(&linked_target, &linked_view);
+
+    let cycle_dir = root.join("cycle");
+    write(
+        cycle_dir.join("SKILL.md"),
+        r"---
 name: cycle
 description: Cycle skill
 ---
 Cycle body.
 ",
-        );
-    }
+    );
+    let cycle_link = cycle_dir.join("loop");
+    let cycle_created = create_dir_symlink(&cycle_dir, &cycle_link);
 
-    let (skills, diagnostics) = discover_skills(dir.path(), SkillSource::default());
+    let (skills, diagnostics) = discover_skills(&root, SkillSource::default());
     let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
 
     assert!(names.contains(&"valid"), "valid sibling missing: {names:?}");
+    assert!(
+        names.contains(&"depth-six"),
+        "depth-six skill missing: {names:?}"
+    );
+
+    if linked_created {
+        let linked = skills
+            .iter()
+            .find(|skill| skill.name == "linked")
+            .expect("linked skill should be discovered");
+        assert_eq!(linked.root, linked_view);
+    }
+
+    if cycle_created {
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.path == cycle_link
+                    && diagnostic
+                        .message
+                        .contains("symlink cycle or already-visited")
+            }),
+            "expected cycle diagnostic: {diagnostics:?}"
+        );
+    }
 
     let malformed_diag = diagnostics
         .iter()
-        .any(|d| d.path.ends_with("malformed/SKILL.md"));
+        .any(|d| d.path == root.join("malformed").join("SKILL.md"));
     assert!(malformed_diag, "expected diagnostic for malformed skill");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.path == root.join("valid").join("agents").join("neo.yaml")),
+        "expected diagnostic for malformed host metadata"
+    );
+}
+
+#[test]
+fn skill_store_reports_duplicate_qualified_names_within_a_tier() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    for root in [&first, &second] {
+        write(
+            root.join("package").join("SKILL.md"),
+            "---\nname: duplicate\ndescription: Duplicate skill\n---\nBody.\n",
+        );
+    }
+
+    let store = SkillStore::load(&[], &[first, second.clone()], Vec::new());
+    let loaded = store.get("duplicate").expect("duplicate skill loaded");
+    assert!(loaded.root.starts_with(&second));
+    assert!(store.diagnostics().iter().any(|diagnostic| {
+        diagnostic.path == loaded.root
+            && diagnostic
+                .message
+                .contains("duplicate qualified skill name `duplicate` within extra tier")
+    }));
+}
+
+#[test]
+fn discovery_diagnoses_non_directory_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("not-a-directory");
+    write(&root, "not a directory");
+
+    let (skills, diagnostics) = discover_skills(&root, SkillSource::User);
+    assert!(skills.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].path, root);
+    assert!(diagnostics[0].message.contains("not a directory"));
 }
 
 #[test]
@@ -684,4 +776,20 @@ fn write(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).expect("create directory symlink");
+    true
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_dir(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_dir_symlink(_target: &Path, _link: &Path) -> bool {
+    false
 }
