@@ -1,7 +1,6 @@
 ---
 name: update-config
 description: Help the user inspect or edit Kimi Code configuration files (config.toml, tui.toml, trust, etc.).
-type: prompt
 whenToUse: When the user asks what a setting does or wants to change a configuration value.
 disableModelInvocation: false
 ---

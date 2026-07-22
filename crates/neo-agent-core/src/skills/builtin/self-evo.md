@@ -1,7 +1,6 @@
 ---
 name: self-evo
 description: Summarize the current session or a concrete recent scope into reusable Neo skills saved under ~/.neo/skills/.
-type: prompt
 disableModelInvocation: true
 ---
 

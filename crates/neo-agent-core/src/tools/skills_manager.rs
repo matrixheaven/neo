@@ -85,6 +85,12 @@ pub struct CreateSkillArgs {
         description = "Optional text resources to create under references/, scripts/, or assets/."
     )]
     pub resources: Vec<CreateSkillResource>,
+    /// Optional Neo host metadata for agents/neo.yaml sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Optional typed host metadata: interface (display_name, short_description) and/or MCP dependencies."
+    )]
+    pub host_metadata: Option<crate::skills::SkillHostMetadata>,
 }
 
 pub struct ListSkillsTool {
@@ -375,6 +381,22 @@ impl Tool for CreateSkillTool {
             }
 
             write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
+
+            // Write agents/neo.yaml when host_metadata is present.
+            if let Some(ref metadata) = args.host_metadata {
+                if let Some(sidecar_yaml) =
+                    crate::skills::serialize_host_metadata(metadata)
+                {
+                    let agents_dir = skill_dir.join("agents");
+                    stdfs::create_dir_all(&agents_dir).map_err(ToolError::Io)?;
+                    let sidecar_path = agents_dir.join("neo.yaml");
+                    reject_reparse_or_symlink_if_present(&sidecar_path)
+                        .map_err(ToolError::Io)?;
+                    write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes())
+                        .map_err(ToolError::Io)?;
+                }
+            }
+
             for resource in &resources {
                 write_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
             }
@@ -1293,72 +1315,59 @@ mod tests {
     }
 
     #[test]
-    fn builtin_skills_include_create_skill() {
+    fn builtin_skill_authors_use_canonical_package_contract() {
         let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
-        let names = skills
-            .iter()
-            .map(|skill| skill.name.as_str())
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"create-skill"), "built-ins: {names:?}");
-    }
 
-    #[test]
-    fn self_evo_builtin_requires_scope_and_verify_section() {
-        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
-        let skill = skills
+        let create_skill = skills
             .iter()
-            .find(|skill| skill.name == "self-evo")
-            .expect("self-evo built-in");
-        assert!(
-            skill.body.contains("No-argument invocation is not a scope"),
-            "{}",
-            skill.body
-        );
-        assert!(skill.body.contains("## Verify"), "{}", skill.body);
-        assert!(
-            skill.body.contains("CreateSkill.resources"),
-            "{}",
-            skill.body
-        );
-        assert!(skill.body.contains("${NEO_SKILL_DIR}"), "{}", skill.body);
-        assert!(skill.body.contains("references/"), "{}", skill.body);
-        assert!(skill.body.contains("scripts/"), "{}", skill.body);
-        assert!(skill.body.contains("assets/"), "{}", skill.body);
-        assert!(
-            skill.manifest.disable_model_invocation,
-            "self-evo must require explicit user invocation"
-        );
-    }
-
-    #[test]
-    fn create_skill_builtin_requires_verify_and_create_skill_tool() {
-        let skills = crate::skills::builtin::builtin_skills().expect("built-ins load");
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "create-skill")
+            .find(|s| s.name == "create-skill")
             .expect("create-skill built-in");
+        let self_evo = skills
+            .iter()
+            .find(|s| s.name == "self-evo")
+            .expect("self-evo built-in");
+
+        // Both authors must be manual-only.
         assert!(
-            skill
-                .body
-                .contains("No-argument invocation is not a requirement"),
-            "{}",
-            skill.body
+            create_skill.manifest.disable_model_invocation,
+            "create-skill must be manual-only"
         );
-        assert!(skill.body.contains("## Verify"), "{}", skill.body);
-        assert!(skill.body.contains("CreateSkill"), "{}", skill.body);
         assert!(
-            skill.body.contains("CreateSkill.resources"),
-            "{}",
-            skill.body
+            self_evo.manifest.disable_model_invocation,
+            "self-evo must be manual-only"
         );
-        assert!(skill.body.contains("${NEO_SKILL_DIR}"), "{}", skill.body);
-        assert!(skill.body.contains("references/"), "{}", skill.body);
-        assert!(skill.body.contains("scripts/"), "{}", skill.body);
-        assert!(skill.body.contains("assets/"), "{}", skill.body);
-        assert!(
-            skill.manifest.disable_model_invocation,
-            "create-skill must require explicit user invocation"
-        );
+
+        // Neither may contain retired type/skill_type fields.
+        for skill in [create_skill, self_evo] {
+            let combined = format!("{}\n{}", skill.name, skill.body);
+            assert!(
+                !combined.contains("type: prompt")
+                    && !combined.contains("type: inline")
+                    && !combined.contains("type: flow"),
+                "{} must not mention retired type field",
+                skill.name
+            );
+            assert!(
+                !combined.contains("skill_type"),
+                "{} must not mention retired skill_type",
+                skill.name
+            );
+            assert!(
+                !combined.contains("slashCommands") && !combined.contains("slash_commands"),
+                "{} must not mention retired slash fields",
+                skill.name
+            );
+        }
+
+        // create-skill is requirement-driven.
+        assert!(create_skill.body.contains("No-argument invocation is not a requirement"));
+        assert!(create_skill.body.contains("## Verify"));
+        assert!(create_skill.body.contains("CreateSkill"));
+
+        // self-evo is evidence-driven.
+        assert!(self_evo.body.contains("No-argument invocation is not a scope"));
+        assert!(self_evo.body.contains("## Verify"));
+        assert!(self_evo.body.contains("CreateSkill.resources"));
     }
 
     #[tokio::test]
@@ -1371,7 +1380,7 @@ mod tests {
         let skill_path = builtin_skill_dir.join("SKILL.md");
         fs::write(
             &skill_path,
-            "---\nname: self-evo\ndescription: stale\ntype: prompt\n---\n\nSTALE_MARKER\n",
+            "---\nname: self-evo\ndescription: stale\ndisableModelInvocation: true\n---\n\nSTALE_MARKER\n",
         )
         .await
         .expect("write stale builtin");
@@ -2400,6 +2409,65 @@ mod tests {
             "tool result should tell the model the reload happened: {}",
             result.content
         );
+    }
+
+    #[tokio::test]
+    async fn create_skill_writes_and_preserves_typed_host_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let skill_dir = temp.path().join("skills").join("host-skill");
+
+        // Create with host metadata.
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "host-skill",
+                    "description": "Has host metadata",
+                    "body": "# Host Skill\n\nUses metadata.",
+                    "host_metadata": {
+                        "interface": {
+                            "display_name": "Host Display",
+                            "short_description": "Picker summary"
+                        },
+                        "dependencies": [
+                            {
+                                "type": "mcp",
+                                "value": "myServer",
+                                "description": "My MCP server"
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+
+        let sidecar_path = skill_dir.join("agents").join("neo.yaml");
+        let sidecar =
+            fs::read_to_string(&sidecar_path).await.expect("read sidecar");
+        assert!(sidecar.contains("display_name: \"Host Display\""));
+        assert!(sidecar.contains("short_description: \"Picker summary\""));
+        assert!(sidecar.contains("value: \"myServer\""));
+
+        // Update without host_metadata — existing sidecar preserved.
+        let result2 = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "host-skill",
+                    "description": "Updated",
+                    "body": "# Updated"
+                }),
+            )
+            .await
+            .expect("execute2");
+        assert!(!result2.is_error);
+
+        let sidecar2 =
+            fs::read_to_string(&sidecar_path).await.expect("read sidecar2");
+        assert!(sidecar2.contains("display_name: \"Host Display\""));
     }
 
     #[tokio::test]

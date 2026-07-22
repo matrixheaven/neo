@@ -6,26 +6,27 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// Parsed host metadata from `agents/neo.yaml`.
 ///
 /// An absent or empty sidecar is normal and produces `SkillHostMetadata::default()`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillHostMetadata {
     pub interface: Option<SkillInterface>,
     pub dependencies: Vec<SkillToolDependency>,
 }
 
 /// Human-facing display labels consumed by TUI completion and `ListSkills`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillInterface {
     pub display_name: Option<String>,
     pub short_description: Option<String>,
 }
 
 /// Declared tool dependency (currently only MCP server identifiers).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillToolDependency {
     pub value: String,
     pub description: Option<String>,

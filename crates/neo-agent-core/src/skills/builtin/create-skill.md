@@ -1,7 +1,6 @@
 ---
 name: create-skill
 description: Create a Neo skill from the user's requirements, including verification guidance.
-type: prompt
 disableModelInvocation: true
 ---
 
@@ -31,7 +30,7 @@ Core principle: create a reusable capability package, not a memory note. A good 
    - Use `references/` for heavy API docs, schemas, policies, or examples that should load only when needed.
    - Use `scripts/` when repeated code or fragile operations need deterministic execution.
    - Use `assets/` for templates, images, boilerplate, or files used in final outputs.
-   - Reference resource files from the generated body through `${NEO_SKILL_DIR}` so future agents can locate files relative to the loaded skill directory, for example `${NEO_SKILL_DIR}/references/schema.md`, `${NEO_SKILL_DIR}/scripts/check.py`, or `${NEO_SKILL_DIR}/assets/template.md`.
+   - Reference resource files from the generated body through paths relative to the skill root (the `root` attribute shown in the loaded skill envelope), or through `${NEO_SKILL_DIR}` which remains supported. For example: `${NEO_SKILL_DIR}/references/schema.md`, `${NEO_SKILL_DIR}/scripts/check.py`, or `${NEO_SKILL_DIR}/assets/template.md`.
    - Create resource files directly with `CreateSkill.resources` when they are part of the design. Do not create placeholder resources, empty directories, or references to files that are not being created.
 5. Choose a portable skill name:
    - lowercase ASCII letters and digits;
@@ -55,7 +54,7 @@ Core principle: create a reusable capability package, not a memory note. A good 
    - Tool/script skills: require running the script or command on a representative input.
    - Discipline-enforcing or high-impact skills: use a RED-GREEN-REFACTOR style test. Define a pressure scenario, identify likely baseline failure or rationalization, add explicit counters, and forward-test with a fresh agent if available.
    - When forward-testing, pass the skill and a realistic user request, not your intended answer or diagnosis.
-10. Call `CreateSkill` with `name`, `description`, `skill_type: "prompt"`, `body`, and `resources` when resource files are part of the design.
+10. Call `CreateSkill` with `name`, `description`, `body`, and `resources` when resource files are part of the design. Include `host_metadata` only when a distinct human-facing label (`display_name`, `short_description`) or an MCP server dependency has a real consumer. Never fabricate icons, transport, command, URL, installer, or `agents/openai.yaml` data. Do not use retired execution-type or slash-alias fields.
 11. Call `ListSkills` and verify the created skill name is visible in the active skill store.
 12. Report the created path, whether a backup was made, the reload result, every resource file created, and any forward-test follow-up that still remains.
 

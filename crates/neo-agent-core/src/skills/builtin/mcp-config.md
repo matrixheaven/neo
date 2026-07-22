@@ -1,7 +1,6 @@
 ---
 name: mcp-config
 description: Use when the user wants to configure MCP servers, inspect MCP status, or log in to an MCP server that needs OAuth.
-type: prompt
 disableModelInvocation: false
 ---
 

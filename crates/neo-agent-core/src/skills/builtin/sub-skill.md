@@ -1,7 +1,6 @@
 ---
 name: sub-skill
 description: Discover and reorganize the skill inventory into hierarchical sub-skill bundles. Use when the user asks to review, group, or consolidate skills into a parent bundle.
-type: prompt
 disableModelInvocation: true
 ---
 

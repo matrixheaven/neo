@@ -1,7 +1,6 @@
 ---
 name: custom-theme
 description: Help the user create or modify a custom TUI color theme.
-type: flow
 disableModelInvocation: true
 ---
 
