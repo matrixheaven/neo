@@ -120,5 +120,8 @@ async fn capability_generation_change_rollback_failure_terminalizes_old_run() {
         "the newer capability must remain available"
     );
     assert!(background_tasks.workflow_handle(&task_id).await.is_none());
-    assert_eq!(handle.snapshot().await.state, WorkflowState::Failed);
+    assert_eq!(
+        handle.snapshot().await.state,
+        crate::workflow::WorkflowState::Failed
+    );
 }

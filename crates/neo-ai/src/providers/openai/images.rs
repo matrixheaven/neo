@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::providers::common::error::ProviderError;
-use crate::providers::common::http::http_status_error;
+use crate::providers::common::http::{http_status_error, request_url};
 use crate::{
     AiError, ImageData, ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponse,
     ImageGenerationResponseImage,
@@ -34,7 +34,8 @@ impl ImageGenerationClient for OpenAiImagesClient {
         &self,
         request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, AiError> {
-        let url = format!("{}/images/generations", self.base_url);
+        let url = request_url(&self.base_url, "/images/generations")
+            .map_err(ProviderError::into_ai_error)?;
         let body = json!({
             "model": request.model.model,
             "prompt": request.prompt,

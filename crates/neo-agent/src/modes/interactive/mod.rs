@@ -84,11 +84,12 @@ use interactive_preflight::{
 
 mod prompt_completion;
 use prompt_completion::{
-    longest_common_completion_prefix, prompt_completions, session_completion_items,
+    CompletionCatalog, longest_common_completion_prefix, prompt_completions,
+    session_completion_items,
 };
 
 #[cfg(test)]
-use prompt_completion::{CompletionCatalog, CompletionSource, completion_source_candidates};
+use prompt_completion::{CompletionSource, completion_source_candidates};
 
 mod mode_state;
 
@@ -384,6 +385,7 @@ pub(crate) struct InteractiveController {
     completion_root: PathBuf,
     pending_file_completion: Option<PendingFileCompletion>,
     queued_file_completion: Option<(PromptCompletionPrefix, bool)>,
+    slash_completion_catalog: Option<CompletionCatalog>,
     workspace_root: PathBuf,
     git_status_provider: GitStatusProvider,
     pending_git_status: Option<JoinHandle<Option<String>>>,
@@ -847,6 +849,7 @@ impl InteractiveController {
             completion_root: workspace_root.clone(),
             pending_file_completion: None,
             queued_file_completion: None,
+            slash_completion_catalog: None,
             workspace_root,
             git_status_provider,
             pending_git_status: None,
@@ -1417,6 +1420,15 @@ impl InteractiveController {
             }
             return true;
         }
+        if self
+            .tui
+            .chrome()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+        {
+            self.close_inline_prompt_completion();
+            return true;
+        }
         // Approvals live only in `pending_approvals` (not a focused overlay).
         // Escape for live approvals is handled by `reject_pending_approval` /
         // `handle_pending_approval_input` → `deny_approval`.
@@ -1509,6 +1521,7 @@ impl InteractiveController {
         if prompt.trim().is_empty() {
             return Ok(());
         }
+        self.slash_completion_catalog = None;
 
         // Dismiss any open prompt-completion overlay before handling slash commands
         // or submitting, so it doesn't linger under a newly-opened picker.
@@ -2076,6 +2089,12 @@ impl InteractiveController {
                 .mark_projected(id);
         }
         self.render_appended_user_message_if_needed(&event);
+        if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
+            && matches!(name.as_str(), "CreateSkill" | "MoveSkill")
+            && !result.is_error
+        {
+            self.refresh_skill_store_for_completion();
+        }
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"
             && let Some(details) = &result.details

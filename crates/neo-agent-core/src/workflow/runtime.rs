@@ -113,7 +113,7 @@ struct RunState {
     replay_entries: Vec<ReplayEntry>,
     replay_cursor: usize,
     replay_live: bool,
-    journal_error: Option<String>,
+    journal: Option<JournalWriter>,
 }
 
 impl RunState {
@@ -124,7 +124,7 @@ impl RunState {
             state: self.state,
             current_phase: self.current_phase.clone(),
             projection_sequence: self.projection_sequence,
-            recovery_failure: self.journal_error.is_some(),
+            recovery_failure: self.journal.is_none(),
             started_at_ms: self.started_at_ms,
             updated_at_ms: self.updated_at_ms,
             invocation_count: self.invocation_count,
@@ -327,9 +327,9 @@ impl WorkflowRuntime {
                 },
                 &self.limits,
             )?;
-            Ok::<_, WorkflowError>((sequence, timestamp_ms))
+            Ok::<_, WorkflowError>((writer, sequence, timestamp_ms))
         })();
-        let (projection_sequence, started_at_ms) = match durable_create {
+        let (writer, projection_sequence, started_at_ms) = match durable_create {
             Ok(durable) => durable,
             Err(error) => {
                 return match std::fs::remove_dir_all(&run_dir) {
@@ -365,7 +365,7 @@ impl WorkflowRuntime {
             replay_entries: Vec::new(),
             replay_cursor: 0,
             replay_live: false,
-            journal_error: None,
+            journal: Some(writer),
         }));
         self.runs
             .lock()
@@ -479,7 +479,7 @@ impl WorkflowRuntime {
     pub async fn output(&self, run_id: &WorkflowId) -> Result<WorkflowOutput, WorkflowError> {
         let state = self.run_state(run_id).await?;
         let guard = state.lock().await;
-        let invocations = if guard.journal_error.is_some() {
+        let invocations = if guard.journal.is_none() {
             Vec::new()
         } else {
             journal::read_journal(&guard.journal_path())?
@@ -655,11 +655,10 @@ impl WorkflowRuntime {
                     continue;
                 }
             };
-
+            let mut writer = JournalWriter::open(&journal_path)?;
             let incomplete = journal::find_incomplete_invocations(&records);
             if !incomplete.is_empty() {
                 let resolver = self.bound_recovery_resolver()?;
-                let mut writer = JournalWriter::open(&journal_path)?;
                 for invocation in incomplete {
                     let invocation = Arc::new(invocation);
                     let outcome = if let Some(resolver) = resolver.as_ref() {
@@ -682,7 +681,6 @@ impl WorkflowRuntime {
 
             let (last_state, last_reason) = last_state(&records);
             let final_state = if last_state == WorkflowState::Running {
-                let mut writer = JournalWriter::open(&journal_path)?;
                 let record = JournalRecord::StateChanged {
                     seq: writer.next_seq(),
                     timestamp_ms: current_timestamp_ms(),
@@ -711,6 +709,7 @@ impl WorkflowRuntime {
                     records,
                     final_state,
                     terminal_reason,
+                    writer,
                 )
                 .await,
             );
@@ -785,7 +784,9 @@ impl WorkflowRuntime {
                     .token_cap
                     .is_some_and(|cap| usage_total(guard.actual_usage) >= cap);
             let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().as_simple());
-            let mut writer = JournalWriter::open(&guard.journal_path())?;
+            let writer = guard.journal.as_mut().ok_or_else(|| {
+                WorkflowError::Journal("workflow journal is unavailable".to_owned())
+            })?;
             let timestamp_ms = current_timestamp_ms();
             let started = JournalRecord::InvocationStarted {
                 seq: writer.next_seq(),
@@ -832,7 +833,10 @@ impl WorkflowRuntime {
         };
 
         let mut guard = state.lock().await;
-        let mut writer = JournalWriter::open(&guard.journal_path())?;
+        let writer = guard
+            .journal
+            .as_mut()
+            .ok_or_else(|| WorkflowError::Journal("workflow journal is unavailable".to_owned()))?;
         let timestamp_ms = current_timestamp_ms();
         let sequence = writer.append(
             &JournalRecord::InvocationFinished {
@@ -930,10 +934,11 @@ impl WorkflowRuntime {
         reason: &str,
         actor: WorkflowActor,
     ) -> Result<(), WorkflowError> {
-        if new_state.is_terminal()
-            && !journal::find_incomplete_invocations(&journal::read_journal(&state.journal_path())?)
-                .is_empty()
-        {
+        let writer = state
+            .journal
+            .as_mut()
+            .ok_or_else(|| WorkflowError::Journal("workflow journal is unavailable".to_owned()))?;
+        if new_state.is_terminal() && writer.has_incomplete_invocations() {
             return Err(WorkflowError::InvalidInput(
                 "cannot terminalize workflow with an incomplete invocation".to_owned(),
             ));
@@ -942,7 +947,6 @@ impl WorkflowRuntime {
         if previous == new_state {
             return Ok(());
         }
-        let mut writer = JournalWriter::open(&state.journal_path())?;
         let timestamp_ms = current_timestamp_ms();
         let sequence = writer.append(
             &JournalRecord::StateChanged {
@@ -1031,6 +1035,7 @@ impl WorkflowRuntime {
         records: Vec<JournalRecord>,
         state: WorkflowState,
         terminal_reason: Option<String>,
+        writer: JournalWriter,
     ) -> WorkflowHandle {
         let replay_entries = replay_entries(&records);
         let projection_sequence = records.last().map(JournalRecord::seq);
@@ -1068,7 +1073,7 @@ impl WorkflowRuntime {
             replay_entries,
             replay_cursor: 0,
             replay_live: false,
-            journal_error: None,
+            journal: Some(writer),
         };
         self.runs
             .lock()
@@ -1132,7 +1137,7 @@ impl WorkflowRuntime {
             replay_entries: Vec::new(),
             replay_cursor: 0,
             replay_live: false,
-            journal_error: Some(reason),
+            journal: None,
         };
         self.runs
             .lock()

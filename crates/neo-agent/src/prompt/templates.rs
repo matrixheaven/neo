@@ -108,7 +108,7 @@ pub(crate) fn discover_prompt_template_commands(
         );
     }
     commands.extend(
-        load_project_prompt_templates(project_dir, project_trusted)
+        load_project_prompt_templates(project_dir, project_trusted)?
             .into_iter()
             .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
             .map(|template| PromptTemplateCommand {
@@ -152,11 +152,11 @@ const fn location_rank(location: PromptTemplateLocation) -> u8 {
 pub(crate) fn load_project_prompt_templates(
     project_dir: &Path,
     project_trusted: bool,
-) -> Vec<PromptTemplate> {
+) -> anyhow::Result<Vec<PromptTemplate>> {
     if !project_trusted {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    load_prompt_templates_from_tree(&project_dir.join(".neo/prompts")).unwrap_or_default()
+    load_prompt_templates_from_tree(&project_dir.join(".neo/prompts"))
 }
 
 fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
@@ -164,8 +164,10 @@ fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTe
 }
 
 fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
-    let Ok(entries) = fs::read_dir(prompts_dir) else {
-        return Ok(Vec::new());
+    let entries = match fs::read_dir(prompts_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
     };
     let mut templates = Vec::new();
     collect_direct_prompt_templates(entries, &mut templates)?;
@@ -178,8 +180,10 @@ fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<Prom
 }
 
 fn load_prompt_templates_from_tree(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
-    let Ok(entries) = fs::read_dir(prompts_dir) else {
-        return Ok(Vec::new());
+    let entries = match fs::read_dir(prompts_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
     };
     let mut templates = Vec::new();
     collect_prompt_templates(entries, &mut templates)?;
@@ -235,7 +239,7 @@ fn find_prompt_template_by_name(
     global_prompts_dir: Option<&Path>,
     project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
         .into_iter()
         .find(|template| template.name == name)
     {
@@ -256,7 +260,7 @@ fn find_auto_prompt_template_by_name(
     exclusions: &[PromptTemplateExclusion],
     project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
         .into_iter()
         .filter(|template| !is_prompt_template_excluded(template, exclusions))
         .find(|template| template.name == name)
@@ -688,7 +692,7 @@ fn substitute_arg_slice(expression: &str, args: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_command_args, substitute_args};
+    use super::{load_project_prompt_templates, parse_command_args, substitute_args};
 
     #[test]
     fn parse_command_args_preserves_quoted_segments() {
@@ -715,5 +719,20 @@ mod tests {
             result,
             "name=Button all=Button click handler disabled support named=Button click handler disabled support rest=click handler disabled support one=click handler missing="
         );
+    }
+
+    #[test]
+    fn project_prompt_loader_ignores_only_missing_directories() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert!(
+            load_project_prompt_templates(root.path(), true)
+                .expect("missing prompt directory")
+                .is_empty()
+        );
+        std::fs::create_dir(root.path().join(".neo")).expect("mkdir");
+        std::fs::write(root.path().join(".neo/prompts"), "not a directory").expect("write marker");
+
+        load_project_prompt_templates(root.path(), true)
+            .expect_err("non-directory prompt path must be reported");
     }
 }

@@ -644,9 +644,7 @@ async fn runtime_for_config(
     if let Some(question_tx) = question_tx {
         tools.register(AskUserTool::new(question_tx));
     }
-    let extra_skill_paths: Vec<PathBuf> =
-        config.extra_skill_dirs.iter().map(PathBuf::from).collect();
-    tools.register(ListSkillsTool::new(neo_home(), extra_skill_paths));
+    tools.register(ListSkillsTool::new(skill_store_handle.clone()));
     if let Some(home) = neo_home() {
         let skill_store_reload = skill_store_reloader(config);
         let move_reload = Arc::clone(&skill_store_reload);
@@ -732,7 +730,8 @@ async fn finish_prompt_turn(
 ) -> anyhow::Result<PromptTurn> {
     let mut assistant_text = String::new();
     let mut persistence = SessionEventPersistence::default();
-    let mut turn_stream = runtime.run_turn(&mut context, user_message.clone());
+    let mut turn_stream =
+        runtime.run_turn_with_cancel(&mut context, user_message.clone(), CancellationToken::new());
     while let Some(event) = turn_stream.next().await {
         let event = event?;
         if show_retry_notices {
@@ -850,19 +849,14 @@ pub(crate) enum PersistedSessionWorkflowEvent {
     },
 }
 
-struct IdleSessionEventWriter {
-    writer: JsonlSessionWriter,
-    persistence: SessionEventPersistence,
-}
-
 pub(crate) async fn persist_session_workflow_events(
     config: AppConfig,
     mut events: mpsc::UnboundedReceiver<SessionWorkflowEvent>,
     persisted: mpsc::UnboundedSender<PersistedSessionWorkflowEvent>,
 ) {
-    let mut writers = HashMap::<String, IdleSessionEventWriter>::new();
+    let mut persistence = HashMap::<String, SessionEventPersistence>::new();
     while let Some(envelope) = events.recv().await {
-        let result = persist_session_workflow_event(&config, &mut writers, &envelope).await;
+        let result = persist_session_workflow_event(&config, &mut persistence, &envelope).await;
         let delivery = match result {
             Ok(()) => PersistedSessionWorkflowEvent::Event(envelope),
             Err(error) => PersistedSessionWorkflowEvent::Error {
@@ -879,27 +873,16 @@ pub(crate) async fn persist_session_workflow_events(
 
 async fn persist_session_workflow_event(
     config: &AppConfig,
-    writers: &mut HashMap<String, IdleSessionEventWriter>,
+    persistence: &mut HashMap<String, SessionEventPersistence>,
     envelope: &SessionWorkflowEvent,
 ) -> anyhow::Result<()> {
-    if !writers.contains_key(&envelope.session_id) {
-        let path = sessions::session_path(&envelope.session_id, config)?;
-        let writer = JsonlSessionWriter::open_append(path).await?;
-        writers.insert(
-            envelope.session_id.clone(),
-            IdleSessionEventWriter {
-                writer,
-                persistence: SessionEventPersistence::default(),
-            },
-        );
+    let path = sessions::session_path(&envelope.session_id, config)?;
+    let mut writer = JsonlSessionWriter::open_append(path).await?;
+    let session = persistence.entry(envelope.session_id.clone()).or_default();
+    for event in session.persisted_events(&envelope.event) {
+        writer.append_event(&event).await?;
     }
-    let session = writers
-        .get_mut(&envelope.session_id)
-        .expect("idle session writer inserted above");
-    for event in session.persistence.persisted_events(&envelope.event) {
-        session.writer.append_event(&event).await?;
-    }
-    session.writer.flush().await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -965,7 +948,13 @@ async fn finish_compaction_turn_streaming(
     let mut stream =
         runtime.run_manual_compaction_turn_with_cancel(&mut context, streaming.cancel_token);
     while let Some(event) = stream.next().await {
-        let event = streaming_event_or_bail(event, &streaming.event_tx)?;
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                writer.flush().await?;
+                return Err(streaming_error(error, &streaming.event_tx));
+            }
+        };
         writer.append_event(&event).await?;
         let _ = streaming.event_tx.send(Ok(event.clone()));
         events.push(event);
@@ -993,11 +982,16 @@ fn streaming_event_or_bail<E: std::fmt::Display>(
     event: Result<AgentEvent, E>,
     event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
 ) -> anyhow::Result<AgentEvent> {
-    event.map_err(|error| {
-        let message = error.to_string();
-        let _ = event_tx.send(Err(anyhow::anyhow!(message.clone())));
-        anyhow::anyhow!(message)
-    })
+    event.map_err(|error| streaming_error(error, event_tx))
+}
+
+fn streaming_error(
+    error: impl std::fmt::Display,
+    event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+) -> anyhow::Error {
+    let message = error.to_string();
+    let _ = event_tx.send(Err(anyhow::anyhow!(message.clone())));
+    anyhow::anyhow!(message)
 }
 
 async fn append_streaming_event(
@@ -1056,11 +1050,11 @@ mod tests {
 
     use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
     use neo_agent_core::{
-        AgentConfig, AgentContext, AgentEvent, AgentMessage, ApprovalAction, ApprovalOption,
-        ApprovalPresentation, ApprovalRequest, ApprovalResponse, CompactionSettings, Content,
-        McpConnectionManager, MessageOrigin, PermissionMode, PermissionOperation,
-        ProcessSupervisor, QueueMode, StopReason as AgentStopReason, ToolExecutionMode,
-        ToolRegistry,
+        AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
+        ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
+        CompactionSettings, Content, McpConnectionManager, MessageOrigin, PermissionMode,
+        PermissionOperation, ProcessSupervisor, QueueMode, StopReason as AgentStopReason,
+        ToolExecutionMode, ToolRegistry,
         harness::FakeHarness,
         session::{JsonlSessionReader, JsonlSessionWriter},
     };
@@ -1068,6 +1062,7 @@ mod tests {
         AiStreamEvent, ApiKind, ApiType, ChatMessage, ContentPart, ModelCapabilities, ModelSpec,
         ProviderId, StopReason, providers::fake::FakeModelClient,
     };
+    use tokio_util::sync::CancellationToken;
     use tracing_subscriber::prelude::*;
 
     use super::mcp_cli::auth_mcp_server;
@@ -3113,8 +3108,62 @@ mod tests {
             "delivery must follow durable flush"
         );
 
+        let writer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            JsonlSessionWriter::open_append(&wire_path),
+        )
+        .await
+        .expect("workflow ingress must release the session lock after each event")
+        .expect("open session after workflow event");
+        drop(writer);
+
         drop(ingress);
         worker.await.expect("idle persistence worker");
+    }
+
+    #[tokio::test]
+    async fn failed_streaming_compaction_flushes_error_terminal_event() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wire.jsonl");
+        let mut writer = JsonlSessionWriter::create(&path)
+            .await
+            .expect("session writer");
+        let runtime = AgentRuntime::new(
+            AgentConfig::for_model(fake_model())
+                .with_compaction(CompactionSettings::new(usize::MAX, 4)),
+            Arc::new(FakeModelClient::default()),
+        );
+        let (event_tx, _events) = tokio::sync::mpsc::unbounded_channel();
+
+        let error = match super::finish_compaction_turn_streaming(
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+            Vec::new(),
+            super::StreamingTurnIo {
+                event_tx,
+                session_id: "session-test".to_owned(),
+                cancel_token: CancellationToken::new(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("empty context must fail compaction"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("compaction"));
+
+        let stored = JsonlSessionReader::read_all(&path)
+            .await
+            .expect("read flushed terminal event");
+        let terminal = stored
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::RunFinished { stop_reason, .. } => Some(*stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal, [AgentStopReason::Error]);
     }
 
     #[tokio::test]

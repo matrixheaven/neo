@@ -45,7 +45,7 @@ pub fn detect_terminal_capabilities_with_env(
         || term.contains("tmux");
 
     let image_disabled =
-        !is_terminal || is_dumb || no_color || ci || is_windows_conpty || conservative_multiplexer;
+        !is_terminal || is_dumb || ci || is_windows_conpty || conservative_multiplexer;
 
     let image = if image_disabled {
         TerminalImageCapabilities::default()
@@ -66,7 +66,7 @@ pub fn detect_terminal_capabilities_with_env(
         AnsiCapabilities {
             color: !no_color,
             cursor_addressing: true,
-            bracketed_paste: !no_color,
+            bracketed_paste: true,
             kitty_keyboard: kitty_like,
             synchronized_output: true,
         }

@@ -3024,20 +3024,27 @@ fn terminal_capabilities_ci_disables_tui_and_images() {
 }
 
 #[test]
-fn terminal_capabilities_no_color_keeps_tui_disables_color_images() {
-    let env = |name: &str| match name {
-        "TERM" => Ok("xterm-256color".to_owned()),
+fn terminal_capabilities_no_color_only_disables_color() {
+    let no_color_env = |name: &str| match name {
+        "TERM" => Ok("xterm-kitty".to_owned()),
         "NO_COLOR" => Ok("1".to_owned()),
+        _ => Err(env::VarError::NotPresent),
+    };
+    let color_env = |name: &str| match name {
+        "TERM" => Ok("xterm-kitty".to_owned()),
         _ => Err(env::VarError::NotPresent),
     };
 
     let capabilities =
-        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, env);
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, no_color_env);
+    let color_capabilities =
+        detect_terminal_capabilities_with_env(ImageProtocolPreference::Auto, true, color_env);
 
     assert!(capabilities.ansi.cursor_addressing);
+    assert!(capabilities.ansi.bracketed_paste);
     assert!(capabilities.can_run_tui());
     assert!(!capabilities.ansi.color);
-    assert!(!capabilities.image.kitty());
+    assert_eq!(capabilities.image.kitty(), color_capabilities.image.kitty());
 }
 
 #[tokio::test]
@@ -3529,6 +3536,90 @@ fn prompt_completions_merges_real_prompt_package_and_session_commands() {
     }
     assert!(!by_value.contains_key("/tree"));
     assert!(!by_value.contains_key("/sync"));
+}
+
+#[tokio::test]
+async fn slash_completion_no_match_keeps_the_current_catalog() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prompts_dir = temp.path().join(".neo/prompts");
+    fs::create_dir_all(&prompts_dir).expect("create prompts");
+    fs::write(prompts_dir.join("alpha.md"), "alpha").expect("write alpha");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    controller
+        .handle_input_event(InputEvent::Insert('/'))
+        .await
+        .expect("open completion");
+    controller
+        .handle_input_event(InputEvent::Insert('z'))
+        .await
+        .expect("hide unmatched completion");
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(controller.slash_completion_catalog.is_some());
+    fs::write(prompts_dir.join("zzz.md"), "zzz").expect("write zzz");
+
+    controller
+        .handle_input_event(InputEvent::Insert('z'))
+        .await
+        .expect("continue unmatched completion");
+
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(
+        controller
+            .slash_completion_catalog
+            .as_ref()
+            .expect("catalog remains loaded")
+            .slash_prompts
+            .iter()
+            .all(|item| item.value != "/zzz")
+    );
+}
+
+#[tokio::test]
+async fn escape_ends_the_slash_completion_catalog_session() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prompts_dir = temp.path().join(".neo/prompts");
+    fs::create_dir_all(&prompts_dir).expect("create prompts");
+    fs::write(prompts_dir.join("first.md"), "first").expect("write first");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .handle_input_event(InputEvent::Insert('/'))
+        .await
+        .expect("open completion");
+
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("cancel completion");
+
+    assert!(controller.chrome().focused_overlay().is_none());
+    assert!(controller.slash_completion_catalog.is_none());
+    fs::write(prompts_dir.join("second.md"), "second").expect("write second");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("open next completion session");
+    assert!(
+        controller
+            .slash_completion_catalog
+            .as_ref()
+            .expect("new catalog loaded")
+            .slash_prompts
+            .iter()
+            .any(|item| item.value == "/second")
+    );
 }
 
 #[test]

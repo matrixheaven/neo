@@ -40,7 +40,7 @@ impl AnthropicMessagesClient {
         &self,
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let url = format!("{}/messages", self.base_url);
+        let url = super::common::http::request_url(&self.base_url, "/messages")?;
         let body = request_body(request)?;
         let mut builder = self
             .client

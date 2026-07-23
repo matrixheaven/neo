@@ -43,7 +43,7 @@ impl OpenAiCompatibleClient {
         &self,
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = crate::providers::common::http::request_url(&self.base_url, "/chat/completions")?;
         let body = request_body(request)?;
         let mut builder = self
             .client

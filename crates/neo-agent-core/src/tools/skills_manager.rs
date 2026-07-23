@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::skills::{SkillSource, SkillStore, SkillStoreHandle, discovery};
+use crate::skills::{SkillSource, SkillStore, SkillStoreHandle};
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 
 type SkillStoreReloader = Arc<dyn Fn() -> Result<SkillStore, String> + Send + Sync>;
@@ -129,17 +129,13 @@ pub enum CreateSkillDependencyType {
 }
 
 pub struct ListSkillsTool {
-    neo_home: Option<PathBuf>,
-    extra_dirs: Vec<PathBuf>,
+    skill_store: SkillStoreHandle,
 }
 
 impl ListSkillsTool {
     #[must_use]
-    pub fn new(neo_home: Option<PathBuf>, extra_dirs: Vec<PathBuf>) -> Self {
-        Self {
-            neo_home,
-            extra_dirs,
-        }
+    pub fn new(skill_store: SkillStoreHandle) -> Self {
+        Self { skill_store }
     }
 }
 
@@ -156,8 +152,8 @@ impl Tool for ListSkillsTool {
          Skill discovery tiers (in priority order):\n\
          1. user: Skills in ~/.neo/skills/ — created by the user or the CreateSkill tool. These \
          take highest priority when multiple skills share a name.\n\
-         2. extra: Skills in directories listed in the config's extra_skill_dirs setting. Useful \
-         for team-shared skill directories.\n\
+         2. extra: Skills in configured extra_skill_dirs and skill_path directories. Useful for \
+         team-shared skill directories.\n\
          3. builtin: Skills shipped with Neo (e.g. sub-skill, self-evo). These are extracted into \
          ~/.neo/skills/.builtin/ on startup. Only included in the listing when \
          include_builtin=true.\n\n\
@@ -185,29 +181,19 @@ impl Tool for ListSkillsTool {
                 message: err.to_string(),
             }
         });
-        let neo_home = self.neo_home.clone();
-        let extra_dirs = self.extra_dirs.clone();
+        let skill_store = self.skill_store.clone();
         Box::pin(async move {
             let args = args?;
-            let mut user_dirs = Vec::new();
-            if let Some(home) = neo_home {
-                user_dirs.extend(discovery::user_skill_dirs(&home));
-            }
-            let builtin = if args.include_builtin {
-                crate::skills::builtin::builtin_skills().map_err(|err| ToolError::InvalidInput {
-                    tool: "ListSkills".to_owned(),
-                    message: err.to_string(),
-                })?
-            } else {
-                Vec::new()
-            };
-            let store = SkillStore::load(&user_dirs, &extra_dirs, builtin);
+            let store = skill_store.snapshot();
             let mut lines = Vec::new();
             for (source, tier) in [
                 (SkillSource::User, "user"),
                 (SkillSource::Extra, "extra"),
                 (SkillSource::Builtin, "builtin"),
             ] {
+                if source == SkillSource::Builtin && !args.include_builtin {
+                    continue;
+                }
                 let mut skills = store
                     .iter()
                     .filter(|skill| skill.source == source)
@@ -1279,12 +1265,25 @@ async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::ToolContext;
-    use crate::skills::{SkillStore, SkillStoreHandle, load_host_metadata};
+    use crate::skills::{SkillStore, SkillStoreHandle, discovery, load_host_metadata};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
         let dir = tempfile::tempdir().unwrap();
         ToolContext::new(dir.path()).unwrap()
+    }
+
+    fn list_skills_tool(neo_home: Option<PathBuf>) -> ListSkillsTool {
+        let user_dirs = neo_home
+            .as_deref()
+            .map(discovery::user_skill_dirs)
+            .unwrap_or_default();
+        let store = SkillStore::load(
+            &user_dirs,
+            &[],
+            crate::skills::builtin::builtin_skills().expect("builtin skills"),
+        );
+        ListSkillsTool::new(SkillStoreHandle::new(store))
     }
 
     #[tokio::test]
@@ -1299,7 +1298,7 @@ mod tests {
         .await
         .expect("write");
 
-        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let tool = list_skills_tool(Some(temp.path().to_path_buf()));
         let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
         assert!(!result.is_error);
         assert!(result.content.contains("[user]"));
@@ -1309,7 +1308,7 @@ mod tests {
     #[tokio::test]
     async fn list_skills_includes_builtin_when_requested() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let tool = list_skills_tool(Some(temp.path().to_path_buf()));
 
         let result = tool
             .execute(&make_ctx(), json!({"include_builtin": true}))
@@ -1320,6 +1319,31 @@ mod tests {
         assert!(result.content.contains("[builtin]"));
         assert!(result.content.contains("self-evo"));
         assert!(result.content.contains("sub-skill"));
+    }
+
+    #[tokio::test]
+    async fn list_skills_reads_the_shared_skill_store_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("shared-skill");
+        fs::create_dir_all(&skill_dir).await.expect("mkdir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: shared-skill\ndescription: test\n---\n\nbody",
+        )
+        .await
+        .expect("write");
+        let handle = SkillStoreHandle::default();
+        let tool = ListSkillsTool::new(handle.clone());
+        handle.replace(SkillStore::load(
+            &[],
+            &[temp.path().to_path_buf()],
+            Vec::new(),
+        ));
+
+        let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
+
+        assert!(result.content.contains("[extra]"));
+        assert!(result.content.contains("shared-skill"));
     }
 
     #[tokio::test]
@@ -1339,7 +1363,7 @@ mod tests {
         .await
         .expect("write");
 
-        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let tool = list_skills_tool(Some(temp.path().to_path_buf()));
         let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
 
         assert!(!result.is_error);
@@ -1380,7 +1404,7 @@ mod tests {
             .await
             .expect("write script");
 
-        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let tool = list_skills_tool(Some(temp.path().to_path_buf()));
         let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
 
         assert!(!result.is_error);
@@ -1417,7 +1441,7 @@ mod tests {
             .await
             .expect("write script");
 
-        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
+        let tool = list_skills_tool(Some(temp.path().to_path_buf()));
         let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
 
         assert!(!result.is_error);
@@ -3016,11 +3040,7 @@ mod tests {
 
     #[test]
     fn tool_descriptions_are_non_empty() {
-        assert!(
-            !ListSkillsTool::new(None, Vec::new())
-                .description()
-                .is_empty()
-        );
+        assert!(!list_skills_tool(None).description().is_empty());
         assert!(!CreateSkillTool::new(".").description().is_empty());
         assert!(!MoveSkillTool::new(".").description().is_empty());
     }

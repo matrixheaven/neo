@@ -913,6 +913,7 @@ async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_c
         writer.append(&event).await.expect("append event");
     }
     writer.flush().await.expect("flush");
+    drop(writer);
 
     let result = compact_jsonl_session(
         &path,
@@ -1000,6 +1001,7 @@ async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
         writer.append(&event).await.expect("append event");
     }
     writer.flush().await.expect("flush");
+    drop(writer);
 
     let result = compact_jsonl_session(
         &path,
@@ -1012,6 +1014,91 @@ async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
 
     assert_eq!(result.compacted_message_count, 1);
     assert_eq!(result.summary.tokens_before, 13);
+}
+
+#[tokio::test]
+async fn jsonl_session_compaction_waits_for_live_writer_before_reading() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    writer
+        .append(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("first"),
+        })
+        .await
+        .expect("append first");
+    writer.flush().await.expect("flush first");
+
+    let compact_path = path.clone();
+    let compaction = tokio::spawn(async move {
+        compact_jsonl_session(
+            compact_path,
+            SessionCompactionOptions {
+                keep_recent_messages: 0,
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::time::sleep(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .expect("lock contention must not block the async runtime");
+    for _ in 0..100 {
+        assert!(
+            !compaction.is_finished(),
+            "compaction must wait while the live writer owns the session"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    writer
+        .append(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("second"),
+        })
+        .await
+        .expect("append second");
+    writer.flush().await.expect("flush second");
+    drop(writer);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), compaction)
+        .await
+        .expect("compaction should acquire the released lock")
+        .expect("compaction task")
+        .expect("compact session");
+    assert_eq!(result.compacted_message_count, 2);
+}
+
+#[tokio::test]
+async fn cancelled_session_lock_wait_leaves_no_waiter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            JsonlSessionWriter::open_append(&path),
+        )
+        .await
+        .is_err(),
+        "second writer should wait for the live writer"
+    );
+    drop(writer);
+
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        JsonlSessionWriter::open_append(&path),
+    )
+    .await
+    .expect("cancelled wait must not retain the lock")
+    .expect("open writer after cancellation");
+    drop(next);
 }
 
 #[tokio::test]

@@ -40,7 +40,7 @@ impl OpenAiResponsesClient {
         &self,
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let url = format!("{}/responses", self.base_url);
+        let url = crate::providers::common::http::request_url(&self.base_url, "/responses")?;
         let body = request_body(request)?;
         let mut builder = self
             .client

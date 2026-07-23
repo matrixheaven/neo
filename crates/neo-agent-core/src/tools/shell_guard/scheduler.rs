@@ -558,6 +558,7 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     fn agent(owner: &str, class: ShellAdmissionClass) -> ShellAdmissionRequest {
@@ -582,10 +583,47 @@ mod tests {
         })
     }
 
+    async fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
     async fn wait_for_queued(scheduler: &ShellScheduler, expected: usize) {
-        while scheduler.queued_count() != expected {
-            tokio::task::yield_now().await;
-        }
+        wait_until("shell waiter to be queued", || {
+            scheduler.queued_count() == expected
+        })
+        .await;
+    }
+
+    async fn wait_for_task<T>(
+        scheduler: &ShellScheduler,
+        description: &str,
+        task: tokio::task::JoinHandle<T>,
+    ) -> Result<T, tokio::task::JoinError> {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for {description}; queued={}, running={:?}",
+                    scheduler.queued_count(),
+                    scheduler.running_counts()
+                )
+            })
+    }
+
+    async fn wait_for_grant(
+        scheduler: &ShellScheduler,
+        description: &str,
+        task: tokio::task::JoinHandle<ShellCommandPermit>,
+    ) -> ShellCommandPermit {
+        wait_for_task(scheduler, description, task)
+            .await
+            .unwrap_or_else(|error| panic!("{description} failed: {error}"))
     }
 
     #[tokio::test]
@@ -614,7 +652,7 @@ mod tests {
         wait_for_queued(&scheduler, 1).await;
         assert!(!second.is_finished());
         drop(first);
-        let permit = second.await.expect("waiter task");
+        let permit = wait_for_grant(&scheduler, "waiter task", second).await;
         drop(permit);
         assert_eq!(scheduler.running_counts(), (0, 0));
     }
@@ -640,12 +678,12 @@ mod tests {
         wait_for_queued(&scheduler, 6).await;
 
         drop(held);
-        drop(user.await.expect("user grant"));
-        drop(fg_a1.await.expect("foreground a grant"));
-        drop(fg_b.await.expect("foreground b grant"));
-        drop(bg_a1.await.expect("background a1 grant"));
-        drop(bg_b.await.expect("background b grant"));
-        drop(bg_a2.await.expect("background a2 grant"));
+        drop(wait_for_grant(&scheduler, "user grant", user).await);
+        drop(wait_for_grant(&scheduler, "foreground a grant", fg_a1).await);
+        drop(wait_for_grant(&scheduler, "foreground b grant", fg_b).await);
+        drop(wait_for_grant(&scheduler, "background a1 grant", bg_a1).await);
+        drop(wait_for_grant(&scheduler, "background b grant", bg_b).await);
+        drop(wait_for_grant(&scheduler, "background a2 grant", bg_a2).await);
         assert_eq!(
             *order.lock().expect("order lock"),
             ["user", "fg-a1", "fg-b", "bg-a1", "bg-b", "bg-a2"]
@@ -672,7 +710,7 @@ mod tests {
         drop(foreground);
         assert!(!bg4.is_finished());
         drop(bg1);
-        drop(bg4.await.expect("fourth background grant"));
+        drop(wait_for_grant(&scheduler, "fourth background grant", bg4).await);
         drop(bg2);
         drop(bg3);
         assert_eq!(scheduler.running_counts(), (0, 0));
@@ -701,7 +739,7 @@ mod tests {
                 waiter.abort();
                 drop(held);
             }
-            let _ = waiter.await;
+            let _ = wait_for_task(&scheduler, "cancelled waiter", waiter).await;
             let probe = scheduler
                 .acquire(agent("probe", AgentForeground), None)
                 .await;
@@ -739,33 +777,25 @@ mod tests {
             }));
             wait_for_queued(&scheduler, index + 1).await;
         }
-        loop {
-            let ready = positions.lock().expect("positions lock").len() == 3;
-            if ready {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        wait_until("initial scheduler positions", || {
+            positions.lock().expect("positions lock").len() == 3
+        })
+        .await;
         assert_eq!(
             *positions.lock().expect("positions lock"),
             HashMap::from([("a1", 1), ("b1", 2), ("a2", 3)])
         );
         drop(held);
-        let first = waiters.remove(0).await.expect("first grant");
-        loop {
-            let ready = {
-                let positions = positions.lock().expect("positions lock");
-                positions.get("b1") == Some(&1) && positions.get("a2") == Some(&2)
-            };
-            if ready {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        let first = wait_for_grant(&scheduler, "first position grant", waiters.remove(0)).await;
+        wait_until("updated scheduler positions", || {
+            let positions = positions.lock().expect("positions lock");
+            positions.get("b1") == Some(&1) && positions.get("a2") == Some(&2)
+        })
+        .await;
         drop(first);
         for waiter in waiters {
             waiter.abort();
-            let _ = waiter.await;
+            let _ = wait_for_task(&scheduler, "cancelled position waiter", waiter).await;
         }
         assert_eq!(scheduler.running_counts(), (0, 0));
     }
@@ -780,12 +810,10 @@ mod tests {
         let clone = runtime.clone();
         let queued =
             tokio::spawn(async move { clone.acquire(agent("b", AgentForeground), None).await });
-        while runtime.scheduler.queued_count() != 1 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_queued(&runtime.scheduler, 1).await;
         assert!(!queued.is_finished());
         drop(held);
-        drop(queued.await.expect("clone grant"));
+        drop(wait_for_grant(&runtime.scheduler, "clone grant", queued).await);
         assert_eq!(runtime.scheduler.running_counts(), (0, 0));
     }
 }

@@ -94,7 +94,10 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             Some("Open a temporary side-question panel"),
         ),
     ];
-    let mut templates = load_project_prompt_templates(project_dir, project_trusted);
+    let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
+        Ok(templates) => templates,
+        Err(error) => return (commands, Some(error.to_string())),
+    };
     templates.sort_by(|left, right| left.name.cmp(&right.name));
     commands.extend(templates.into_iter().map(|template| {
         let label = format!("/{}", template.name);

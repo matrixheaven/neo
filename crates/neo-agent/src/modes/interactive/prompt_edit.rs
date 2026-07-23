@@ -5,6 +5,7 @@ use anyhow::Result;
 use super::{
     Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind, PickerItem,
     PromptCompletionPrefix, PromptEdit, frame_content_width, longest_common_completion_prefix,
+    prompt_completion::{prompt_completions_from_catalog, slash_completion_catalog},
     prompt_completions, size,
 };
 
@@ -464,12 +465,7 @@ impl InteractiveController {
             self.start_file_completion(prefix, true);
             return;
         }
-        let completions = match prompt_completions(
-            &self.completion_root,
-            &prefix.text,
-            self.skill_store.as_ref(),
-            self.project_trusted(),
-        ) {
+        let completions = match self.prompt_completions_for_prefix(&prefix.text) {
             Ok(completions) => completions,
             Err(error) => {
                 self.push_status(format!("Completion error: {error}"));
@@ -548,9 +544,11 @@ impl InteractiveController {
                 .tui
                 .chrome_mut()
                 .confirm_prompt_completion_with_replacement(&marker);
+            self.slash_completion_catalog = None;
             return true;
         }
         let _ = self.tui.chrome_mut().confirm_prompt_completion();
+        self.slash_completion_catalog = None;
         true
     }
 
@@ -604,26 +602,23 @@ impl InteractiveController {
 
     pub(super) fn sync_inline_prompt_completion(&mut self) {
         let Some(prefix) = self.tui.chrome_mut().prompt().completion_prefix() else {
+            self.slash_completion_catalog = None;
             self.close_inline_prompt_completion();
             return;
         };
 
         if !prefix.text.starts_with('/') && !prefix.text.starts_with('@') {
+            self.slash_completion_catalog = None;
             self.close_inline_prompt_completion();
             return;
         }
 
         if prefix.text.starts_with('@') {
+            self.slash_completion_catalog = None;
             self.start_file_completion(prefix, false);
             return;
         }
-        self.refresh_skill_store_for_completion();
-        let completions = match prompt_completions(
-            &self.completion_root,
-            &prefix.text,
-            self.skill_store.as_ref(),
-            self.project_trusted(),
-        ) {
+        let completions = match self.prompt_completions_for_prefix(&prefix.text) {
             Ok(completions) => completions,
             Err(error) => {
                 self.close_inline_prompt_completion();
@@ -633,7 +628,7 @@ impl InteractiveController {
         };
 
         if completions.is_empty() {
-            self.close_inline_prompt_completion();
+            self.hide_inline_prompt_completion();
             return;
         }
 
@@ -643,7 +638,7 @@ impl InteractiveController {
             .focused_overlay()
             .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)));
         if focused_is_prompt_completion {
-            let _ = self.tui.chrome_mut().close_focused_overlay();
+            self.hide_inline_prompt_completion();
         } else if self.tui.chrome_mut().focused_overlay_id().is_some() {
             return;
         }
@@ -672,12 +667,7 @@ impl InteractiveController {
     }
 
     fn open_slash_prompt_completion_at_cursor(&mut self) {
-        let completions = match prompt_completions(
-            &self.completion_root,
-            "/",
-            self.skill_store.as_ref(),
-            self.project_trusted(),
-        ) {
+        let completions = match self.prompt_completions_for_prefix("/") {
             Ok(completions) => completions,
             Err(error) => {
                 self.push_status(format!("Completion error: {error}"));
@@ -702,6 +692,11 @@ impl InteractiveController {
 
     pub(super) fn close_inline_prompt_completion(&mut self) {
         self.queued_file_completion = None;
+        self.slash_completion_catalog = None;
+        self.hide_inline_prompt_completion();
+    }
+
+    fn hide_inline_prompt_completion(&mut self) {
         if self
             .tui
             .chrome_mut()
@@ -797,11 +792,38 @@ impl InteractiveController {
             Ok(store) => {
                 self.tui.transcript_mut().set_skill_store(store.clone());
                 self.skill_store = Some(store);
+                self.slash_completion_catalog = None;
             }
             Err(error) => {
                 self.push_status(format!("Skill reload error: {error}"));
             }
         }
+    }
+
+    fn prompt_completions_for_prefix(&mut self, prefix: &str) -> Result<Vec<PickerItem>> {
+        if !prefix.starts_with('/') {
+            return prompt_completions(
+                &self.completion_root,
+                prefix,
+                self.skill_store.as_ref(),
+                self.project_trusted(),
+            );
+        }
+        if self.slash_completion_catalog.is_none() {
+            self.refresh_skill_store_for_completion();
+            self.slash_completion_catalog = Some(slash_completion_catalog(
+                &self.completion_root,
+                self.skill_store.as_ref(),
+                self.project_trusted(),
+            )?);
+        }
+        prompt_completions_from_catalog(
+            &self.completion_root,
+            prefix,
+            self.slash_completion_catalog
+                .as_ref()
+                .expect("slash completion catalog initialized"),
+        )
     }
 
     pub(super) fn prompt_body_width() -> usize {

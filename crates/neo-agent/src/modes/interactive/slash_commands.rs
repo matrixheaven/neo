@@ -261,6 +261,7 @@ impl InteractiveController {
     }
 
     pub(super) fn clear_submitted_prompt(&mut self) {
+        self.slash_completion_catalog = None;
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
     }
 

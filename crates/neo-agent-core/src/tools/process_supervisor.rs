@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, join_all};
 use tokio::sync::Mutex;
 
 type CleanupFn = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -57,9 +57,12 @@ impl ProcessSupervisor {
             .await
             .drain()
             .collect::<Vec<(String, SupervisedProcess)>>();
-        for (handle, process) in processes {
-            (process.cleanup)(handle).await;
-        }
+        join_all(
+            processes
+                .into_iter()
+                .map(|(handle, process)| (process.cleanup)(handle)),
+        )
+        .await;
     }
 
     #[cfg(test)]
@@ -76,5 +79,52 @@ impl ProcessSupervisor {
                     cleanup: Arc::new(cleanup),
                 },
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::FutureExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_all_starts_every_cleanup_before_waiting() {
+        let supervisor = ProcessSupervisor::default();
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+
+        for handle in ["one", "two"] {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            supervisor
+                .register(handle.to_owned(), move |_| {
+                    let started = Arc::clone(&started);
+                    let release = Arc::clone(&release);
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        release.notified().await;
+                    }
+                    .boxed()
+                })
+                .await;
+        }
+
+        let cleanup = tokio::spawn({
+            let supervisor = supervisor.clone();
+            async move { supervisor.cleanup_all().await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all cleanups should start concurrently");
+        release.notify_waiters();
+        cleanup.await.expect("cleanup task should finish");
+        assert_eq!(supervisor.active_count().await, 0);
     }
 }

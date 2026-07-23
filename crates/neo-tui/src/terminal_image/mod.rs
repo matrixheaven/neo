@@ -13,6 +13,9 @@ const MAX_KITTY_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_KITTY_IMAGE_PIXELS: u64 = 40_000_000;
 const MAX_KITTY_IMAGE_ALLOC_BYTES: u64 = MAX_KITTY_IMAGE_PIXELS * 4;
 const MAX_KITTY_IMAGE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_METADATA_MIME_CHARS: usize = 128;
+const MAX_METADATA_URL_CHARS: usize = 512;
+const MAX_METADATA_ALT_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -354,7 +357,10 @@ impl InlineImage {
     #[must_use]
     pub fn metadata_summary(&self) -> String {
         let mut summary = String::from("[image: ");
-        summary.push_str(&self.mime_type);
+        summary.push_str(&sanitize_metadata_value(
+            &self.mime_type,
+            MAX_METADATA_MIME_CHARS,
+        ));
         summary.push(' ');
         match &self.payload {
             InlineImagePayload::Bytes(bytes) => match self.source {
@@ -372,12 +378,15 @@ impl InlineImage {
             },
             InlineImagePayload::RemoteUrl(url) => {
                 summary.push_str("url=");
-                summary.push_str(url);
+                summary.push_str(&sanitize_metadata_value(url, MAX_METADATA_URL_CHARS));
             }
         }
         if let Some(alt) = &self.alt {
             summary.push_str(" alt=\"");
-            summary.push_str(&escape_metadata_value(alt));
+            summary.push_str(&escape_metadata_value(&sanitize_metadata_value(
+                alt,
+                MAX_METADATA_ALT_CHARS,
+            )));
             summary.push('"');
         }
         summary.push(']');
@@ -559,6 +568,14 @@ fn stable_image_id(id: &str) -> u32 {
 
 fn escape_metadata_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn sanitize_metadata_value(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect()
 }
 
 fn image_lines(
@@ -809,5 +826,36 @@ mod tests {
             assert!(rendered.escape_sequence.is_none());
             assert_eq!(rendered.lines, vec![rendered.metadata]);
         }
+    }
+
+    #[test]
+    fn metadata_summary_sanitizes_and_bounds_untrusted_fields() {
+        let image = InlineImage::remote_url(
+            "unsafe",
+            "image/\x1bpng\r\n",
+            "https://example.test/\x1bimage\r\n",
+            Some("a\0\\\"\u{0085}b"),
+        );
+
+        assert_eq!(
+            image.metadata_summary(),
+            r#"[image: image/png url=https://example.test/image alt="a\\\"b"]"#
+        );
+
+        let bounded = InlineImage::remote_url(
+            "bounded",
+            "m".repeat(MAX_METADATA_MIME_CHARS + 1),
+            "u".repeat(MAX_METADATA_URL_CHARS + 1),
+            Some("a".repeat(MAX_METADATA_ALT_CHARS + 1)),
+        );
+        assert_eq!(
+            bounded.metadata_summary(),
+            format!(
+                "[image: {} url={} alt=\"{}\"]",
+                "m".repeat(MAX_METADATA_MIME_CHARS),
+                "u".repeat(MAX_METADATA_URL_CHARS),
+                "a".repeat(MAX_METADATA_ALT_CHARS),
+            )
+        );
     }
 }

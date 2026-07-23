@@ -355,7 +355,7 @@ impl AgentRuntime {
                 ProjectionPlan::disabled(),
             );
             let mut compaction_events = Vec::new();
-            if let Err(err) = run_full_compaction(
+            let result = run_full_compaction(
                 &model,
                 &config,
                 &mut emitter.context,
@@ -365,15 +365,20 @@ impl AgentRuntime {
                 &cancel_token,
                 |event| compaction_events.push(event),
             )
-            .await
-            {
-                let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
-            }
+            .await;
             for event in compaction_events {
                 emitter.emit(event);
             }
             process_supervisor.cleanup_all().await;
-            emit_run_finished(&config, &mut emitter, turn, StopReason::EndTurn).await;
+            let stop_reason = if result.is_ok() {
+                StopReason::EndTurn
+            } else {
+                StopReason::Error
+            };
+            emit_run_finished(&config, &mut emitter, turn, stop_reason).await;
+            if let Err(err) = result {
+                let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
+            }
             let _ = final_sender.send(emitter.context);
         });
 
@@ -499,6 +504,33 @@ mod tests {
             "compaction-only turn must not produce an assistant reply"
         );
         assert!(context.compaction_summary().is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_emits_error_terminal_event_before_stream_error() {
+        let runtime = AgentRuntime::new(
+            fake_compaction_config(),
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+        );
+        let mut context = AgentContext::new();
+
+        let events = runtime
+            .run_manual_compaction_turn(&mut context)
+            .collect::<Vec<_>>()
+            .await;
+
+        let terminal_events = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(AgentEvent::RunFinished { stop_reason, .. }) => Some(*stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_events, [StopReason::Error]);
+        assert!(matches!(
+            events.last(),
+            Some(Err(AgentRuntimeError::Compaction(_)))
+        ));
     }
 
     #[tokio::test]

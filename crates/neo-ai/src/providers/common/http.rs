@@ -8,6 +8,17 @@ use super::error::{ProviderError, error_body_excerpt, parse_retry_after};
 
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 
+pub(crate) fn request_url(base_url: &str, path: &str) -> Result<reqwest::Url, ProviderError> {
+    let url = reqwest::Url::parse(&format!("{base_url}{path}"))
+        .map_err(|err| ProviderError::Url(format!("invalid provider URL: {err}")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return Err(ProviderError::Url(
+            "invalid provider URL: expected HTTP or HTTPS with a host".to_owned(),
+        ));
+    }
+    Ok(url)
+}
+
 pub(crate) async fn http_status_error(mut response: reqwest::Response) -> ProviderError {
     let status = response.status().as_u16();
     let retry_after = response
@@ -53,4 +64,25 @@ pub(crate) fn inject_extra_headers(
         headers.insert(name, value);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_request_url_is_not_retryable() {
+        for base_url in [
+            "not a URL",
+            "file:///tmp/provider",
+            "mailto:user@example.com",
+        ] {
+            let error = request_url(base_url, "/messages")
+                .unwrap_err()
+                .into_ai_error();
+
+            assert!(matches!(error, crate::AiError::Protocol { .. }));
+            assert!(!error.is_retryable());
+        }
+    }
 }

@@ -204,7 +204,6 @@ fn journal_append_rejects_wrong_sequence_and_hash_without_writing() {
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
     let mut writer = JournalWriter::open(&jpath).unwrap();
-
     let wrong_seq = state_changed(1, WorkflowState::Running, WorkflowState::Running);
     let err = writer.append(&wrong_seq, &limits).unwrap_err();
     assert!(err.to_string().contains("expected 0, got 1"));
@@ -229,6 +228,7 @@ fn journal_rejects_incoherent_invocation_finishes() {
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
     let mut writer = JournalWriter::open(&jpath).unwrap();
+    assert!(!writer.has_incomplete_invocations());
 
     let err = writer
         .append(&invocation_finished(0, "inv_1", true), &limits)
@@ -238,9 +238,11 @@ fn journal_rejects_incoherent_invocation_finishes() {
     writer
         .append(&invocation_started(0, "inv_1", 0), &limits)
         .unwrap();
+    assert!(writer.has_incomplete_invocations());
     writer
         .append(&invocation_finished(1, "inv_1", true), &limits)
         .unwrap();
+    assert!(!writer.has_incomplete_invocations());
     let err = writer
         .append(&invocation_finished(2, "inv_1", true), &limits)
         .unwrap_err();

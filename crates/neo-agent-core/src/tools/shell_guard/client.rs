@@ -32,6 +32,7 @@ use crate::tools::{ToolError, ToolUpdateCallback};
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_STDERR_LIMIT: usize = 4 * 1024;
 const FAILED_START_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+const EMERGENCY_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub(crate) struct GuardedCommandResult {
@@ -539,10 +540,10 @@ async fn cleanup_failed_guardian_start(
             if let Some((command_pid, command_start_id)) =
                 read_running_command_identity(running_status_path).await
             {
-                emergency_cleanup(command_pid, command_start_id).await;
+                emergency_cleanup(&mut child, command_pid, command_start_id).await;
+            } else {
+                terminate_guardian(&mut child).await;
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
         }
     }
     if let Some(stderr_task) = stderr_task {
@@ -585,6 +586,7 @@ fn spawn_reader_task(mut args: ReaderTaskArgs) {
     tokio::spawn(async move {
         let _permit = args.permit;
         let mut streamed = 0usize;
+        let mut reader_failed = false;
         let final_value = loop {
             match read_logical_response(&mut args.response, args.stream_limit).await {
                 Ok(GuardResponse::Output { stream, data }) => {
@@ -625,7 +627,9 @@ fn spawn_reader_task(mut args: ReaderTaskArgs) {
                 }
                 Ok(GuardResponse::Started { .. }) => {}
                 Err(_) => {
-                    emergency_cleanup(args.command_pid, args.command_start_id).await;
+                    emergency_cleanup(&mut args.child, args.command_pid, args.command_start_id)
+                        .await;
+                    reader_failed = true;
                     break failed_result();
                 }
             }
@@ -638,7 +642,9 @@ fn spawn_reader_task(mut args: ReaderTaskArgs) {
                 message: "guardian exited before request completed".to_owned(),
             });
         }
-        let _ = args.child.wait().await;
+        if !reader_failed {
+            let _ = args.child.wait().await;
+        }
     });
 }
 
@@ -772,19 +778,18 @@ fn unexpected_response(operation: &str) -> ToolError {
 }
 
 #[cfg(unix)]
-async fn emergency_cleanup(command_pid: u32, command_start_id: u64) {
-    if !identity_matches(command_pid, command_start_id) {
-        return;
+async fn emergency_cleanup(guardian: &mut Child, command_pid: u32, command_start_id: u64) {
+    if identity_matches(command_pid, command_start_id) {
+        if let Some(group) = i32::try_from(command_pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
     }
-    let Some(group) = i32::try_from(command_pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
-    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    terminate_guardian(guardian).await;
 }
 
 #[cfg(unix)]
@@ -799,7 +804,14 @@ fn identity_matches(command_pid: u32, command_start_id: u64) -> bool {
 }
 
 #[cfg(not(unix))]
-async fn emergency_cleanup(_command_pid: u32, _command_start_id: u64) {}
+async fn emergency_cleanup(guardian: &mut Child, _command_pid: u32, _command_start_id: u64) {
+    terminate_guardian(guardian).await;
+}
+
+async fn terminate_guardian(guardian: &mut Child) {
+    let _ = guardian.start_kill();
+    let _ = tokio::time::timeout(EMERGENCY_CLEANUP_GRACE, guardian.wait()).await;
+}
 
 #[cfg(test)]
 mod tests {
@@ -807,6 +819,20 @@ mod tests {
 
     const SNAPSHOT_KIND: u8 = 105;
     const EXITED_KIND: u8 = 106;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn emergency_cleanup_terminates_guardian() {
+        let mut guardian = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+
+        emergency_cleanup(&mut guardian, 0, 0).await;
+
+        assert!(guardian.try_wait().unwrap().is_some());
+    }
 
     #[cfg(unix)]
     #[tokio::test]

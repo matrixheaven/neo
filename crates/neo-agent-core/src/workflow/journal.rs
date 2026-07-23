@@ -76,7 +76,7 @@ fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 pub struct JournalWriter {
-    path: PathBuf,
+    file: std::fs::File,
     next_seq: u64,
     bytes_written: u64,
     started_invocations: HashSet<String>,
@@ -113,9 +113,13 @@ impl JournalWriter {
             .map_err(|e| WorkflowError::Journal(e.to_string()))?
             .len();
         let (started_invocations, finished_invocations) = invocation_ids(&records);
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
 
         Ok(Self {
-            path: path.to_path_buf(),
+            file,
             next_seq,
             bytes_written,
             started_invocations,
@@ -163,13 +167,10 @@ impl JournalWriter {
             return Err(WorkflowError::JournalTotalLimitExceeded);
         }
 
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        file.write_all(line.as_bytes())
-            .and_then(|()| file.write_all(b"\n"))
-            .and_then(|()| file.sync_all())
+        self.file
+            .write_all(line.as_bytes())
+            .and_then(|()| self.file.write_all(b"\n"))
+            .and_then(|()| self.file.sync_all())
             .map_err(|e| WorkflowError::Journal(e.to_string()))?;
 
         let seq = self.next_seq;
@@ -237,6 +238,13 @@ impl JournalWriter {
     #[must_use]
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
+    }
+
+    #[must_use]
+    pub fn has_incomplete_invocations(&self) -> bool {
+        self.started_invocations
+            .iter()
+            .any(|id| !self.finished_invocations.contains(id))
     }
 }
 

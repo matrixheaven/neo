@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
-use crate::prompt::templates::{
-    PromptTemplateLocation, discover_prompt_template_commands, load_project_prompt_templates,
-};
+use crate::prompt::templates::{PromptTemplate, load_project_prompt_templates};
 use neo_agent_core::skills::SkillStore;
 use neo_tui::shell::PickerItem;
 
@@ -22,50 +20,58 @@ pub(super) fn prompt_completions(
     skill_store: Option<&SkillStore>,
     project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
-    let (slash_prompts, prompt_packages) = if prefix.starts_with('/') {
-        (
-            slash_prompt_template_completion_items(root, project_trusted),
-            prompt_package_completion_items(root, project_trusted)?,
-        )
+    let catalog = if prefix.starts_with('/') {
+        slash_completion_catalog(root, skill_store, project_trusted)?
     } else {
-        (Vec::new(), Vec::new())
+        CompletionCatalog::default()
     };
-    let catalog = CompletionCatalog {
-        slash_prompts,
-        prompt_packages,
+    prompt_completions_from_catalog(root, prefix, &catalog)
+}
+
+pub(super) fn slash_completion_catalog(
+    root: &Path,
+    skill_store: Option<&SkillStore>,
+    project_trusted: bool,
+) -> Result<CompletionCatalog> {
+    let templates = load_project_prompt_templates(root, project_trusted)?;
+    Ok(CompletionCatalog {
+        slash_prompts: slash_prompt_template_completion_items(root, &templates),
+        prompt_packages: prompt_package_completion_items(root, &templates),
         session_commands: session_completion_items(skill_store),
-    };
+    })
+}
+
+pub(super) fn prompt_completions_from_catalog(
+    root: &Path,
+    prefix: &str,
+    catalog: &CompletionCatalog,
+) -> Result<Vec<PickerItem>> {
     Ok(completion_source_candidates(root, prefix, &catalog)?
         .into_iter()
         .map(|candidate| candidate.to_picker_item())
         .collect())
 }
 
-fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result<Vec<PickerItem>> {
-    let mut items = discover_prompt_template_commands(root, None, &[], project_trusted)?
+fn prompt_package_completion_items(root: &Path, templates: &[PromptTemplate]) -> Vec<PickerItem> {
+    let mut items = templates
         .into_iter()
-        .filter(|command| command.location == PromptTemplateLocation::Project)
-        .filter_map(|command| {
-            let relative_path = command
-                .template
-                .path
-                .strip_prefix(root.join(".neo/prompts"))
-                .ok()?;
+        .filter_map(|template| {
+            let relative_path = template.path.strip_prefix(root.join(".neo/prompts")).ok()?;
             relative_path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .and_then(|parent| parent.components().next())
                 .and_then(|component| component.as_os_str().to_str())
                 .filter(|provider| !provider.is_empty())?;
-            let value = format!("/{}", command.template.name);
+            let value = format!("/{}", template.name);
             let description =
-                (!command.template.description.is_empty()).then_some(command.template.description);
+                (!template.description.is_empty()).then_some(template.description.clone());
             Some(PickerItem::new(value.clone(), value, description))
         })
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.value.cmp(&right.value));
     items.dedup_by(|left, right| left.value == right.value);
-    Ok(items)
+    items
 }
 
 static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -116,9 +122,12 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
     items
 }
 
-fn slash_prompt_template_completion_items(root: &Path, project_trusted: bool) -> Vec<PickerItem> {
+fn slash_prompt_template_completion_items(
+    root: &Path,
+    templates: &[PromptTemplate],
+) -> Vec<PickerItem> {
     let project_prompts_dir = root.join(".neo/prompts");
-    let mut completions = load_project_prompt_templates(root, project_trusted)
+    let mut completions = templates
         .into_iter()
         .filter(|template| {
             template
@@ -132,7 +141,8 @@ fn slash_prompt_template_completion_items(root: &Path, project_trusted: bool) ->
         })
         .map(|template| {
             let value = format!("/{}", template.name);
-            let description = (!template.description.is_empty()).then_some(template.description);
+            let description =
+                (!template.description.is_empty()).then_some(template.description.clone());
             PickerItem::new(value.clone(), value, description)
         })
         .collect::<Vec<_>>();
@@ -698,4 +708,29 @@ pub(super) fn longest_common_completion_prefix(completions: &[PickerItem]) -> Op
         }
     }
     Some(prefix.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prompt_completions_from_catalog, slash_completion_catalog};
+
+    #[test]
+    fn slash_catalog_is_stable_until_the_next_completion_session() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let prompts = root.path().join(".neo/prompts");
+        std::fs::create_dir_all(&prompts).expect("mkdir");
+        std::fs::write(prompts.join("first.md"), "first").expect("write first");
+        let catalog = slash_completion_catalog(root.path(), None, true).expect("catalog");
+        std::fs::write(prompts.join("second.md"), "second").expect("write second");
+
+        let current = prompt_completions_from_catalog(root.path(), "/", &catalog)
+            .expect("current completions");
+        assert!(current.iter().any(|item| item.value == "/first"));
+        assert!(!current.iter().any(|item| item.value == "/second"));
+
+        let refreshed = slash_completion_catalog(root.path(), None, true).expect("refresh");
+        let next = prompt_completions_from_catalog(root.path(), "/", &refreshed)
+            .expect("next completions");
+        assert!(next.iter().any(|item| item.value == "/second"));
+    }
 }

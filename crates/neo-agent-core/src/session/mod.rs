@@ -3,7 +3,7 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ const SESSION_FORMAT_NAME: &str = "neo.session.jsonl";
 const SESSION_SCHEMA_VERSION: u32 = 1;
 const SESSION_METADATA_KIND: &str = "session_metadata";
 const SESSION_ID_PREFIX: &str = "session_";
+const SESSION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -64,6 +65,7 @@ pub enum SessionError {
 
 pub struct JsonlSessionWriter {
     writer: BufWriter<File>,
+    _lock: fs::File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ struct SessionSchemaMetadata {
 
 impl JsonlSessionWriter {
     pub async fn create(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        let lock = acquire_session_lock(path.as_ref()).await?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -84,12 +87,14 @@ impl JsonlSessionWriter {
             .await?;
         let mut session = Self {
             writer: BufWriter::new(file),
+            _lock: lock,
         };
         session.append_metadata().await?;
         Ok(session)
     }
 
     pub async fn open_append(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        let lock = acquire_session_lock(path.as_ref()).await?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -97,6 +102,7 @@ impl JsonlSessionWriter {
             .await?;
         Ok(Self {
             writer: BufWriter::new(file),
+            _lock: lock,
         })
     }
 
@@ -129,6 +135,29 @@ impl JsonlSessionWriter {
     pub async fn flush(&mut self) -> Result<(), SessionError> {
         self.writer.flush().await?;
         Ok(())
+    }
+}
+
+async fn acquire_session_lock(path: &Path) -> Result<fs::File, SessionError> {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .await?
+        .into_std()
+        .await;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(SESSION_LOCK_RETRY_DELAY).await;
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(SessionError::Io(error)),
+        }
     }
 }
 
@@ -261,6 +290,7 @@ pub async fn compact_jsonl_session(
     options: SessionCompactionOptions,
 ) -> Result<SessionCompactionResult, SessionError> {
     let path = path.as_ref();
+    let mut writer = JsonlSessionWriter::open_append(path).await?;
     let events = JsonlSessionReader::read_all(path).await?;
     let context = AgentContext::from_replay(events.iter());
     let messages = context.messages();
@@ -275,7 +305,6 @@ pub async fn compact_jsonl_session(
         first_kept_message_index,
     };
 
-    let mut writer = JsonlSessionWriter::open_append(path).await?;
     writer
         .append(&AgentEvent::CompactionApplied {
             summary: summary.clone(),
