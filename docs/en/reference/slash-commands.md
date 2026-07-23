@@ -13,10 +13,13 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/resume` | — | Open the session picker to restore a local session. |
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | View currently active background tasks. |
+| `/workflow` | — | Grant one capability for the next reviewed `RunWorkflow` launch. Arguments are not accepted. |
 | `/fork` | — | Create a new branch from the current session and switch to it. |
 | `/init [instruction]` | — | Create or refresh the workspace-root `AGENTS.md` only; nested `AGENTS.md` files are user-authored and never generated or modified by `/init`. Extra text is passed to the init workflow as natural-language guidance. |
 
 `/init` is TUI-only. Interactive workflows such as `/init`, `/skill:self-evo`, and `/skill:create-skill` may open a local preflight in Auto mode before starting. Neo does this mechanically from the parsed slash command; the model does not decide to switch permission modes.
+
+`/workflow` authorizes one launch, not its child effects. `RunWorkflow` always starts in the background; every Delegate, swarm, or shell effect still follows the active Ask / Auto / Yolo permission mode. Use `TaskPause`, `TaskResume`, `TaskStop`, and `TaskOutput` to control or inspect the returned task ID.
 
 ## Mode Control
 

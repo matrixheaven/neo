@@ -25,6 +25,10 @@ Any path relative to `~/.neo/` in the documentation can be replaced with `$NEO_H
 │   └── wd_<slug>_<hash12>/  # One bucket per workspace
 │       └── session_<uuid>/  # One directory per session
 │           ├── state.json   # Session state (model, timestamps, etc.)
+│           ├── workflows/   # Durable workflow runs
+│           │   └── <run_id>/
+│           │       ├── run.json
+│           │       └── journal.jsonl
 │           └── agents/
 │               └── main/    # Main agent records
 │                   ├── wire.jsonl
@@ -64,7 +68,11 @@ Fixed files inside each session directory:
 | `agents/main/plans/` | Main agent's plan files |
 | `agents/main/goals/` | Main agent's goal files |
 | `agents/main/tasks/` | Main agent's background task artifacts |
+| `workflows/<run_id>/run.json` | Immutable launch metadata: workflow identity, reviewed source/args, phases, launch source, and journal format version |
+| `workflows/<run_id>/journal.jsonl` | Append-only workflow state, invocation intent/result, control, and actual usage records |
 | `agents/<agent_id>/...` | Corresponding records for subagents (e.g. produced by Delegate) |
+
+Workflow files live under the session directory, not under transcript or background-task projections. `run.json` is immutable launch metadata. Current state, control, and actual provider usage come only from append-only `journal.jsonl`, which supports `TaskOutput`, pause/resume/stop, and host-exit recovery. Historical sessions remain readable; old workflow cards without `workflows/<run_id>/` files are historical projections only and cannot be resumed.
 
 ## Other Configuration File Locations
 

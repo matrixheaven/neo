@@ -170,6 +170,35 @@ max_background_log_bytes = 10485760
 
 `max_active_commands` 只控制调度容量。容量满时，新的 shell 调用会透明等待，而不是返回容量错误。Agent 发起的后台 Bash 与 Terminal 共享固定的 3 个槽上限，因此默认仍有 5 个槽可供用户与前台 Agent 工作使用。三个 `max_command_*` 是直接的单命令预算，不会按容量再分摊。所有整数限制必须为正。
 
+### `[runtime.workflow]` 子表
+
+`RunWorkflow` 的机器安全上限：
+
+```toml
+[runtime.workflow]
+lua_source_bytes = 1048576
+lua_vm_memory_bytes = 268435456
+pause_hook_interval = 10000
+max_uninterrupted_instructions = 100000000
+journal_record_bytes = 16777216
+journal_total_bytes = 4294967296
+swarm_concurrency = 4
+# token_cap = 0
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `lua_source_bytes` | u64 | `1048576`（1 MiB） | Lua source 大小上限 |
+| `lua_vm_memory_bytes` | u64 | `268435456`（256 MiB） | Lua VM 内存上限；还必须能转换为当前平台的 `usize` |
+| `pause_hook_interval` | u64 | `10000` | pause/stop/resource 检查之间的 Lua 指令数（`1..=u32::MAX`） |
+| `max_uninterrupted_instructions` | u64 | `100000000` | 两次持久化 child invocation 之间允许的最大 Lua 指令数 |
+| `journal_record_bytes` | u64 | `16777216`（16 MiB） | 单条序列化 journal record 的大小上限 |
+| `journal_total_bytes` | u64 | `4294967296`（4 GiB） | 每个 workflow run 的 journal 总大小上限 |
+| `swarm_concurrency` | usize | `4` | workflow 创建 swarm 时的默认最大并发数 |
+| `token_cap` | u64 | 省略（`None`） | 按 provider 实际用量检查的可选上限；`0` 会阻止第一次 provider-backed 调用 |
+
+除 `token_cap` 外所有字段都必须为正；`pause_hook_interval` 还必须符合表中的范围。省略 `token_cap` 表示 workflow 不受 token 上限约束，并且 workflow 没有 wall-clock timeout。这些字段是机器安全控制，不是项目预算：Neo 不预测 token、成本、时间或 agent 用量，也不会基于预测自动暂停或降级 workflow。`RunWorkflow` 的模型 schema 不能设置这些上限或单独的并发值。
+
 ### `[runtime.compaction]` 子表
 
 上下文压缩默认开启。首次写入配置时会包含此表；如果旧配置缺少该表，Neo 仍使用开启状态的默认值。需要关闭时必须显式设置 `enabled = false`。其余子字段都可选：

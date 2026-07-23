@@ -25,6 +25,10 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 │   └── wd_<slug>_<hash12>/  # 每个 workspace 一个桶
 │       └── session_<uuid>/  # 每次会话一个目录
 │           ├── state.json   # 会话状态（模型、时间戳等）
+│           ├── workflows/   # 持久化 workflow run
+│           │   └── <run_id>/
+│           │       ├── run.json
+│           │       └── journal.jsonl
 │           └── agents/
 │               └── main/    # 主 agent 记录
 │                   ├── wire.jsonl
@@ -64,7 +68,11 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 | `agents/main/plans/` | 主 agent 的计划文件 |
 | `agents/main/goals/` | 主 agent 的目标文件 |
 | `agents/main/tasks/` | 主 agent 的后台任务产物 |
+| `workflows/<run_id>/run.json` | 不可变 launch metadata：workflow identity、已审查 source/args、phases、launch source 与 journal format version |
+| `workflows/<run_id>/journal.jsonl` | Append-only workflow 状态、invocation intent/result、控制与实际用量记录 |
 | `agents/<agent_id>/...` | 子 agent（如 Delegate 产生的）对应记录 |
+
+Workflow 文件位于 session 目录下，不属于 transcript 或 background-task 投影。`run.json` 是不可变 launch metadata。当前状态、控制与 provider 实际用量只来自 append-only `journal.jsonl`，后者支持 `TaskOutput`、pause/resume/stop 和 host-exit recovery。历史 session 仍可读取；没有 `workflows/<run_id>/` 文件的旧 workflow 卡片只是历史投影，不能恢复执行。
 
 ## 其他配置文件位置
 

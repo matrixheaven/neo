@@ -208,6 +208,29 @@ pub(crate) struct FileRuntimeConfig {
     pub(crate) compaction: Option<FileRuntimeCompactionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) shell: Option<FileRuntimeShellConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow: Option<FileRuntimeWorkflowConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileRuntimeWorkflowConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lua_source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lua_vm_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pause_hook_interval: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_uninterrupted_instructions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) journal_record_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) journal_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) swarm_concurrency: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_cap: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

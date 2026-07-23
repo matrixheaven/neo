@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn workflow_schema_is_exact_and_rejects_model_limits() {
+    let schema = RunWorkflowTool.input_schema();
+    let properties = schema["properties"]
+        .as_object()
+        .expect("workflow schema properties");
+    let names = properties
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["name", "description", "phases", "script", "args"])
+    );
+    assert_eq!(schema["additionalProperties"], false);
+
+    let error = validated_input(&serde_json::json!({
+        "name": "bounded by runtime",
+        "description": "model cannot set machine limits",
+        "phases": [{"id": "work", "description": "work"}],
+        "script": "neo.phase('work')",
+        "args": {},
+        "limits": {"token_cap": 1}
+    }))
+    .expect_err("model-supplied limits were accepted");
+    assert!(error.contains("unknown field `limits`"), "{error}");
+}
+
+#[test]
 fn approval_presentation_counts_trailing_newline() {
     let presentation = approval_presentation(&serde_json::json!({
         "name": "line count",

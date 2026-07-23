@@ -112,6 +112,8 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `TaskList` | 列出后台任务及其状态。 |
 | `TaskOutput` | 取回一个运行中或已完成后台任务的输出。等待已知任务完成时优先使用 `block=true`。 |
 | `TaskStop` | 停止运行中的后台任务。 |
+| `TaskPause` | 请求运行中的 workflow 在下一个持久化 invocation 边界暂停；当前 child 会先完成。 |
+| `TaskResume` | 恢复已暂停 workflow；先回放匹配的 journal invocation，再继续执行 live work。 |
 
 ## 计时
 
@@ -128,9 +130,13 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `AskUserQuestion` | 执行中向用户提出带结构化选项的问题。 |
 | `CreateSkill` | 在 `~/.neo/skills/<name>/SKILL.md` 创建新 skill。 |
 | `MoveSkill` | 将 skill 目录移入父级 bundle，自动生成时间戳备份。 |
-| `RunWorkflow` | 运行 Lua 工作流脚本（可调用 `neo.delegate` / `neo.swarm` 等）。 |
+| `RunWorkflow` | 在后台启动已审查的 Lua workflow。模型输入严格只有 `name`、`description`、`phases`、`script`、`args`；机器上限属于 runtime 配置，不属于模型输入。 |
 | `ListSkills` | 列出所有可发现 skill（user / extra / builtin）。 |
 | `SummarizeSessions` | 读取并总结本地 session transcript，便于沉淀为 skill。 |
+
+`RunWorkflow` 必须先通过精确的 `/workflow` 命令授予一次 launch capability。它始终在后台启动并返回 `run_id`，该 ID 同时也是 task ID。用 `TaskOutput` 查看 journal-backed 状态/输出，用 `TaskPause` 与 `TaskResume` 做边界安全控制，用 `TaskStop` 取消。暂停会等待当前 child invocation 完成。Ask / Auto / Yolo 通过普通工具权限路径控制每个 child effect；批准 launch 不会绕过 child 审批。
+
+Workflow token 处理只使用 provider 实际用量。默认没有 token cap 或 wall-clock timeout；Neo 不会预测项目成本、token 用量、耗时或 agent 数量来暂停或降级 workflow。历史 session 中的 workflow 卡片仍可读取，但缺少持久化 workflow 文件的旧 session 不能作为 workflow 恢复执行。
 
 ## 子 agent 工具集
 

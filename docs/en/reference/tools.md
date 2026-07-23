@@ -126,6 +126,8 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | `TaskList` | List background tasks and their status. |
 | `TaskOutput` | Retrieve the output of a running or completed background task. Prefer `block=true` when waiting for a known task to finish. |
 | `TaskStop` | Stop a running background task. |
+| `TaskPause` | Request that a running workflow pause at its next durable invocation boundary; the active child finishes first. |
+| `TaskResume` | Resume a paused workflow by replaying matching journaled invocations before continuing live work. |
 
 ## Timing
 
@@ -142,9 +144,13 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | `AskUserQuestion` | Ask the user a question with structured options during execution. |
 | `CreateSkill` | Create a new skill at `~/.neo/skills/<name>/SKILL.md`. |
 | `MoveSkill` | Move a skill directory into its parent bundle, automatically generating a timestamped backup. |
-| `RunWorkflow` | Run a Lua workflow script (can call `neo.delegate` / `neo.swarm`, etc.). |
+| `RunWorkflow` | Start a reviewed Lua workflow in the background. Its model input is exactly `name`, `description`, `phases`, `script`, and `args`; machine limits are runtime configuration, not model input. |
 | `ListSkills` | List all discoverable skills (user / extra / builtin). |
 | `SummarizeSessions` | Read and summarize a local session transcript, useful for distilling it into a skill. |
+
+`RunWorkflow` requires the exact `/workflow` command to grant one launch capability. The launch is always background and returns a `run_id`, which is also its task ID. Use `TaskOutput` to inspect journal-backed status/output, `TaskPause` and `TaskResume` for boundary-safe control, and `TaskStop` to cancel. A pause waits for the active child invocation to finish. Ask / Auto / Yolo govern each child effect through the ordinary tool permission path; launch approval never bypasses child approval.
+
+Workflow token handling uses actual provider usage only. There is no default token cap or wall-clock timeout, and Neo never predicts project cost, token use, duration, or agent count to pause or degrade a workflow. Historical session workflow cards remain readable, but sessions without durable workflow files cannot be resumed as workflows.
 
 ## Sub-agent Toolset
 

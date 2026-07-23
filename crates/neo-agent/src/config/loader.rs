@@ -17,7 +17,8 @@ use neo_tui::notify::NotificationMode;
 
 use super::types::{
     FileConfig, FileRuntimeCompactionConfig, FileRuntimeConfig, FileRuntimeRetryConfig,
-    FileRuntimeShellConfig, FileTuiConfig, default_runtime_compaction_keep_recent_messages,
+    FileRuntimeShellConfig, FileRuntimeWorkflowConfig, FileTuiConfig,
+    default_runtime_compaction_keep_recent_messages,
     default_runtime_compaction_max_estimated_tokens,
 };
 use super::{
@@ -116,6 +117,8 @@ impl AppConfig {
         };
         let mut runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
+        let workflow_runtime =
+            neo_agent_core::workflow::WorkflowRuntime::new(runtime.workflow.clone());
         let runtime_dir = config_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", config_path.display()))?
@@ -150,9 +153,7 @@ impl AppConfig {
             runtime,
             background_tasks: BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
-            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
-                neo_agent_core::workflow::WorkflowLimits::default(),
-            ),
+            workflow_runtime,
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: MultiAgentRuntime::new(),
@@ -254,8 +255,43 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         },
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
         shell: runtime_shell_from_file(runtime.shell),
+        workflow: runtime_workflow_from_file(runtime.workflow),
         shell_runtime: ShellRuntime::default(),
     }
+}
+
+fn runtime_workflow_from_file(
+    workflow: Option<FileRuntimeWorkflowConfig>,
+) -> neo_agent_core::workflow::WorkflowLimits {
+    let mut limits = neo_agent_core::workflow::WorkflowLimits::default();
+    let Some(workflow) = workflow else {
+        return limits;
+    };
+    if let Some(value) = workflow.lua_source_bytes {
+        limits.lua_source_bytes = value;
+    }
+    if let Some(value) = workflow.lua_vm_memory_bytes {
+        limits.lua_vm_memory_bytes = value;
+    }
+    if let Some(value) = workflow.pause_hook_interval {
+        limits.pause_hook_interval = value;
+    }
+    if let Some(value) = workflow.max_uninterrupted_instructions {
+        limits.max_uninterrupted_instructions = value;
+    }
+    if let Some(value) = workflow.journal_record_bytes {
+        limits.journal_record_bytes = value;
+    }
+    if let Some(value) = workflow.journal_total_bytes {
+        limits.journal_total_bytes = value;
+    }
+    if let Some(value) = workflow.swarm_concurrency {
+        limits.swarm_concurrency = value;
+    }
+    if let Some(value) = workflow.token_cap {
+        limits.token_cap = Some(value);
+    }
+    limits
 }
 
 fn runtime_shell_from_file(shell: Option<FileRuntimeShellConfig>) -> ShellLimits {
@@ -328,6 +364,7 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
 
 fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
     config.shell.validate().map_err(anyhow::Error::new)?;
+    config.workflow.validate().map_err(anyhow::Error::msg)?;
     if let Some(temperature) = config.temperature {
         anyhow::ensure!(
             temperature.is_finite() && temperature >= 0.0,

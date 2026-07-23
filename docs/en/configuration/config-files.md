@@ -170,6 +170,35 @@ max_background_log_bytes = 10485760
 
 `max_active_commands` controls scheduler capacity only. At capacity, new shell calls wait transparently instead of returning a capacity error. Agent-started background Bash and Terminal sessions share a fixed cap of three, leaving five default slots available to user and foreground agent work. The three `max_command_*` values are direct per-command budgets and are never divided by capacity. All integer limits must be positive.
 
+### `[runtime.workflow]` Sub-Table
+
+Machine-safety limits for `RunWorkflow`:
+
+```toml
+[runtime.workflow]
+lua_source_bytes = 1048576
+lua_vm_memory_bytes = 268435456
+pause_hook_interval = 10000
+max_uninterrupted_instructions = 100000000
+journal_record_bytes = 16777216
+journal_total_bytes = 4294967296
+swarm_concurrency = 4
+# token_cap = 0
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `lua_source_bytes` | u64 | `1048576` (1 MiB) | Maximum Lua source size |
+| `lua_vm_memory_bytes` | u64 | `268435456` (256 MiB) | Lua VM memory limit; must also fit the platform `usize` |
+| `pause_hook_interval` | u64 | `10000` | Lua instructions between pause/stop/resource checks (`1..=u32::MAX`) |
+| `max_uninterrupted_instructions` | u64 | `100000000` | Maximum Lua instructions without a durable child invocation |
+| `journal_record_bytes` | u64 | `16777216` (16 MiB) | Maximum serialized journal record size |
+| `journal_total_bytes` | u64 | `4294967296` (4 GiB) | Maximum journal size per workflow run |
+| `swarm_concurrency` | usize | `4` | Default maximum concurrency for workflow-created swarms |
+| `token_cap` | u64 | omitted (`None`) | Optional cap checked against actual provider usage; `0` blocks the first provider-backed call |
+
+All fields except `token_cap` must be positive; `pause_hook_interval` also has the range shown above. Omitting `token_cap` leaves workflows unbounded by tokens, and there is no workflow wall-clock timeout. These are machine-safety controls, not project budgets: Neo does not predict token, cost, time, or agent usage and does not automatically pause or degrade a workflow from a prediction. The `RunWorkflow` model schema cannot set these limits or a separate concurrency value.
+
 ### `[runtime.compaction]` Sub-Table
 
 Context compaction is enabled by default. Fresh config writes include this table; if the table is missing from an older config, Neo still uses the enabled defaults. Set `enabled = false` explicitly to disable it. All other sub-fields are optional:
