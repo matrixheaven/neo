@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum WorkflowError {
     #[error("lua error: {0}")]
     Lua(String),
@@ -14,8 +14,14 @@ pub enum WorkflowError {
     JournalTotalLimitExceeded,
     #[error("invalid workflow input: {0}")]
     InvalidInput(String),
+    #[error("invalid_workflow_operation: {0}")]
+    InvalidOperation(String),
     #[error("resource limited: {0}")]
     ResourceLimited(String),
+    #[error("workflow paused: {0}")]
+    Paused(String),
+    #[error("workflow cancelled: {0}")]
+    Cancelled(String),
     #[error("run not found: {0}")]
     NotFound(String),
 }

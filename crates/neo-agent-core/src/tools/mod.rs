@@ -2,6 +2,7 @@ mod ask_user;
 mod background_tasks;
 mod bash;
 mod delegate;
+pub(crate) use delegate::{validate_delegate_request, validate_swarm_request};
 mod delegate_controls;
 mod diff;
 mod edit;

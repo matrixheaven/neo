@@ -724,7 +724,10 @@ fn child_runtime_deps(ctx: &ToolContext) -> Result<ChildRuntimeDeps, ToolError> 
     Ok(deps)
 }
 
-fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<(), ToolError> {
+pub(crate) fn validate_delegate_request(
+    tool: &str,
+    request: &DelegateRequest,
+) -> Result<(), ToolError> {
     if request.task.trim().is_empty() {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -751,7 +754,10 @@ fn validate_delegate_request(tool: &str, request: &DelegateRequest) -> Result<()
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_swarm_request(tool: &str, request: &DelegateSwarmRequest) -> Result<(), ToolError> {
+pub(crate) fn validate_swarm_request(
+    tool: &str,
+    request: &DelegateSwarmRequest,
+) -> Result<(), ToolError> {
     const MAX_SWARM_CHILDREN: usize = 8;
     const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
     const MAX_SWARM_ITEM_TITLE_CHARS: usize = 80;

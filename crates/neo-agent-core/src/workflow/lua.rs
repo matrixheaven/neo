@@ -1,18 +1,127 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt, Value};
+use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Value, VmState};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use super::WorkflowError;
+use super::{
+    WorkflowError, WorkflowHandle, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowLimits, WorkflowOutcomeStatus,
+};
+use crate::multi_agent::{
+    AgentRole, AgentRunMode, DelegateContext, DelegateRequest, DelegateSwarmItem,
+    DelegateSwarmRequest,
+};
 use crate::runtime::WorkflowDispatchHandle;
-use crate::workflow::WorkflowHandle;
-use crate::workflow::WorkflowInvocationKind;
-use crate::workflow::WorkflowLimits;
+use crate::tools::{ToolError, validate_delegate_request, validate_swarm_request};
+
+const VERIFY_WRAPPER: &str = r"
+return function(host_verify)
+    return function(...)
+        local outcome = host_verify(...)
+        if outcome.ok then
+            return nil
+        end
+        error(outcome, 0)
+    end
+end
+";
+
+const VERIFY_COMMAND_WRAPPER: &str = r"
+return function(host_verify_command)
+    return function(...)
+        local outcome = host_verify_command(...)
+        if outcome.ok then
+            return outcome
+        end
+        error(outcome, 0)
+    end
+end
+";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DelegateInput {
+    task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<AgentRole>,
+    #[serde(default)]
+    context: DelegateContext,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SwarmItem {
+    title: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SwarmInput {
+    description: String,
+    #[serde(default)]
+    items: Vec<SwarmItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_template: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    resume_agent_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    role: AgentRole,
+}
+
+impl DelegateInput {
+    fn canonical_request(&self) -> DelegateRequest {
+        DelegateRequest {
+            task: self.task.clone(),
+            resume: self.resume.clone(),
+            title: self.title.clone(),
+            role: self.role,
+            mode: AgentRunMode::Foreground,
+            context: self.context,
+        }
+    }
+}
+
+impl SwarmInput {
+    fn canonical_request(&self, max_concurrency: usize) -> DelegateSwarmRequest {
+        DelegateSwarmRequest {
+            description: self.description.clone(),
+            items: self
+                .items
+                .iter()
+                .map(|item| DelegateSwarmItem {
+                    title: item.title.clone(),
+                    value: item.value.clone(),
+                })
+                .collect(),
+            prompt_template: self.prompt_template.clone(),
+            resume_agent_ids: self.resume_agent_ids.clone(),
+            role: self.role,
+            mode: AgentRunMode::Foreground,
+            max_concurrency: Some(max_concurrency),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyCommandInput {
+    command: String,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    failure_message: Option<String>,
+}
 
 /// Runs Lua workflow scripts in a sandboxed `mlua` VM with strict host APIs.
-/// The `neo` table exposes `phase`, `log`, `delegate`, `swarm`, `verify`,
-/// `verify_command`, `report`, and `fail`. No raw OS/file/process/network APIs
-/// are available. `args` is installed as recursively read-only.
 pub struct LuaWorkflowRunner {
     dispatch: WorkflowDispatchHandle,
     handle: WorkflowHandle,
@@ -37,131 +146,227 @@ impl LuaWorkflowRunner {
         source: &str,
         args: serde_json::Value,
     ) -> Result<Option<serde_json::Value>, WorkflowError> {
-        let lua = Lua::new();
+        let libs = StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH;
+        let lua = Lua::new_with(libs, LuaOptions::default())
+            .map_err(|error| WorkflowError::Lua(error.to_string()))?;
+        let memory_limit = usize::try_from(self.limits.lua_vm_memory_bytes).map_err(|_| {
+            WorkflowError::InvalidInput("Lua VM memory limit does not fit this platform".to_owned())
+        })?;
+        lua.set_memory_limit(memory_limit).map_err(map_lua_error)?;
 
-        // Install memory limit
-        lua.set_memory_limit(self.limits.lua_vm_memory_bytes as usize)
-            .map_err(|e| WorkflowError::Lua(e.to_string()))?;
+        let interval = u32::try_from(self.limits.pause_hook_interval)
+            .ok()
+            .filter(|interval| *interval > 0)
+            .ok_or_else(|| {
+                WorkflowError::InvalidInput(
+                    "Lua hook interval must be between 1 and u32::MAX".to_owned(),
+                )
+            })?;
+        let instructions = Arc::new(AtomicU64::new(0));
+        let resource_limited = Arc::new(AtomicBool::new(false));
+        let fatal_reason = Arc::new(Mutex::new(None));
+        self.install_neo_table(
+            &lua,
+            args,
+            Arc::clone(&instructions),
+            Arc::clone(&fatal_reason),
+        )?;
+        restrict_base_globals(&lua)?;
 
-        // Note: `set_interrupt` is available via unsafe feature in newer mlua versions
-        // For now, instruction counting is done via the hook mechanism on eval_async
-        let _limits = &self.limits;
-        let _handle = &self.handle;
-
-        self.install_neo_table(&lua, args)?;
-
-        let result: mlua::Result<Value> = lua
+        let function = lua
             .load(source)
             .set_name("workflow script")
-            .eval_async()
-            .await;
+            .into_function()
+            .map_err(map_lua_error)?;
+        let thread = lua.create_thread(function).map_err(map_lua_error)?;
+        self.install_hook(
+            &thread,
+            interval,
+            Arc::clone(&instructions),
+            Arc::clone(&resource_limited),
+            Arc::clone(&fatal_reason),
+        );
+        let result: mlua::Result<Value> = thread.into_async(()).await;
 
+        if let Some(reason) = fatal_message(&fatal_reason)? {
+            return Err(WorkflowError::Failed(reason));
+        }
+        if resource_limited.load(Ordering::Acquire) {
+            return Err(WorkflowError::ResourceLimited(format!(
+                "Lua uninterrupted instruction limit {} reached",
+                self.limits.max_uninterrupted_instructions
+            )));
+        }
+        if self.handle.is_stop_requested() {
+            return Err(WorkflowError::Cancelled(
+                "workflow stop requested".to_owned(),
+            ));
+        }
+        if self.handle.is_pause_requested() {
+            return Err(WorkflowError::Paused("workflow pause requested".to_owned()));
+        }
         match result {
-            Ok(value) => {
-                lua_return_to_json(&lua, value).map_err(|e| WorkflowError::Lua(e.to_string()))
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                // neo.fail uses RuntimeError with a special prefix
-                if msg.contains("deliberate failure") {
-                    Err(WorkflowError::Failed(msg))
-                } else if msg.contains("memory limit") {
-                    Err(WorkflowError::ResourceLimited(msg))
-                } else {
-                    Err(WorkflowError::Lua(msg))
-                }
-            }
+            Ok(value) => lua_return_to_json(&lua, value).map_err(map_lua_error),
+            Err(error) => Err(map_lua_error(error)),
         }
     }
 
+    fn install_hook(
+        &self,
+        thread: &mlua::Thread,
+        interval: u32,
+        instructions: Arc<AtomicU64>,
+        resource_limited: Arc<AtomicBool>,
+        fatal_reason: Arc<Mutex<Option<String>>>,
+    ) {
+        let handle = self.handle.clone();
+        let max_instructions = self.limits.max_uninterrupted_instructions;
+        thread.set_hook(
+            HookTriggers::new().every_nth_instruction(interval),
+            move |_, _| {
+                check_fatal(&fatal_reason)?;
+                if handle.is_stop_requested() {
+                    return Err(mlua::Error::external(WorkflowError::Cancelled(
+                        "workflow stop requested".to_owned(),
+                    )));
+                }
+                if handle.is_pause_requested() {
+                    return Err(mlua::Error::external(WorkflowError::Paused(
+                        "workflow pause requested".to_owned(),
+                    )));
+                }
+                let executed = instructions
+                    .fetch_add(u64::from(interval), Ordering::Relaxed)
+                    .saturating_add(u64::from(interval));
+                if executed >= max_instructions {
+                    resource_limited.store(true, Ordering::Release);
+                    return Err(mlua::Error::external(WorkflowError::ResourceLimited(
+                        format!("Lua uninterrupted instruction limit {max_instructions} reached"),
+                    )));
+                }
+                Ok(VmState::Continue)
+            },
+        );
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn install_neo_table(&self, lua: &Lua, args: serde_json::Value) -> Result<(), WorkflowError> {
+    fn install_neo_table(
+        &self,
+        lua: &Lua,
+        args: serde_json::Value,
+        instructions: Arc<AtomicU64>,
+        fatal_reason: Arc<Mutex<Option<String>>>,
+    ) -> Result<(), WorkflowError> {
         let neo = lua
             .create_table()
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-
-        // Install recursively read-only args
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
         let args_value = lua
             .to_value(&args)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        let read_only_args =
-            make_read_only(args_value, lua).map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("args", read_only_args)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set(
+            "args",
+            make_read_only(args_value, lua, "args are read-only")
+                .map_err(|error| WorkflowError::Host(error.to_string()))?,
+        )
+        .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.phase(id)
-        let _handle = self.handle.clone();
-        let dispatch = self.dispatch.clone();
-        let phase_fn = lua
+        let next_call = Arc::new(AtomicU64::new(0));
+
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let phase = lua
             .create_async_function(move |_, id: String| {
-                let _dispatch = dispatch.clone();
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    if id.is_empty() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "phase id must be non-empty".to_owned(),
-                        )));
+                    check_fatal(&fatal)?;
+                    require_non_empty("phase id", &id)?;
+                    let output = handle.output().await.map_err(mlua::Error::external)?;
+                    if !output.metadata.phases.iter().any(|phase| phase.id == id) {
+                        return Err(mlua::Error::external(WorkflowError::InvalidInput(format!(
+                            "unknown phase id: {id}"
+                        ))));
                     }
-                    // Phase is a journaled local operation, no external effect
-                    // TODO: journal phase transition through WorkflowRuntime
+                    let input = json!({"id": id});
+                    let details = json!({"phase": id});
+                    invoke_local(
+                        &handle,
+                        &call_index,
+                        WorkflowInvocationKind::Phase,
+                        input,
+                        completed_outcome("phase selected", details),
+                    )
+                    .await?;
+                    boundary.store(0, Ordering::Relaxed);
                     Ok(())
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("phase", phase_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("phase", phase)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.log(message)
-        let log_fn = lua
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let log = lua
             .create_async_function(move |_, message: String| {
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    if message.is_empty() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "log message must be non-empty".to_owned(),
-                        )));
-                    }
-                    // Log is a journaled local operation
+                    check_fatal(&fatal)?;
+                    require_non_empty("log message", &message)?;
+                    invoke_local(
+                        &handle,
+                        &call_index,
+                        WorkflowInvocationKind::Log,
+                        json!({"message": message}),
+                        completed_outcome("log recorded", json!({"message": message})),
+                    )
+                    .await?;
+                    boundary.store(0, Ordering::Relaxed);
                     Ok(())
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("log", log_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("log", log)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        let next_effect_call = Arc::new(AtomicU64::new(0));
-
-        // neo.delegate(input)
-        let dispatch_delegate = self.dispatch.clone();
-        let handle_delegate = self.handle.clone();
-        let delegate_call_index = Arc::clone(&next_effect_call);
-        let delegate_fn = lua
-            .create_async_function(move |lua, table: Value| {
-                let dispatch = dispatch_delegate.clone();
-                let handle = handle_delegate.clone();
-                let call_index = Arc::clone(&delegate_call_index);
+        let dispatch = self.dispatch.clone();
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let delegate = lua
+            .create_async_function(move |lua, value: Value| {
+                let dispatch = dispatch.clone();
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    let input = lua_value_to_json(&lua, table)?;
-                    let task = input
-                        .get("task")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            mlua::Error::external(WorkflowError::InvalidInput(
-                                "delegate requires non-empty task field".to_owned(),
-                            ))
-                        })?;
-                    if task.is_empty() {
+                    check_fatal(&fatal)?;
+                    let (input, canonical_input): (DelegateInput, _) =
+                        decode_input(&lua, value, "delegate")?;
+                    if input
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| title.trim().is_empty())
+                    {
                         return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "delegate task must be non-empty".to_owned(),
+                            "delegate title must be non-empty when present".to_owned(),
                         )));
                     }
-                    // Reject mode=background
-                    if input.get("mode").is_some() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "delegate mode field is not allowed".to_owned(),
-                        )));
-                    }
-
+                    validate_delegate_request("Delegate", &input.canonical_request())
+                        .map_err(invalid_tool_input)?;
+                    let input = canonical_input.clone();
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let canonical_input = input.clone();
                     let outcome = handle
                         .invoke(
                             index,
@@ -174,48 +379,42 @@ impl LuaWorkflowRunner {
                         )
                         .await
                         .map_err(mlua::Error::external)?;
-                    let table = outcome_to_lua_table(&lua, &outcome)?;
-                    Ok(table)
+                    boundary.store(0, Ordering::Relaxed);
+                    immutable_outcome(&lua, &outcome)
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("delegate", delegate_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("delegate", delegate)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.swarm(input)
-        let dispatch_swarm = self.dispatch.clone();
-        let handle_swarm = self.handle.clone();
-        let swarm_call_index = Arc::clone(&next_effect_call);
-        let swarm_fn = lua
-            .create_async_function(move |lua, table: Value| {
-                let dispatch = dispatch_swarm.clone();
-                let handle = handle_swarm.clone();
-                let call_index = Arc::clone(&swarm_call_index);
+        let dispatch = self.dispatch.clone();
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let max_concurrency = self.limits.swarm_concurrency;
+        let swarm = lua
+            .create_async_function(move |lua, value: Value| {
+                let dispatch = dispatch.clone();
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    let input = lua_value_to_json(&lua, table)?;
-                    let description = input
-                        .get("description")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
-                    if description.is_empty() && input.get("description").is_some() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "swarm description must be non-empty when present".to_owned(),
-                        )));
-                    }
-                    // Reject mode and max_concurrency
-                    if input.get("mode").is_some() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "swarm mode field is not allowed".to_owned(),
-                        )));
-                    }
-                    if input.get("max_concurrency").is_some() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "swarm max_concurrency is not allowed".to_owned(),
-                        )));
-                    }
-
+                    check_fatal(&fatal)?;
+                    let (input, canonical_input): (SwarmInput, _) =
+                        decode_input(&lua, value, "swarm")?;
+                    validate_swarm_request(
+                        "DelegateSwarm",
+                        &input.canonical_request(max_concurrency),
+                    )
+                    .map_err(invalid_tool_input)?;
+                    let mut tool_input = canonical_input.clone();
+                    tool_input
+                        .as_object_mut()
+                        .expect("strict swarm input is an object")
+                        .insert("max_concurrency".to_owned(), max_concurrency.into());
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let canonical_input = input.clone();
                     let outcome = handle
                         .invoke(
                             index,
@@ -223,67 +422,89 @@ impl LuaWorkflowRunner {
                             canonical_input,
                             true,
                             move |invocation| async move {
-                                dispatch.run_one(invocation, "DelegateSwarm", input).await
+                                dispatch
+                                    .run_one(invocation, "DelegateSwarm", tool_input)
+                                    .await
                             },
                         )
                         .await
                         .map_err(mlua::Error::external)?;
-                    let table = outcome_to_lua_table(&lua, &outcome)?;
-                    Ok(table)
+                    boundary.store(0, Ordering::Relaxed);
+                    immutable_outcome(&lua, &outcome)
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("swarm", swarm_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("swarm", swarm)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.verify(condition, message)
-        let verify_fn = lua
-            .create_function(
-                move |_, (condition, message): (bool, String)| -> mlua::Result<()> {
-                    if message.is_empty() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "verify message must be non-empty".to_owned(),
-                        )));
-                    }
-                    if condition {
-                        Ok(())
-                    } else {
-                        let _outcome_table = mlua::Value::Nil; // TODO: return proper outcome
-                        Err(mlua::Error::RuntimeError(message))
-                    }
-                },
-            )
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("verify", verify_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-
-        // neo.verify_command(input)
-        let dispatch_vcmd = self.dispatch.clone();
-        let handle_vcmd = self.handle.clone();
-        let verify_command_call_index = Arc::clone(&next_effect_call);
-        let verify_command_fn = lua
-            .create_async_function(move |lua, table: Value| {
-                let dispatch = dispatch_vcmd.clone();
-                let handle = handle_vcmd.clone();
-                let call_index = Arc::clone(&verify_command_call_index);
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let host_verify = lua
+            .create_async_function(move |lua, (condition, message): (bool, String)| {
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    let input = lua_value_to_json(&lua, table)?;
-                    let command = input
-                        .get("command")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            mlua::Error::external(WorkflowError::InvalidInput(
-                                "verify_command requires non-empty command field".to_owned(),
-                            ))
-                        })?;
-                    if command.is_empty() {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                            "verify_command command must be non-empty".to_owned(),
-                        )));
-                    }
+                    check_fatal(&fatal)?;
+                    require_non_empty("verify message", &message)?;
+                    let outcome = if condition {
+                        completed_outcome("verification passed", json!({"message": message}))
+                    } else {
+                        failed_outcome(message.clone(), json!({"message": message}))
+                    };
+                    let outcome = invoke_local(
+                        &handle,
+                        &call_index,
+                        WorkflowInvocationKind::Verify,
+                        json!({"condition": condition, "message": message}),
+                        outcome,
+                    )
+                    .await?;
+                    boundary.store(0, Ordering::Relaxed);
+                    immutable_outcome(&lua, &outcome)
+                }
+            })
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set(
+            "verify",
+            wrap_host_function(lua, VERIFY_WRAPPER, host_verify)?,
+        )
+        .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
+        let dispatch = self.dispatch.clone();
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let host_verify_command = lua
+            .create_async_function(move |lua, value: Value| {
+                let dispatch = dispatch.clone();
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
+                async move {
+                    check_fatal(&fatal)?;
+                    let (input, _canonical): (VerifyCommandInput, _) =
+                        decode_input(&lua, value, "verify_command")?;
+                    require_non_empty("verify_command command", &input.command)?;
+                    if let Some(message) = input.failure_message.as_deref() {
+                        require_non_empty("verify_command failure_message", message)?;
+                    }
+                    let tool_input = json!({
+                        "command": input.command,
+                        "cwd": input.cwd,
+                    });
+                    let canonical_input = json!({
+                        "command": input.command,
+                        "cwd": input.cwd,
+                        "failure_message": input.failure_message,
+                    });
+                    let failure_message = input.failure_message;
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let canonical_input = input.clone();
                     let outcome = handle
                         .invoke(
                             index,
@@ -291,82 +512,262 @@ impl LuaWorkflowRunner {
                             canonical_input,
                             false,
                             move |invocation| async move {
-                                dispatch.run_one(invocation, "Bash", input).await
+                                let mut outcome =
+                                    dispatch.run_one(invocation, "Bash", tool_input).await;
+                                if !outcome.ok
+                                    && let Some(message) = failure_message
+                                {
+                                    outcome.summary = message;
+                                }
+                                outcome
                             },
                         )
                         .await
                         .map_err(mlua::Error::external)?;
-                    let table = outcome_to_lua_table(&lua, &outcome)?;
-                    Ok(table)
+                    boundary.store(0, Ordering::Relaxed);
+                    immutable_outcome(&lua, &outcome)
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("verify_command", verify_command_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set(
+            "verify_command",
+            wrap_host_function(lua, VERIFY_COMMAND_WRAPPER, host_verify_command)?,
+        )
+        .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.report(value)
-        let report_fn = lua
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let report = lua
             .create_async_function(move |lua, value: Value| {
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
                 async move {
-                    let _json = lua_value_to_json(&lua, value)?;
-                    // Report is journaled as a local operation
-                    // TODO: journal report through WorkflowRuntime
+                    check_fatal(&fatal)?;
+                    let report = lua_value_to_json(&lua, value)?;
+                    invoke_local(
+                        &handle,
+                        &call_index,
+                        WorkflowInvocationKind::Report,
+                        json!({"value": report}),
+                        completed_outcome("report recorded", json!({"report": report})),
+                    )
+                    .await?;
+                    boundary.store(0, Ordering::Relaxed);
                     Ok(())
                 }
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("report", report_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("report", report)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
-        // neo.fail(message)
-        let fail_fn = lua
-            .create_function(move |_, message: String| -> mlua::Result<()> {
-                if message.is_empty() {
-                    return Err(mlua::Error::external(WorkflowError::InvalidInput(
-                        "fail message must be non-empty".to_owned(),
-                    )));
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(&instructions);
+        let fatal = Arc::clone(&fatal_reason);
+        let fail = lua
+            .create_async_function(move |_, message: String| {
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
+                async move {
+                    check_fatal(&fatal)?;
+                    require_non_empty("fail message", &message)?;
+                    let recorded = message.clone();
+                    let outcome = failed_outcome(message.clone(), json!({"message": message}));
+                    invoke_local(
+                        &handle,
+                        &call_index,
+                        WorkflowInvocationKind::Fail,
+                        json!({"message": message}),
+                        outcome,
+                    )
+                    .await?;
+                    boundary.store(0, Ordering::Relaxed);
+                    *fatal.lock().map_err(|_| {
+                        mlua::Error::external(WorkflowError::Host(
+                            "workflow fail state lock poisoned".to_owned(),
+                        ))
+                    })? = Some(recorded.clone());
+                    Err::<(), _>(mlua::Error::RuntimeError(recorded))
                 }
-                Err(mlua::Error::RuntimeError(message))
             })
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        neo.set("fail", fail_fn)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-
-        // Disable unsafe APIs
-        // Remove math.random and other non-deterministic APIs
-        lua.globals()
-            .set("math", Value::Nil)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("fail", fail)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         lua.globals()
             .set("neo", neo)
-            .map_err(|e| WorkflowError::Host(e.to_string()))?;
-        Ok(())
+            .map_err(|error| WorkflowError::Host(error.to_string()))
     }
 }
 
-fn make_read_only(value: Value, lua: &Lua) -> mlua::Result<Value> {
-    match value {
-        Value::Table(table) => {
-            let read_only = lua.create_table()?;
-            let meta = lua.create_table()?;
+async fn invoke_local(
+    handle: &WorkflowHandle,
+    call_index: &AtomicU64,
+    kind: WorkflowInvocationKind,
+    input: serde_json::Value,
+    outcome: WorkflowInvocationOutcome,
+) -> mlua::Result<WorkflowInvocationOutcome> {
+    let index = call_index.fetch_add(1, Ordering::Relaxed);
+    handle
+        .invoke(index, kind, input, false, move |_| async move { outcome })
+        .await
+        .map_err(mlua::Error::external)
+}
 
-            let err_guard = lua.create_function(|_, (): ()| -> mlua::Result<()> {
-                Err(mlua::Error::external(super::WorkflowError::InvalidInput(
-                    "args are read-only".to_owned(),
-                )))
-            })?;
-            meta.set("__newindex", err_guard.clone())?;
-            meta.set("__index", table.clone())?;
-            read_only.set_metatable(Some(meta));
-            Ok(Value::Table(read_only))
-        }
-        other => Ok(other),
+fn restrict_base_globals(lua: &Lua) -> Result<(), WorkflowError> {
+    let globals = lua.globals();
+    for name in ["dofile", "loadfile", "print", "rawset"] {
+        globals
+            .set(name, Value::Nil)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+    }
+    let math: mlua::Table = globals
+        .get("math")
+        .map_err(|error| WorkflowError::Host(error.to_string()))?;
+    math.set("random", Value::Nil)
+        .and_then(|()| math.set("randomseed", Value::Nil))
+        .map_err(|error| WorkflowError::Host(error.to_string()))
+}
+
+fn wrap_host_function(
+    lua: &Lua,
+    wrapper_source: &str,
+    host: Function,
+) -> Result<Function, WorkflowError> {
+    let factory: Function = lua
+        .load(wrapper_source)
+        .eval()
+        .map_err(|error| WorkflowError::Host(error.to_string()))?;
+    factory
+        .call(host)
+        .map_err(|error| WorkflowError::Host(error.to_string()))
+}
+
+fn make_read_only(value: Value, lua: &Lua, message: &'static str) -> mlua::Result<Value> {
+    let Value::Table(table) = value else {
+        return Ok(value);
+    };
+    let backing = lua.create_table()?;
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        backing.raw_set(key, make_read_only(value, lua, message)?)?;
+    }
+    let read_only = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.set("__index", backing.clone())?;
+    meta.raw_set("__neo_readonly_backing", backing.clone())?;
+    let next: Function = lua.globals().get("next")?;
+    let iterator_backing = backing.clone();
+    let iterator = lua.create_function(move |_, (_state, key): (Value, Value)| {
+        next.call::<mlua::MultiValue>((iterator_backing.clone(), key))
+    })?;
+    meta.set(
+        "__pairs",
+        lua.create_function(move |_, _: Value| Ok((iterator.clone(), Value::Nil, Value::Nil)))?,
+    )?;
+    meta.set(
+        "__len",
+        lua.create_function(move |_, _: Value| Ok(backing.raw_len()))?,
+    )?;
+    meta.set(
+        "__newindex",
+        lua.create_function(move |_, (_table, _key, _value): (Value, Value, Value)| {
+            Err::<(), _>(mlua::Error::external(WorkflowError::InvalidOperation(
+                message.to_owned(),
+            )))
+        })?,
+    )?;
+    meta.set("__metatable", "read-only")?;
+    read_only.set_metatable(Some(meta));
+    Ok(Value::Table(read_only))
+}
+
+fn decode_input<T>(lua: &Lua, value: Value, api: &str) -> mlua::Result<(T, serde_json::Value)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = lua_value_to_json(lua, value)?;
+    let decoded = serde_json::from_value(value.clone()).map_err(|error| {
+        mlua::Error::external(WorkflowError::InvalidInput(format!("{api}: {error}")))
+    })?;
+    Ok((decoded, value))
+}
+
+fn invalid_tool_input(error: ToolError) -> mlua::Error {
+    mlua::Error::external(WorkflowError::InvalidInput(error.to_string()))
+}
+
+fn require_non_empty(field: &str, value: &str) -> mlua::Result<()> {
+    if value.is_empty() {
+        return Err(mlua::Error::external(WorkflowError::InvalidInput(format!(
+            "{field} must be non-empty"
+        ))));
+    }
+    Ok(())
+}
+
+fn completed_outcome(
+    summary: impl Into<String>,
+    details: serde_json::Value,
+) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: true,
+        status: WorkflowOutcomeStatus::Completed,
+        summary: summary.into(),
+        interruption: None,
+        details,
+        actual_usage: None,
+        child_refs: Vec::new(),
+    }
+}
+
+fn failed_outcome(
+    summary: impl Into<String>,
+    details: serde_json::Value,
+) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: false,
+        status: WorkflowOutcomeStatus::Failed,
+        summary: summary.into(),
+        interruption: None,
+        details,
+        actual_usage: None,
+        child_refs: Vec::new(),
     }
 }
 
 fn lua_value_to_json(lua: &Lua, value: Value) -> mlua::Result<serde_json::Value> {
-    lua.from_value(value)
+    lua.from_value(thaw_read_only(lua, value, 0)?)
+}
+
+fn thaw_read_only(lua: &Lua, value: Value, depth: usize) -> mlua::Result<Value> {
+    if depth >= 128 {
+        return Err(mlua::Error::SerializeError(
+            "Lua table nesting exceeds 128 levels".to_owned(),
+        ));
+    }
+    let Value::Table(table) = value else {
+        return Ok(value);
+    };
+    let source = table
+        .metatable()
+        .and_then(|meta| meta.raw_get::<mlua::Table>("__neo_readonly_backing").ok())
+        .unwrap_or(table);
+    let copy = lua.create_table()?;
+    for pair in source.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        copy.raw_set(
+            thaw_read_only(lua, key, depth + 1)?,
+            thaw_read_only(lua, value, depth + 1)?,
+        )?;
+    }
+    Ok(Value::Table(copy))
 }
 
 fn lua_return_to_json(lua: &Lua, value: Value) -> mlua::Result<Option<serde_json::Value>> {
@@ -376,34 +777,69 @@ fn lua_return_to_json(lua: &Lua, value: Value) -> mlua::Result<Option<serde_json
     }
 }
 
-fn outcome_to_lua_table(
-    lua: &Lua,
-    outcome: &super::WorkflowInvocationOutcome,
-) -> mlua::Result<Value> {
+fn outcome_to_lua_table(lua: &Lua, outcome: &WorkflowInvocationOutcome) -> mlua::Result<Value> {
     let table = lua.create_table()?;
-    table.set("ok", outcome.ok).map_err(mlua::Error::external)?;
-    table
-        .set(
-            "status",
-            match outcome.status {
-                super::WorkflowOutcomeStatus::Completed => "completed",
-                super::WorkflowOutcomeStatus::Failed => "failed",
-                super::WorkflowOutcomeStatus::Denied => "denied",
-                super::WorkflowOutcomeStatus::Cancelled => "cancelled",
-                super::WorkflowOutcomeStatus::ResourceLimited => "resource_limited",
-                super::WorkflowOutcomeStatus::Interrupted => "interrupted",
-            },
-        )
-        .map_err(mlua::Error::external)?;
-    table
-        .set("summary", outcome.summary.as_str())
-        .map_err(mlua::Error::external)?;
-    table
-        .set(
-            "details",
-            lua.to_value(&outcome.details)
-                .map_err(mlua::Error::external)?,
-        )
-        .map_err(mlua::Error::external)?;
+    table.set("ok", outcome.ok)?;
+    table.set(
+        "status",
+        match outcome.status {
+            WorkflowOutcomeStatus::Completed => "completed",
+            WorkflowOutcomeStatus::Failed => "failed",
+            WorkflowOutcomeStatus::Denied => "denied",
+            WorkflowOutcomeStatus::Cancelled => "cancelled",
+            WorkflowOutcomeStatus::ResourceLimited => "resource_limited",
+            WorkflowOutcomeStatus::Interrupted => "interrupted",
+        },
+    )?;
+    table.set("summary", outcome.summary.as_str())?;
+    table.set("details", lua.to_value(&outcome.details)?)?;
+    if let Some(usage) = outcome.actual_usage {
+        table.set("actual_usage", lua.to_value(&usage)?)?;
+    }
+    for child in &outcome.child_refs {
+        let field = match child.kind.as_str() {
+            "delegate" => "agent_id",
+            "delegate_swarm" => "swarm_id",
+            "task" => "task_id",
+            _ => continue,
+        };
+        if !table.contains_key(field)? {
+            table.set(field, child.id.as_str())?;
+        }
+    }
     Ok(Value::Table(table))
+}
+
+fn immutable_outcome(lua: &Lua, outcome: &WorkflowInvocationOutcome) -> mlua::Result<Value> {
+    make_read_only(
+        outcome_to_lua_table(lua, outcome)?,
+        lua,
+        "workflow outcomes are read-only",
+    )
+}
+
+fn fatal_message(fatal: &Mutex<Option<String>>) -> Result<Option<String>, WorkflowError> {
+    fatal
+        .lock()
+        .map_err(|_| WorkflowError::Host("workflow fail state lock poisoned".to_owned()))
+        .map(|reason| reason.clone())
+}
+
+fn check_fatal(fatal: &Mutex<Option<String>>) -> mlua::Result<()> {
+    if let Some(reason) = fatal_message(fatal).map_err(mlua::Error::external)? {
+        return Err(mlua::Error::external(WorkflowError::Failed(reason)));
+    }
+    Ok(())
+}
+
+fn map_lua_error(error: mlua::Error) -> WorkflowError {
+    for source in error.chain() {
+        if let Some(error) = source.downcast_ref::<WorkflowError>() {
+            return error.clone();
+        }
+    }
+    match error {
+        mlua::Error::MemoryError(message) => WorkflowError::ResourceLimited(message),
+        other => WorkflowError::Lua(other.to_string()),
+    }
 }
