@@ -47,7 +47,11 @@ impl ApprovalRequestModal {
     pub fn is_revision_selected(&self) -> bool {
         matches!(
             self.selected_action(),
-            Some(ApprovalAction::RevisePlan { .. } | ApprovalAction::ReviseGoal { .. })
+            Some(
+                ApprovalAction::RevisePlan { .. }
+                    | ApprovalAction::ReviseGoal { .. }
+                    | ApprovalAction::ReviseWorkflow { .. }
+            )
         )
     }
 
@@ -82,7 +86,8 @@ impl ApprovalRequestModal {
         }
         if let Some(
             ApprovalAction::RevisePlan { preset_feedback }
-            | ApprovalAction::ReviseGoal { preset_feedback },
+            | ApprovalAction::ReviseGoal { preset_feedback }
+            | ApprovalAction::ReviseWorkflow { preset_feedback },
         ) = self.selected_action()
         {
             self.feedback_input = preset_feedback.clone().unwrap_or_default();
@@ -99,7 +104,8 @@ impl ApprovalRequestModal {
         let preset = match self.selected_action() {
             Some(
                 ApprovalAction::RevisePlan { preset_feedback }
-                | ApprovalAction::ReviseGoal { preset_feedback },
+                | ApprovalAction::ReviseGoal { preset_feedback }
+                | ApprovalAction::ReviseWorkflow { preset_feedback },
             ) => preset_feedback.clone(),
             _ => return false,
         };
@@ -145,7 +151,9 @@ pub(super) fn response_for_selected(modal: &ApprovalRequestModal) -> Option<Appr
     let action = modal.selected_action()?.clone();
     let revises = matches!(
         action,
-        ApprovalAction::RevisePlan { .. } | ApprovalAction::ReviseGoal { .. }
+        ApprovalAction::RevisePlan { .. }
+            | ApprovalAction::ReviseGoal { .. }
+            | ApprovalAction::ReviseWorkflow { .. }
     );
     if revises {
         let feedback = modal.feedback_input.trim();

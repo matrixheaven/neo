@@ -1819,6 +1819,9 @@ impl InteractiveController {
     fn set_active_session_id(&mut self, session_id: String) {
         let changed = self.active_session_id.as_deref() != Some(session_id.as_str());
         if changed {
+            if self.active_session_id.is_some() {
+                self.workflow_capability.revoke_now();
+            }
             self.park_workflow_approvals_for_session_change(Some(&session_id));
             self.invalidate_workflow_event_generation();
         }
@@ -1833,6 +1836,7 @@ impl InteractiveController {
 
     fn clear_active_session_id(&mut self) {
         if self.active_session_id.is_some() {
+            self.workflow_capability.revoke_now();
             self.park_workflow_approvals_for_session_change(None);
             self.active_session_id = None;
             self.invalidate_workflow_event_generation();

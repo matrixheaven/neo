@@ -1676,6 +1676,7 @@ fn default_tool_context(
                 .with_background_tasks(config.background_tasks.clone())
                 .with_shell_runtime(config.shell_runtime.clone())
                 .with_workflow_capability(config.workflow_capability.clone())
+                .with_workflow_runtime(config.workflow_runtime.clone())
                 .with_multi_agent(multi_agent)
                 .with_child_runtime(config.clone(), model, registry, turn)
                 .with_parent_instruction_state(parent_instruction_state);

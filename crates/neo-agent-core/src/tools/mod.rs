@@ -141,7 +141,7 @@ pub use bash::{
     ShellExecutionRequest, ShellExecutionResult, ShellTermination, execute_model_bash_for_runtime,
     execute_shell_command,
 };
-mod workflow;
+pub(crate) mod workflow;
 
 pub use delegate_controls::{
     InterruptDelegateTool, ListDelegatesTool, MessageDelegateTool, WaitDelegateTool,
@@ -228,6 +228,7 @@ pub struct ToolContext {
     pub background_tasks: BackgroundTaskManager,
     pub shell_runtime: ShellRuntime,
     pub workflow_capability: crate::workflow::WorkflowCapability,
+    pub workflow_runtime: crate::workflow::WorkflowRuntime,
     /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
     /// Parent runtime config used to construct real child `AgentRuntime` instances.
@@ -309,6 +310,9 @@ impl ToolContext {
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
             workflow_capability: crate::workflow::WorkflowCapability::default(),
+            workflow_runtime: crate::workflow::WorkflowRuntime::new(
+                crate::workflow::WorkflowLimits::default(),
+            ),
             multi_agent: MultiAgentRuntime::new(),
             child_config: None,
             child_model: None,
@@ -377,6 +381,12 @@ impl ToolContext {
         capability: crate::workflow::WorkflowCapability,
     ) -> Self {
         self.workflow_capability = capability;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workflow_runtime(mut self, runtime: crate::workflow::WorkflowRuntime) -> Self {
+        self.workflow_runtime = runtime;
         self
     }
 

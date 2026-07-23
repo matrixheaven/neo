@@ -33,6 +33,7 @@ pub(super) enum PermissionPreparation {
         prefix_rule: Option<PrefixApprovalRule>,
     },
     Deny(String),
+    Terminal(ToolResult),
 }
 
 /// The outcome of resolving one [`PermissionPreparation`]: run with an
@@ -70,6 +71,10 @@ pub(super) async fn resolve_permission_preparation(
         PermissionPreparation::Deny(message) => PermissionResolution::Terminal {
             result: ToolResult::error(message),
             permission_decision: Some(PermissionTerminalDecision::Denied),
+        },
+        PermissionPreparation::Terminal(result) => PermissionResolution::Terminal {
+            result,
+            permission_decision: None,
         },
         PermissionPreparation::Ask {
             operation,
@@ -121,6 +126,43 @@ pub(super) fn permission_preparation_for_mode(
     // 1. Plan-mode hard guard.
     if let Some(prep) = check_plan_guard(config, tool_call, prepared_call) {
         return prep;
+    }
+
+    // Workflow capability is independent launch authority. Validate it and
+    // the complete typed input before Auto/Yolo shortcuts or Ask presentation.
+    if tool_call.name.as_ref() == "RunWorkflow" {
+        if !config.workflow_capability.inspect() {
+            return PermissionPreparation::Deny(
+                "RunWorkflow requires a launch capability. Use the exact /workflow slash command first."
+                    .to_owned(),
+            );
+        }
+        let input = match crate::tools::workflow::validated_input(arguments) {
+            Ok(input) => input,
+            Err(error) => {
+                return PermissionPreparation::Terminal(
+                    crate::tools::workflow::invalid_input_result(error),
+                );
+            }
+        };
+        if let Err(error) = config
+            .workflow_runtime
+            .validate_launch_request(&input.launch_request(mode))
+        {
+            return PermissionPreparation::Terminal(crate::tools::workflow::invalid_input_result(
+                error.to_string(),
+            ));
+        }
+        return if mode == PermissionMode::Ask {
+            PermissionPreparation::Ask {
+                operation: PermissionOperation::WorkflowLaunch,
+                subject: "Launch workflow".to_owned(),
+                session_scope: None,
+                prefix_rule: None,
+            }
+        } else {
+            PermissionPreparation::Run(access_for_tool(tool_call, true))
+        };
     }
 
     // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
@@ -546,6 +588,9 @@ fn ordinary_approval_presentation(
             title: "User question".to_owned(),
             details: compact_details([Some(subject.to_owned())]),
         },
+        PermissionOperation::WorkflowLaunch => {
+            unreachable!("WorkflowLaunch uses its dedicated presentation builder")
+        }
         PermissionOperation::PlanTransition | PermissionOperation::GoalTransition => {
             unreachable!("Plan/Goal use dedicated presentation builders")
         }
@@ -634,6 +679,46 @@ fn goal_approval_options() -> Vec<ApprovalOption> {
             },
         },
     ]
+}
+
+fn workflow_approval_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Launch".to_owned(),
+            description: None,
+            action: ApprovalAction::LaunchWorkflow,
+        },
+        ApprovalOption {
+            label: "Revise".to_owned(),
+            description: Some("Return feedback without consuming the capability.".to_owned()),
+            action: ApprovalAction::ReviseWorkflow {
+                preset_feedback: None,
+            },
+        },
+        ApprovalOption {
+            label: "Cancel".to_owned(),
+            description: Some("Revoke the capability without creating a run.".to_owned()),
+            action: ApprovalAction::CancelWorkflow,
+        },
+    ]
+}
+
+fn build_workflow_approval_request(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+) -> Result<ApprovalRequest, String> {
+    let workflow = crate::tools::workflow::approval_presentation(arguments)?;
+    Ok(ApprovalRequest {
+        turn,
+        id: tool_call.id.to_string(),
+        operation: PermissionOperation::WorkflowLaunch,
+        presentation: ApprovalPresentation::Workflow {
+            title: "Launch workflow?".to_owned(),
+            workflow,
+        },
+        options: workflow_approval_options(),
+    })
 }
 
 fn build_plan_approval_request(
@@ -833,15 +918,20 @@ fn apply_approval_resolution(
     resolution: ApprovalResolution,
 ) -> AppliedApproval {
     match resolution {
-        ApprovalResolution::Cancelled { .. } => AppliedApproval::Terminal {
-            result: permission_error(
-                operation,
-                subject,
-                PermissionTerminalDecision::Cancelled,
-                "approval cancelled",
-            ),
-            permission_decision: Some(PermissionTerminalDecision::Cancelled),
-        },
+        ApprovalResolution::Cancelled { .. } => {
+            if operation == PermissionOperation::WorkflowLaunch {
+                config.workflow_capability.revoke_now();
+            }
+            AppliedApproval::Terminal {
+                result: permission_error(
+                    operation,
+                    subject,
+                    PermissionTerminalDecision::Cancelled,
+                    "approval cancelled",
+                ),
+                permission_decision: Some(PermissionTerminalDecision::Cancelled),
+            }
+        }
         ApprovalResolution::Selected {
             action: ApprovalAction::PermitOnce,
             ..
@@ -893,6 +983,25 @@ fn apply_approval_resolution(
             approval: Some(ApprovalExecutionContext::Goal),
         },
         ApprovalResolution::Selected {
+            action: ApprovalAction::LaunchWorkflow,
+            ..
+        } => AppliedApproval::Allow { approval: None },
+        ApprovalResolution::Selected {
+            action: ApprovalAction::CancelWorkflow,
+            ..
+        } => {
+            config.workflow_capability.revoke_now();
+            AppliedApproval::Terminal {
+                result: permission_error(
+                    PermissionOperation::WorkflowLaunch,
+                    "Launch workflow",
+                    PermissionTerminalDecision::Cancelled,
+                    "approval cancelled",
+                ),
+                permission_decision: Some(PermissionTerminalDecision::Cancelled),
+            }
+        }
+        ApprovalResolution::Selected {
             action: ApprovalAction::RejectPlan,
             ..
         } => AppliedApproval::Terminal {
@@ -942,6 +1051,17 @@ fn apply_approval_resolution(
                 permission_decision: None,
             }
         }
+        ApprovalResolution::Selected {
+            action: ApprovalAction::ReviseWorkflow { .. },
+            feedback,
+            ..
+        } => AppliedApproval::Terminal {
+            result: ToolResult::ok(format!(
+                "User requested workflow revisions. No run was created and the /workflow capability remains available.\n\nFeedback: {}",
+                feedback.unwrap_or_default()
+            )),
+            permission_decision: None,
+        },
     }
 }
 
@@ -979,6 +1099,17 @@ async fn resolve_approval(
         PermissionOperation::GoalTransition => {
             build_goal_approval_request(turn, tool_call, arguments)
         }
+        PermissionOperation::WorkflowLaunch => {
+            match build_workflow_approval_request(turn, tool_call, arguments) {
+                Ok(request) => request,
+                Err(error) => {
+                    return AppliedApproval::Terminal {
+                        result: crate::tools::workflow::invalid_input_result(error),
+                        permission_decision: None,
+                    };
+                }
+            }
+        }
         _ => build_ordinary_approval_request(
             turn,
             tool_call,
@@ -998,6 +1129,9 @@ async fn resolve_approval(
         tokio::select! {
             biased;
             () = cancel_token.cancelled() => {
+                if operation == PermissionOperation::WorkflowLaunch {
+                    config.workflow_capability.revoke_now();
+                }
                 emit_approval_resolved(
                     emitter,
                     request.turn,
@@ -1019,6 +1153,9 @@ async fn resolve_approval(
             response = handler(request.clone()) => response,
         }
     } else {
+        if operation == PermissionOperation::WorkflowLaunch {
+            config.workflow_capability.revoke_now();
+        }
         // No handler: close the request with Cancelled so UI/session never
         // leave an unpaired ApprovalRequested open.
         emit_approval_resolved(
@@ -1042,6 +1179,9 @@ async fn resolve_approval(
     let resolution = match request.validate_response(&response) {
         Ok(resolution) => resolution,
         Err(error) => {
+            if operation == PermissionOperation::WorkflowLaunch {
+                config.workflow_capability.revoke_now();
+            }
             // Invalid responses are rejected at the trust boundary; still emit a
             // terminal resolution so every ApprovalRequested has a pair.
             emit_approval_resolved(
@@ -1077,6 +1217,7 @@ fn permission_error(
         PermissionOperation::Shell => "shell",
         PermissionOperation::Tool => "tool",
         PermissionOperation::UserQuestion => "user question",
+        PermissionOperation::WorkflowLaunch => "workflow launch",
         PermissionOperation::PlanTransition => "plan transition",
         PermissionOperation::GoalTransition => "goal transition",
     };

@@ -1,4 +1,4 @@
-use crate::markdown::render_markdown;
+use crate::markdown::{highlight_code_lines, render_markdown, wrap_spans};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Line, Span, Style, truncate_to_width, visible_width};
 
@@ -14,6 +14,7 @@ pub struct PlanBoxComponent {
     content: String,
     path: Option<String>,
     status: Option<String>,
+    source_language: Option<&'static str>,
 }
 
 impl PlanBoxComponent {
@@ -23,6 +24,18 @@ impl PlanBoxComponent {
             content: content.into(),
             path,
             status: None,
+            source_language: None,
+        }
+    }
+
+    /// Render source without Markdown/plain-text whitespace normalization.
+    #[must_use]
+    pub fn source(content: impl Into<String>, language: &'static str) -> Self {
+        Self {
+            content: content.into(),
+            path: None,
+            status: None,
+            source_language: Some(language),
         }
     }
 
@@ -55,11 +68,16 @@ impl PlanBoxComponent {
         let content_width = horz_len.saturating_sub(2 * SIDE_PADDING).max(1);
 
         // Title
-        let basename = self.path.as_deref().map_or("plan", display_basename);
-        let title = if let Some(status) = &self.status {
-            format!(" plan: {basename} · {status} ")
+        let title = if let Some(language) = self.source_language {
+            let total = self.content.split('\n').count().max(1);
+            format!(" {language} source · lines 1-{total} / {total} ")
         } else {
-            format!(" plan: {basename} ")
+            let basename = self.path.as_deref().map_or("plan", display_basename);
+            if let Some(status) = &self.status {
+                format!(" plan: {basename} · {status} ")
+            } else {
+                format!(" plan: {basename} ")
+            }
         };
 
         let mut lines = vec![Self::titled_border(&indent, &title, horz_len, border_style)];
@@ -70,7 +88,25 @@ impl PlanBoxComponent {
             .as_deref()
             .and_then(|p| std::path::Path::new(p).extension())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-        if is_markdown && !self.content.trim().is_empty() {
+        if let Some(language) = self.source_language {
+            let path = format!("workflow.{language}");
+            for logical_line in highlight_code_lines(&self.content, &path, theme) {
+                for visual_line in wrap_spans(&logical_line, content_width) {
+                    let padding = " ".repeat(
+                        content_width
+                            .saturating_sub(visual_line.iter().map(Span::visible_width).sum()),
+                    );
+                    let mut spans = vec![
+                        Span::styled(indent.clone(), Style::default()),
+                        Span::styled("\u{2502} ", border_style),
+                    ];
+                    spans.extend(visual_line);
+                    spans.push(Span::styled(padding, Style::default()));
+                    spans.push(Span::styled(" \u{2502}", border_style));
+                    lines.push(Line::from_spans(spans));
+                }
+            }
+        } else if is_markdown && !self.content.trim().is_empty() {
             let md_lines = render_markdown(&self.content, content_width, theme, "", "");
             for md_line in md_lines {
                 let visible_w = md_line.visible_width();
@@ -349,5 +385,33 @@ mod tests {
         let bottom = lines.last().unwrap().visible_width();
         assert_eq!(top, bottom);
         assert_eq!(top, 40);
+    }
+
+    #[test]
+    fn source_mode_preserves_whitespace_and_reports_full_viewport() {
+        let source = "function run()\n    local  x = 'a  b' -- keep  spaces\nend";
+        let lines = PlanBoxComponent::source(source, "lua").render(100, &TuiTheme::default());
+        let rendered = lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(&line.to_ansi()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("lua source · lines 1-3 / 3"));
+        assert!(rendered.contains("    local  x = 'a  b' -- keep  spaces"));
+    }
+
+    #[test]
+    fn source_mode_wraps_long_lines_without_dropping_characters() {
+        let source = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let highlighted = highlight_code_lines(source, "workflow.lua", &TuiTheme::default());
+        let wrapped = wrap_spans(&highlighted[0], 7);
+        let reconstructed = wrapped
+            .into_iter()
+            .flatten()
+            .map(|span| span.text().to_owned())
+            .collect::<String>();
+
+        assert_eq!(reconstructed, source);
     }
 }

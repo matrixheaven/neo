@@ -995,6 +995,9 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1091,6 +1094,9 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1163,6 +1169,9 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1219,6 +1228,9 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1296,6 +1308,9 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1381,6 +1396,9 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -1497,6 +1515,9 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
@@ -2875,6 +2896,9 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),

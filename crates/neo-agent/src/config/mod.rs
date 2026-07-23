@@ -94,6 +94,9 @@ pub struct AppConfig {
     /// Session-scoped, non-serializable authority for one workflow launch.
     #[serde(skip)]
     pub workflow_capability: neo_agent_core::workflow::WorkflowCapability,
+    /// Session-shared durable workflow owner.
+    #[serde(skip)]
+    pub workflow_runtime: neo_agent_core::workflow::WorkflowRuntime,
     /// Session-shared resolver for live workflow child dispatch dependencies.
     #[serde(skip)]
     pub workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver,
@@ -135,6 +138,7 @@ impl AppConfig {
         self.workspace_policy = Arc::clone(&current.workspace_policy);
         self.background_tasks = current.background_tasks.clone();
         self.workflow_capability = current.workflow_capability.clone();
+        self.workflow_runtime = current.workflow_runtime.clone();
         self.workflow_dispatch_resolver = current.workflow_dispatch_resolver.clone();
         self.multi_agent = current.multi_agent.clone();
         self.runtime.shell = current.runtime.shell;

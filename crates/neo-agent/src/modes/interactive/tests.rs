@@ -10136,6 +10136,9 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         runtime: RuntimeConfig::default(),
         background_tasks: neo_agent_core::BackgroundTaskManager::new(),
         workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+        workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        ),
         workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
         multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
         tui: TuiConfig::default(),
@@ -11006,6 +11009,53 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
 }
 
 #[tokio::test]
+async fn workflow_slash_arguments_do_not_grant_capability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join("sessions"));
+    let mut controller = controller_for_config(&config);
+
+    controller.type_text("/workflow anything");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("slash submits");
+
+    assert!(!config.workflow_capability.is_available().await);
+}
+
+#[tokio::test]
+async fn workflow_capability_is_revoked_only_when_session_identity_changes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join("sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    config.workflow_capability.grant().await;
+    controller.set_active_session_id(SESSION_A.to_owned());
+    assert!(config.workflow_capability.inspect());
+
+    controller.set_active_session_id(SESSION_B.to_owned());
+    assert!(!config.workflow_capability.inspect());
+
+    config.workflow_capability.grant().await;
+    controller.clear_active_session_id();
+    assert!(!config.workflow_capability.inspect());
+}
+
+#[tokio::test]
+async fn workflow_capability_survives_first_session_materialization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join("sessions"));
+    let mut controller = controller_for_config(&config);
+    assert_eq!(controller.active_session_id(), None);
+
+    config.workflow_capability.grant().await;
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    assert!(config.workflow_capability.inspect());
+}
+
+#[tokio::test]
 async fn slash_clear_does_not_request_terminal_scrollback_purge() {
     let (mut controller, _requests) = controller_with_session_for_new_tests();
     let mut terminal = InlineTerminal::for_test(80, 24);
@@ -11503,11 +11553,15 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
 }
 
 #[test]
-fn slash_completions_include_new_and_clear() {
+fn slash_completions_include_new_clear_and_workflow() {
     let items = session_completion_items(None);
     let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
     assert!(values.contains(&"/new"), "completions include /new");
     assert!(values.contains(&"/clear"), "completions include /clear");
+    assert!(
+        values.contains(&"/workflow"),
+        "completions include /workflow"
+    );
 }
 
 #[test]
@@ -11591,6 +11645,53 @@ async fn command_palette_new_session_resets_to_fresh_session() {
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("Started fresh session"));
     assert!(!snapshot.contains("old session content"));
+}
+
+#[tokio::test]
+async fn command_palette_new_session_revokes_capability_before_session_materialization() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "new",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    assert_eq!(controller.active_session_id(), None);
+    controller.workflow_capability.grant().await;
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+        .await
+        .expect("command palette opens");
+    for _ in 0..64 {
+        let selected = controller
+            .chrome()
+            .selected_command()
+            .expect("selected command");
+        if selected.id == "session.new" {
+            break;
+        }
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to next command");
+    }
+    assert_eq!(
+        controller
+            .chrome()
+            .selected_command()
+            .expect("new session command")
+            .id,
+        "session.new"
+    );
+
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("new session command runs");
+
+    assert!(!controller.workflow_capability.inspect());
+    assert_eq!(controller.active_session_id(), None);
 }
 
 // --- NEO-23: cross-session prompt history -----------------------------
@@ -15114,7 +15215,8 @@ async fn task_browser_workflow_controls_use_human_handle() {
             "browser controls".to_owned(),
             handle.clone(),
         )
-        .await;
+        .await
+        .expect("register workflow");
     controller.local_config = Some(config);
     controller.type_text("/tasks");
     controller
@@ -15144,7 +15246,7 @@ async fn task_browser_workflow_controls_use_human_handle() {
         neo_agent_core::workflow::WorkflowState::Paused
     );
     runtime
-        .bind_runner(|handle, _metadata| async move {
+        .bind_runner(|handle, _metadata, _session_dir| async move {
             handle.stop_token().cancelled().await;
             Ok(())
         })
@@ -16413,6 +16515,7 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
+    controller.workflow_capability.grant().await;
 
     let consumed = controller.handle_slash_command("/fork").await;
     assert!(consumed, "/fork should be consumed as a slash command");
@@ -16423,6 +16526,7 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         "active session switched to fork child"
     );
     assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
+    assert!(!controller.workflow_capability.inspect());
     assert!(
         transcript_has_status(&controller, &format!("fork from session {SESSION_A}")),
         "transcript shows fork-from notice"

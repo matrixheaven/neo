@@ -81,7 +81,8 @@ impl ApprovalPromptData {
             | ApprovalPresentation::Edit { title, .. }
             | ApprovalPresentation::Write { title, .. }
             | ApprovalPresentation::Plan { title, .. }
-            | ApprovalPresentation::Goal { title, .. } => title.as_str(),
+            | ApprovalPresentation::Goal { title, .. }
+            | ApprovalPresentation::Workflow { title, .. } => title.as_str(),
         }
     }
 
@@ -1076,6 +1077,11 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.push(Line::raw(""));
     }
 
+    if let ApprovalPresentation::Workflow { workflow, .. } = &data.request.presentation {
+        rows.extend(PlanBoxComponent::source(workflow.source.clone(), "lua").render(width, theme));
+        rows.push(Line::raw(""));
+    }
+
     for (index, option) in data.request.options.iter().enumerate() {
         let prefix = if data.selected == index {
             "  ▶ "
@@ -1106,7 +1112,9 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         .is_some_and(|option| {
             matches!(
                 option.action,
-                ApprovalAction::RevisePlan { .. } | ApprovalAction::ReviseGoal { .. }
+                ApprovalAction::RevisePlan { .. }
+                    | ApprovalAction::ReviseGoal { .. }
+                    | ApprovalAction::ReviseWorkflow { .. }
             )
         });
     if data.feedback_active && revise_selected {
@@ -1175,6 +1183,25 @@ fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String>
             lines.extend(phases.iter().cloned());
             lines
         }
+        ApprovalPresentation::Workflow { workflow, .. } => {
+            let mut lines = vec![
+                format!("name: {}", workflow.name),
+                format!("description: {}", workflow.description),
+            ];
+            lines.extend(
+                workflow
+                    .phases
+                    .iter()
+                    .map(|phase| format!("phase: {phase}")),
+            );
+            lines.push(format!("args: {}", workflow.args));
+            lines.push(format!(
+                "source: {} lines, {} bytes",
+                workflow.line_count, workflow.byte_count
+            ));
+            lines.push(workflow.warning.clone());
+            lines
+        }
     }
 }
 
@@ -1183,7 +1210,11 @@ fn resolution_display_label(resolution: &ApprovalResolution) -> String {
         // Pure reject actions render a stable past-tense status word. Other
         // selected actions keep the event's canonical option label.
         ApprovalResolution::Selected {
-            action: ApprovalAction::Reject | ApprovalAction::RejectPlan | ApprovalAction::RejectGoal,
+            action:
+                ApprovalAction::Reject
+                | ApprovalAction::RejectPlan
+                | ApprovalAction::RejectGoal
+                | ApprovalAction::CancelWorkflow,
             ..
         } => "Rejected".to_owned(),
         ApprovalResolution::Selected { label, .. } => label.clone(),

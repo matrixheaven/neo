@@ -158,6 +158,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub workflow_capability: crate::workflow::WorkflowCapability,
+    /// Session-shared durable workflow owner.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workflow_runtime: crate::workflow::WorkflowRuntime,
     /// Live dependencies used by workflow-hosted tool calls. Every invocation
     /// snapshots this resolver before awaiting permission or execution.
     #[serde(skip)]
@@ -271,6 +275,9 @@ impl AgentConfig {
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
             workflow_capability: crate::workflow::WorkflowCapability::default(),
+            workflow_runtime: crate::workflow::WorkflowRuntime::new(
+                crate::workflow::WorkflowLimits::default(),
+            ),
             workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver::default(
             ),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
@@ -547,6 +554,16 @@ impl AgentConfig {
         workflow_capability: crate::workflow::WorkflowCapability,
     ) -> Self {
         self.workflow_capability = workflow_capability;
+        self
+    }
+
+    /// Replace the session-shared durable workflow owner.
+    #[must_use]
+    pub fn with_workflow_runtime(
+        mut self,
+        workflow_runtime: crate::workflow::WorkflowRuntime,
+    ) -> Self {
+        self.workflow_runtime = workflow_runtime;
         self
     }
 

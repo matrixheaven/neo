@@ -21,8 +21,8 @@ pub mod workspace_policy;
 pub use approval::{
     ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation,
     ApprovalProtocolError, ApprovalRequest, ApprovalResolution, ApprovalResponse,
-    EditApprovalChange, EditApprovalPresentation, PlanSelection, WriteApprovalChange,
-    WriteApprovalPresentation, WriteApprovalPreview,
+    EditApprovalChange, EditApprovalPresentation, PlanSelection, WorkflowApprovalPresentation,
+    WriteApprovalChange, WriteApprovalPresentation, WriteApprovalPreview,
 };
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,

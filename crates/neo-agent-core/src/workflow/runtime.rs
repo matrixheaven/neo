@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
@@ -29,7 +31,7 @@ use support::{
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
 type RunnerFuture = Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Send>>;
-type Runner = dyn Fn(WorkflowHandle, WorkflowRunMetadata) -> RunnerFuture + Send + Sync;
+type Runner = dyn Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> RunnerFuture + Send + Sync;
 type RecoveryFuture = Pin<Box<dyn Future<Output = Option<WorkflowInvocationOutcome>> + Send>>;
 type RecoveryResolver = dyn Fn(Arc<IncompleteInvocation>) -> RecoveryFuture + Send + Sync;
 
@@ -48,6 +50,24 @@ pub struct WorkflowLaunchRequest {
     pub args: serde_json::Value,
     pub launch_source: String,
     pub parent_run_id: Option<WorkflowId>,
+}
+
+fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> WorkflowRunMetadata {
+    use sha2::{Digest, Sha256};
+
+    let script_sha256 = format!("{:x}", Sha256::digest(request.script.as_bytes()));
+    WorkflowRunMetadata {
+        run_id,
+        parent_run_id: request.parent_run_id,
+        name: request.name,
+        description: request.description,
+        phases: request.phases,
+        script: request.script,
+        script_sha256,
+        args: request.args,
+        launch_source: request.launch_source,
+        journal_format_version: 1,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +138,23 @@ pub struct WorkflowRuntime {
     limits: WorkflowLimits,
     runner: Arc<RwLock<Option<Arc<Runner>>>>,
     recovery_resolver: Arc<RwLock<Option<Arc<RecoveryResolver>>>>,
+    #[cfg(test)]
+    rollback_remove_failure: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for WorkflowRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkflowRuntime")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for WorkflowRuntime {
+    fn default() -> Self {
+        Self::new(WorkflowLimits::default())
+    }
 }
 
 impl WorkflowRuntime {
@@ -128,13 +165,15 @@ impl WorkflowRuntime {
             limits,
             runner: Arc::new(RwLock::new(None)),
             recovery_resolver: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
+            rollback_remove_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Bind the production worker supplied by the Lua/dispatch composition root.
     pub fn bind_runner<F, Fut>(&self, runner: F) -> Result<(), WorkflowError>
     where
-        F: Fn(WorkflowHandle, WorkflowRunMetadata) -> Fut + Send + Sync + 'static,
+        F: Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), WorkflowError>> + Send + 'static,
     {
         let mut slot = self
@@ -146,9 +185,60 @@ impl WorkflowRuntime {
                 "workflow runner is already bound".to_owned(),
             ));
         }
-        *slot = Some(Arc::new(move |handle, metadata| {
-            Box::pin(runner(handle, metadata))
+        *slot = Some(Arc::new(move |handle, metadata, session_dir| {
+            Box::pin(runner(handle, metadata, session_dir))
         }));
+        Ok(())
+    }
+
+    /// Bind the shared production runner once. Repeated calls are harmless;
+    /// the runner resolves live dependencies per session when a worker starts.
+    pub fn bind_runner_if_unbound<F, Fut>(&self, runner: F) -> Result<(), WorkflowError>
+    where
+        F: Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), WorkflowError>> + Send + 'static,
+    {
+        let mut slot = self
+            .runner
+            .write()
+            .map_err(|_| WorkflowError::Host("workflow runner lock poisoned".to_owned()))?;
+        if slot.is_none() {
+            *slot = Some(Arc::new(move |handle, metadata, session_dir| {
+                Box::pin(runner(handle, metadata, session_dir))
+            }));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> WorkflowLimits {
+        self.limits.clone()
+    }
+
+    /// Validate every pure launch boundary before capability reservation.
+    pub fn validate_launch_request(
+        &self,
+        request: &WorkflowLaunchRequest,
+    ) -> Result<(), WorkflowError> {
+        if request.script.len() as u64 > self.limits.lua_source_bytes {
+            return Err(WorkflowError::InvalidInput(format!(
+                "script size {} exceeds limit {}",
+                request.script.len(),
+                self.limits.lua_source_bytes
+            )));
+        }
+        let metadata = metadata_for_request(
+            WorkflowId(format!("wf_{}", "0".repeat(32))),
+            request.clone(),
+        );
+        let bytes = serde_json::to_vec_pretty(&metadata)
+            .map_err(|error| WorkflowError::InvalidInput(error.to_string()))?
+            .len() as u64;
+        if bytes > self.limits.journal_record_bytes {
+            return Err(WorkflowError::InvalidInput(format!(
+                "run.json size {bytes} exceeds 16 MiB record limit"
+            )));
+        }
         Ok(())
     }
 
@@ -176,46 +266,43 @@ impl WorkflowRuntime {
         session_dir: &Path,
         request: WorkflowLaunchRequest,
     ) -> Result<WorkflowHandle, WorkflowError> {
-        if request.script.len() as u64 > self.limits.lua_source_bytes {
-            return Err(WorkflowError::InvalidInput(format!(
-                "script size {} exceeds limit {}",
-                request.script.len(),
-                self.limits.lua_source_bytes
-            )));
+        self.validate_launch_request(&request)?;
+
+        let (run_id, run_dir) = loop {
+            let run_id = WorkflowId(format!("wf_{}", uuid::Uuid::new_v4().as_simple()));
+            let run_dir = journal::run_dir(session_dir, &run_id);
+            if !run_dir.exists() {
+                break (run_id, run_dir);
+            }
+        };
+        let metadata = metadata_for_request(run_id.clone(), request);
+
+        let durable_create = (|| {
+            journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
+            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"))?;
+            writer.append(
+                &JournalRecord::StateChanged {
+                    seq: writer.next_seq(),
+                    timestamp_ms: current_timestamp_ms(),
+                    previous: WorkflowState::Running,
+                    new: WorkflowState::Running,
+                    reason: "launch".to_owned(),
+                    actor: WorkflowActor::Runtime,
+                },
+                &self.limits,
+            )?;
+            Ok::<(), WorkflowError>(())
+        })();
+        if let Err(error) = durable_create {
+            return match std::fs::remove_dir_all(&run_dir) {
+                Ok(()) => Err(error),
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+                Err(cleanup) => Err(WorkflowError::Journal(format!(
+                    "{error}; failed to clean incomplete run {}: {cleanup}",
+                    run_dir.display()
+                ))),
+            };
         }
-
-        let run_id = WorkflowId(format!("wf_{}", uuid::Uuid::new_v4().as_simple()));
-        let script_sha256 = {
-            use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(request.script.as_bytes()))
-        };
-        let metadata = WorkflowRunMetadata {
-            run_id: run_id.clone(),
-            parent_run_id: request.parent_run_id,
-            name: request.name,
-            description: request.description,
-            phases: request.phases,
-            script: request.script,
-            script_sha256,
-            args: request.args,
-            launch_source: request.launch_source,
-            journal_format_version: 1,
-        };
-
-        let run_dir = journal::run_dir(session_dir, &run_id);
-        journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
-        let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"))?;
-        writer.append(
-            &JournalRecord::StateChanged {
-                seq: writer.next_seq(),
-                timestamp_ms: current_timestamp_ms(),
-                previous: WorkflowState::Running,
-                new: WorkflowState::Running,
-                reason: "launch".to_owned(),
-                actor: WorkflowActor::Runtime,
-            },
-            &self.limits,
-        )?;
 
         let control = Arc::new(RunControl::new());
         let state = Arc::new(Mutex::new(RunState {
@@ -246,10 +333,47 @@ impl WorkflowRuntime {
             control,
             runtime: self.clone(),
         };
-        if self.bound_runner()?.is_some() {
-            self.start_worker(&run_id).await?;
-        }
         Ok(handle)
+    }
+
+    /// Remove a just-created, never-started run when task registration fails.
+    pub async fn rollback_created_run(&self, run_id: &WorkflowId) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let run_dir = {
+            let guard = state.lock().await;
+            if guard.worker_active {
+                return Err(WorkflowError::InvalidInput(
+                    "cannot roll back a started workflow".to_owned(),
+                ));
+            }
+            guard.run_dir.clone()
+        };
+        #[cfg(test)]
+        if self.rollback_remove_failure.load(Ordering::Acquire) {
+            return Err(WorkflowError::Journal(
+                "injected rollback removal failure".to_owned(),
+            ));
+        }
+        std::fs::remove_dir_all(&run_dir)
+            .map_err(|error| WorkflowError::Journal(error.to_string()))?;
+        self.runs.lock().await.remove(&run_id.0);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rollback_remove_failure(&self) {
+        self.rollback_remove_failure.store(true, Ordering::Release);
+    }
+
+    /// Persist a terminal failure if worker startup fails after capability
+    /// commit. The registered task remains inspectable through TaskOutput.
+    pub async fn fail_worker_start(
+        &self,
+        run_id: &WorkflowId,
+        error: &WorkflowError,
+    ) -> Result<(), WorkflowError> {
+        self.finish_worker(run_id, Err(WorkflowError::Host(error.to_string())))
+            .await
     }
 
     pub async fn start_worker(&self, run_id: &WorkflowId) -> Result<(), WorkflowError> {
@@ -257,7 +381,7 @@ impl WorkflowRuntime {
             WorkflowError::InvalidInput("workflow runner is not bound".to_owned())
         })?;
         let state = self.run_state(run_id).await?;
-        let (handle, metadata) = {
+        let (handle, metadata, session_dir) = {
             let mut guard = state.lock().await;
             if guard.state != WorkflowState::Running {
                 return Err(WorkflowError::InvalidInput(
@@ -270,6 +394,14 @@ impl WorkflowRuntime {
                 ));
             }
             guard.worker_active = true;
+            let session_dir = guard
+                .run_dir
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| {
+                    WorkflowError::Host("workflow run directory has no session parent".to_owned())
+                })?
+                .to_path_buf();
             (
                 WorkflowHandle {
                     run_id: run_id.clone(),
@@ -277,12 +409,13 @@ impl WorkflowRuntime {
                     runtime: self.clone(),
                 },
                 guard.metadata.clone(),
+                session_dir,
             )
         };
         let runtime = self.clone();
         let id = run_id.clone();
         tokio::spawn(async move {
-            let result = runner(handle, metadata).await;
+            let result = runner(handle, metadata, session_dir).await;
             let _ = runtime.finish_worker(&id, result).await;
         });
         Ok(())

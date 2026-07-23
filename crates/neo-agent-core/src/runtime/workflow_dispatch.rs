@@ -253,6 +253,25 @@ impl WorkflowDispatchResolver {
             .ok_or_else(|| "workflow dispatch resolver is not bound".to_owned())
     }
 
+    /// Build a canonical dispatch handle for one workflow session. The handle
+    /// retains this resolver, so every host call still resolves fresh live
+    /// model/provider/approval dependencies.
+    pub fn handle_for_session(
+        &self,
+        session_directory: &Path,
+    ) -> Result<WorkflowDispatchHandle, String> {
+        let session = WorkflowDispatchSessionKey::from_directory(Some(session_directory));
+        let mut snapshot = self.resolve_for(&session)?;
+        snapshot.config.workflow_dispatch_resolver = self.clone();
+        Ok(WorkflowDispatchHandle {
+            config: snapshot.config,
+            model_client: snapshot.model_client,
+            registry: snapshot.registry,
+            process_supervisor: snapshot.process_supervisor,
+            context: snapshot.context,
+        })
+    }
+
     fn resolve_for(
         &self,
         session: &WorkflowDispatchSessionKey,

@@ -72,7 +72,7 @@ async fn wait_for_state(handle: &WorkflowHandle, expected: WorkflowState) {
 }
 
 #[tokio::test]
-async fn workflow_returns_running_after_durable_create_and_starts_bound_worker() {
+async fn durable_create_waits_for_explicit_worker_start() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
     let started = Arc::new(Notify::new());
@@ -82,7 +82,7 @@ async fn workflow_returns_running_after_durable_create_and_starts_bound_worker()
         .bind_runner({
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
-            move |_handle, metadata| {
+            move |_handle, metadata, _session_dir| {
                 let started = Arc::clone(&started);
                 let release = Arc::clone(&release);
                 let run_dir = neo_agent_core::workflow::run_dir(&root, &metadata.run_id);
@@ -98,10 +98,59 @@ async fn workflow_returns_running_after_durable_create_and_starts_bound_worker()
         .unwrap();
 
     let handle = create_run(&runtime, dir.path()).await;
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
+    runtime.start_worker(&handle.run_id).await.unwrap();
     started.notified().await;
     assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
     release.notify_one();
     wait_for_state(&handle, WorkflowState::Completed).await;
+}
+
+#[tokio::test]
+async fn rollback_created_run_removes_only_unstarted_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let run_dir = neo_agent_core::workflow::run_dir(dir.path(), &handle.run_id);
+    assert!(run_dir.exists());
+
+    runtime
+        .rollback_created_run(&handle.run_id)
+        .await
+        .expect("rollback unstarted run");
+
+    assert!(!run_dir.exists());
+    assert!(runtime.snapshot(&handle.run_id).await.is_err());
+}
+
+#[tokio::test]
+async fn worker_start_failure_is_durably_terminalized() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let error = runtime
+        .start_worker(&handle.run_id)
+        .await
+        .expect_err("unbound worker must fail");
+
+    runtime
+        .fail_worker_start(&handle.run_id, &error)
+        .await
+        .expect("persist failed startup");
+
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Failed);
+    assert!(
+        read_journal(&journal_path(dir.path(), &handle.run_id))
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record,
+                JournalRecord::StateChanged {
+                    new: WorkflowState::Failed,
+                    ..
+                }
+            ))
+    );
 }
 
 #[tokio::test]
@@ -276,7 +325,7 @@ async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live()
     recovered
         .bind_runner({
             let effects = Arc::clone(&effects);
-            move |handle, _metadata| {
+            move |handle, _metadata, _session_dir| {
                 let effects = Arc::clone(&effects);
                 async move {
                     handle
@@ -343,7 +392,7 @@ async fn replay_mismatch_starts_live_effect() {
     recovered
         .bind_runner({
             let effects = Arc::clone(&effects);
-            move |handle, _metadata| {
+            move |handle, _metadata, _session_dir| {
                 let effects = Arc::clone(&effects);
                 async move {
                     handle
@@ -399,7 +448,7 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     recovered
         .bind_runner({
             let effects = Arc::clone(&effects);
-            move |handle, _metadata| {
+            move |handle, _metadata, _session_dir| {
                 let effects = Arc::clone(&effects);
                 async move {
                     let outcome = handle
@@ -475,7 +524,7 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
         .bind_runner({
             let worker_starts = Arc::clone(&worker_starts);
             let effects = Arc::clone(&effects);
-            move |handle, _metadata| {
+            move |handle, _metadata, _session_dir| {
                 let worker_starts = Arc::clone(&worker_starts);
                 let effects = Arc::clone(&effects);
                 async move {
@@ -504,6 +553,7 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
         })
         .unwrap();
     let handle = create_run(&runtime, dir.path()).await;
+    runtime.start_worker(&handle.run_id).await.unwrap();
     while effects.load(Ordering::Acquire) == 0 {
         tokio::task::yield_now().await;
     }
@@ -546,7 +596,7 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
             let effect_cancelled = Arc::clone(&effect_cancelled);
             let allow_settlement = Arc::clone(&allow_settlement);
             let effect_settled = Arc::clone(&effect_settled);
-            move |handle, _metadata| {
+            move |handle, _metadata, _session_dir| {
                 let effect_started = Arc::clone(&effect_started);
                 let effect_cancelled = Arc::clone(&effect_cancelled);
                 let allow_settlement = Arc::clone(&allow_settlement);
@@ -584,6 +634,7 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
         })
         .unwrap();
     let handle = create_run(&runtime, dir.path()).await;
+    runtime.start_worker(&handle.run_id).await.unwrap();
     effect_started.notified().await;
     handle.stop(WorkflowActor::Human).await.unwrap();
     effect_cancelled.notified().await;

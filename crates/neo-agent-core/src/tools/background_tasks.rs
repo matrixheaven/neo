@@ -501,8 +501,14 @@ impl BackgroundTaskManager {
         task_id: String,
         description: String,
         handle: crate::workflow::WorkflowHandle,
-    ) {
+    ) -> Result<(), ToolError> {
         let mut tasks = self.inner.lock().await;
+        if tasks.contains_key(&task_id) {
+            return Err(ToolError::InvalidInput {
+                tool: "RunWorkflow".to_owned(),
+                message: format!("background task `{task_id}` already exists"),
+            });
+        }
         tasks.insert(
             task_id,
             BackgroundTaskRecord {
@@ -512,6 +518,21 @@ impl BackgroundTaskManager {
                 detached: false,
             },
         );
+        Ok(())
+    }
+
+    /// Remove a workflow registration while rolling back a launch transaction.
+    pub async fn remove_workflow(&self, task_id: &str) -> bool {
+        let mut tasks = self.inner.lock().await;
+        if tasks
+            .get(task_id)
+            .is_some_and(|record| matches!(record.state, BackgroundTaskState::Workflow { .. }))
+        {
+            tasks.remove(task_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get the workflow handle. The handle remains the query/control owner
@@ -2197,7 +2218,8 @@ mod tests {
         let manager = BackgroundTaskManager::new();
         manager
             .start_workflow(task_id.clone(), "controls test".to_owned(), handle)
-            .await;
+            .await
+            .expect("register workflow");
 
         let pause = manager
             .pause_workflow(&task_id, WorkflowActor::Model)
@@ -2213,7 +2235,7 @@ mod tests {
             BackgroundTaskStatus::Paused
         );
         runtime
-            .bind_runner(|handle, _metadata| async move {
+            .bind_runner(|handle, _metadata, _session_dir| async move {
                 handle.stop_token().cancelled().await;
                 Ok(())
             })
@@ -2275,6 +2297,52 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn workflow_registration_collision_is_fail_closed() {
+        let session = tempfile::tempdir().expect("session");
+        let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+        let handle = runtime
+            .create_run(
+                session.path(),
+                WorkflowLaunchRequest {
+                    name: "collision".to_owned(),
+                    description: "collision test".to_owned(),
+                    phases: vec![WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    }],
+                    script: "neo.phase('work')".to_owned(),
+                    args: json!({}),
+                    launch_source: "test".to_owned(),
+                    parent_run_id: None,
+                },
+            )
+            .await
+            .expect("create workflow");
+        let task_id = handle.run_id.0.clone();
+        let manager = BackgroundTaskManager::new();
+        manager
+            .start_workflow(task_id.clone(), "first".to_owned(), handle.clone())
+            .await
+            .expect("first registration");
+
+        let error = manager
+            .start_workflow(task_id.clone(), "replacement".to_owned(), handle)
+            .await
+            .expect_err("duplicate registration must fail");
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(manager.list(false, 10).await.len(), 1);
+        assert_eq!(
+            manager
+                .workflow_handle(&task_id)
+                .await
+                .expect("original handle")
+                .run_id
+                .0,
+            task_id
+        );
     }
 
     #[tokio::test]

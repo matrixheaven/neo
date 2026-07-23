@@ -53,6 +53,18 @@ pub struct WriteApprovalChange {
     pub preview: WriteApprovalPreview,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct WorkflowApprovalPresentation {
+    pub name: String,
+    pub description: String,
+    pub phases: Vec<String>,
+    pub args: String,
+    pub source: String,
+    pub line_count: usize,
+    pub byte_count: usize,
+    pub warning: String,
+}
+
 /// Explicit created-versus-overwritten preview for a prepared Write target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -93,6 +105,10 @@ pub enum ApprovalPresentation {
         completion_criterion: Option<String>,
         phases: Vec<String>,
     },
+    Workflow {
+        title: String,
+        workflow: WorkflowApprovalPresentation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -108,6 +124,9 @@ pub enum ApprovalAction {
     StartGoal,
     ReviseGoal { preset_feedback: Option<String> },
     RejectGoal,
+    LaunchWorkflow,
+    ReviseWorkflow { preset_feedback: Option<String> },
+    CancelWorkflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -196,7 +215,9 @@ impl ApprovalRequest {
                     .ok_or(ApprovalProtocolError::ActionNotOffered)?;
                 let revises = matches!(
                     action,
-                    ApprovalAction::RevisePlan { .. } | ApprovalAction::ReviseGoal { .. }
+                    ApprovalAction::RevisePlan { .. }
+                        | ApprovalAction::ReviseGoal { .. }
+                        | ApprovalAction::ReviseWorkflow { .. }
                 );
                 if !revises && feedback.is_some() {
                     return Err(ApprovalProtocolError::UnexpectedFeedback);

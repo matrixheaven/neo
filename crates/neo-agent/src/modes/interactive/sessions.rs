@@ -216,6 +216,7 @@ impl InteractiveController {
             );
             return;
         }
+        self.workflow_capability.revoke_now();
         self.close_inline_prompt_completion();
         self.reset_for_new_session();
         self.push_status("Started fresh session");
