@@ -407,7 +407,7 @@ async fn host_exit_recovery_does_not_start_model_turn() {
         {
             let task_id = handle.run_id.0.clone();
             if tasks.workflow_handle(&task_id).await.is_none() {
-                let description = handle.snapshot().await.name;
+                let description = handle.snapshot().await.title;
                 tasks
                     .start_workflow(task_id, description, handle)
                     .await

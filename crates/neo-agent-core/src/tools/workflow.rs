@@ -3,12 +3,9 @@ use std::collections::HashSet;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, schema};
+use crate::WorkflowApprovalPresentation;
 use crate::workflow::capability::WorkflowCapabilityReservation;
-use crate::workflow::{
-    LuaWorkflowRunner, WorkflowError, WorkflowLaunchRequest, WorkflowPhase, WorkflowSnapshot,
-    WorkflowState,
-};
-use crate::{AgentEvent, WorkflowApprovalPresentation};
+use crate::workflow::{LuaWorkflowRunner, WorkflowError, WorkflowLaunchRequest, WorkflowPhase};
 
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +233,15 @@ impl Tool for RunWorkflowTool {
             }
 
             let resolver = child_config.workflow_dispatch_resolver.clone();
+            let projection_resolver = resolver.clone();
+            ctx.workflow_runtime
+                .bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
+                    projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
+                })
+                .map_err(|error| ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: error.to_string(),
+                })?;
             let limits = ctx.workflow_runtime.limits();
             ctx.workflow_runtime
                 .bind_runner_if_unbound(move |handle, metadata, worker_session_dir| {
@@ -298,16 +304,13 @@ impl Tool for RunWorkflowTool {
                 .await);
             }
 
-            let turn = ctx.current_turn.unwrap_or_default();
-            ctx.emit_event(AgentEvent::WorkflowStarted {
-                turn,
-                workflow: WorkflowSnapshot {
-                    id: handle.run_id.clone(),
-                    title: input.name.clone(),
-                    state: WorkflowState::Running,
-                    steps: Vec::new(),
-                },
-            });
+            ctx.workflow_runtime
+                .emit_started(&handle.run_id)
+                .await
+                .map_err(|error| ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: error.to_string(),
+                })?;
 
             if let Err(error) = ctx.workflow_runtime.start_worker(&handle.run_id).await {
                 let terminal_error = ctx

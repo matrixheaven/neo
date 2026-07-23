@@ -1,201 +1,141 @@
 use neo_agent_core::AgentEvent;
 use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState, WorkflowStepRecord};
-use neo_tui::primitive::theme::TuiTheme;
-use neo_tui::primitive::{Color, Component, Line, strip_ansi};
-use neo_tui::transcript::{TranscriptEntry, TranscriptPane, WorkflowCardComponent};
+use neo_tui::primitive::{Component, Finalization, Line, strip_ansi};
+use neo_tui::transcript::WorkflowCardComponent;
 
-fn step(
-    index: usize,
-    name: &str,
-    state: WorkflowState,
-    summary: Option<&str>,
-) -> WorkflowStepRecord {
-    WorkflowStepRecord {
-        index,
-        name: name.to_owned(),
-        state,
-        summary: summary.map(str::to_owned),
-        details: None,
-        agent: None,
-        swarm: None,
-        has_failures: None,
-    }
-}
-
-fn sample_snapshot() -> WorkflowSnapshot {
+fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
     WorkflowSnapshot {
         id: WorkflowId("wf-test".to_owned()),
         title: "Runtime audit and fix".to_owned(),
-        state: WorkflowState::Running,
-        steps: vec![
-            step(
-                0,
-                "swarm: audit",
-                WorkflowState::Completed,
-                Some("3 items completed."),
-            ),
-            step(
-                1,
-                "delegate: fix issue",
-                WorkflowState::Completed,
-                Some("Fixed."),
-            ),
-        ],
+        state,
+        current_phase: Some("verify".to_owned()),
+        projection_sequence: Some(7),
+        recovery_failure: false,
+        started_at_ms: Some(1_000),
+        updated_at_ms: Some(6_000),
+        invocation_count: 3,
+        failure_count: 1,
+        actual_usage: Some(neo_agent_core::AgentTokenUsage {
+            input_tokens: 20,
+            output_tokens: 5,
+            input_cache_read_tokens: 10,
+            input_cache_write_tokens: 0,
+        }),
+        latest_log_summary: Some("focused verification running".to_owned()),
+        latest_report_summary: Some("all scoped checks passed".to_owned()),
+        terminal_reason: state
+            .is_terminal()
+            .then(|| "workflow reached its durable boundary".to_owned()),
+        steps: Vec::new(),
     }
 }
 
-fn ansi(lines: &[Line]) -> String {
+fn text(lines: &[Line]) -> String {
     lines
         .iter()
-        .map(Line::to_ansi)
+        .map(|line| strip_ansi(&line.to_ansi()))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn assert_ansi_contains_color(ansi: &str, color: Color) {
-    let expected = match color {
-        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
-        Color::Indexed(n) => format!("\x1b[38;5;{n}m"),
-        _ => return,
-    };
+#[test]
+fn workflow_card_projects_orchestration_without_child_duplication() {
+    let mut workflow = snapshot(WorkflowState::Running);
+    workflow.steps.push(WorkflowStepRecord {
+        index: 0,
+        name: "delegate child secret".to_owned(),
+        state: WorkflowState::Completed,
+        summary: Some("child result secret".to_owned()),
+        details: Some(serde_json::json!({"command": "full shell command secret"})),
+        agent: None,
+        swarm: None,
+        has_failures: None,
+    });
+
+    let rendered = text(&WorkflowCardComponent::new(workflow).render(120));
+
+    assert!(rendered.contains("Runtime audit and fix"), "{rendered}");
+    assert!(rendered.contains("phase verify"), "{rendered}");
+    assert!(rendered.contains("3 invocations"), "{rendered}");
+    assert!(rendered.contains("25 tokens"), "{rendered}");
     assert!(
-        ansi.contains(&expected),
-        "missing color {expected:?} in {ansi:?}"
+        rendered.contains("focused verification running"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("TaskPause · TaskStop"), "{rendered}");
+    assert!(!rendered.contains("delegate child secret"), "{rendered}");
+    assert!(!rendered.contains("child result secret"), "{rendered}");
+    assert!(
+        !rendered.contains("full shell command secret"),
+        "{rendered}"
     );
 }
 
 #[test]
-fn workflow_card_renders_title_and_steps() {
-    let mut card = WorkflowCardComponent::new(sample_snapshot());
-    let lines = card.render(120);
-    let text: String = lines
-        .iter()
-        .map(|l| strip_ansi(&l.to_ansi()))
-        .collect::<Vec<_>>()
-        .join("\n");
+fn historical_workflow_events_remain_read_only() {
+    for variant in ["WorkflowStarted", "WorkflowUpdated", "WorkflowFinished"] {
+        let payload = serde_json::json!({
+            "turn": 4,
+            "workflow": {
+                "id": "wf-historical",
+                "title": "Historical workflow",
+                "state": "running",
+                "steps": [{
+                    "index": 0,
+                    "name": "legacy step",
+                    "state": "completed",
+                    "summary": "legacy summary"
+                }]
+            }
+        });
+        let event: AgentEvent = serde_json::from_value(serde_json::Value::Object(
+            [(variant.to_owned(), payload)].into_iter().collect(),
+        ))
+        .expect("old workflow event remains readable");
 
-    assert!(text.contains("Workflow  Runtime audit and fix"), "{text}");
-    assert!(text.contains("running"), "{text}");
-    assert!(text.contains("swarm: audit"), "{text}");
-    assert!(text.contains("delegate: fix issue"), "{text}");
+        let workflow = match event {
+            AgentEvent::WorkflowStarted { workflow, .. }
+            | AgentEvent::WorkflowUpdated { workflow, .. }
+            | AgentEvent::WorkflowFinished { workflow, .. } => workflow,
+            _ => panic!("historical workflow event"),
+        };
+        assert_eq!(workflow.projection_sequence, None);
+        assert!(!workflow.recovery_failure);
+        assert_eq!(workflow.started_at_ms, None);
+        assert_eq!(workflow.updated_at_ms, None);
+        assert_eq!(workflow.steps.len(), 1);
+    }
 }
 
 #[test]
-fn workflow_card_uses_theme_for_state_styles_and_summaries() {
-    let theme = TuiTheme::default()
-        .with_brand(Color::Rgb(120, 80, 240))
-        .with_status_ok(Color::Rgb(1, 180, 90))
-        .with_status_error(Color::Rgb(220, 20, 20))
-        .with_status_warn(Color::Rgb(230, 160, 20))
-        .with_text_muted(Color::Rgb(90, 100, 110));
-    let snapshot = WorkflowSnapshot {
-        id: WorkflowId("wf-style".to_owned()),
-        title: "Styled workflow".to_owned(),
-        state: WorkflowState::Failed,
-        steps: vec![
-            step(
-                0,
-                "completed step",
-                WorkflowState::Completed,
-                Some("Audit finished."),
-            ),
-            step(
-                1,
-                "running step",
-                WorkflowState::Running,
-                Some("Worker is editing."),
-            ),
-            step(
-                2,
-                "failed step",
-                WorkflowState::Failed,
-                Some("Focused test failed."),
-            ),
-        ],
-    };
-    let card = WorkflowCardComponent::new(snapshot);
-    let rows = card.render_with_theme(140, &theme);
-    let raw = ansi(&rows);
-    let text = rows
-        .iter()
-        .map(|line| strip_ansi(&line.to_ansi()))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert_ansi_contains_color(&raw, theme.brand);
-    assert_ansi_contains_color(&raw, theme.status_ok);
-    assert_ansi_contains_color(&raw, theme.status_warn);
-    assert_ansi_contains_color(&raw, theme.status_error);
-    assert!(text.contains("Audit finished."), "{text}");
-    assert!(text.contains("Worker is editing."), "{text}");
-    assert!(text.contains("Focused test failed."), "{text}");
-}
-
-#[test]
-fn workflow_card_finalizes_on_completion() {
-    use neo_tui::primitive::Finalization;
-    let mut snapshot = sample_snapshot();
-    snapshot.state = WorkflowState::Completed;
-    let card = WorkflowCardComponent::new(snapshot);
-    assert_eq!(card.finalization(), Finalization::Finalized);
-}
-
-#[test]
-fn transcript_pane_upserts_workflow_card_from_events() {
-    let mut pane = TranscriptPane::new(120, 20);
-    pane.apply_agent_event(AgentEvent::WorkflowStarted {
-        turn: 1,
-        workflow: sample_snapshot(),
-    });
-
-    let _ = pane.render_frame(120, 20);
-    let frame = pane.frame_ansi_lines();
-    let text: String = frame
-        .iter()
-        .map(|l| strip_ansi(l))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(text.contains("Workflow  Runtime audit and fix"), "{text}");
-}
-
-#[test]
-fn in_place_workflow_update_preserves_active_thinking() {
-    let mut pane = TranscriptPane::new(120, 20);
-    let mut workflow = sample_snapshot();
-    pane.apply_agent_event(AgentEvent::WorkflowStarted {
-        turn: 1,
-        workflow: workflow.clone(),
-    });
-    pane.apply_agent_event(AgentEvent::ThinkingStarted {
-        turn: 2,
-        id: "reasoning".to_owned(),
-    });
-    pane.apply_agent_event(AgentEvent::ThinkingDelta {
-        turn: 2,
-        text: "continuous".to_owned(),
-    });
-
-    workflow.steps[1].summary = Some("Updated in place.".to_owned());
-    pane.apply_agent_event(AgentEvent::WorkflowUpdated { turn: 1, workflow });
-    pane.apply_agent_event(AgentEvent::ThinkingDelta {
-        turn: 2,
-        text: " thinking".to_owned(),
-    });
-    pane.apply_agent_event(AgentEvent::ThinkingFinished {
-        turn: 2,
-        signature: None,
-        redacted: false,
-    });
-
-    let thinking = pane
-        .transcript()
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(thinking, vec!["continuous thinking"]);
+fn workflow_card_renders_paused_resource_limited_and_terminal_states() {
+    for (state, label, controls) in [
+        (
+            WorkflowState::Paused,
+            "paused",
+            Some("TaskResume · TaskStop"),
+        ),
+        (WorkflowState::Completed, "completed", None),
+        (WorkflowState::Failed, "failed", None),
+        (WorkflowState::Cancelled, "cancelled", None),
+        (WorkflowState::ResourceLimited, "resource limited", None),
+    ] {
+        let mut card = WorkflowCardComponent::new(snapshot(state));
+        let rendered = text(&card.render_with_theme(120, &Default::default()));
+        assert!(rendered.contains(label), "{state:?}: {rendered}");
+        let expected_finalization = if state == WorkflowState::Paused {
+            Finalization::Live
+        } else {
+            Finalization::Finalized
+        };
+        assert_eq!(card.finalization(), expected_finalization);
+        assert!(!card.on_render_tick(10_000), "{state:?} elapsed is frozen");
+        match controls {
+            Some(controls) => assert!(rendered.contains(controls), "{rendered}"),
+            None => assert!(!rendered.contains("Controls"), "{rendered}"),
+        }
+    }
+    let mut running = WorkflowCardComponent::new(snapshot(WorkflowState::Running));
+    assert!(running.on_render_tick(10_000));
+    assert!(text(&running.render(120)).contains("9s"));
 }

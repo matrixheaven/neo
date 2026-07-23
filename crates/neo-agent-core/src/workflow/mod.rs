@@ -17,7 +17,7 @@ pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
 pub use runtime::{
     ReplayPrefix, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
-    WorkflowRunSnapshot, WorkflowRuntime, compute_replay_prefix,
+    WorkflowProjectionStage, WorkflowRuntime, compute_replay_prefix,
 };
 pub use state::{
     WorkflowActor, WorkflowChildRef, WorkflowId, WorkflowInterruptionReason,

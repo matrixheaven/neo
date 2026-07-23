@@ -15,7 +15,7 @@ use crate::skills::SkillStoreHandle;
 use crate::tools::{ProcessSupervisor, ToolEventCallback, ToolRegistry};
 use crate::workflow::{
     WorkflowChildRef, WorkflowInterruptionReason, WorkflowInvocationContext,
-    WorkflowInvocationOutcome, WorkflowOutcomeStatus,
+    WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowProjectionStage, WorkflowSnapshot,
 };
 use crate::{AgentEvent, AgentTokenUsage, AgentToolCall, ToolResult};
 
@@ -411,6 +411,36 @@ impl WorkflowDispatchResolver {
             route.turn = turn;
         }
         Ok(())
+    }
+
+    pub fn emit_workflow_projection(
+        &self,
+        session_directory: &Path,
+        stage: WorkflowProjectionStage,
+        workflow: WorkflowSnapshot,
+    ) {
+        let session = WorkflowDispatchSessionKey::from_directory(Some(session_directory));
+        let turn = self.state.read().ok().and_then(|state| {
+            state
+                .event_routes
+                .get(&session)
+                .map(|route| route.turn)
+                .or_else(|| {
+                    state
+                        .snapshots
+                        .get(&session)
+                        .map(|snapshot| snapshot.context.turns)
+                })
+        });
+        let Some(turn) = turn else {
+            return;
+        };
+        let event = match stage {
+            WorkflowProjectionStage::Started => AgentEvent::WorkflowStarted { turn, workflow },
+            WorkflowProjectionStage::Updated => AgentEvent::WorkflowUpdated { turn, workflow },
+            WorkflowProjectionStage::Finished => AgentEvent::WorkflowFinished { turn, workflow },
+        };
+        self.dispatch_event(&session, event);
     }
 
     fn event_route(

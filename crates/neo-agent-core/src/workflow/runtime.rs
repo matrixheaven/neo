@@ -17,7 +17,7 @@ use super::journal::{
 use super::limits::WorkflowLimits;
 use super::state::{
     WorkflowActor, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowPhase,
-    WorkflowRunMetadata, WorkflowState,
+    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
 use crate::AgentTokenUsage;
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
@@ -25,9 +25,10 @@ use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 #[path = "runtime_support.rs"]
 mod support;
 use support::{
-    ReplayEntry, RunControl, add_usage, aggregate_usage, current_timestamp_ms, interrupted_outcome,
-    last_state, recovered_phase, recovered_reports, replay_entries, resource_limited_outcome,
-    usage_total,
+    ReplayEntry, RunControl, add_usage, aggregate_usage, bounded_summary, current_timestamp_ms,
+    interrupted_outcome, last_state, latest_log_summary, latest_report_summary,
+    projection_timestamps, recovered_phase, recovered_reports, replay_entries, report_summary,
+    resource_limited_outcome, usage_total,
 };
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
@@ -35,6 +36,14 @@ type RunnerFuture = Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Sen
 type Runner = dyn Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> RunnerFuture + Send + Sync;
 type RecoveryFuture = Pin<Box<dyn Future<Output = Option<WorkflowInvocationOutcome>> + Send>>;
 type RecoveryResolver = dyn Fn(Arc<IncompleteInvocation>) -> RecoveryFuture + Send + Sync;
+type ProjectionEmitter = dyn Fn(&Path, WorkflowProjectionStage, WorkflowSnapshot) + Send + Sync;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowProjectionStage {
+    Started,
+    Updated,
+    Finished,
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkflowInvocationContext {
@@ -71,18 +80,6 @@ fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> W
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct WorkflowRunSnapshot {
-    pub run_id: WorkflowId,
-    pub name: String,
-    pub state: WorkflowState,
-    pub current_phase: Option<String>,
-    pub invocation_count: u64,
-    pub failure_count: u64,
-    pub actual_usage: Option<AgentTokenUsage>,
-    pub terminal_reason: Option<String>,
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkflowOutput {
     pub metadata: WorkflowRunMetadata,
@@ -102,6 +99,11 @@ struct RunState {
     invocation_count: u64,
     failure_count: u64,
     actual_usage: Option<AgentTokenUsage>,
+    projection_sequence: Option<u64>,
+    started_at_ms: Option<u64>,
+    updated_at_ms: Option<u64>,
+    latest_log_summary: Option<String>,
+    latest_report_summary: Option<String>,
     terminal_reason: Option<String>,
     reports: Vec<serde_json::Value>,
     run_dir: PathBuf,
@@ -115,16 +117,23 @@ struct RunState {
 }
 
 impl RunState {
-    fn snapshot(&self) -> WorkflowRunSnapshot {
-        WorkflowRunSnapshot {
-            run_id: self.metadata.run_id.clone(),
-            name: self.metadata.name.clone(),
+    fn snapshot(&self) -> WorkflowSnapshot {
+        WorkflowSnapshot {
+            id: self.metadata.run_id.clone(),
+            title: self.metadata.name.clone(),
             state: self.state,
             current_phase: self.current_phase.clone(),
+            projection_sequence: self.projection_sequence,
+            recovery_failure: self.journal_error.is_some(),
+            started_at_ms: self.started_at_ms,
+            updated_at_ms: self.updated_at_ms,
             invocation_count: self.invocation_count,
             failure_count: self.failure_count,
             actual_usage: self.actual_usage,
+            latest_log_summary: self.latest_log_summary.clone(),
+            latest_report_summary: self.latest_report_summary.clone(),
             terminal_reason: self.terminal_reason.clone(),
+            steps: Vec::new(),
         }
     }
 
@@ -140,6 +149,7 @@ pub struct WorkflowRuntime {
     notifications: WorkflowNotificationQueue,
     runner: Arc<RwLock<Option<Arc<Runner>>>>,
     recovery_resolver: Arc<RwLock<Option<Arc<RecoveryResolver>>>>,
+    projection_emitter: Arc<RwLock<Option<Arc<ProjectionEmitter>>>>,
     #[cfg(test)]
     rollback_remove_failure: Arc<AtomicBool>,
 }
@@ -168,6 +178,7 @@ impl WorkflowRuntime {
             notifications: WorkflowNotificationQueue::default(),
             runner: Arc::new(RwLock::new(None)),
             recovery_resolver: Arc::new(RwLock::new(None)),
+            projection_emitter: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             rollback_remove_failure: Arc::new(AtomicBool::new(false)),
         }
@@ -218,6 +229,19 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    pub fn bind_projection_emitter_if_unbound<F>(&self, emitter: F) -> Result<(), WorkflowError>
+    where
+        F: Fn(&Path, WorkflowProjectionStage, WorkflowSnapshot) + Send + Sync + 'static,
+    {
+        let mut slot = self.projection_emitter.write().map_err(|_| {
+            WorkflowError::Host("workflow projection emitter lock poisoned".to_owned())
+        })?;
+        if slot.is_none() {
+            *slot = Some(Arc::new(emitter));
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn limits(&self) -> WorkflowLimits {
         self.limits.clone()
@@ -228,7 +252,7 @@ impl WorkflowRuntime {
         &self,
         request: &WorkflowLaunchRequest,
     ) -> Result<(), WorkflowError> {
-        if request.script.len() as u64 > self.limits.lua_source_bytes {
+        if u64::try_from(request.script.len()).unwrap_or(u64::MAX) > self.limits.lua_source_bytes {
             return Err(WorkflowError::InvalidInput(format!(
                 "script size {} exceeds limit {}",
                 request.script.len(),
@@ -239,9 +263,12 @@ impl WorkflowRuntime {
             WorkflowId(format!("wf_{}", "0".repeat(32))),
             request.clone(),
         );
-        let bytes = serde_json::to_vec_pretty(&metadata)
-            .map_err(|error| WorkflowError::InvalidInput(error.to_string()))?
-            .len() as u64;
+        let bytes = u64::try_from(
+            serde_json::to_vec_pretty(&metadata)
+                .map_err(|error| WorkflowError::InvalidInput(error.to_string()))?
+                .len(),
+        )
+        .unwrap_or(u64::MAX);
         if bytes > self.limits.journal_record_bytes {
             return Err(WorkflowError::InvalidInput(format!(
                 "run.json size {bytes} exceeds 16 MiB record limit"
@@ -288,10 +315,11 @@ impl WorkflowRuntime {
         let durable_create = (|| {
             journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
             let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"))?;
-            writer.append(
+            let timestamp_ms = current_timestamp_ms();
+            let sequence = writer.append(
                 &JournalRecord::StateChanged {
                     seq: writer.next_seq(),
-                    timestamp_ms: current_timestamp_ms(),
+                    timestamp_ms,
                     previous: WorkflowState::Running,
                     new: WorkflowState::Running,
                     reason: "launch".to_owned(),
@@ -299,18 +327,21 @@ impl WorkflowRuntime {
                 },
                 &self.limits,
             )?;
-            Ok::<(), WorkflowError>(())
+            Ok::<_, WorkflowError>((sequence, timestamp_ms))
         })();
-        if let Err(error) = durable_create {
-            return match std::fs::remove_dir_all(&run_dir) {
-                Ok(()) => Err(error),
-                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
-                Err(cleanup) => Err(WorkflowError::Journal(format!(
-                    "{error}; failed to clean incomplete run {}: {cleanup}",
-                    run_dir.display()
-                ))),
-            };
-        }
+        let (projection_sequence, started_at_ms) = match durable_create {
+            Ok(durable) => durable,
+            Err(error) => {
+                return match std::fs::remove_dir_all(&run_dir) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+                    Err(cleanup) => Err(WorkflowError::Journal(format!(
+                        "{error}; failed to clean incomplete run {}: {cleanup}",
+                        run_dir.display()
+                    ))),
+                };
+            }
+        };
 
         let control = Arc::new(RunControl::new());
         let state = Arc::new(Mutex::new(RunState {
@@ -320,6 +351,11 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 0,
             actual_usage: None,
+            projection_sequence: Some(projection_sequence),
+            started_at_ms: Some(started_at_ms),
+            updated_at_ms: Some(started_at_ms),
+            latest_log_summary: None,
+            latest_report_summary: None,
             terminal_reason: None,
             reports: Vec::new(),
             run_dir,
@@ -342,6 +378,13 @@ impl WorkflowRuntime {
             runtime: self.clone(),
         };
         Ok(handle)
+    }
+
+    pub async fn emit_started(&self, run_id: &WorkflowId) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        self.emit_projection(&guard, WorkflowProjectionStage::Started);
+        Ok(())
     }
 
     /// Remove a just-created, never-started run when task registration fails.
@@ -429,10 +472,7 @@ impl WorkflowRuntime {
         Ok(())
     }
 
-    pub async fn snapshot(
-        &self,
-        run_id: &WorkflowId,
-    ) -> Result<WorkflowRunSnapshot, WorkflowError> {
+    pub async fn snapshot(&self, run_id: &WorkflowId) -> Result<WorkflowSnapshot, WorkflowError> {
         Ok(self.run_state(run_id).await?.lock().await.snapshot())
     }
 
@@ -683,7 +723,7 @@ impl WorkflowRuntime {
             {
                 self.notifications.enqueue(WorkflowNotification::new(
                     session_dir,
-                    snapshot.run_id,
+                    snapshot.id,
                     snapshot.state,
                     snapshot
                         .terminal_reason
@@ -746,31 +786,38 @@ impl WorkflowRuntime {
                     .is_some_and(|cap| usage_total(guard.actual_usage) >= cap);
             let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().as_simple());
             let mut writer = JournalWriter::open(&guard.journal_path())?;
+            let timestamp_ms = current_timestamp_ms();
             let started = JournalRecord::InvocationStarted {
                 seq: writer.next_seq(),
-                timestamp_ms: current_timestamp_ms(),
+                timestamp_ms,
                 invocation_id: invocation_id.clone(),
                 call_index,
                 kind,
                 canonical_input,
                 canonical_input_hash: input_hash,
             };
-            if let Err(error) = writer.append(&started, &self.limits) {
-                if matches!(error, WorkflowError::JournalTotalLimitExceeded) {
-                    self.transition_locked(
-                        &mut guard,
-                        WorkflowState::ResourceLimited,
-                        "journal limit reached",
-                        WorkflowActor::Runtime,
-                    )?;
-                    return Err(WorkflowError::ResourceLimited(
-                        "journal limit reached".to_owned(),
-                    ));
+            let sequence = match writer.append(&started, &self.limits) {
+                Ok(sequence) => sequence,
+                Err(error) => {
+                    if matches!(error, WorkflowError::JournalTotalLimitExceeded) {
+                        self.transition_locked(
+                            &mut guard,
+                            WorkflowState::ResourceLimited,
+                            "journal limit reached",
+                            WorkflowActor::Runtime,
+                        )?;
+                        return Err(WorkflowError::ResourceLimited(
+                            "journal limit reached".to_owned(),
+                        ));
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
+            };
             guard.invocation_count = guard.invocation_count.saturating_add(1);
             guard.current_invocation = Some(invocation_id.clone());
+            guard.projection_sequence = Some(sequence);
+            guard.updated_at_ms = Some(timestamp_ms);
+            self.emit_projection(&guard, WorkflowProjectionStage::Updated);
             (invocation_id, Arc::clone(&guard.control), capped)
         };
 
@@ -786,10 +833,11 @@ impl WorkflowRuntime {
 
         let mut guard = state.lock().await;
         let mut writer = JournalWriter::open(&guard.journal_path())?;
-        writer.append(
+        let timestamp_ms = current_timestamp_ms();
+        let sequence = writer.append(
             &JournalRecord::InvocationFinished {
                 seq: writer.next_seq(),
-                timestamp_ms: current_timestamp_ms(),
+                timestamp_ms,
                 invocation_id,
                 outcome: outcome.clone(),
             },
@@ -797,6 +845,9 @@ impl WorkflowRuntime {
         )?;
         guard.current_invocation = None;
         observe_outcome(&mut guard, kind, &outcome);
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
 
         if capped {
             self.transition_locked(
@@ -892,10 +943,11 @@ impl WorkflowRuntime {
             return Ok(());
         }
         let mut writer = JournalWriter::open(&state.journal_path())?;
-        writer.append(
+        let timestamp_ms = current_timestamp_ms();
+        let sequence = writer.append(
             &JournalRecord::StateChanged {
                 seq: writer.next_seq(),
-                timestamp_ms: current_timestamp_ms(),
+                timestamp_ms,
                 previous,
                 new: new_state,
                 reason: reason.to_owned(),
@@ -904,9 +956,21 @@ impl WorkflowRuntime {
             &self.limits,
         )?;
         state.state = new_state;
+        state.projection_sequence = Some(sequence);
+        state.updated_at_ms = Some(timestamp_ms);
         if new_state.is_terminal() || new_state == WorkflowState::Paused {
             state.terminal_reason = Some(reason.to_owned());
+        } else {
+            state.terminal_reason = None;
         }
+        self.emit_projection(
+            state,
+            if new_state.is_terminal() {
+                WorkflowProjectionStage::Finished
+            } else {
+                WorkflowProjectionStage::Updated
+            },
+        );
         if new_state.is_terminal()
             && let Some(session_dir) = state.run_dir.parent().and_then(Path::parent)
         {
@@ -943,6 +1007,23 @@ impl WorkflowRuntime {
             .map_err(|_| WorkflowError::Host("workflow recovery lock poisoned".to_owned()))
     }
 
+    fn emit_projection(&self, state: &RunState, stage: WorkflowProjectionStage) {
+        let Ok(emitter) = self
+            .projection_emitter
+            .read()
+            .map(|slot| slot.as_ref().map(Arc::clone))
+        else {
+            return;
+        };
+        let Some(emitter) = emitter else {
+            return;
+        };
+        let Some(session_dir) = state.run_dir.parent().and_then(Path::parent) else {
+            return;
+        };
+        emitter(session_dir, stage, state.snapshot());
+    }
+
     async fn insert_rehydrated_run(
         &self,
         run_dir: PathBuf,
@@ -952,6 +1033,8 @@ impl WorkflowRuntime {
         terminal_reason: Option<String>,
     ) -> WorkflowHandle {
         let replay_entries = replay_entries(&records);
+        let projection_sequence = records.last().map(JournalRecord::seq);
+        let (started_at_ms, updated_at_ms) = projection_timestamps(&records);
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
         let run_state = RunState {
@@ -959,12 +1042,21 @@ impl WorkflowRuntime {
             invocation_count: records
                 .iter()
                 .filter(|record| matches!(record, JournalRecord::InvocationStarted { .. }))
-                .count() as u64,
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX),
             failure_count: records
                 .iter()
                 .filter(|record| matches!(record, JournalRecord::InvocationFinished { outcome, .. } if !outcome.ok))
-                .count() as u64,
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX),
             actual_usage: aggregate_usage(&records),
+            projection_sequence,
+            started_at_ms,
+            updated_at_ms,
+            latest_log_summary: latest_log_summary(&replay_entries),
+            latest_report_summary: latest_report_summary(&records),
             reports: recovered_reports(&records),
             metadata,
             state,
@@ -1026,6 +1118,11 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 1,
             actual_usage: None,
+            projection_sequence: None,
+            started_at_ms: None,
+            updated_at_ms: None,
+            latest_log_summary: None,
+            latest_report_summary: None,
             terminal_reason: Some(reason.clone()),
             reports: Vec::new(),
             run_dir,
@@ -1057,7 +1154,7 @@ pub struct WorkflowHandle {
 }
 
 impl WorkflowHandle {
-    pub async fn snapshot(&self) -> WorkflowRunSnapshot {
+    pub async fn snapshot(&self) -> WorkflowSnapshot {
         self.runtime
             .snapshot(&self.run_id)
             .await
@@ -1132,6 +1229,13 @@ fn observe_outcome(
         state.actual_usage = Some(add_usage(state.actual_usage, usage));
     }
     match kind {
+        WorkflowInvocationKind::Log if outcome.ok => {
+            state.latest_log_summary = outcome
+                .details
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(bounded_summary);
+        }
         WorkflowInvocationKind::Phase if outcome.ok => {
             state.current_phase = outcome
                 .details
@@ -1141,6 +1245,7 @@ fn observe_outcome(
         }
         WorkflowInvocationKind::Report if outcome.ok => {
             if let Some(report) = outcome.details.get("report") {
+                state.latest_report_summary = report_summary(report);
                 state.reports.push(report.clone());
             }
         }

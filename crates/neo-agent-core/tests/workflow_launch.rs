@@ -1,5 +1,6 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 use neo_agent_core::{
@@ -230,6 +231,102 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
     );
     assert!(!config.workflow_capability.inspect());
     worker_release.notify_one();
+}
+
+#[tokio::test]
+async fn workflow_projection_emits_started_updated_and_finished_after_durable_transitions() {
+    let session = tempfile::tempdir().unwrap();
+    let mut input = valid_input("projected");
+    input["script"] = Value::String(
+        "neo.phase('work')\nneo.log('verification running')\nneo.report('scoped checks passed')"
+            .to_owned(),
+    );
+    let harness = harness_for_calls(&[("launch", input)]);
+    let config = config_for(&harness, session.path(), PermissionMode::Auto);
+    config.workflow_capability.grant().await;
+    let idle_events = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&idle_events);
+    let _idle_lease = config
+        .workflow_dispatch_resolver
+        .lease_idle_event_route(
+            Some(session.path()),
+            Arc::new(move |event| captured.lock().expect("idle events").push(event)),
+        )
+        .expect("idle workflow event route");
+
+    let (mut events, config) = run(&harness, config).await;
+    let task_id = workflow_results(&events)[0].details.as_ref().unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let handle = config
+        .background_tasks
+        .workflow_handle(&task_id)
+        .await
+        .expect("registered workflow");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.snapshot().await.state.is_terminal() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow reaches terminal state");
+    tokio::task::yield_now().await;
+    events.extend(idle_events.lock().expect("idle events").clone());
+
+    let projections = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::WorkflowStarted { workflow, .. } => Some(("started", workflow)),
+            AgentEvent::WorkflowUpdated { workflow, .. } => Some(("updated", workflow)),
+            AgentEvent::WorkflowFinished { workflow, .. } => Some(("finished", workflow)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let started = projections
+        .iter()
+        .find(|(stage, _)| *stage == "started")
+        .expect("durable started projection")
+        .1;
+    let finished = projections
+        .iter()
+        .rev()
+        .find(|(stage, _)| *stage == "finished")
+        .expect("durable finished projection")
+        .1;
+
+    assert!(
+        projections
+            .iter()
+            .any(|(stage, workflow)| { *stage == "updated" && workflow.invocation_count > 0 }),
+        "durable invocations emit updated projections"
+    );
+    assert_eq!(started.projection_sequence, Some(0));
+    assert!(
+        finished.projection_sequence.unwrap() > started.projection_sequence.unwrap(),
+        "finished projection follows durable journal order"
+    );
+    assert_eq!(
+        finished.state,
+        neo_agent_core::workflow::WorkflowState::Completed
+    );
+    assert_eq!(finished.current_phase.as_deref(), Some("work"));
+    assert_eq!(
+        finished.latest_log_summary.as_deref(),
+        Some("verification running")
+    );
+    assert_eq!(
+        finished.latest_report_summary.as_deref(),
+        Some("scoped checks passed")
+    );
+    assert!(
+        projections
+            .iter()
+            .all(|(_, workflow)| workflow.steps.is_empty())
+    );
 }
 
 #[tokio::test]

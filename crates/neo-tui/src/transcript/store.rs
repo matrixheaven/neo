@@ -906,13 +906,11 @@ impl TranscriptStore {
             .iter()
             .position(|entry| matches!(entry, TranscriptEntry::Workflow { component } if component.id() == id));
         if let Some(index) = existing_index {
-            if self.entries[index].finalization() == Finalization::Finalized
-                && matches!(
-                    snapshot.state,
-                    neo_agent_core::workflow::WorkflowState::Running
-                        | neo_agent_core::workflow::WorkflowState::Paused
-                )
-            {
+            let accepts_projection = match &self.entries[index] {
+                TranscriptEntry::Workflow { component } => component.accepts_projection(&snapshot),
+                _ => unreachable!("workflow index resolved above"),
+            };
+            if !accepts_projection {
                 return;
             }
             self.mutate_entry(index, |entry| {
@@ -1012,6 +1010,9 @@ impl TranscriptStore {
                     | TranscriptEntry::DelegateGroup { .. }
                     | TranscriptEntry::DelegateSwarm { .. }
                     | TranscriptEntry::McpStartupStatus { .. }
+            ) || matches!(
+                entry,
+                TranscriptEntry::Workflow { component } if component.has_ticking_elapsed()
             ) || matches!(
                 entry,
                 TranscriptEntry::RetryStatus { data } if data.phase != RetryPhase::Exhausted

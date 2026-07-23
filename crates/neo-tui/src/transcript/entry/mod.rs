@@ -875,6 +875,7 @@ impl TranscriptEntry {
             Self::Delegate { component } => component.on_render_tick(now_ms),
             Self::DelegateGroup { component } => component.on_render_tick(now_ms),
             Self::DelegateSwarm { component } => component.on_render_tick(now_ms),
+            Self::Workflow { component } => component.on_render_tick(now_ms),
             Self::McpStartupStatus { data } => {
                 matches!(data.phase, McpStartupPhase::Connecting)
             }
@@ -918,6 +919,7 @@ impl TranscriptEntry {
             Self::DelegateSwarm { component } => {
                 Component::finalization(component) == Finalization::Live
             }
+            Self::Workflow { component } => component.has_ticking_elapsed(),
             _ => false,
         }
     }

@@ -38,13 +38,17 @@ impl InteractiveController {
         let loaded = (self.load_session)(session_id.to_owned())
             .await
             .with_context(|| format!("failed to load session {session_id}"))?;
-        self.rehydrate_session_workflows(session_id, &loaded)
+        let recovered = self
+            .rehydrate_session_workflows(session_id, &loaded)
             .await?;
         self.tui
             .chrome_mut()
             .set_session_label(loaded.label.clone());
         self.set_terminal_title_from_loaded_session(&loaded);
         self.rebuild_transcript_from_session(&loaded);
+        for event in &recovered {
+            self.tui.transcript_mut().apply_agent_event(event);
+        }
         self.set_active_session_id(session_id.to_owned());
         Ok(())
     }

@@ -146,5 +146,28 @@ pub struct WorkflowSnapshot {
     pub id: WorkflowId,
     pub title: String,
     pub state: WorkflowState,
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    #[serde(default)]
+    pub projection_sequence: Option<u64>,
+    #[serde(default)]
+    pub recovery_failure: bool,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub updated_at_ms: Option<u64>,
+    #[serde(default)]
+    pub invocation_count: u64,
+    #[serde(default)]
+    pub failure_count: u64,
+    #[serde(default)]
+    pub actual_usage: Option<AgentTokenUsage>,
+    #[serde(default)]
+    pub latest_log_summary: Option<String>,
+    #[serde(default)]
+    pub latest_report_summary: Option<String>,
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
+    #[serde(default)]
     pub steps: Vec<WorkflowStepRecord>,
 }

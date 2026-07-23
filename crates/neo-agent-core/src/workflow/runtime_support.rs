@@ -265,6 +265,66 @@ pub(super) fn recovered_reports(records: &[JournalRecord]) -> Vec<serde_json::Va
         .collect()
 }
 
+pub(super) fn latest_log_summary(entries: &[ReplayEntry]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        if entry.kind != WorkflowInvocationKind::Log || !entry.outcome.ok {
+            return None;
+        }
+        entry
+            .outcome
+            .details
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(bounded_summary)
+    })
+}
+
+pub(super) fn latest_report_summary(records: &[JournalRecord]) -> Option<String> {
+    records.iter().rev().find_map(|record| match record {
+        JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => {
+            outcome.details.get("report").and_then(report_summary)
+        }
+        _ => None,
+    })
+}
+
+pub(super) fn report_summary(value: &serde_json::Value) -> Option<String> {
+    let text = value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| serde_json::to_string(value).ok())?;
+    Some(bounded_summary(&text))
+}
+
+pub(super) fn bounded_summary(value: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    value
+        .chars()
+        .map(|character| {
+            if character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+pub(super) fn projection_timestamps(records: &[JournalRecord]) -> (Option<u64>, Option<u64>) {
+    let timestamp = |record: &JournalRecord| match record {
+        JournalRecord::StateChanged { timestamp_ms, .. }
+        | JournalRecord::InvocationStarted { timestamp_ms, .. }
+        | JournalRecord::InvocationFinished { timestamp_ms, .. } => *timestamp_ms,
+    };
+    (
+        records.first().map(timestamp),
+        records.last().map(timestamp),
+    )
+}
+
 pub(super) fn current_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

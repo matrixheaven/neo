@@ -72,35 +72,129 @@ pub async fn execute(
     }
 }
 
+#[derive(Default)]
+struct PersistedWorkflowProjection {
+    max_sequence: Option<u64>,
+    turn: u32,
+    recovery_failure: Option<PersistedWorkflowRecoveryFailure>,
+}
+
+struct PersistedWorkflowRecoveryFailure {
+    state: neo_agent_core::workflow::WorkflowState,
+    reason: Option<String>,
+    sequence_watermark: Option<u64>,
+}
+
 pub(crate) async fn rehydrate_session_workflows(
     config: &AppConfig,
     session_id: &str,
     session_dir: &std::path::Path,
     replayed_events: &[AgentEvent],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<AgentEvent>> {
     let runtime = config.workflow_runtime.clone();
     let background_tasks = config.background_tasks.clone();
+    let projection_resolver = config.workflow_dispatch_resolver.clone();
+    runtime
+        .bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
+            projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
+        })
+        .context("failed to bind workflow projection emitter")?;
     runtime.notification_queue().restore_projected(
         neo_agent_core::session::workflow_notification_projection_ids(replayed_events),
     );
+    let mut persisted_projections = HashMap::<String, PersistedWorkflowProjection>::new();
+    for event in replayed_events {
+        let (turn, workflow) = match event {
+            AgentEvent::WorkflowStarted { turn, workflow }
+            | AgentEvent::WorkflowUpdated { turn, workflow }
+            | AgentEvent::WorkflowFinished { turn, workflow } => (*turn, workflow),
+            _ => continue,
+        };
+        let entry = persisted_projections
+            .entry(workflow.id.0.clone())
+            .or_default();
+        entry.turn = turn;
+        if workflow.recovery_failure {
+            entry.recovery_failure = Some(PersistedWorkflowRecoveryFailure {
+                state: workflow.state,
+                reason: workflow.terminal_reason.clone(),
+                sequence_watermark: entry.max_sequence,
+            });
+        } else if let Some(sequence) = workflow.projection_sequence {
+            let supersedes_recovery_failure =
+                entry.recovery_failure.as_ref().is_some_and(|failure| {
+                    failure
+                        .sequence_watermark
+                        .is_none_or(|watermark| sequence > watermark)
+                });
+            if supersedes_recovery_failure {
+                entry.recovery_failure = None;
+            }
+            if entry.max_sequence.is_none_or(|current| sequence > current) {
+                entry.max_sequence = Some(sequence);
+            }
+        }
+    }
+    let mut recovered_events = Vec::new();
     for handle in runtime
         .rehydrate(session_dir)
         .await
         .with_context(|| format!("failed to recover workflows for session {session_id}"))?
     {
         let task_id = handle.run_id.0.clone();
-        if background_tasks.workflow_handle(&task_id).await.is_some() {
+        let snapshot = handle.snapshot().await;
+        if background_tasks.workflow_handle(&task_id).await.is_none() {
+            background_tasks
+                .start_workflow(task_id.clone(), snapshot.title.clone(), handle)
+                .await
+                .with_context(|| {
+                    format!("failed to register recovered workflow for session {session_id}")
+                })?;
+        }
+        let persisted = persisted_projections.get(&task_id);
+        let recovery_failure_already_projected = persisted
+            .and_then(|projection| projection.recovery_failure.as_ref())
+            .is_some_and(|failure| {
+                failure.state == snapshot.state && failure.reason == snapshot.terminal_reason
+            });
+        let should_project = if snapshot.recovery_failure {
+            snapshot.state.is_terminal() && !recovery_failure_already_projected
+        } else {
+            snapshot.projection_sequence.is_some_and(|sequence| {
+                persisted
+                    .and_then(|projection| projection.max_sequence)
+                    .is_none_or(|persisted_sequence| sequence > persisted_sequence)
+            })
+        };
+        if !should_project {
             continue;
         }
-        let description = handle.snapshot().await.name;
-        background_tasks
-            .start_workflow(task_id, description, handle)
-            .await
-            .with_context(|| {
-                format!("failed to register recovered workflow for session {session_id}")
-            })?;
+        let turn = persisted.map_or(0, |projection| projection.turn);
+        let event = if snapshot.state.is_terminal() {
+            AgentEvent::WorkflowFinished {
+                turn,
+                workflow: snapshot,
+            }
+        } else {
+            AgentEvent::WorkflowUpdated {
+                turn,
+                workflow: snapshot,
+            }
+        };
+        recovered_events.push(event);
     }
-    Ok(())
+    if !recovered_events.is_empty() {
+        let path = sessions::session_path(session_id, config)?;
+        let mut writer = JsonlSessionWriter::open_append(path).await?;
+        let mut persistence = SessionEventPersistence::default();
+        for event in &recovered_events {
+            for persisted in persistence.persisted_events(event) {
+                writer.append_event(&persisted).await?;
+            }
+        }
+        writer.flush().await?;
+    }
+    Ok(recovered_events)
 }
 
 fn events_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
@@ -243,7 +337,7 @@ async fn run_prompt_in_session(
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
     let context = AgentContext::from_replay(replayed_events.iter());
     let session_dir = session_root_from_wire_path(&session_path)?;
-    rehydrate_session_workflows(config, session_id, &session_dir, &replayed_events).await?;
+    let _ = rehydrate_session_workflows(config, session_id, &session_dir, &replayed_events).await?;
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
@@ -3021,6 +3115,292 @@ mod tests {
 
         drop(ingress);
         worker.await.expect("idle persistence worker");
+    }
+
+    #[tokio::test]
+    async fn workflow_recovery_persists_only_newer_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000778";
+        let session_directory = crate::config::workspace_sessions_dir(&config).join(session_id);
+        tokio::fs::create_dir_all(&session_directory)
+            .await
+            .expect("session directory");
+
+        let started = {
+            let seed_runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            );
+            let handle = seed_runtime
+                .create_run(
+                    &session_directory,
+                    neo_agent_core::workflow::WorkflowLaunchRequest {
+                        name: "recover projection".to_owned(),
+                        description: "test recovery projection ordering".to_owned(),
+                        phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                            id: "work".to_owned(),
+                            description: "work".to_owned(),
+                        }],
+                        script: "neo.phase('work')".to_owned(),
+                        args: serde_json::json!({}),
+                        launch_source: "test".to_owned(),
+                        parent_run_id: None,
+                    },
+                )
+                .await
+                .expect("seed workflow");
+            handle.snapshot().await
+        };
+        assert_eq!(started.projection_sequence, Some(0));
+
+        let wire_path = neo_agent_core::session::main_agent_wire_path(&session_directory);
+        tokio::fs::create_dir_all(wire_path.parent().expect("wire parent"))
+            .await
+            .expect("wire directory");
+        let started_event = AgentEvent::WorkflowStarted {
+            turn: 7,
+            workflow: started,
+        };
+        let mut writer = JsonlSessionWriter::create(&wire_path)
+            .await
+            .expect("session writer");
+        writer
+            .append_event(&started_event)
+            .await
+            .expect("historical projection");
+        writer.flush().await.expect("historical projection flush");
+        drop(writer);
+
+        let replayed = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("historical session");
+        let recovered =
+            super::rehydrate_session_workflows(&config, session_id, &session_directory, &replayed)
+                .await
+                .expect("recover workflow projection");
+        assert_eq!(recovered.len(), 1);
+        let AgentEvent::WorkflowUpdated { turn, workflow } = &recovered[0] else {
+            panic!("host-exit recovery is a paused update")
+        };
+        assert_eq!(*turn, 7);
+        assert_eq!(
+            workflow.state,
+            neo_agent_core::workflow::WorkflowState::Paused
+        );
+        assert_eq!(workflow.projection_sequence, Some(1));
+        assert_eq!(workflow.terminal_reason.as_deref(), Some("host_exit"));
+        assert!(
+            config
+                .background_tasks
+                .workflow_handle(&workflow.id.0)
+                .await
+                .is_some(),
+            "recovery registers the canonical handle before projection"
+        );
+
+        let stored = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("recovered session");
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::WorkflowStarted { .. }
+                        | AgentEvent::WorkflowUpdated { .. }
+                        | AgentEvent::WorkflowFinished { .. }
+                ))
+                .count(),
+            2
+        );
+        let duplicate =
+            super::rehydrate_session_workflows(&config, session_id, &session_directory, &stored)
+                .await
+                .expect("idempotent workflow recovery");
+        assert!(duplicate.is_empty());
+        let stored_again = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("idempotent recovered session");
+        assert_eq!(
+            stored_again, stored,
+            "equal durable sequence is not appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_workflow_recovery_persists_terminal_projection_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000779";
+        let session_directory = crate::config::workspace_sessions_dir(&config).join(session_id);
+        let run_directory = session_directory.join("workflows").join("wf_corrupt");
+        tokio::fs::create_dir_all(&run_directory)
+            .await
+            .expect("corrupt workflow directory");
+        tokio::fs::write(run_directory.join("run.json"), b"not-json")
+            .await
+            .expect("corrupt run metadata");
+
+        let wire_path = neo_agent_core::session::main_agent_wire_path(&session_directory);
+        tokio::fs::create_dir_all(wire_path.parent().expect("wire parent"))
+            .await
+            .expect("wire directory");
+        let historical_running: neo_agent_core::workflow::WorkflowSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "id": "wf_corrupt",
+                "title": "Workflow before corruption",
+                "state": "running",
+                "projection_sequence": 4
+            }))
+            .expect("historical workflow snapshot");
+        let mut writer = JsonlSessionWriter::create(&wire_path)
+            .await
+            .expect("session writer");
+        writer
+            .append_event(&AgentEvent::WorkflowStarted {
+                turn: 8,
+                workflow: historical_running.clone(),
+            })
+            .await
+            .expect("historical running projection");
+        writer.flush().await.expect("historical projection flush");
+        drop(writer);
+
+        let replayed = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("historical session");
+        let recovered =
+            super::rehydrate_session_workflows(&config, session_id, &session_directory, &replayed)
+                .await
+                .expect("recover corrupt workflow projection");
+        assert_eq!(recovered.len(), 1);
+        let AgentEvent::WorkflowFinished { turn, workflow } = &recovered[0] else {
+            panic!("corrupt workflow recovery is terminal")
+        };
+        assert_eq!(*turn, 8);
+        assert_eq!(
+            workflow.state,
+            neo_agent_core::workflow::WorkflowState::Failed
+        );
+        assert_eq!(workflow.projection_sequence, None);
+        assert!(workflow.recovery_failure);
+        assert!(
+            workflow
+                .terminal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("corrupt run metadata"))
+        );
+
+        let stored = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("recovered corrupt session");
+        assert_eq!(stored.len(), 2);
+        let mut writer = JsonlSessionWriter::open_append(&wire_path)
+            .await
+            .expect("append stale projection");
+        writer
+            .append_event(&AgentEvent::WorkflowUpdated {
+                turn: 8,
+                workflow: historical_running,
+            })
+            .await
+            .expect("stale sequenced projection");
+        writer.flush().await.expect("stale projection flush");
+        drop(writer);
+        let stored_with_stale = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("session with stale projection");
+        let duplicate = super::rehydrate_session_workflows(
+            &config,
+            session_id,
+            &session_directory,
+            &stored_with_stale,
+        )
+        .await
+        .expect("idempotent corrupt workflow recovery");
+        assert!(duplicate.is_empty());
+        let stored_again = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("idempotent corrupt session");
+        assert_eq!(stored_again, stored_with_stale);
+    }
+
+    #[tokio::test]
+    async fn empty_workflow_journal_recovery_projects_terminal_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000780";
+        let session_directory = crate::config::workspace_sessions_dir(&config).join(session_id);
+        let seed_runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        );
+        let handle = seed_runtime
+            .create_run(
+                &session_directory,
+                neo_agent_core::workflow::WorkflowLaunchRequest {
+                    name: "empty journal".to_owned(),
+                    description: "test empty journal recovery".to_owned(),
+                    phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    }],
+                    script: "neo.phase('work')".to_owned(),
+                    args: serde_json::json!({}),
+                    launch_source: "test".to_owned(),
+                    parent_run_id: None,
+                },
+            )
+            .await
+            .expect("seed workflow");
+        let historical_running = handle.snapshot().await;
+        let run_directory = session_directory
+            .join("workflows")
+            .join(&historical_running.id.0);
+        drop(handle);
+        drop(seed_runtime);
+        tokio::fs::write(run_directory.join("journal.jsonl"), b"")
+            .await
+            .expect("empty journal");
+
+        let wire_path = neo_agent_core::session::main_agent_wire_path(&session_directory);
+        tokio::fs::create_dir_all(wire_path.parent().expect("wire parent"))
+            .await
+            .expect("wire directory");
+        let mut writer = JsonlSessionWriter::create(&wire_path)
+            .await
+            .expect("session writer");
+        writer
+            .append_event(&AgentEvent::WorkflowStarted {
+                turn: 9,
+                workflow: historical_running,
+            })
+            .await
+            .expect("historical running projection");
+        writer.flush().await.expect("historical projection flush");
+        drop(writer);
+
+        let replayed = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("historical session");
+        let recovered =
+            super::rehydrate_session_workflows(&config, session_id, &session_directory, &replayed)
+                .await
+                .expect("recover empty journal projection");
+
+        assert_eq!(recovered.len(), 1);
+        let AgentEvent::WorkflowFinished { workflow, .. } = &recovered[0] else {
+            panic!("empty journal recovery is terminal")
+        };
+        assert_eq!(
+            workflow.state,
+            neo_agent_core::workflow::WorkflowState::Failed
+        );
+        assert!(workflow.recovery_failure);
+        assert_eq!(workflow.projection_sequence, None);
+        assert_eq!(
+            workflow.terminal_reason.as_deref(),
+            Some("corrupt journal: missing initial state")
+        );
     }
 
     #[tokio::test]

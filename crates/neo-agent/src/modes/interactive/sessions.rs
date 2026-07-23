@@ -21,13 +21,17 @@ impl InteractiveController {
             let loaded = (self.load_session)(session.id.clone())
                 .await
                 .with_context(|| format!("failed to load session {}", session.id))?;
-            self.rehydrate_session_workflows(&session.id, &loaded)
+            let recovered = self
+                .rehydrate_session_workflows(&session.id, &loaded)
                 .await?;
             self.tui
                 .chrome_mut()
                 .set_session_label(loaded.label.clone());
             self.set_terminal_title_from_loaded_session(&loaded);
             self.rebuild_transcript_from_session(&loaded);
+            for event in &recovered {
+                self.tui.transcript_mut().apply_agent_event(event);
+            }
             self.set_active_session_id(session.id);
             return Ok(());
         }
@@ -44,9 +48,9 @@ impl InteractiveController {
         &self,
         session_id: &str,
         loaded: &LoadedSessionTranscript,
-    ) -> Result<()> {
+    ) -> Result<Vec<neo_agent_core::AgentEvent>> {
         let Some(config) = self.local_config.as_ref() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let session_dir = crate::config::workspace_sessions_dir(config).join(session_id);
         crate::modes::run::rehydrate_session_workflows(

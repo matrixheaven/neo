@@ -150,6 +150,54 @@ async fn manually_paused_run_rehydrates_without_host_exit_notification() {
 }
 
 #[tokio::test]
+async fn rehydration_keeps_verify_messages_out_of_latest_log_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Log,
+            serde_json::json!({"message": "durable log"}),
+            false,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    details: serde_json::json!({"message": "durable log"}),
+                    ..completed("log recorded")
+                }
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .invoke(
+            1,
+            WorkflowInvocationKind::Verify,
+            serde_json::json!({"condition": true, "message": "verification passed"}),
+            false,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    details: serde_json::json!({"message": "verification passed"}),
+                    ..completed("verification passed")
+                }
+            },
+        )
+        .await
+        .unwrap();
+    handle.pause(WorkflowActor::Human).await.unwrap();
+    drop(handle);
+    drop(runtime);
+
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+
+    assert_eq!(
+        handle.snapshot().await.latest_log_summary.as_deref(),
+        Some("durable log")
+    );
+}
+
+#[tokio::test]
 async fn worker_start_failure_is_durably_terminalized() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
@@ -702,6 +750,7 @@ async fn corrupt_run_is_rehydrated_as_inspectable_failed_handle() {
     assert_eq!(handles.len(), 1);
     let snapshot = handles[0].snapshot().await;
     assert_eq!(snapshot.state, WorkflowState::Failed);
+    assert!(snapshot.recovery_failure);
     assert!(
         snapshot
             .terminal_reason
