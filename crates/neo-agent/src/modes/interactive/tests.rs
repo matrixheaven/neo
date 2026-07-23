@@ -28,7 +28,10 @@ use neo_tui::{
 use tokio::sync::oneshot;
 use tracing_subscriber::prelude::*;
 
-use super::git_status::{git_status_label_with_program, parse_git_status_porcelain};
+use super::git_status::{
+    count_untracked_changes, git_status_label_with_program, parse_git_numstat,
+    parse_git_status_porcelain, parse_git_untracked_files_z,
+};
 use super::snapshot::{compose_tui_frame, render_overlay_snapshot};
 use super::*;
 use crate::config::{Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig};
@@ -500,11 +503,12 @@ fn rebuilding_session_transcript_resets_captured_log_budget() {
 
 #[test]
 fn git_status_badge_formats_dirty_and_sync() {
-    let badge =
+    let mut badge =
         parse_git_status_porcelain("## main...origin/main [ahead 2, behind 1]\n M src/app.rs\n")
             .expect("git badge");
+    (badge.added, badge.deleted) = parse_git_numstat("12\t3\tsrc/app.rs\n");
 
-    assert_eq!(badge.format(), "main [± ↑2↓1]");
+    assert_eq!(badge.format(), "main [+12 -3 ↑2↓1]");
 }
 
 #[test]
@@ -520,6 +524,22 @@ fn git_status_badge_formats_unborn_branch_as_init() {
         .expect("git badge");
 
     assert_eq!(badge.format(), "main [init]");
+}
+
+#[test]
+fn git_status_badge_counts_untracked_changes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(dir.path().join("new.rs"), "first\nsecond\n").expect("write text file");
+    fs::write(dir.path().join("image.bin"), b"neo\0image").expect("write binary file");
+
+    let mut badge =
+        parse_git_status_porcelain("## feature\n?? new.rs\n?? image.bin\n").expect("git badge");
+    let paths = parse_git_untracked_files_z(b"new.rs\0image.bin\0");
+    let (added, untracked) = count_untracked_changes(dir.path(), &paths);
+    badge.added = added;
+    badge.untracked = untracked;
+
+    assert_eq!(badge.format(), "feature [+2 -0 ?1]");
 }
 
 #[test]
@@ -550,6 +570,36 @@ fn git_status_badge_resolves_repository_from_nested_workspace() {
     assert_eq!(
         git_status_label_with_program("git", &workspace),
         Some("main [init]".to_owned())
+    );
+
+    let add_status = Command::new("git")
+        .arg("-C")
+        .arg(parent.path())
+        .args(["add", "nested-workspace/untracked.txt"])
+        .status()
+        .expect("run git add");
+    assert!(add_status.success(), "git add should succeed");
+    let commit_status = Command::new("git")
+        .arg("-C")
+        .arg(parent.path())
+        .args([
+            "-c",
+            "user.name=Neo",
+            "-c",
+            "user.email=neo@example.invalid",
+            "commit",
+            "-m",
+            "initial",
+        ])
+        .status()
+        .expect("run git commit");
+    assert!(commit_status.success(), "git commit should succeed");
+    fs::write(workspace.join("untracked.txt"), "new file\nsecond line\n")
+        .expect("modify tracked file");
+
+    assert_eq!(
+        git_status_label_with_program("git", &workspace),
+        Some("main [+1 -0]".to_owned())
     );
 }
 
