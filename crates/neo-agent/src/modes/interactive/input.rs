@@ -320,6 +320,8 @@ impl InteractiveController {
             InputEvent::Action(KeybindingAction::SelectPageDown) => {
                 Some(TaskBrowserAction::SelectPageDown)
             }
+            InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectUp),
+            InputEvent::ScrollDown(_) => Some(TaskBrowserAction::SelectDown),
             InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => self
                 .tui
                 .chrome()

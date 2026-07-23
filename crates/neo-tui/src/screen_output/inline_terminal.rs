@@ -7,7 +7,8 @@ use crate::transcript::FinalizedBlock;
 
 use super::LiveRenderer;
 use super::terminal_modes::{
-    TerminalModeGuard, write_enter_review_output, write_leave_review_output,
+    TerminalModeGuard, write_disable_mouse_capture, write_enable_mouse_capture,
+    write_enter_review_output, write_leave_review_output,
 };
 use super::types::CursorPos;
 
@@ -21,6 +22,7 @@ pub struct TerminalFrame {
     pub live: Vec<String>,
     pub cursor: Option<CursorPos>,
     pub review_surface: bool,
+    pub mouse_capture: bool,
     pub next_animation_deadline: Option<Instant>,
 }
 
@@ -36,6 +38,7 @@ impl TerminalFrame {
             live,
             cursor,
             review_surface: false,
+            mouse_capture: false,
             next_animation_deadline: None,
         }
     }
@@ -53,8 +56,15 @@ impl TerminalFrame {
             live,
             cursor,
             review_surface,
+            mouse_capture: false,
             next_animation_deadline,
         }
+    }
+
+    #[must_use]
+    pub const fn with_mouse_capture(mut self, mouse_capture: bool) -> Self {
+        self.mouse_capture = mouse_capture;
+        self
     }
 
     #[must_use]
@@ -69,6 +79,7 @@ impl TerminalFrame {
             live,
             cursor,
             review_surface: false,
+            mouse_capture: false,
             next_animation_deadline,
         }
     }
@@ -96,6 +107,7 @@ pub struct InlineTerminal {
     saved_normal_geometry: Option<NormalScreenGeometry>,
     modes: Option<TerminalModeGuard>,
     review_surface: bool,
+    mouse_capture: bool,
 }
 
 impl InlineTerminal {
@@ -126,6 +138,7 @@ impl InlineTerminal {
             saved_normal_geometry: None,
             modes: None,
             review_surface: false,
+            mouse_capture: false,
         }
     }
 
@@ -173,11 +186,14 @@ impl InlineTerminal {
         let saved_normal_live = entering_review.then(|| self.live.clone());
         let saved_normal_geometry = entering_review.then_some(self.geometry);
 
-        if entering_review {
-            append_review_transition(&mut transaction, &mut self.modes, true)?;
-        } else if leaving_review {
-            append_review_transition(&mut transaction, &mut self.modes, false)?;
-        }
+        append_surface_transition(
+            &mut transaction,
+            &mut self.modes,
+            self.review_surface,
+            self.mouse_capture,
+            frame.review_surface,
+            frame.mouse_capture,
+        )?;
 
         let history_lines = if frame.review_surface {
             Vec::new()
@@ -283,9 +299,14 @@ impl InlineTerminal {
                 let _ = output.write_all(SYNCHRONIZED_OUTPUT_END);
             }
             let _ = output.flush();
-            if entering_review || leaving_review {
-                recover_review_transition(&mut self.modes, output, entering_review);
-            }
+            recover_surface_transition(
+                &mut self.modes,
+                output,
+                self.review_surface,
+                self.mouse_capture,
+                frame.review_surface,
+                frame.mouse_capture,
+            );
             return Err(error);
         }
 
@@ -306,6 +327,10 @@ impl InlineTerminal {
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
             }
+        }
+        self.mouse_capture = frame.mouse_capture;
+        if let Some(modes) = &mut self.modes {
+            modes.set_mouse_capture_active(frame.mouse_capture);
         }
         Ok(())
     }
@@ -403,7 +428,14 @@ impl InlineTerminal {
         let was_review = self.review_surface;
         if self.review_surface {
             let mut transition = Vec::new();
-            append_review_transition(&mut transition, &mut self.modes, false)?;
+            append_surface_transition(
+                &mut transition,
+                &mut self.modes,
+                self.review_surface,
+                self.mouse_capture,
+                false,
+                false,
+            )?;
             if let Some(saved) = self.saved_normal_live.as_ref() {
                 let mut saved = saved.clone();
                 let live_top = self
@@ -414,15 +446,24 @@ impl InlineTerminal {
             transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
                 let _ = output.write_all(RESET_SCROLL_REGION);
-                recover_review_transition(&mut self.modes, output, false);
+                recover_surface_transition(
+                    &mut self.modes,
+                    output,
+                    self.review_surface,
+                    self.mouse_capture,
+                    false,
+                    false,
+                );
                 return Err(error);
             }
             self.saved_normal_live = None;
             self.saved_normal_geometry = None;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
+                modes.set_mouse_capture_active(false);
             }
             self.review_surface = false;
+            self.mouse_capture = false;
             self.live.reset();
         }
         let result = if was_review {
@@ -467,7 +508,14 @@ impl InlineTerminal {
     pub fn leave(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
         if self.review_surface {
             let mut transition = Vec::new();
-            append_review_transition(&mut transition, &mut self.modes, false)?;
+            append_surface_transition(
+                &mut transition,
+                &mut self.modes,
+                self.review_surface,
+                self.mouse_capture,
+                false,
+                false,
+            )?;
             if let Some(saved) = self.saved_normal_live.as_ref() {
                 let mut saved = saved.clone();
                 let live_top = self
@@ -478,15 +526,24 @@ impl InlineTerminal {
             transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
                 let _ = output.write_all(RESET_SCROLL_REGION);
-                recover_review_transition(&mut self.modes, output, false);
+                recover_surface_transition(
+                    &mut self.modes,
+                    output,
+                    self.review_surface,
+                    self.mouse_capture,
+                    false,
+                    false,
+                );
                 return Err(error);
             }
             self.saved_normal_live = None;
             self.saved_normal_geometry = None;
             if let Some(modes) = &mut self.modes {
                 modes.set_review_active(false);
+                modes.set_mouse_capture_active(false);
             }
             self.review_surface = false;
+            self.mouse_capture = false;
             self.live.reset();
             if let Some(modes) = &mut self.modes {
                 modes.leave();
@@ -640,38 +697,64 @@ fn reconcile_live_viewport(
     Ok(())
 }
 
-fn append_review_transition(
+fn append_surface_transition(
     transaction: &mut Vec<u8>,
     modes: &mut Option<TerminalModeGuard>,
-    entering: bool,
+    from_review: bool,
+    from_mouse_capture: bool,
+    to_review: bool,
+    to_mouse_capture: bool,
 ) -> std::io::Result<()> {
-    if let Some(modes) = modes {
-        if entering {
-            modes.enter_review(transaction)
-        } else {
-            modes.leave_review(transaction)
-        }
-    } else if entering {
-        write_enter_review_output(transaction)
-    } else {
-        write_leave_review_output(transaction)
+    if from_review && !to_review && from_mouse_capture {
+        write_disable_mouse_capture(transaction)?;
     }
+    if from_review != to_review {
+        if let Some(modes) = modes {
+            if to_review {
+                modes.enter_review(transaction)?;
+            } else {
+                modes.leave_review(transaction)?;
+            }
+        } else if to_review {
+            write_enter_review_output(transaction)?;
+        } else {
+            write_leave_review_output(transaction)?;
+        }
+    }
+    if from_mouse_capture != to_mouse_capture && !(from_review && !to_review) {
+        if to_mouse_capture {
+            write_enable_mouse_capture(transaction)?;
+        } else {
+            write_disable_mouse_capture(transaction)?;
+        }
+    }
+    Ok(())
 }
 
-fn recover_review_transition(
+fn recover_surface_transition(
     modes: &mut Option<TerminalModeGuard>,
     output: &mut dyn Write,
-    entering: bool,
+    from_review: bool,
+    from_mouse_capture: bool,
+    to_review: bool,
+    to_mouse_capture: bool,
 ) {
-    if entering {
-        let _ = write_leave_review_output(output);
-    } else {
-        let _ = write_enter_review_output(output);
-    }
+    let mut rollback = Vec::new();
+    let mut no_modes = None;
+    let _ = append_surface_transition(
+        &mut rollback,
+        &mut no_modes,
+        to_review,
+        to_mouse_capture,
+        from_review,
+        from_mouse_capture,
+    );
+    let _ = output.write_all(&rollback).and_then(|()| output.flush());
     if let Some(modes) = modes {
         // Keep the guard aligned with the pre-transition state so the next
         // frame can retry the transition on the same writer.
-        modes.set_review_active(!entering);
+        modes.set_review_active(from_review);
+        modes.set_mouse_capture_active(from_mouse_capture);
     }
 }
 
@@ -818,6 +901,31 @@ mod tests {
         );
         assert!(!final_surface);
         assert!(!final_guard_review);
+    }
+
+    #[test]
+    fn task_review_mouse_capture_leaves_before_alternate_screen() {
+        let mut terminal = InlineTerminal::for_test(80, 12);
+        terminal.modes = Some(TerminalModeGuard::for_test());
+        let task =
+            TerminalFrame::with_surface(Vec::new(), vec!["task".to_owned()], None, true, None)
+                .with_mouse_capture(true);
+        let normal =
+            TerminalFrame::with_surface(Vec::new(), vec!["normal".to_owned()], None, false, None);
+
+        let mut enter = Vec::new();
+        terminal
+            .render_to(&mut enter, &task)
+            .expect("enter task review");
+        let mut leave = Vec::new();
+        terminal
+            .render_to(&mut leave, &normal)
+            .expect("leave task review");
+        let leave = String::from_utf8(leave).expect("leave is UTF-8");
+
+        assert!(leave.contains("?1000l"));
+        assert!(leave.contains("?1049l"));
+        assert!(leave.find("?1000l") < leave.find("?1049l"));
     }
 
     struct FailOnceAfterBytes {

@@ -150,6 +150,7 @@ impl NeoTui {
         height: usize,
         now: Instant,
     ) -> TerminalFrame {
+        let task_browser_open = self.chrome.task_browser_state().is_some();
         let manual_review_open = self
             .chrome
             .find_overlay_by_kind(|kind| matches!(kind, OverlayKind::TranscriptBrowser(_)))
@@ -158,7 +159,8 @@ impl NeoTui {
             lines.truncate(height);
             apply_gutter(&mut lines);
             // Preserve the primary live anchor while the full-screen overlay is open.
-            return TerminalFrame::with_surface(Vec::new(), lines, None, true, None);
+            return TerminalFrame::with_surface(Vec::new(), lines, None, true, None)
+                .with_mouse_capture(task_browser_open);
         }
 
         let chrome_render =

@@ -15094,6 +15094,56 @@ async fn task_browser_escape_closes_overlay_and_tab_toggles_filter() {
 }
 
 #[tokio::test]
+async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let config = test_config(temp.path(), sessions_dir);
+    config
+        .background_tasks
+        .start_question("question-1".to_owned(), "Pick one".to_owned())
+        .await;
+    config
+        .background_tasks
+        .start_question("question-2".to_owned(), "Pick two".to_owned())
+        .await;
+    controller.local_config = Some(config);
+    controller.type_text("/tasks");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show tasks");
+
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .unwrap()
+            .selected_task_id(),
+        Some("question-1")
+    );
+    controller
+        .handle_input_event(InputEvent::ScrollDown(3))
+        .await
+        .expect("wheel moves selection");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .unwrap()
+            .selected_task_id(),
+        Some("question-2")
+    );
+    assert!(controller.chrome().prompt().text.is_empty());
+}
+
+#[tokio::test]
 async fn task_browser_refresh_updates_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");

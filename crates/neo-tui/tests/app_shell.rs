@@ -116,6 +116,7 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
     let mut tui = neo_tui::NeoTui::new(app, transcript);
     let frame = tui.render_terminal_frame(80, 20);
     assert!(frame.review_surface);
+    assert!(frame.mouse_capture);
     assert!(frame.cursor.is_none());
     let rendered = frame
         .live
@@ -126,6 +127,9 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
 
     assert!(rendered.contains("TASK BROWSER"));
     assert!(!rendered.contains("old transcript line should be hidden"));
+
+    tui.chrome_mut().close_focused_overlay();
+    assert!(!tui.render_terminal_frame(80, 20).mouse_capture);
 }
 
 #[test]

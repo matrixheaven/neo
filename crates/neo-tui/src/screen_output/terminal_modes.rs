@@ -1,8 +1,8 @@
 use std::io::{Write, stdout};
 
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -64,11 +64,22 @@ pub(super) fn write_leave_review_output(output: &mut dyn Write) -> std::io::Resu
     output.flush()
 }
 
+pub(super) fn write_enable_mouse_capture(output: &mut dyn Write) -> std::io::Result<()> {
+    let mut output = output;
+    queue!(&mut output, EnableMouseCapture)
+}
+
+pub(super) fn write_disable_mouse_capture(output: &mut dyn Write) -> std::io::Result<()> {
+    let mut output = output;
+    queue!(&mut output, DisableMouseCapture)
+}
+
 #[derive(Debug)]
 pub(super) struct TerminalModeGuard {
     capabilities: TerminalCapabilities,
     active: bool,
     review_active: bool,
+    mouse_capture_active: bool,
     #[cfg(windows)]
     windows_input_mode: windows_input_mode::WindowsInputModeGuard,
 }
@@ -90,6 +101,7 @@ impl TerminalModeGuard {
             capabilities,
             active: true,
             review_active: false,
+            mouse_capture_active: false,
             #[cfg(windows)]
             windows_input_mode,
         })
@@ -97,15 +109,25 @@ impl TerminalModeGuard {
 
     pub(super) fn leave(&mut self) {
         if !self.active {
-            if self.review_active {
+            if self.mouse_capture_active || self.review_active {
                 let mut output = stdout();
-                let _ = write_leave_review_output(&mut output);
-                self.review_active = false;
+                if self.mouse_capture_active {
+                    let _ = write_disable_mouse_capture(&mut output);
+                    self.mouse_capture_active = false;
+                }
+                if self.review_active {
+                    let _ = write_leave_review_output(&mut output);
+                    self.review_active = false;
+                }
                 let _ = output.flush();
             }
             return;
         }
         let mut output = stdout();
+        if self.mouse_capture_active {
+            let _ = write_disable_mouse_capture(&mut output);
+            self.mouse_capture_active = false;
+        }
         if self.review_active {
             let _ = write_leave_review_output(&mut output);
             self.review_active = false;
@@ -123,6 +145,7 @@ impl TerminalModeGuard {
             return Ok(());
         }
         self.review_active = false;
+        self.mouse_capture_active = false;
         let raw_mode = RawModeGuard::enter()?;
         #[cfg(windows)]
         {
@@ -158,12 +181,17 @@ impl TerminalModeGuard {
         self.review_active = active;
     }
 
+    pub(super) const fn set_mouse_capture_active(&mut self, active: bool) {
+        self.mouse_capture_active = active;
+    }
+
     #[cfg(test)]
     pub(super) fn for_test() -> Self {
         Self {
             capabilities: TerminalCapabilities::default(),
             active: true,
             review_active: false,
+            mouse_capture_active: false,
             #[cfg(windows)]
             windows_input_mode: windows_input_mode::WindowsInputModeGuard::for_test(),
         }
@@ -183,6 +211,7 @@ impl TerminalModeGuard {
     pub(super) const fn disarm_for_test(&mut self) {
         self.active = false;
         self.review_active = false;
+        self.mouse_capture_active = false;
     }
 }
 
