@@ -165,6 +165,33 @@ impl AgentRuntime {
         &self.config
     }
 
+    /// Publish this runtime's canonical dependencies for recovered workflows.
+    ///
+    /// This prepares dispatch only; it does not start a model turn or workflow.
+    pub fn refresh_workflow_dispatch(
+        &self,
+        context: &AgentContext,
+    ) -> Result<(), AgentRuntimeError> {
+        let tools = self.tools.as_ref().ok_or_else(|| {
+            AgentRuntimeError::Tool(crate::ToolError::InvalidInput {
+                tool: "RunWorkflow".to_owned(),
+                message: "workflow dispatch requires a configured tool registry".to_owned(),
+            })
+        })?;
+        self.config
+            .workflow_dispatch_resolver
+            .refresh(super::workflow_dispatch::WorkflowDispatchSnapshot {
+                config: self.config.clone(),
+                model_client: Arc::clone(&self.model),
+                registry: Arc::clone(tools),
+                skills: self.skills.clone(),
+                process_supervisor: ProcessSupervisor::default(),
+                context: context.clone(),
+            })
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
     /// Restore plan-mode state from a replayed context.
     pub fn restore_plan_mode(&self, context: &AgentContext) {
         if !context.is_plan_mode_active() {

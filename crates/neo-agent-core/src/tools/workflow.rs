@@ -5,7 +5,7 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, schema};
 use crate::WorkflowApprovalPresentation;
 use crate::workflow::capability::WorkflowCapabilityReservation;
-use crate::workflow::{LuaWorkflowRunner, WorkflowError, WorkflowLaunchRequest, WorkflowPhase};
+use crate::workflow::{WorkflowError, WorkflowLaunchRequest, WorkflowPhase};
 
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -231,36 +231,6 @@ impl Tool for RunWorkflowTool {
             if let Err(error) = ctx.workflow_runtime.validate_launch_request(&request) {
                 return Ok(invalid_input_result(error.to_string()));
             }
-
-            let resolver = child_config.workflow_dispatch_resolver.clone();
-            let projection_resolver = resolver.clone();
-            ctx.workflow_runtime
-                .bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
-                    projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
-                })
-                .map_err(|error| ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: error.to_string(),
-                })?;
-            let limits = ctx.workflow_runtime.limits();
-            ctx.workflow_runtime
-                .bind_runner_if_unbound(move |handle, metadata, worker_session_dir| {
-                    let resolver = resolver.clone();
-                    let limits = limits.clone();
-                    async move {
-                        let dispatch = resolver
-                            .handle_for_session(&worker_session_dir)
-                            .map_err(WorkflowError::Host)?;
-                        LuaWorkflowRunner::new(dispatch, handle, limits)
-                            .execute(&metadata.script, metadata.args)
-                            .await
-                            .map(|_| ())
-                    }
-                })
-                .map_err(|error| ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: error.to_string(),
-                })?;
 
             let Some(reservation) = ctx.workflow_capability.reserve() else {
                 return Ok(ToolResult::error(

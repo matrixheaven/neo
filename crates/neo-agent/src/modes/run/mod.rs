@@ -85,6 +85,29 @@ struct PersistedWorkflowRecoveryFailure {
     sequence_watermark: Option<u64>,
 }
 
+async fn prepare_recovered_workflow_dispatch(
+    config: &AppConfig,
+    session_dir: &std::path::Path,
+    replayed_events: &[AgentEvent],
+) -> anyhow::Result<()> {
+    let dispatch_runtime = runtime_for_config(
+        config,
+        Some(session_dir.to_path_buf()),
+        None,
+        None,
+        None,
+        false,
+        SteerInputHandle::new(),
+        None,
+        Arc::new(Mutex::new(None)),
+        None,
+    )
+    .await?;
+    let context = AgentContext::from_replay(replayed_events.iter());
+    dispatch_runtime.refresh_workflow_dispatch(&context)?;
+    Ok(())
+}
+
 pub(crate) async fn rehydrate_session_workflows(
     config: &AppConfig,
     session_id: &str,
@@ -93,12 +116,10 @@ pub(crate) async fn rehydrate_session_workflows(
 ) -> anyhow::Result<Vec<AgentEvent>> {
     let runtime = config.workflow_runtime.clone();
     let background_tasks = config.background_tasks.clone();
-    let projection_resolver = config.workflow_dispatch_resolver.clone();
-    runtime
-        .bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
-            projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
-        })
-        .context("failed to bind workflow projection emitter")?;
+    config
+        .workflow_dispatch_resolver
+        .bind_workflow_runtime(&runtime)
+        .context("failed to bind workflow runtime")?;
     runtime.notification_queue().restore_projected(
         neo_agent_core::session::workflow_notification_projection_ids(replayed_events),
     );
@@ -135,12 +156,30 @@ pub(crate) async fn rehydrate_session_workflows(
             }
         }
     }
-    let mut recovered_events = Vec::new();
-    for handle in runtime
+    let handles = runtime
         .rehydrate(session_dir)
         .await
-        .with_context(|| format!("failed to recover workflows for session {session_id}"))?
-    {
+        .with_context(|| format!("failed to recover workflows for session {session_id}"))?;
+    let mut has_resumable_workflow = false;
+    for handle in &handles {
+        if handle.snapshot().await.state == neo_agent_core::workflow::WorkflowState::Paused {
+            has_resumable_workflow = true;
+            break;
+        }
+    }
+    if has_resumable_workflow {
+        if let Err(error) =
+            prepare_recovered_workflow_dispatch(config, session_dir, replayed_events).await
+        {
+            tracing::warn!(
+                session_id,
+                %error,
+                "recovered workflow dispatch is not ready; resume will remain paused"
+            );
+        }
+    }
+    let mut recovered_events = Vec::new();
+    for handle in handles {
         let task_id = handle.run_id.0.clone();
         let snapshot = handle.snapshot().await;
         if background_tasks.workflow_handle(&task_id).await.is_none() {
@@ -3274,6 +3313,94 @@ mod tests {
             stored_again, stored,
             "equal durable sequence is not appended"
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_process_rehydrated_workflow_can_resume_with_bound_runner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_model = "gpt-4.1".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                display_name: None,
+                provider_type: Some(ApiType::OpenAiResponse),
+                base_url: Some("https://example.test/v1".to_owned()),
+                api_key: Some("test-key".to_owned()),
+                api_key_env: None,
+            },
+        );
+        let session_id = "session_00000000-0000-4000-8000-000000000781";
+        let session_directory = crate::config::workspace_sessions_dir(&config).join(session_id);
+        tokio::fs::create_dir_all(&session_directory)
+            .await
+            .expect("session directory");
+
+        let seed_runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        );
+        let seeded = seed_runtime
+            .create_run(
+                &session_directory,
+                neo_agent_core::workflow::WorkflowLaunchRequest {
+                    name: "fresh process resume".to_owned(),
+                    description: "test recovery runner composition".to_owned(),
+                    phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    }],
+                    script: "neo.phase('work')".to_owned(),
+                    args: serde_json::json!({}),
+                    launch_source: "test".to_owned(),
+                    parent_run_id: None,
+                },
+            )
+            .await
+            .expect("seed workflow");
+        let run_id = seeded.run_id.0.clone();
+        drop(seeded);
+        drop(seed_runtime);
+
+        let wire_path = neo_agent_core::session::main_agent_wire_path(&session_directory);
+        tokio::fs::create_dir_all(wire_path.parent().expect("wire parent"))
+            .await
+            .expect("wire directory");
+        let mut writer = JsonlSessionWriter::create(&wire_path)
+            .await
+            .expect("empty session writer");
+        writer.flush().await.expect("empty session flush");
+        drop(writer);
+
+        super::rehydrate_session_workflows(&config, session_id, &session_directory, &[])
+            .await
+            .expect("fresh runtime recovery");
+        let handle = config
+            .background_tasks
+            .workflow_handle(&run_id)
+            .await
+            .expect("recovered workflow handle");
+        assert_eq!(
+            handle.snapshot().await.state,
+            neo_agent_core::workflow::WorkflowState::Paused
+        );
+
+        handle
+            .resume(neo_agent_core::workflow::WorkflowActor::Human)
+            .await
+            .expect("fresh-process recovered workflow can start its runner");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if handle.snapshot().await.state
+                    == neo_agent_core::workflow::WorkflowState::Completed
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovered workflow completes through the prepared dispatch runtime");
+        assert_eq!(handle.run_id.0, run_id);
     }
 
     #[tokio::test]

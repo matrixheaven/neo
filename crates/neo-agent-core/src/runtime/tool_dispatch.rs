@@ -1644,6 +1644,15 @@ fn default_tool_context(
     process_supervisor: ProcessSupervisor,
     parent_instruction_state: Option<crate::instructions::AgentInstructionState>,
 ) -> Result<ToolContext, AgentRuntimeError> {
+    config
+        .workflow_dispatch_resolver
+        .bind_workflow_runtime(&config.workflow_runtime)
+        .map_err(|error| {
+            AgentRuntimeError::Tool(ToolError::InvalidInput {
+                tool: "RunWorkflow".to_owned(),
+                message: error.to_string(),
+            })
+        })?;
     let workspace_root = if let Some(workspace_root) = &config.workspace_root {
         workspace_root.clone()
     } else {

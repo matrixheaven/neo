@@ -4,11 +4,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use neo_agent_core::AgentTokenUsage;
+use neo_agent_core::runtime::WorkflowDispatchResolver;
 use neo_agent_core::workflow::{
-    JournalRecord, JournalWriter, WorkflowActor, WorkflowHandle, WorkflowInterruptionReason,
-    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
-    WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash,
-    journal_path, read_journal,
+    JournalRecord, JournalWriter, WorkflowActor, WorkflowChildRef, WorkflowHandle,
+    WorkflowInterruptionReason, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime,
+    WorkflowState, canonical_input_hash, journal_path, read_journal,
 };
 use tokio::sync::Notify;
 
@@ -69,6 +70,164 @@ async fn wait_for_state(handle: &WorkflowHandle, expected: WorkflowState) {
     })
     .await
     .expect("workflow reached expected state");
+}
+
+#[tokio::test]
+async fn oversized_invocation_outcome_terminalizes_without_stranding_running_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = WorkflowLimits {
+        journal_record_bytes: 1_024,
+        journal_total_bytes: 128 * 1_024,
+        ..WorkflowLimits::default()
+    };
+    let runtime = WorkflowRuntime::new(limits.clone());
+    runtime
+        .bind_runner(|handle, _metadata, _session_dir| async move {
+            handle
+                .invoke(
+                    0,
+                    WorkflowInvocationKind::Delegate,
+                    serde_json::json!({"task": "large result"}),
+                    true,
+                    |_| async {
+                        WorkflowInvocationOutcome {
+                            details: serde_json::json!({"output": "x".repeat(4_096)}),
+                            actual_usage: Some(AgentTokenUsage {
+                                input_tokens: 37,
+                                output_tokens: 23,
+                                input_cache_read_tokens: 11,
+                                input_cache_write_tokens: 7,
+                            }),
+                            child_refs: vec![
+                                WorkflowChildRef {
+                                    kind: "agent".to_owned(),
+                                    id: "agent_oversized".to_owned(),
+                                },
+                                WorkflowChildRef {
+                                    kind: "task".to_owned(),
+                                    id: "task_oversized".to_owned(),
+                                },
+                            ],
+                            ..completed("large result")
+                        }
+                    },
+                )
+                .await?;
+            Ok(())
+        })
+        .unwrap();
+
+    let handle = create_run(&runtime, dir.path()).await;
+    runtime.start_worker(&handle.run_id).await.unwrap();
+    wait_for_state(&handle, WorkflowState::ResourceLimited).await;
+
+    let snapshot = handle.snapshot().await;
+    assert!(!snapshot.recovery_failure);
+    assert_eq!(
+        snapshot.terminal_reason.as_deref(),
+        Some("workflow invocation result exceeds journal record limit")
+    );
+    assert_eq!(
+        snapshot.actual_usage.expect("snapshot usage").input_tokens,
+        37
+    );
+    let records = read_journal(&journal_path(dir.path(), &handle.run_id)).unwrap();
+    let compact_outcome = records
+        .iter()
+        .find_map(|record| match record {
+            JournalRecord::InvocationFinished { outcome, .. }
+                if outcome.status == WorkflowOutcomeStatus::ResourceLimited =>
+            {
+                Some(outcome)
+            }
+            _ => None,
+        })
+        .expect("compact invocation outcome");
+    assert_eq!(
+        compact_outcome
+            .actual_usage
+            .expect("journal usage")
+            .output_tokens,
+        23
+    );
+    assert_eq!(
+        compact_outcome.child_refs,
+        vec![
+            WorkflowChildRef {
+                kind: "agent".to_owned(),
+                id: "agent_oversized".to_owned(),
+            },
+            WorkflowChildRef {
+                kind: "task".to_owned(),
+                id: "task_oversized".to_owned(),
+            },
+        ]
+    );
+    assert!(records.iter().any(|record| matches!(
+        record,
+        JournalRecord::StateChanged {
+            new: WorkflowState::ResourceLimited,
+            ..
+        }
+    )));
+
+    let output = handle.output().await.unwrap();
+    assert_eq!(
+        output.actual_usage.expect("live output usage").input_tokens,
+        37
+    );
+    let output_outcome = output
+        .invocations
+        .iter()
+        .find_map(|record| match record {
+            JournalRecord::InvocationFinished { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .expect("live output invocation");
+    assert_eq!(output_outcome.child_refs, compact_outcome.child_refs);
+
+    let recovered_runtime = WorkflowRuntime::new(limits);
+    let recovered = recovered_runtime.rehydrate(dir.path()).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    let recovered_snapshot = recovered[0].snapshot().await;
+    assert_eq!(
+        recovered_snapshot
+            .actual_usage
+            .expect("recovered snapshot usage")
+            .output_tokens,
+        23
+    );
+    let recovered_output = recovered[0].output().await.unwrap();
+    let recovered_outcome = recovered_output
+        .invocations
+        .iter()
+        .find_map(|record| match record {
+            JournalRecord::InvocationFinished { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .expect("recovered output invocation");
+    assert_eq!(recovered_outcome.child_refs, compact_outcome.child_refs);
+}
+
+#[tokio::test]
+async fn resume_without_session_dispatch_returns_to_inspectable_paused_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    WorkflowDispatchResolver::default()
+        .bind_workflow_runtime(&runtime)
+        .unwrap();
+    let handle = create_run(&runtime, dir.path()).await;
+    handle.pause(WorkflowActor::Human).await.unwrap();
+
+    handle.resume(WorkflowActor::Human).await.unwrap();
+    wait_for_state(&handle, WorkflowState::Paused).await;
+
+    let snapshot = handle.snapshot().await;
+    assert!(!snapshot.recovery_failure);
+    assert_eq!(
+        snapshot.terminal_reason.as_deref(),
+        Some("workflow dispatch is not ready for this session")
+    );
 }
 
 #[tokio::test]

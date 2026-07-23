@@ -10,6 +10,8 @@ pub enum WorkflowError {
     Host(String),
     #[error("journal error: {0}")]
     Journal(String),
+    #[error("journal record size {observed} exceeds limit {limit}")]
+    JournalRecordLimitExceeded { observed: u64, limit: u64 },
     #[error("journal total size limit exceeded")]
     JournalTotalLimitExceeded,
     #[error("invalid workflow input: {0}")]

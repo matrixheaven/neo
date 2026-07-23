@@ -212,6 +212,21 @@ pub(super) fn resource_limited_outcome(reason: &str) -> WorkflowInvocationOutcom
     }
 }
 
+pub(super) fn compact_resource_limited_outcome(
+    reason: &str,
+    original: &WorkflowInvocationOutcome,
+) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: false,
+        status: WorkflowOutcomeStatus::ResourceLimited,
+        summary: reason.to_owned(),
+        interruption: None,
+        details: serde_json::json!({"reason": reason}),
+        actual_usage: original.actual_usage,
+        child_refs: original.child_refs.clone(),
+    }
+}
+
 pub(super) fn aggregate_usage(records: &[JournalRecord]) -> Option<AgentTokenUsage> {
     records.iter().fold(None, |total, record| match record {
         JournalRecord::InvocationFinished {

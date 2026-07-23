@@ -147,10 +147,10 @@ impl JournalWriter {
             .ok_or_else(|| WorkflowError::Journal("record size overflow".to_owned()))?;
 
         if line_bytes > limits.journal_record_bytes {
-            return Err(WorkflowError::Journal(format!(
-                "record size {} exceeds limit {}",
-                line_bytes, limits.journal_record_bytes
-            )));
+            return Err(WorkflowError::JournalRecordLimitExceeded {
+                observed: line_bytes,
+                limit: limits.journal_record_bytes,
+            });
         }
 
         if matches!(record, JournalRecord::InvocationStarted { .. })

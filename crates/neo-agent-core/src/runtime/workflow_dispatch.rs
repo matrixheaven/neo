@@ -14,8 +14,9 @@ use crate::multi_agent::{AgentLifecycleState, AgentRunMode};
 use crate::skills::SkillStoreHandle;
 use crate::tools::{ProcessSupervisor, ToolEventCallback, ToolRegistry};
 use crate::workflow::{
-    WorkflowChildRef, WorkflowInterruptionReason, WorkflowInvocationContext,
-    WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowProjectionStage, WorkflowSnapshot,
+    LuaWorkflowRunner, WorkflowChildRef, WorkflowError, WorkflowInterruptionReason,
+    WorkflowInvocationContext, WorkflowInvocationOutcome, WorkflowOutcomeStatus,
+    WorkflowProjectionStage, WorkflowRuntime, WorkflowSnapshot,
 };
 use crate::{AgentEvent, AgentTokenUsage, AgentToolCall, ToolResult};
 
@@ -193,10 +194,57 @@ impl std::fmt::Debug for WorkflowDispatchResolver {
 }
 
 impl WorkflowDispatchResolver {
+    /// Bind one workflow runtime to this session-resolving dispatch owner.
+    ///
+    /// Repeated composition calls are harmless. Workers still resolve the live
+    /// session snapshot only when they start, so recovery does not execute work.
+    pub fn bind_workflow_runtime(&self, runtime: &WorkflowRuntime) -> Result<(), WorkflowError> {
+        let runner_resolver = self.clone();
+        let limits = runtime.limits();
+        runtime.bind_runner_if_unbound(move |handle, metadata, session_dir| {
+            let resolver = runner_resolver.clone();
+            let limits = limits.clone();
+            async move {
+                if !resolver
+                    .is_bound_for_session(&session_dir)
+                    .map_err(WorkflowError::Host)?
+                {
+                    return Err(WorkflowError::Paused(
+                        "workflow dispatch is not ready for this session".to_owned(),
+                    ));
+                }
+                let dispatch = resolver
+                    .handle_for_session(&session_dir)
+                    .map_err(WorkflowError::Host)?;
+                LuaWorkflowRunner::new(dispatch, handle, limits)
+                    .execute(&metadata.script, metadata.args)
+                    .await
+                    .map(|_| ())
+            }
+        })?;
+
+        let projection_resolver = self.clone();
+        runtime.bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
+            projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
+        })
+    }
+
     /// Whether two handles resolve through the same session owner.
     #[must_use]
     pub fn shares_state_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    /// Whether canonical dispatch dependencies exist for one workflow session.
+    ///
+    /// # Errors
+    /// Returns an error when the shared resolver lock is poisoned.
+    pub fn is_bound_for_session(&self, session_directory: &Path) -> Result<bool, String> {
+        let session = WorkflowDispatchSessionKey::from_directory(Some(session_directory));
+        self.state
+            .read()
+            .map(|state| state.snapshots.contains_key(&session))
+            .map_err(|_| "workflow dispatch resolver lock poisoned".to_owned())
     }
 
     /// Replace the dependencies used by subsequent workflow invocations.
