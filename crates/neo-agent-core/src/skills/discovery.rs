@@ -22,39 +22,18 @@ pub enum SkillSource {
 ///
 /// Returns loaded skills and non-fatal diagnostics. A malformed skill or
 /// directory read failure never prevents other skills from loading.
+#[must_use]
 pub fn discover_skills(
     root: &Path,
     source: SkillSource,
 ) -> (Vec<LoadedSkill>, Vec<SkillDiagnostic>) {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
-    match std::fs::metadata(root) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => {
-            diagnostics.push(SkillDiagnostic::new(
-                root,
-                "skill discovery root is not a directory".to_owned(),
-            ));
-            return (skills, diagnostics);
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (skills, diagnostics);
-        }
-        Err(error) => {
-            diagnostics.push(SkillDiagnostic::new(
-                root,
-                format!("cannot inspect discovery root: {error}"),
-            ));
-            return (skills, diagnostics);
-        }
+    if !validate_root(root, &mut diagnostics) {
+        return (skills, diagnostics);
     }
 
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut dir_count: usize = 0;
-    let mut entry_count: usize = 0;
-
-    // Iterative stack: (dir_path, prefix, depth)
-    let mut stack: Vec<(PathBuf, String, usize)> = Vec::new();
     match canonicalize_for_visited(root) {
         Ok(canonical) => {
             visited.insert(canonical);
@@ -67,7 +46,11 @@ pub fn discover_skills(
             return (skills, diagnostics);
         }
     }
-    stack.push((root.to_path_buf(), String::new(), 0));
+
+    let mut dir_count: usize = 0;
+    let mut entry_count: usize = 0;
+    // Iterative stack: (dir_path, prefix, depth)
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(root.to_path_buf(), String::new(), 0)];
 
     'walk: while let Some((dir, prefix, depth)) = stack.pop() {
         dir_count += 1;
@@ -78,33 +61,9 @@ pub fn discover_skills(
             ));
             break;
         }
-        let own_skill_file = dir.join("SKILL.md");
-        let has_own_skill = own_skill_file.is_file();
-        let own_prefix = if has_own_skill {
-            match load_skill_file_with_diagnostics(&own_skill_file, source) {
-                Ok((skill, load_diagnostics)) => {
-                    diagnostics.extend(load_diagnostics);
-                    let name = if prefix.is_empty() {
-                        skill.name.clone()
-                    } else {
-                        format!("{prefix}/{}", skill.name)
-                    };
-                    skills.push(LoadedSkill { name, ..skill });
-                    skills
-                        .last()
-                        .map_or_else(|| prefix.clone(), |s| s.name.clone())
-                }
-                Err(err) => {
-                    diagnostics.push(SkillDiagnostic::new(
-                        &own_skill_file,
-                        format!("failed to load skill: {err}"),
-                    ));
-                    prefix.clone()
-                }
-            }
-        } else {
-            prefix.clone()
-        };
+
+        let has_own_skill = dir.join("SKILL.md").is_file();
+        let own_prefix = load_dir_skill(&dir, &prefix, source, &mut skills, &mut diagnostics);
 
         if depth >= MAX_DEPTH {
             continue;
@@ -134,38 +93,10 @@ pub fn discover_skills(
                 ));
                 break 'walk;
             }
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    diagnostics.push(SkillDiagnostic::new(
-                        &dir,
-                        format!("failed to read directory entry: {err}"),
-                    ));
-                    continue;
-                }
-            };
-            let metadata = match std::fs::metadata(entry.path()) {
-                Ok(metadata) => metadata,
-                Err(err) => {
-                    diagnostics.push(SkillDiagnostic::new(
-                        entry.path(),
-                        format!("cannot stat entry: {err}"),
-                    ));
-                    continue;
-                }
-            };
-            if !metadata.is_dir() {
-                continue;
+            match classify_entry(entry, &dir, has_own_skill, &mut diagnostics) {
+                EntryKind::Subdir(path) => subdirs.push(path),
+                EntryKind::Skip => {}
             }
-            if has_own_skill
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|file_name| RESOURCE_DIRS.contains(&file_name))
-            {
-                continue;
-            }
-            subdirs.push(entry.path());
         }
 
         // Push in reverse order to preserve sorted traversal (we pop from back).
@@ -195,6 +126,115 @@ pub fn discover_skills(
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     (skills, diagnostics)
+}
+
+/// Validate the discovery root, recording a diagnostic when it is unusable.
+///
+/// Returns `true` when traversal should proceed. A missing root is a no-op
+/// (`true` is not returned, but no diagnostic is recorded).
+fn validate_root(root: &Path, diagnostics: &mut Vec<SkillDiagnostic>) -> bool {
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => {
+            diagnostics.push(SkillDiagnostic::new(
+                root,
+                "skill discovery root is not a directory".to_owned(),
+            ));
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            diagnostics.push(SkillDiagnostic::new(
+                root,
+                format!("cannot inspect discovery root: {error}"),
+            ));
+            false
+        }
+    }
+}
+
+/// Load `dir/SKILL.md` when present, returning the prefix child directories
+/// should inherit.
+fn load_dir_skill(
+    dir: &Path,
+    prefix: &str,
+    source: SkillSource,
+    skills: &mut Vec<LoadedSkill>,
+    diagnostics: &mut Vec<SkillDiagnostic>,
+) -> String {
+    let skill_file = dir.join("SKILL.md");
+    if !skill_file.is_file() {
+        return prefix.to_owned();
+    }
+    match load_skill_file_with_diagnostics(&skill_file, source) {
+        Ok((skill, load_diagnostics)) => {
+            diagnostics.extend(load_diagnostics);
+            let name = if prefix.is_empty() {
+                skill.name.clone()
+            } else {
+                format!("{prefix}/{}", skill.name)
+            };
+            skills.push(LoadedSkill { name, ..skill });
+            skills
+                .last()
+                .map_or_else(|| prefix.to_owned(), |s| s.name.clone())
+        }
+        Err(err) => {
+            diagnostics.push(SkillDiagnostic::new(
+                &skill_file,
+                format!("failed to load skill: {err}"),
+            ));
+            prefix.to_owned()
+        }
+    }
+}
+
+/// Outcome of inspecting a single directory entry during traversal.
+enum EntryKind {
+    /// A subdirectory that should be enqueued for traversal.
+    Subdir(PathBuf),
+    /// A non-directory or ignored resource directory.
+    Skip,
+}
+
+fn classify_entry(
+    entry: Result<std::fs::DirEntry, std::io::Error>,
+    dir: &Path,
+    has_own_skill: bool,
+    diagnostics: &mut Vec<SkillDiagnostic>,
+) -> EntryKind {
+    let entry = match entry {
+        Ok(entry) => entry,
+        Err(err) => {
+            diagnostics.push(SkillDiagnostic::new(
+                dir,
+                format!("failed to read directory entry: {err}"),
+            ));
+            return EntryKind::Skip;
+        }
+    };
+    let metadata = match std::fs::metadata(entry.path()) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            diagnostics.push(SkillDiagnostic::new(
+                entry.path(),
+                format!("cannot stat entry: {err}"),
+            ));
+            return EntryKind::Skip;
+        }
+    };
+    if !metadata.is_dir() {
+        return EntryKind::Skip;
+    }
+    if has_own_skill
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|file_name| RESOURCE_DIRS.contains(&file_name))
+    {
+        return EntryKind::Skip;
+    }
+    EntryKind::Subdir(entry.path())
 }
 
 fn canonicalize_for_visited(path: &Path) -> std::io::Result<PathBuf> {

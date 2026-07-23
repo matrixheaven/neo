@@ -165,12 +165,7 @@ impl LuaWorkflowRunner {
         let instructions = Arc::new(AtomicU64::new(0));
         let resource_limited = Arc::new(AtomicBool::new(false));
         let fatal_reason = Arc::new(Mutex::new(None));
-        self.install_neo_table(
-            &lua,
-            args,
-            Arc::clone(&instructions),
-            Arc::clone(&fatal_reason),
-        )?;
+        self.install_neo_table(&lua, &args, &instructions, &fatal_reason)?;
         restrict_base_globals(&lua)?;
 
         let function = lua
@@ -253,9 +248,9 @@ impl LuaWorkflowRunner {
     fn install_neo_table(
         &self,
         lua: &Lua,
-        args: serde_json::Value,
-        instructions: Arc<AtomicU64>,
-        fatal_reason: Arc<Mutex<Option<String>>>,
+        args: &serde_json::Value,
+        instructions: &Arc<AtomicU64>,
+        fatal_reason: &Arc<Mutex<Option<String>>>,
     ) -> Result<(), WorkflowError> {
         let neo = lua
             .create_table()
@@ -274,8 +269,8 @@ impl LuaWorkflowRunner {
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let phase = lua
             .create_async_function(move |_, id: String| {
                 let handle = handle.clone();
@@ -311,8 +306,8 @@ impl LuaWorkflowRunner {
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let log = lua
             .create_async_function(move |_, message: String| {
                 let handle = handle.clone();
@@ -341,8 +336,8 @@ impl LuaWorkflowRunner {
         let dispatch = self.dispatch.clone();
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let delegate = lua
             .create_async_function(move |lua, value: Value| {
                 let dispatch = dispatch.clone();
@@ -364,21 +359,20 @@ impl LuaWorkflowRunner {
                         )));
                     }
                     validate_delegate_request("Delegate", &input.canonical_request())
-                        .map_err(invalid_tool_input)?;
+                        .map_err(|error| invalid_tool_input(&error))?;
                     let input = canonical_input.clone();
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let outcome = handle
-                        .invoke(
-                            index,
-                            WorkflowInvocationKind::Delegate,
-                            canonical_input,
-                            true,
-                            move |invocation| async move {
-                                dispatch.run_one(invocation, "Delegate", input).await
-                            },
-                        )
-                        .await
-                        .map_err(mlua::Error::external)?;
+                    let outcome = Box::pin(handle.invoke(
+                        index,
+                        WorkflowInvocationKind::Delegate,
+                        canonical_input,
+                        true,
+                        move |invocation| async move {
+                            dispatch.run_one(invocation, "Delegate", input).await
+                        },
+                    ))
+                    .await
+                    .map_err(mlua::Error::external)?;
                     boundary.store(0, Ordering::Relaxed);
                     immutable_outcome(&lua, &outcome)
                 }
@@ -390,8 +384,8 @@ impl LuaWorkflowRunner {
         let dispatch = self.dispatch.clone();
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let max_concurrency = self.limits.swarm_concurrency;
         let swarm = lua
             .create_async_function(move |lua, value: Value| {
@@ -408,27 +402,26 @@ impl LuaWorkflowRunner {
                         "DelegateSwarm",
                         &input.canonical_request(max_concurrency),
                     )
-                    .map_err(invalid_tool_input)?;
+                    .map_err(|error| invalid_tool_input(&error))?;
                     let mut tool_input = canonical_input.clone();
                     tool_input
                         .as_object_mut()
                         .expect("strict swarm input is an object")
                         .insert("max_concurrency".to_owned(), max_concurrency.into());
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let outcome = handle
-                        .invoke(
-                            index,
-                            WorkflowInvocationKind::Swarm,
-                            canonical_input,
-                            true,
-                            move |invocation| async move {
-                                dispatch
-                                    .run_one(invocation, "DelegateSwarm", tool_input)
-                                    .await
-                            },
-                        )
-                        .await
-                        .map_err(mlua::Error::external)?;
+                    let outcome = Box::pin(handle.invoke(
+                        index,
+                        WorkflowInvocationKind::Swarm,
+                        canonical_input,
+                        true,
+                        move |invocation| async move {
+                            dispatch
+                                .run_one(invocation, "DelegateSwarm", tool_input)
+                                .await
+                        },
+                    ))
+                    .await
+                    .map_err(mlua::Error::external)?;
                     boundary.store(0, Ordering::Relaxed);
                     immutable_outcome(&lua, &outcome)
                 }
@@ -439,8 +432,8 @@ impl LuaWorkflowRunner {
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let host_verify = lua
             .create_async_function(move |lua, (condition, message): (bool, String)| {
                 let handle = handle.clone();
@@ -477,8 +470,8 @@ impl LuaWorkflowRunner {
         let dispatch = self.dispatch.clone();
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let host_verify_command = lua
             .create_async_function(move |lua, value: Value| {
                 let dispatch = dispatch.clone();
@@ -505,25 +498,24 @@ impl LuaWorkflowRunner {
                     });
                     let failure_message = input.failure_message;
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let outcome = handle
-                        .invoke(
-                            index,
-                            WorkflowInvocationKind::VerifyCommand,
-                            canonical_input,
-                            false,
-                            move |invocation| async move {
-                                let mut outcome =
-                                    dispatch.run_one(invocation, "Bash", tool_input).await;
-                                if !outcome.ok
-                                    && let Some(message) = failure_message
-                                {
-                                    outcome.summary = message;
-                                }
-                                outcome
-                            },
-                        )
-                        .await
-                        .map_err(mlua::Error::external)?;
+                    let outcome = Box::pin(handle.invoke(
+                        index,
+                        WorkflowInvocationKind::VerifyCommand,
+                        canonical_input,
+                        false,
+                        move |invocation| async move {
+                            let mut outcome =
+                                dispatch.run_one(invocation, "Bash", tool_input).await;
+                            if !outcome.ok
+                                && let Some(message) = failure_message
+                            {
+                                outcome.summary = message;
+                            }
+                            outcome
+                        },
+                    ))
+                    .await
+                    .map_err(mlua::Error::external)?;
                     boundary.store(0, Ordering::Relaxed);
                     immutable_outcome(&lua, &outcome)
                 }
@@ -537,8 +529,8 @@ impl LuaWorkflowRunner {
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let report = lua
             .create_async_function(move |lua, value: Value| {
                 let handle = handle.clone();
@@ -566,8 +558,8 @@ impl LuaWorkflowRunner {
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
-        let boundary = Arc::clone(&instructions);
-        let fatal = Arc::clone(&fatal_reason);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
         let fail = lua
             .create_async_function(move |_, message: String| {
                 let handle = handle.clone();
@@ -699,7 +691,7 @@ where
     Ok((decoded, value))
 }
 
-fn invalid_tool_input(error: ToolError) -> mlua::Error {
+fn invalid_tool_input(error: &ToolError) -> mlua::Error {
     mlua::Error::external(WorkflowError::InvalidInput(error.to_string()))
 }
 

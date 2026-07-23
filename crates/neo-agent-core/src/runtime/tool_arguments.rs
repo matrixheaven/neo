@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_scope_probes_cover_files_roots_and_explicit_shell_cwds_only() {
+    fn typed_scope_probes_cover_files_roots_only() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         let nested = workspace.join("nested");
@@ -727,6 +727,29 @@ mod tests {
             probe("Grep", json!({ "pattern": "x", "path": "nested/file.txt" })),
             vec![nested.clone()]
         );
+    }
+
+    #[test]
+    fn typed_scope_probes_cover_shell_and_mcp_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested = workspace.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::write(nested.join("file.txt"), "body").expect("nested file");
+        let external = temp.path().join("external.txt");
+        std::fs::write(&external, "outside").expect("external file");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let nested = workspace.join("nested");
+        let external = external.canonicalize().expect("canonical external");
+
+        let probe = |name: &str, arguments: serde_json::Value| {
+            InstructionScopeProbe::from_prepared_tool(name, &arguments, &workspace)
+                .into_iter()
+                .map(|probe| probe.target_directory)
+                .collect::<Vec<_>>()
+        };
+        let absolute = |path: &std::path::Path| path.to_string_lossy().to_string();
+
         // Bash and Terminal(start) probe the explicit cwd, falling back to the
         // primary workspace. Command strings are never parsed for paths.
         assert_eq!(

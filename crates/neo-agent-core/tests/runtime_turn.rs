@@ -3114,7 +3114,12 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
         turn: 1,
         id: "tool_1".to_owned(),
         name: "never".to_owned(),
-        result: ToolResult::error("tool execution cancelled"),
+        result: ToolResult {
+            content: "tool execution cancelled".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
+            terminate: false,
+        },
     }));
     assert_eq!(
         events.last(),
@@ -3280,7 +3285,12 @@ fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentCon
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
-        result: ToolResult::error("tool execution cancelled"),
+        result: ToolResult {
+            content: "tool execution cancelled".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
+            terminate: false,
+        },
     }));
     assert_eq!(
         events.last(),
@@ -3375,7 +3385,12 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
         turn: 1,
         id: "tool_2".to_owned(),
         name: "never".to_owned(),
-        result: ToolResult::error("tool execution cancelled"),
+        result: ToolResult {
+            content: "tool execution cancelled".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
+            terminate: false,
+        },
     }));
     assert_eq!(
         events.last(),
@@ -3783,7 +3798,12 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
-        result: ToolResult::error("approval required for tool: echo"),
+        result: ToolResult {
+            content: "approval required for tool: echo".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({"kind": "permission", "decision": "required", "operation": "tool", "subject": "echo", "side_effect_occurred": false})),
+            terminate: false,
+        },
     }));
     assert_eq!(
         context.messages()[2],
@@ -4222,7 +4242,18 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
-        result: ToolResult::error("approval denied for tool: echo"),
+        result: ToolResult {
+            content: "approval denied for tool: echo".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({
+                "kind": "permission",
+                "decision": "denied",
+                "operation": "tool",
+                "subject": "echo",
+                "side_effect_occurred": false,
+            })),
+            terminate: false,
+        },
     }));
 }
 
@@ -4463,7 +4494,18 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
-        result: ToolResult::error("approval denied for tool: echo"),
+        result: ToolResult {
+            content: "approval denied for tool: echo".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({
+                "kind": "permission",
+                "decision": "denied",
+                "operation": "tool",
+                "subject": "echo",
+                "side_effect_occurred": false,
+            })),
+            terminate: false,
+        },
     }));
     assert_eq!(
         context.messages()[2],
@@ -4514,7 +4556,12 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
-        result: ToolResult::error("tool execution cancelled"),
+        result: ToolResult {
+            content: "tool execution cancelled".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
+            terminate: false,
+        },
     }));
     assert_eq!(
         events.last(),
@@ -4537,9 +4584,10 @@ async fn runtime_edit_approval_interrupt_reports_structured_zero_write_cancellat
             "edit_cancel",
             "Edit",
             json!({
-                "files": [{
+                "edits": [{
                     "path": "file.txt",
-                    "replacements": [{ "old": "before", "new": "after" }]
+                    "old": "before",
+                    "new": "after"
                 }]
             }),
         )]),
@@ -7336,9 +7384,10 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 raw_arguments: json!({
-                    "files": [{
+                    "edits": [{
                         "path": plan_path,
-                        "replacements": [{ "old": "Draft.", "new": "Finalized." }]
+                        "old": "Draft.",
+                        "new": "Finalized."
                     }]
                 })
                 .to_string(),
@@ -7403,12 +7452,14 @@ async fn runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_p
             "edit_plan_batch",
             "Edit",
             json!({
-                "files": [{
+                "edits": [{
                     "path": plan_path,
-                    "replacements": [{ "old": "plan", "new": "PLAN" }]
+                    "old": "plan",
+                    "new": "PLAN"
                 }, {
                     "path": other,
-                    "replacements": [{ "old": "other", "new": "OTHER" }]
+                    "old": "other",
+                    "new": "OTHER"
                 }]
             }),
         )]),
@@ -10529,9 +10580,10 @@ async fn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "files": [{
+        "edits": [{
             "path": target.to_string_lossy(),
-            "replacements": [{ "old": "alpha", "new": "beta" }]
+            "old": "alpha",
+            "new": "beta"
         }]
     });
     let harness = FakeHarness::from_turns([
@@ -10897,9 +10949,10 @@ async fn blocked_scope_allows_read_only_diagnosis_but_blocks_mixed_mutation_batc
     let target = fixture.workspace.join("nested").join("data.txt");
     std::fs::write(&target, "body").expect("data file");
     let edit_arguments = json!({
-        "files": [{
+        "edits": [{
             "path": target.to_string_lossy(),
-            "replacements": [{ "old": "body", "new": "changed" }]
+            "old": "body",
+            "new": "changed"
         }]
     });
     let read_arguments = json!({ "path": target.to_string_lossy() });
@@ -11120,9 +11173,10 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "files": [{
+        "edits": [{
             "path": target.to_string_lossy(),
-            "replacements": [{ "old": "alpha", "new": "beta" }]
+            "old": "alpha",
+            "new": "beta"
         }]
     });
     let harness = FakeHarness::from_turns([
@@ -11278,9 +11332,10 @@ async fn history_pressure_compacts_before_whole_bundle_omission() {
     let target = fixture.workspace.join("nested/target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "files": [{
+        "edits": [{
             "path": target.to_string_lossy(),
-            "replacements": [{ "old": "alpha", "new": "beta" }]
+            "old": "alpha",
+            "new": "beta"
         }]
     });
     let harness = FakeHarness::from_turns([
@@ -11413,10 +11468,11 @@ async fn post_tool_instruction_update_compacts_before_fresh_admission() {
 
 fn batch_edit_arguments(files: &[(&str, &str, &str)]) -> serde_json::Value {
     json!({
-        "files": files.iter().map(|(path, old, new)| {
+        "edits": files.iter().map(|(path, old, new)| {
             json!({
                 "path": path,
-                "replacements": [{ "old": old, "new": new }]
+                "old": old,
+                "new": new
             })
         }).collect::<Vec<_>>()
     })
@@ -12051,14 +12107,16 @@ async fn instruction_preflight_defers_whole_edit_for_one_new_scope() {
     std::fs::write(&nested_file, "nested\n").expect("nested");
     std::fs::write(&root_file, "root\n").expect("root");
     let args = json!({
-        "files": [
+        "edits": [
             {
                 "path": root_file.to_string_lossy(),
-                "replacements": [{ "old": "root", "new": "ROOT" }]
+                "old": "root",
+                "new": "ROOT"
             },
             {
                 "path": nested_file.to_string_lossy(),
-                "replacements": [{ "old": "nested", "new": "NESTED" }]
+                "old": "nested",
+                "new": "NESTED"
             }
         ]
     });
@@ -12102,7 +12160,7 @@ async fn run_workflow_forwards_tool_context_events_with_live_turn_and_closes_str
         .with_workspace_root(workspace.path())
         .expect("workspace root")
         .with_permission_mode(PermissionMode::Yolo);
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     let mut registry = ToolRegistry::with_builtin_tools();
     registry.register(WorkflowToolEventProbe);
     let runtime = AgentRuntime::with_tools(config, harness.client(), registry);

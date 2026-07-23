@@ -10403,20 +10403,20 @@ fn persisted_workflow_events_apply_only_to_matching_session_generation() {
     };
     persisted
         .send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
-            crate::modes::run::SessionWorkflowEvent {
+            Box::new(crate::modes::run::SessionWorkflowEvent {
                 session_id: SESSION_A.to_owned(),
                 generation: first_generation_a,
                 event: error_event("stale session A generation must stay hidden"),
-            },
+            }),
         ))
         .expect("session A delivery");
     persisted
         .send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
-            crate::modes::run::SessionWorkflowEvent {
+            Box::new(crate::modes::run::SessionWorkflowEvent {
                 session_id: SESSION_A.to_owned(),
                 generation: current_generation_a,
                 event: error_event("current session A generation is visible"),
-            },
+            }),
         ))
         .expect("session B delivery");
     let entries_before = controller.tui.transcript().transcript().entries().len();
@@ -11138,11 +11138,11 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
         .expect("/workflow submits");
-    assert!(config.workflow_capability.is_available().await);
+    assert!(config.workflow_capability.is_available());
 
     controller.refresh_config();
     let refreshed = controller.local_config.as_ref().expect("refreshed config");
-    assert!(refreshed.workflow_capability.is_available().await);
+    assert!(refreshed.workflow_capability.is_available());
     assert!(
         refreshed
             .workflow_dispatch_resolver
@@ -11161,7 +11161,7 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
         None,
     )
     .expect("agent config");
-    assert!(agent_config.workflow_capability.is_available().await);
+    assert!(agent_config.workflow_capability.is_available());
     assert!(
         agent_config
             .workflow_dispatch_resolver
@@ -11174,7 +11174,7 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
         .expect("/clear submits");
-    assert!(!agent_config.workflow_capability.is_available().await);
+    assert!(!agent_config.workflow_capability.is_available());
 }
 
 #[tokio::test]
@@ -11189,7 +11189,7 @@ async fn workflow_slash_arguments_do_not_grant_capability() {
         .await
         .expect("slash submits");
 
-    assert!(!config.workflow_capability.is_available().await);
+    assert!(!config.workflow_capability.is_available());
 }
 
 #[tokio::test]
@@ -11199,14 +11199,14 @@ async fn workflow_capability_is_revoked_only_when_session_identity_changes() {
     let mut controller = controller_for_config(&config);
     controller.set_active_session_id(SESSION_A.to_owned());
 
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     controller.set_active_session_id(SESSION_A.to_owned());
     assert!(config.workflow_capability.inspect());
 
     controller.set_active_session_id(SESSION_B.to_owned());
     assert!(!config.workflow_capability.inspect());
 
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     controller.clear_active_session_id();
     assert!(!config.workflow_capability.inspect());
 }
@@ -11218,7 +11218,7 @@ async fn workflow_capability_survives_first_session_materialization() {
     let mut controller = controller_for_config(&config);
     assert_eq!(controller.active_session_id(), None);
 
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     controller.set_active_session_id(SESSION_A.to_owned());
 
     assert!(config.workflow_capability.inspect());
@@ -11826,7 +11826,7 @@ async fn command_palette_new_session_revokes_capability_before_session_materiali
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     assert_eq!(controller.active_session_id(), None);
-    controller.workflow_capability.grant().await;
+    controller.workflow_capability.grant();
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
@@ -16734,7 +16734,7 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
-    controller.workflow_capability.grant().await;
+    controller.workflow_capability.grant();
 
     let consumed = controller.handle_slash_command("/fork").await;
     assert!(consumed, "/fork should be consumed as a slash command");

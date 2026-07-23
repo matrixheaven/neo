@@ -186,8 +186,7 @@ impl std::fmt::Debug for WorkflowDispatchResolver {
                 &self
                     .state
                     .read()
-                    .map(|state| !state.snapshots.is_empty())
-                    .unwrap_or(false),
+                    .is_ok_and(|state| !state.snapshots.is_empty()),
             )
             .finish()
     }
@@ -611,8 +610,8 @@ impl WorkflowDispatchResolver {
             snapshot
                 .context
                 .instruction_state_mut()
-                .last_epoch_fingerprint =
-                context.instruction_state().last_epoch_fingerprint.clone();
+                .last_epoch_fingerprint
+                .clone_from(&context.instruction_state().last_epoch_fingerprint);
         }
         Ok(())
     }
@@ -867,112 +866,117 @@ fn canonical_child_outcome(
 ) -> Result<Option<CanonicalChildOutcome>, String> {
     let kind = details.get("kind").and_then(serde_json::Value::as_str);
     match tool_name {
-        "Delegate" => {
-            if kind != Some("delegate") {
-                return Err(format!(
-                    "invalid canonical Delegate outcome details: expected kind delegate, got {}",
-                    kind.unwrap_or("missing")
-                ));
-            }
-            let decoded: DelegateOutcomeDetails = serde_json::from_value(details.clone())
-                .map_err(|error| format!("invalid canonical Delegate outcome details: {error}"))?;
-            if decoded.agent_id.is_empty() {
-                return Err("invalid canonical Delegate outcome details: empty agent_id".to_owned());
-            }
-            let mut child_refs = vec![WorkflowChildRef {
-                kind: "delegate".to_owned(),
-                id: decoded.agent_id,
-            }];
-            if let Some(task_id) = decoded.task_id {
-                if task_id.is_empty() {
-                    return Err(
-                        "invalid canonical Delegate outcome details: empty task_id".to_owned()
-                    );
-                }
-                child_refs.push(WorkflowChildRef {
-                    kind: "task".to_owned(),
-                    id: task_id,
-                });
-            }
-            let status = canonical_child_status("Delegate", decoded.status, decoded.mode)?;
-            if result_is_error && status == WorkflowOutcomeStatus::Completed {
-                return Err(
-                    "invalid canonical Delegate outcome details: error result cannot be completed"
-                        .to_owned(),
-                );
-            }
-            Ok(Some(CanonicalChildOutcome {
-                status,
-                actual_usage: decoded.actual_usage,
-                child_refs,
-            }))
-        }
-        "DelegateSwarm" => {
-            if kind != Some("delegate_swarm") {
-                return Err(format!(
-                    "invalid canonical DelegateSwarm outcome details: expected kind delegate_swarm, got {}",
-                    kind.unwrap_or("missing")
-                ));
-            }
-            let decoded: SwarmOutcomeDetails =
-                serde_json::from_value(details.clone()).map_err(|error| {
-                    format!("invalid canonical DelegateSwarm outcome details: {error}")
-                })?;
-            if decoded.swarm_id.is_empty() {
-                return Err(
-                    "invalid canonical DelegateSwarm outcome details: empty swarm_id".to_owned(),
-                );
-            }
-            if decoded.items.iter().any(|item| !item.status.is_terminal()) {
-                return Err(
-                    "invalid canonical DelegateSwarm outcome details: nonterminal child".to_owned(),
-                );
-            }
-            if decoded.items.iter().any(|item| item.agent_id.is_empty()) {
-                return Err(
-                    "invalid canonical DelegateSwarm outcome details: empty child agent_id"
-                        .to_owned(),
-                );
-            }
-            let mut child_refs = Vec::with_capacity(decoded.items.len() + 2);
-            child_refs.push(WorkflowChildRef {
-                kind: "delegate_swarm".to_owned(),
-                id: decoded.swarm_id,
-            });
-            child_refs.extend(decoded.items.into_iter().map(|item| WorkflowChildRef {
-                kind: "delegate".to_owned(),
-                id: item.agent_id,
-            }));
-            if let Some(task_id) = decoded.task_id {
-                if task_id.is_empty() {
-                    return Err(
-                        "invalid canonical DelegateSwarm outcome details: empty task_id".to_owned(),
-                    );
-                }
-                child_refs.push(WorkflowChildRef {
-                    kind: "task".to_owned(),
-                    id: task_id,
-                });
-            }
-            let status = canonical_child_status("DelegateSwarm", decoded.status, decoded.mode)?;
-            if result_is_error && status == WorkflowOutcomeStatus::Completed {
-                return Err(
-                    "invalid canonical DelegateSwarm outcome details: error result cannot be completed"
-                        .to_owned(),
-                );
-            }
-            Ok(Some(CanonicalChildOutcome {
-                status,
-                actual_usage: decoded.actual_usage,
-                child_refs,
-            }))
-        }
+        "Delegate" => canonical_delegate_outcome(result_is_error, details, kind),
+        "DelegateSwarm" => canonical_swarm_outcome(result_is_error, details, kind),
         _ if matches!(kind, Some("delegate" | "delegate_swarm")) => Err(format!(
             "invalid canonical child outcome details: tool {tool_name} cannot report kind {}",
             kind.expect("matched child kind")
         )),
         _ => Ok(None),
     }
+}
+
+fn canonical_delegate_outcome(
+    result_is_error: bool,
+    details: &serde_json::Value,
+    kind: Option<&str>,
+) -> Result<Option<CanonicalChildOutcome>, String> {
+    if kind != Some("delegate") {
+        return Err(format!(
+            "invalid canonical Delegate outcome details: expected kind delegate, got {}",
+            kind.unwrap_or("missing")
+        ));
+    }
+    let decoded: DelegateOutcomeDetails = serde_json::from_value(details.clone())
+        .map_err(|error| format!("invalid canonical Delegate outcome details: {error}"))?;
+    if decoded.agent_id.is_empty() {
+        return Err("invalid canonical Delegate outcome details: empty agent_id".to_owned());
+    }
+    let mut child_refs = vec![WorkflowChildRef {
+        kind: "delegate".to_owned(),
+        id: decoded.agent_id,
+    }];
+    if let Some(task_id) = decoded.task_id {
+        if task_id.is_empty() {
+            return Err("invalid canonical Delegate outcome details: empty task_id".to_owned());
+        }
+        child_refs.push(WorkflowChildRef {
+            kind: "task".to_owned(),
+            id: task_id,
+        });
+    }
+    let status = canonical_child_status("Delegate", decoded.status, decoded.mode)?;
+    if result_is_error && status == WorkflowOutcomeStatus::Completed {
+        return Err(
+            "invalid canonical Delegate outcome details: error result cannot be completed"
+                .to_owned(),
+        );
+    }
+    Ok(Some(CanonicalChildOutcome {
+        status,
+        actual_usage: decoded.actual_usage,
+        child_refs,
+    }))
+}
+
+fn canonical_swarm_outcome(
+    result_is_error: bool,
+    details: &serde_json::Value,
+    kind: Option<&str>,
+) -> Result<Option<CanonicalChildOutcome>, String> {
+    if kind != Some("delegate_swarm") {
+        return Err(format!(
+            "invalid canonical DelegateSwarm outcome details: expected kind delegate_swarm, got {}",
+            kind.unwrap_or("missing")
+        ));
+    }
+    let decoded: SwarmOutcomeDetails = serde_json::from_value(details.clone())
+        .map_err(|error| format!("invalid canonical DelegateSwarm outcome details: {error}"))?;
+    if decoded.swarm_id.is_empty() {
+        return Err("invalid canonical DelegateSwarm outcome details: empty swarm_id".to_owned());
+    }
+    if decoded.items.iter().any(|item| !item.status.is_terminal()) {
+        return Err(
+            "invalid canonical DelegateSwarm outcome details: nonterminal child".to_owned(),
+        );
+    }
+    if decoded.items.iter().any(|item| item.agent_id.is_empty()) {
+        return Err(
+            "invalid canonical DelegateSwarm outcome details: empty child agent_id".to_owned(),
+        );
+    }
+    let mut child_refs = Vec::with_capacity(decoded.items.len() + 2);
+    child_refs.push(WorkflowChildRef {
+        kind: "delegate_swarm".to_owned(),
+        id: decoded.swarm_id,
+    });
+    child_refs.extend(decoded.items.into_iter().map(|item| WorkflowChildRef {
+        kind: "delegate".to_owned(),
+        id: item.agent_id,
+    }));
+    if let Some(task_id) = decoded.task_id {
+        if task_id.is_empty() {
+            return Err(
+                "invalid canonical DelegateSwarm outcome details: empty task_id".to_owned(),
+            );
+        }
+        child_refs.push(WorkflowChildRef {
+            kind: "task".to_owned(),
+            id: task_id,
+        });
+    }
+    let status = canonical_child_status("DelegateSwarm", decoded.status, decoded.mode)?;
+    if result_is_error && status == WorkflowOutcomeStatus::Completed {
+        return Err(
+            "invalid canonical DelegateSwarm outcome details: error result cannot be completed"
+                .to_owned(),
+        );
+    }
+    Ok(Some(CanonicalChildOutcome {
+        status,
+        actual_usage: decoded.actual_usage,
+        child_refs,
+    }))
 }
 
 fn canonical_child_status(

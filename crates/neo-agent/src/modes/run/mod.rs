@@ -167,16 +167,15 @@ pub(crate) async fn rehydrate_session_workflows(
             break;
         }
     }
-    if has_resumable_workflow {
-        if let Err(error) =
+    if has_resumable_workflow
+        && let Err(error) =
             prepare_recovered_workflow_dispatch(config, session_dir, replayed_events).await
-        {
-            tracing::warn!(
-                session_id,
-                %error,
-                "recovered workflow dispatch is not ready; resume will remain paused"
-            );
-        }
+    {
+        tracing::warn!(
+            session_id,
+            %error,
+            "recovered workflow dispatch is not ready; resume will remain paused"
+        );
     }
     let mut recovered_events = Vec::new();
     for handle in handles {
@@ -409,7 +408,7 @@ async fn run_prompt_in_session(
     .await?;
     let notification_queue = config.workflow_runtime.notification_queue();
     for id in neo_agent_core::session::workflow_notification_projection_ids(&turn.events) {
-        notification_queue.mark_projected(&id);
+        let _ = notification_queue.mark_projected(&id);
     }
     Ok(turn)
 }
@@ -880,7 +879,7 @@ pub(crate) struct SessionWorkflowEvent {
 
 #[derive(Debug)]
 pub(crate) enum PersistedSessionWorkflowEvent {
-    Event(SessionWorkflowEvent),
+    Event(Box<SessionWorkflowEvent>),
     Error {
         session_id: String,
         generation: u64,
@@ -897,7 +896,7 @@ pub(crate) async fn persist_session_workflow_events(
     while let Some(envelope) = events.recv().await {
         let result = persist_session_workflow_event(&config, &mut persistence, &envelope).await;
         let delivery = match result {
-            Ok(()) => PersistedSessionWorkflowEvent::Event(envelope),
+            Ok(()) => PersistedSessionWorkflowEvent::Event(Box::new(envelope)),
             Err(error) => PersistedSessionWorkflowEvent::Error {
                 session_id: envelope.session_id,
                 generation: envelope.generation,
@@ -3134,10 +3133,8 @@ mod tests {
             .expect("persisted delivery");
         assert!(matches!(
             delivery,
-            super::PersistedSessionWorkflowEvent::Event(super::SessionWorkflowEvent {
-                generation: 4,
-                ..
-            })
+            super::PersistedSessionWorkflowEvent::Event(ref envelope)
+                if envelope.generation == 4
         ));
         let stored = JsonlSessionReader::read_all(&wire_path)
             .await

@@ -122,7 +122,7 @@ async fn missing_capability_and_invalid_input_never_open_workflow_approval() {
             panic!("invalid input must not prompt")
         },
     );
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     let (events, config) = run(&harness, config).await;
     assert_eq!(approval_calls.load(Ordering::Acquire), 0);
     assert_eq!(
@@ -138,15 +138,19 @@ async fn source_and_run_metadata_limits_return_typed_invalid_input() {
         {
             let mut input = valid_input("source-limit");
             input["script"] = Value::String("neo.phase('work')".to_owned());
-            let mut limits = neo_agent_core::workflow::WorkflowLimits::default();
-            limits.lua_source_bytes = 8;
+            let limits = neo_agent_core::workflow::WorkflowLimits {
+                lua_source_bytes: 8,
+                ..Default::default()
+            };
             (input, limits)
         },
         {
             let mut input = valid_input("metadata-limit");
             input["args"] = json!({"payload": "x".repeat(1024)});
-            let mut limits = neo_agent_core::workflow::WorkflowLimits::default();
-            limits.journal_record_bytes = 256;
+            let limits = neo_agent_core::workflow::WorkflowLimits {
+                journal_record_bytes: 256,
+                ..Default::default()
+            };
             (input, limits)
         },
     ] {
@@ -154,7 +158,7 @@ async fn source_and_run_metadata_limits_return_typed_invalid_input() {
         let harness = harness_for_calls(&[("invalid", input)]);
         let mut config = config_for(&harness, session.path(), PermissionMode::Auto);
         config.workflow_runtime = neo_agent_core::workflow::WorkflowRuntime::new(limits);
-        config.workflow_capability.grant().await;
+        config.workflow_capability.grant();
 
         let (events, config) = run(&harness, config).await;
         let result = &workflow_results(&events)[0];
@@ -193,7 +197,7 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
             }
         },
     );
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     config
         .workflow_runtime
         .bind_runner({
@@ -243,7 +247,7 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
     );
     let harness = harness_for_calls(&[("launch", input)]);
     let config = config_for(&harness, session.path(), PermissionMode::Auto);
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     let idle_events = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&idle_events);
     let _idle_lease = config
@@ -350,7 +354,7 @@ async fn ask_revise_preserves_capability_and_cancel_revokes_without_run() {
                 feedback: matches!(selected, ApprovalAction::ReviseWorkflow { .. })
                     .then(|| "split the phases".to_owned()),
             });
-        config.workflow_capability.grant().await;
+        config.workflow_capability.grant();
         let (events, config) = run(&harness, config).await;
         assert_eq!(config.workflow_capability.inspect(), remains);
         assert!(config.background_tasks.list(false, 10).await.is_empty());
@@ -377,7 +381,7 @@ async fn auto_and_yolo_cannot_bypass_capability_and_one_grant_launches_once() {
         ("second", valid_input("second")),
     ]);
     let config = config_for(&harness, session.path(), PermissionMode::Auto);
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     let (events, config) = run(&harness, config).await;
     let results = workflow_results(&events);
     assert_eq!(results.iter().filter(|result| !result.is_error).count(), 1);
@@ -392,7 +396,7 @@ async fn durable_create_failure_rolls_reservation_back() {
     std::fs::write(&session_file, b"x").unwrap();
     let harness = harness_for_calls(&[("create", valid_input("create"))]);
     let config = config_for(&harness, &session_file, PermissionMode::Auto);
-    config.workflow_capability.grant().await;
+    config.workflow_capability.grant();
     let (events, config) = run(&harness, config).await;
     assert!(
         workflow_results(&events)[0]

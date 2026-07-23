@@ -4,7 +4,7 @@ target
 .references/
 .DS_Store
 .worktrees/
-docs/aegis/work
+docs/aegis/work/
 .mimocode
 .codegraph/
 docs/node_modules/

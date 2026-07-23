@@ -556,6 +556,33 @@ mod tests {
             state.most_recent_scope.as_deref(),
             Some(workspace.as_path())
         );
+    }
+
+    #[test]
+    fn replay_removal_epoch_and_legacy_sessions() {
+        let workspace = PathBuf::from("/workspace");
+        let first = instruction_epoch(
+            1,
+            "rev-1",
+            InstructionEpochOutcome::Ready,
+            Some("first rules"),
+            Vec::new(),
+        );
+        let second = instruction_epoch(
+            2,
+            "rev-2",
+            InstructionEpochOutcome::Updated,
+            Some("second rules"),
+            vec![InstructionReplacement {
+                display_path: workspace.clone(),
+                previous_revision: "rev-1".to_owned(),
+                new_revision: "rev-2".to_owned(),
+            }],
+        );
+        let events = [
+            AgentEvent::InstructionEpoch { epoch: first },
+            AgentEvent::InstructionEpoch { epoch: second },
+        ];
 
         // A removal epoch without model content updates authority without
         // pinning a new message.

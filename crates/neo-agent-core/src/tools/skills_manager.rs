@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeSet,
+    fmt::Write,
     fs as stdfs, io,
-    io::Write,
+    io::Write as _,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -207,10 +208,10 @@ impl Tool for ListSkillsTool {
                     let resources = skill_resource_summary(&skill.root)
                         .map_or_else(String::new, |summary| format!(" {summary}"));
                     let display = skill.display_name();
-                    let label = if display != skill.name.as_str() {
-                        format!(" ({display})")
-                    } else {
+                    let label = if display == skill.name.as_str() {
                         String::new()
+                    } else {
+                        format!(" ({display})")
                     };
                     let mut entry = format!(
                         "  {}{}: {}{}",
@@ -220,7 +221,7 @@ impl Tool for ListSkillsTool {
                         resources
                     );
                     if let Some(short) = skill.short_description() {
-                        entry.push_str(&format!(" — {short}"));
+                        let _ = write!(entry, " — {short}");
                     }
                     if !skill.host_metadata.dependencies.is_empty() {
                         let deps: Vec<_> = skill
@@ -229,7 +230,7 @@ impl Tool for ListSkillsTool {
                             .iter()
                             .map(|d| d.value.as_str())
                             .collect();
-                        entry.push_str(&format!("  [needs: {}]", deps.join(", ")));
+                        let _ = write!(entry, "  [needs: {}]", deps.join(", "));
                     }
                     lines.push(entry);
                 }
@@ -386,27 +387,9 @@ impl Tool for CreateSkillTool {
                 preflight_resource_file(&skill_dir, resource).map_err(ToolError::Io)?;
             }
 
-            let backup_path = if skill_dir_existed {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let backup_child = PathBuf::from("backups").join("skills");
-                let backup_root = ensure_safe_home_subdirectory(&user_home, &backup_child)?;
-                let backup_id = format!("{timestamp}-{}", Uuid::new_v4());
-                let timestamp_dir =
-                    ensure_safe_child_directory(&backup_root, Path::new(&backup_id))
-                        .map_err(ToolError::Io)?;
-                let backup_dir = timestamp_dir.join(&args.name);
-                reject_reparse_or_symlink_if_present(&backup_dir).map_err(ToolError::Io)?;
-                if let Err(error) = copy_dir(&skill_dir, &backup_dir).await {
-                    let _ = fs::remove_dir_all(&backup_dir).await;
-                    return Err(ToolError::Io(error));
-                }
-                Some(backup_dir)
-            } else {
-                None
-            };
+            let backup_path =
+                backup_skill_if_exists(skill_dir_existed, &user_home, &args.name, &skill_dir)
+                    .await?;
 
             write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
 
@@ -453,6 +436,33 @@ impl Tool for CreateSkillTool {
             }
         })
     }
+}
+
+async fn backup_skill_if_exists(
+    skill_dir_existed: bool,
+    user_home: &Path,
+    skill_name: &str,
+    skill_dir: &Path,
+) -> Result<Option<PathBuf>, ToolError> {
+    if !skill_dir_existed {
+        return Ok(None);
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let backup_child = PathBuf::from("backups").join("skills");
+    let backup_root = ensure_safe_home_subdirectory(user_home, &backup_child)?;
+    let backup_id = format!("{timestamp}-{}", Uuid::new_v4());
+    let timestamp_dir =
+        ensure_safe_child_directory(&backup_root, Path::new(&backup_id)).map_err(ToolError::Io)?;
+    let backup_dir = timestamp_dir.join(skill_name);
+    reject_reparse_or_symlink_if_present(&backup_dir).map_err(ToolError::Io)?;
+    if let Err(error) = copy_dir(skill_dir, &backup_dir).await {
+        let _ = fs::remove_dir_all(&backup_dir).await;
+        return Err(ToolError::Io(error));
+    }
+    Ok(Some(backup_dir))
 }
 
 fn prepare_host_metadata(

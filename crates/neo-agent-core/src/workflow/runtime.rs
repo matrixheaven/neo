@@ -417,7 +417,7 @@ impl WorkflowRuntime {
     }
 
     /// Persist a terminal failure if worker startup fails after capability
-    /// commit. The registered task remains inspectable through TaskOutput.
+    /// commit. The registered task remains inspectable through `TaskOutput`.
     pub async fn fail_worker_start(
         &self,
         run_id: &WorkflowId,
@@ -568,6 +568,138 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    async fn rehydrate_run_entry(
+        &self,
+        entry: std::fs::DirEntry,
+        handles: &mut Vec<WorkflowHandle>,
+    ) -> Result<(), WorkflowError> {
+        let run_dir = entry.path();
+        if !run_dir.is_dir() {
+            return Ok(());
+        }
+        let fallback_id = WorkflowId(entry.file_name().to_string_lossy().into_owned());
+        let existing = self.runs.lock().await.get(&fallback_id.0).cloned();
+        if let Some(existing) = existing {
+            let guard = existing.lock().await;
+            if guard.run_dir != run_dir {
+                return Err(WorkflowError::Journal(format!(
+                    "workflow {} is already registered from {} instead of {}",
+                    fallback_id,
+                    guard.run_dir.display(),
+                    run_dir.display()
+                )));
+            }
+            handles.push(WorkflowHandle {
+                run_id: fallback_id,
+                control: Arc::clone(&guard.control),
+                runtime: self.clone(),
+            });
+            return Ok(());
+        }
+        let metadata = match journal::read_run_metadata(&run_dir) {
+            Ok(metadata) if metadata.run_id == fallback_id => metadata,
+            Ok(_) => {
+                handles.push(
+                    self.insert_corrupt_run(
+                        run_dir,
+                        fallback_id,
+                        "run metadata id does not match directory".to_owned(),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                handles.push(
+                    self.insert_corrupt_run(run_dir, fallback_id, error.to_string())
+                        .await,
+                );
+                return Ok(());
+            }
+        };
+        let journal_path = run_dir.join("journal.jsonl");
+        let mut records = match journal::read_journal(&journal_path) {
+            Ok(records) if !records.is_empty() => records,
+            Ok(_) => {
+                handles.push(
+                    self.insert_failed_run(
+                        run_dir,
+                        metadata,
+                        "corrupt journal: missing initial state".to_owned(),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                handles.push(
+                    self.insert_failed_run(run_dir, metadata, format!("corrupt journal: {error}"))
+                        .await,
+                );
+                return Ok(());
+            }
+        };
+        let mut writer = JournalWriter::open(&journal_path)?;
+        let incomplete = journal::find_incomplete_invocations(&records);
+        if !incomplete.is_empty() {
+            let resolver = self.bound_recovery_resolver()?;
+            for invocation in incomplete {
+                let invocation = Arc::new(invocation);
+                let outcome = if let Some(resolver) = resolver.as_ref() {
+                    resolver(Arc::clone(&invocation))
+                        .await
+                        .unwrap_or_else(|| interrupted_outcome(&invocation))
+                } else {
+                    interrupted_outcome(&invocation)
+                };
+                let record = JournalRecord::InvocationFinished {
+                    seq: writer.next_seq(),
+                    timestamp_ms: current_timestamp_ms(),
+                    invocation_id: invocation.invocation_id.clone(),
+                    outcome,
+                };
+                writer.append(&record, &self.limits)?;
+                records.push(record);
+            }
+        }
+
+        let (last_state, last_reason) = last_state(&records);
+        let final_state = if last_state == WorkflowState::Running {
+            let record = JournalRecord::StateChanged {
+                seq: writer.next_seq(),
+                timestamp_ms: current_timestamp_ms(),
+                previous: WorkflowState::Running,
+                new: WorkflowState::Paused,
+                reason: "host_exit".to_owned(),
+                actor: WorkflowActor::Runtime,
+            };
+            writer.append(&record, &self.limits)?;
+            records.push(record);
+            WorkflowState::Paused
+        } else {
+            last_state
+        };
+        let terminal_reason = if last_state == WorkflowState::Running {
+            Some("host_exit".to_owned())
+        } else if final_state == WorkflowState::Paused || final_state.is_terminal() {
+            last_reason
+        } else {
+            None
+        };
+        handles.push(
+            self.insert_rehydrated_run(
+                run_dir,
+                metadata,
+                records,
+                final_state,
+                terminal_reason,
+                writer,
+            )
+            .await,
+        );
+        Ok(())
+    }
+
     pub async fn rehydrate(
         &self,
         session_dir: &Path,
@@ -585,134 +717,7 @@ impl WorkflowRuntime {
 
         let mut handles = Vec::new();
         for entry in entries {
-            let run_dir = entry.path();
-            if !run_dir.is_dir() {
-                continue;
-            }
-            let fallback_id = WorkflowId(entry.file_name().to_string_lossy().into_owned());
-            let existing = self.runs.lock().await.get(&fallback_id.0).cloned();
-            if let Some(existing) = existing {
-                let guard = existing.lock().await;
-                if guard.run_dir != run_dir {
-                    return Err(WorkflowError::Journal(format!(
-                        "workflow {} is already registered from {} instead of {}",
-                        fallback_id,
-                        guard.run_dir.display(),
-                        run_dir.display()
-                    )));
-                }
-                handles.push(WorkflowHandle {
-                    run_id: fallback_id,
-                    control: Arc::clone(&guard.control),
-                    runtime: self.clone(),
-                });
-                continue;
-            }
-            let metadata = match journal::read_run_metadata(&run_dir) {
-                Ok(metadata) if metadata.run_id == fallback_id => metadata,
-                Ok(_) => {
-                    handles.push(
-                        self.insert_corrupt_run(
-                            run_dir,
-                            fallback_id,
-                            "run metadata id does not match directory".to_owned(),
-                        )
-                        .await,
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    handles.push(
-                        self.insert_corrupt_run(run_dir, fallback_id, error.to_string())
-                            .await,
-                    );
-                    continue;
-                }
-            };
-            let journal_path = run_dir.join("journal.jsonl");
-            let mut records = match journal::read_journal(&journal_path) {
-                Ok(records) if !records.is_empty() => records,
-                Ok(_) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            "corrupt journal: missing initial state".to_owned(),
-                        )
-                        .await,
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            format!("corrupt journal: {error}"),
-                        )
-                        .await,
-                    );
-                    continue;
-                }
-            };
-            let mut writer = JournalWriter::open(&journal_path)?;
-            let incomplete = journal::find_incomplete_invocations(&records);
-            if !incomplete.is_empty() {
-                let resolver = self.bound_recovery_resolver()?;
-                for invocation in incomplete {
-                    let invocation = Arc::new(invocation);
-                    let outcome = if let Some(resolver) = resolver.as_ref() {
-                        resolver(Arc::clone(&invocation))
-                            .await
-                            .unwrap_or_else(|| interrupted_outcome(&invocation))
-                    } else {
-                        interrupted_outcome(&invocation)
-                    };
-                    let record = JournalRecord::InvocationFinished {
-                        seq: writer.next_seq(),
-                        timestamp_ms: current_timestamp_ms(),
-                        invocation_id: invocation.invocation_id.clone(),
-                        outcome,
-                    };
-                    writer.append(&record, &self.limits)?;
-                    records.push(record);
-                }
-            }
-
-            let (last_state, last_reason) = last_state(&records);
-            let final_state = if last_state == WorkflowState::Running {
-                let record = JournalRecord::StateChanged {
-                    seq: writer.next_seq(),
-                    timestamp_ms: current_timestamp_ms(),
-                    previous: WorkflowState::Running,
-                    new: WorkflowState::Paused,
-                    reason: "host_exit".to_owned(),
-                    actor: WorkflowActor::Runtime,
-                };
-                writer.append(&record, &self.limits)?;
-                records.push(record);
-                WorkflowState::Paused
-            } else {
-                last_state
-            };
-            let terminal_reason = if last_state == WorkflowState::Running {
-                Some("host_exit".to_owned())
-            } else if final_state == WorkflowState::Paused || final_state.is_terminal() {
-                last_reason
-            } else {
-                None
-            };
-            handles.push(
-                self.insert_rehydrated_run(
-                    run_dir,
-                    metadata,
-                    records,
-                    final_state,
-                    terminal_reason,
-                    writer,
-                )
-                .await,
-            );
+            self.rehydrate_run_entry(entry, &mut handles).await?;
         }
         for handle in &handles {
             let snapshot = handle.snapshot().await;
@@ -720,7 +725,7 @@ impl WorkflowRuntime {
                 || (snapshot.state == WorkflowState::Paused
                     && snapshot.terminal_reason.as_deref() == Some("host_exit"))
             {
-                self.notifications.enqueue(WorkflowNotification::new(
+                let _ = self.notifications.enqueue(WorkflowNotification::new(
                     session_dir,
                     snapshot.id,
                     snapshot.state,
@@ -784,41 +789,16 @@ impl WorkflowRuntime {
                     .token_cap
                     .is_some_and(|cap| usage_total(guard.actual_usage) >= cap);
             let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().as_simple());
-            let writer = guard.journal.as_mut().ok_or_else(|| {
-                WorkflowError::Journal("workflow journal is unavailable".to_owned())
-            })?;
-            let timestamp_ms = current_timestamp_ms();
-            let started = JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms,
-                invocation_id: invocation_id.clone(),
+            self.write_invocation_started(
+                &mut guard,
+                invocation_id.clone(),
                 call_index,
                 kind,
                 canonical_input,
-                canonical_input_hash: input_hash,
-            };
-            let sequence = match writer.append(&started, &self.limits) {
-                Ok(sequence) => sequence,
-                Err(error) => {
-                    if matches!(error, WorkflowError::JournalTotalLimitExceeded) {
-                        self.transition_locked(
-                            &mut guard,
-                            WorkflowState::ResourceLimited,
-                            "journal limit reached",
-                            WorkflowActor::Runtime,
-                        )?;
-                        return Err(WorkflowError::ResourceLimited(
-                            "journal limit reached".to_owned(),
-                        ));
-                    }
-                    return Err(error);
-                }
-            };
+                input_hash,
+            )?;
             guard.invocation_count = guard.invocation_count.saturating_add(1);
             guard.current_invocation = Some(invocation_id.clone());
-            guard.projection_sequence = Some(sequence);
-            guard.updated_at_ms = Some(timestamp_ms);
-            self.emit_projection(&guard, WorkflowProjectionStage::Updated);
             (invocation_id, Arc::clone(&guard.control), capped)
         };
 
@@ -832,6 +812,64 @@ impl WorkflowRuntime {
             .await
         };
 
+        self.finalize_invocation_locked(state, invocation_id, kind, outcome, capped)
+            .await
+    }
+
+    fn write_invocation_started(
+        &self,
+        guard: &mut RunState,
+        invocation_id: String,
+        call_index: u64,
+        kind: WorkflowInvocationKind,
+        canonical_input: serde_json::Value,
+        canonical_input_hash: String,
+    ) -> Result<(), WorkflowError> {
+        let writer = guard
+            .journal
+            .as_mut()
+            .ok_or_else(|| WorkflowError::Journal("workflow journal is unavailable".to_owned()))?;
+        let timestamp_ms = current_timestamp_ms();
+        let started = JournalRecord::InvocationStarted {
+            seq: writer.next_seq(),
+            timestamp_ms,
+            invocation_id,
+            call_index,
+            kind,
+            canonical_input,
+            canonical_input_hash,
+        };
+        let sequence = match writer.append(&started, &self.limits) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                if matches!(error, WorkflowError::JournalTotalLimitExceeded) {
+                    self.transition_locked(
+                        guard,
+                        WorkflowState::ResourceLimited,
+                        "journal limit reached",
+                        WorkflowActor::Runtime,
+                    )?;
+                    return Err(WorkflowError::ResourceLimited(
+                        "journal limit reached".to_owned(),
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(guard, WorkflowProjectionStage::Updated);
+        Ok(())
+    }
+
+    async fn finalize_invocation_locked(
+        &self,
+        state: Arc<Mutex<RunState>>,
+        invocation_id: String,
+        kind: WorkflowInvocationKind,
+        outcome: WorkflowInvocationOutcome,
+        capped: bool,
+    ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
         let mut guard = state.lock().await;
         let (outcome, resource_limit_reason) =
             match self.finish_invocation_locked(&mut guard, invocation_id, kind, outcome, capped) {
@@ -1036,7 +1074,7 @@ impl WorkflowRuntime {
         state.journal = None;
         self.emit_projection(state, WorkflowProjectionStage::Finished);
         if let Some(session_dir) = state.run_dir.parent().and_then(Path::parent) {
-            self.notifications.enqueue(WorkflowNotification::new(
+            let _ = self.notifications.enqueue(WorkflowNotification::new(
                 session_dir,
                 state.metadata.run_id.clone(),
                 WorkflowState::Failed,
@@ -1096,7 +1134,7 @@ impl WorkflowRuntime {
         if new_state.is_terminal()
             && let Some(session_dir) = state.run_dir.parent().and_then(Path::parent)
         {
-            self.notifications.enqueue(WorkflowNotification::new(
+            let _ = self.notifications.enqueue(WorkflowNotification::new(
                 session_dir,
                 state.metadata.run_id.clone(),
                 new_state,
@@ -1129,7 +1167,7 @@ impl WorkflowRuntime {
             .map_err(|_| WorkflowError::Host("workflow recovery lock poisoned".to_owned()))
     }
 
-    fn emit_projection(&self, state: &RunState, stage: WorkflowProjectionStage) {
+    fn emit_projection(&self, state: &RunState, projection_stage: WorkflowProjectionStage) {
         let Ok(emitter) = self
             .projection_emitter
             .read()
@@ -1143,7 +1181,7 @@ impl WorkflowRuntime {
         let Some(session_dir) = state.run_dir.parent().and_then(Path::parent) else {
             return;
         };
-        emitter(session_dir, stage, state.snapshot());
+        emitter(session_dir, projection_stage, state.snapshot());
     }
 
     async fn insert_rehydrated_run(

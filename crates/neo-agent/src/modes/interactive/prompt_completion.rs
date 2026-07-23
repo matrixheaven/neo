@@ -46,7 +46,7 @@ pub(super) fn prompt_completions_from_catalog(
     prefix: &str,
     catalog: &CompletionCatalog,
 ) -> Result<Vec<PickerItem>> {
-    Ok(completion_source_candidates(root, prefix, &catalog)?
+    Ok(completion_source_candidates(root, prefix, catalog)?
         .into_iter()
         .map(|candidate| candidate.to_picker_item())
         .collect())
@@ -54,7 +54,7 @@ pub(super) fn prompt_completions_from_catalog(
 
 fn prompt_package_completion_items(root: &Path, templates: &[PromptTemplate]) -> Vec<PickerItem> {
     let mut items = templates
-        .into_iter()
+        .iter()
         .filter_map(|template| {
             let relative_path = template.path.strip_prefix(root.join(".neo/prompts")).ok()?;
             relative_path
@@ -128,7 +128,7 @@ fn slash_prompt_template_completion_items(
 ) -> Vec<PickerItem> {
     let project_prompts_dir = root.join(".neo/prompts");
     let mut completions = templates
-        .into_iter()
+        .iter()
         .filter(|template| {
             template
                 .path

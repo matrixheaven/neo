@@ -280,7 +280,7 @@ fn content_body(
     replay_reasoning: bool,
 ) -> Option<Result<Value, ProviderError>> {
     match message {
-        ChatMessage::System { .. } => None,
+        ChatMessage::System { .. } | ChatMessage::ToolResult { .. } => None,
         ChatMessage::User { content } => Some(content_parts(content, true).map(|parts| {
             json!({
                 "role": "user",
@@ -318,7 +318,6 @@ fn content_body(
                 }),
             )
         }
-        ChatMessage::ToolResult { .. } => None,
     }
 }
 
@@ -857,6 +856,10 @@ mod tests {
             .unwrap();
         assert!(!ids.contains(&second_id));
 
+        assert_content_bodies_replay(&ids, second_id);
+    }
+
+    fn assert_content_bodies_replay(ids: &[String], second_id: String) {
         let messages = vec![
             ChatMessage::Assistant {
                 content: Vec::new(),

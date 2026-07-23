@@ -283,23 +283,9 @@ impl Tool for RunWorkflowTool {
                 })?;
 
             if let Err(error) = ctx.workflow_runtime.start_worker(&handle.run_id).await {
-                let terminal_error = ctx
-                    .workflow_runtime
-                    .fail_worker_start(&handle.run_id, &error)
-                    .await
-                    .err();
-                let suffix = terminal_error.map_or_else(String::new, |terminal_error| {
-                    format!("; failed to persist terminal state: {terminal_error}")
-                });
-                return Ok(ToolResult::error(format!(
-                    "task_id: {task_id}\nkind: workflow\nstatus: failed\nerror: worker startup failed: {error}{suffix}"
-                ))
-                .with_details(json!({
-                    "task_id": task_id,
-                    "kind": "workflow",
-                    "status": "failed",
-                    "error": error.to_string(),
-                })));
+                return Ok(
+                    report_worker_failure(&ctx.workflow_runtime, &handle, &error, &task_id).await,
+                );
             }
 
             Ok(ToolResult::ok(format!(
@@ -314,6 +300,27 @@ impl Tool for RunWorkflowTool {
             })))
         })
     }
+}
+
+async fn report_worker_failure(
+    runtime: &crate::workflow::WorkflowRuntime,
+    handle: &crate::workflow::WorkflowHandle,
+    error: &crate::workflow::WorkflowError,
+    task_id: &str,
+) -> ToolResult {
+    let terminal_error = runtime.fail_worker_start(&handle.run_id, error).await.err();
+    let suffix = terminal_error.map_or_else(String::new, |terminal_error| {
+        format!("; failed to persist terminal state: {terminal_error}")
+    });
+    ToolResult::error(format!(
+        "task_id: {task_id}\nkind: workflow\nstatus: failed\nerror: worker startup failed: {error}{suffix}"
+    ))
+    .with_details(json!({
+        "task_id": task_id,
+        "kind": "workflow",
+        "status": "failed",
+        "error": error.to_string(),
+    }))
 }
 
 #[cfg(test)]

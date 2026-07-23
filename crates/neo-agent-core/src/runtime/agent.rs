@@ -261,60 +261,22 @@ impl AgentRuntime {
         let (workflow_event_lease, workflow_event_drain_lease) =
             workflow_event_leases.map_or((None, None), |(lease, drain)| (Some(lease), Some(drain)));
 
-        tokio::spawn(async move {
-            let mut emitter = EventEmitter::new(sender, live_context);
-            let _workflow_event_lease = workflow_event_lease;
-            emitter.emit(AgentEvent::RunStarted {
-                turn: emitter.context.turns.saturating_add(1),
-            });
-            if let Some(skill_context) = emitter.context.take_skill_context() {
-                emitter.emit(AgentEvent::MessageAppended {
-                    message: skill_context,
-                });
-            }
-            // Baseline-before-user: new sessions and pre-feature resumes
-            // (visible_generation == 0) establish one durable instruction
-            // epoch before the first user message is appended.
-            if let Err(err) =
-                establish_instruction_baseline(&model, &config, &mut emitter, &cancel_token).await
-            {
-                process_supervisor.cleanup_all().await;
-                emitter.emit(AgentEvent::MessageAppended { message });
-                emitter.emit(AgentEvent::RunFinished {
-                    turn: emitter.context.turns.saturating_add(1),
-                    stop_reason: StopReason::Error,
-                });
-                let _ = emitter.send_error(err);
-                let _ = final_sender.send(emitter.context);
-                return;
-            }
-            append_available_skills_snapshot(skills.as_ref(), &mut emitter);
-            emitter.emit(AgentEvent::MessageAppended { message });
-            if natural_user_turn {
-                append_pending_workflow_notifications(&config, &mut emitter);
-            }
-            if let Err(err) = run_agent_turn(
-                model,
-                config,
-                tools,
-                skills,
-                goal_manager,
-                steer_input,
-                &mut emitter,
-                cancel_token,
-                process_supervisor.clone(),
-            )
-            .await
-            {
-                process_supervisor.cleanup_all().await;
-                emitter.emit(AgentEvent::RunFinished {
-                    turn: emitter.context.turns.saturating_add(1),
-                    stop_reason: StopReason::Error,
-                });
-                let _ = emitter.send_error(err);
-            }
-            let _ = final_sender.send(emitter.context);
-        });
+        tokio::spawn(Self::run_turn_spawned(
+            sender,
+            live_context,
+            workflow_event_lease,
+            model,
+            config,
+            tools,
+            skills,
+            goal_manager,
+            steer_input,
+            message,
+            natural_user_turn,
+            process_supervisor,
+            cancel_token,
+            final_sender,
+        ));
 
         let inner = stream::unfold(
             SpawnedRun {
@@ -342,6 +304,77 @@ impl AgentRuntime {
             inner,
             _workflow_event_drain_lease: workflow_event_drain_lease,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_spawned(
+        sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+        live_context: AgentContext,
+        workflow_event_lease: Option<super::workflow_dispatch::WorkflowDispatchEventLease>,
+        model: Arc<dyn ModelClient>,
+        config: AgentConfig,
+        tools: Option<Arc<ToolRegistry>>,
+        skills: Option<SkillStoreHandle>,
+        goal_manager: Option<Arc<GoalManager>>,
+        steer_input: SteerInputHandle,
+        message: AgentMessage,
+        natural_user_turn: bool,
+        process_supervisor: ProcessSupervisor,
+        cancel_token: CancellationToken,
+        final_sender: oneshot::Sender<AgentContext>,
+    ) {
+        let mut emitter = EventEmitter::new(sender, live_context);
+        let _workflow_event_lease = workflow_event_lease;
+        emitter.emit(AgentEvent::RunStarted {
+            turn: emitter.context.turns.saturating_add(1),
+        });
+        if let Some(skill_context) = emitter.context.take_skill_context() {
+            emitter.emit(AgentEvent::MessageAppended {
+                message: skill_context,
+            });
+        }
+        // Baseline-before-user: new sessions and pre-feature resumes
+        // (visible_generation == 0) establish one durable instruction
+        // epoch before the first user message is appended.
+        if let Err(err) =
+            establish_instruction_baseline(&model, &config, &mut emitter, &cancel_token).await
+        {
+            process_supervisor.cleanup_all().await;
+            emitter.emit(AgentEvent::MessageAppended { message });
+            emitter.emit(AgentEvent::RunFinished {
+                turn: emitter.context.turns.saturating_add(1),
+                stop_reason: StopReason::Error,
+            });
+            let _ = emitter.send_error(err);
+            let _ = final_sender.send(emitter.context);
+            return;
+        }
+        append_available_skills_snapshot(skills.as_ref(), &mut emitter);
+        emitter.emit(AgentEvent::MessageAppended { message });
+        if natural_user_turn {
+            append_pending_workflow_notifications(&config, &mut emitter);
+        }
+        if let Err(err) = run_agent_turn(
+            model,
+            config,
+            tools,
+            skills,
+            goal_manager,
+            steer_input,
+            &mut emitter,
+            cancel_token,
+            process_supervisor.clone(),
+        )
+        .await
+        {
+            process_supervisor.cleanup_all().await;
+            emitter.emit(AgentEvent::RunFinished {
+                turn: emitter.context.turns.saturating_add(1),
+                stop_reason: StopReason::Error,
+            });
+            let _ = emitter.send_error(err);
+        }
+        let _ = final_sender.send(emitter.context);
     }
 
     /// Run a compaction-only turn.  This does not append a user message and does

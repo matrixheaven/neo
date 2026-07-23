@@ -2083,7 +2083,7 @@ impl InteractiveController {
             && let Some(id) = neo_agent_core::WorkflowNotification::projection_id(message)
             && let Some(config) = &self.local_config
         {
-            config
+            let _ = config
                 .workflow_runtime
                 .notification_queue()
                 .mark_projected(id);

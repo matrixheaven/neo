@@ -3,6 +3,8 @@
 //! One renderer serves both automatic `Skill` calls and manual `/skill:*`
 //! activation so resource resolution never depends on the activation route.
 
+use std::fmt::Write;
+
 use crate::skills::LoadedSkill;
 
 /// Render the activated skill envelope for model context injection.
@@ -22,7 +24,7 @@ pub fn render_skill_context(skill: &LoadedSkill, instructions: &str) -> String {
     if !skill.host_metadata.dependencies.is_empty() {
         xml.push_str("\n<dependencies>\n");
         for dep in &skill.host_metadata.dependencies {
-            xml.push_str(&format!("  <mcp value=\"{}\">", escape_xml(&dep.value)));
+            let _ = write!(xml, "  <mcp value=\"{}\">", escape_xml(&dep.value));
             if let Some(ref desc) = dep.description {
                 xml.push_str(&escape_xml(desc));
             }
@@ -31,9 +33,10 @@ pub fn render_skill_context(skill: &LoadedSkill, instructions: &str) -> String {
         xml.push_str("</dependencies>\n");
     }
 
-    xml.push_str(&format!(
+    let _ = write!(
+        xml,
         "\n<instructions>\n{instructions}\n</instructions>\n</neo-skill-loaded>"
-    ));
+    );
     xml
 }
 

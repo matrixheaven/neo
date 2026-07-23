@@ -11,8 +11,8 @@ use super::shell_guard::{
     ShellAdmissionEvent, ShellAdmissionRequest, TerminalClientSession, TerminalClientState,
 };
 use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code, parse_input,
-    parse_shell_timeout_secs, schema,
+    ShellRuntime, Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code,
+    parse_input, parse_shell_timeout_secs, schema,
 };
 use crate::session::MAIN_AGENT_ID;
 
@@ -112,51 +112,12 @@ impl Tool for TerminalTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
-            let input: TerminalInput = parse_input(self.name(), input)?;
-            if input.cwd.is_some() && input.mode != TerminalMode::Start {
-                return Err(ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: "`cwd` is only valid for mode `start`".to_owned(),
-                });
-            }
-            if input.timeout_secs.is_some() && input.mode != TerminalMode::Start {
-                return Err(ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: "timeout_secs is valid only for start".to_owned(),
-                });
-            }
-            if input.input.is_some() && input.mode != TerminalMode::Write {
-                return Err(ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: "`input` is only valid for mode `write`".to_owned(),
-                });
-            }
-            if let Some(yield_time_ms) = input.yield_time_ms {
-                if !matches!(
-                    input.mode,
-                    TerminalMode::Start | TerminalMode::Write | TerminalMode::Read
-                ) {
-                    return Err(ToolError::InvalidInput {
-                        tool: self.name().to_owned(),
-                        message: "yield_time_ms is valid only for start, write, and read"
-                            .to_owned(),
-                    });
-                }
-                if yield_time_ms > TERMINAL_MAX_YIELD_MS {
-                    return Err(ToolError::InvalidInput {
-                        tool: self.name().to_owned(),
-                        message: format!(
-                            "yield_time_ms must be between 0 and {TERMINAL_MAX_YIELD_MS}"
-                        ),
-                    });
-                }
-            }
-            let timeout = parse_shell_timeout_secs(self.name(), input.timeout_secs)?;
-            let max_output_bytes = input
-                .max_output_bytes
-                .unwrap_or(ctx.max_output_bytes)
-                .min(ctx.shell_runtime.limits().max_output_bytes);
-            let yield_for = terminal_yield(input.mode, input.yield_time_ms);
+            let (input, timeout, max_output_bytes, yield_for) = validate_and_prepare_terminal(
+                self.name(),
+                input,
+                ctx.max_output_bytes,
+                &ctx.shell_runtime,
+            )?;
             match input.mode {
                 TerminalMode::Start => {
                     start_terminal(
@@ -213,6 +174,57 @@ impl Tool for TerminalTool {
             }
         })
     }
+}
+
+fn validate_and_prepare_terminal(
+    tool: &str,
+    input: serde_json::Value,
+    ctx_max_output_bytes: usize,
+    shell_runtime: &ShellRuntime,
+) -> Result<(TerminalInput, Option<Duration>, usize, Duration), ToolError> {
+    let input: TerminalInput = parse_input(tool, input)?;
+    if input.cwd.is_some() && input.mode != TerminalMode::Start {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "`cwd` is only valid for mode `start`".to_owned(),
+        });
+    }
+    if input.timeout_secs.is_some() && input.mode != TerminalMode::Start {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "timeout_secs is valid only for start".to_owned(),
+        });
+    }
+    if input.input.is_some() && input.mode != TerminalMode::Write {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "`input` is only valid for mode `write`".to_owned(),
+        });
+    }
+    if let Some(yield_time_ms) = input.yield_time_ms {
+        if !matches!(
+            input.mode,
+            TerminalMode::Start | TerminalMode::Write | TerminalMode::Read
+        ) {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: "yield_time_ms is valid only for start, write, and read".to_owned(),
+            });
+        }
+        if yield_time_ms > TERMINAL_MAX_YIELD_MS {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!("yield_time_ms must be between 0 and {TERMINAL_MAX_YIELD_MS}"),
+            });
+        }
+    }
+    let timeout = parse_shell_timeout_secs(tool, input.timeout_secs)?;
+    let max_output_bytes = input
+        .max_output_bytes
+        .unwrap_or(ctx_max_output_bytes)
+        .min(shell_runtime.limits().max_output_bytes);
+    let yield_for = terminal_yield(input.mode, input.yield_time_ms);
+    Ok((input, timeout, max_output_bytes, yield_for))
 }
 
 async fn start_terminal(
@@ -371,45 +383,7 @@ async fn collect_terminal_output(
     let _read = session.read_lock.lock().await;
     let read_offset = session.state.lock().await.read_offset;
 
-    if !yield_for.is_zero() && session.client.final_result().is_none() {
-        let started_at = Instant::now();
-        let deadline = started_at + yield_for;
-        // Raw PTY bootstrap bytes can precede child output on ConPTY.
-        let quiet_not_before = started_at
-            + if mode == TerminalMode::Start {
-                yield_for.min(TERMINAL_START_WRITE_YIELD)
-            } else {
-                Duration::ZERO
-            };
-        let mut last_total = 0;
-        let mut last_change = started_at;
-        while Instant::now() < deadline {
-            if ctx.cancel_token.is_cancelled() {
-                return Err(ToolError::Cancelled);
-            }
-            let snapshot = match session.client.read_terminal(read_offset, 0).await {
-                Ok(snapshot) => snapshot,
-                Err(_) if session.client.final_result().is_some() => break,
-                Err(error) => return Err(error),
-            };
-            if snapshot.total != last_total {
-                last_total = snapshot.total;
-                last_change = Instant::now();
-            } else if snapshot.total > read_offset
-                && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD
-                && Instant::now() >= quiet_not_before
-            {
-                break;
-            }
-            if session.client.final_result().is_some() {
-                break;
-            }
-            tokio::select! {
-                () = ctx.cancel_token.cancelled() => return Err(ToolError::Cancelled),
-                () = tokio::time::sleep(TERMINAL_READ_POLL_INTERVAL) => {}
-            }
-        }
-    }
+    wait_for_terminal_data(ctx, session, mode, read_offset, yield_for).await?;
 
     if ctx.cancel_token.is_cancelled() {
         return Err(ToolError::Cancelled);
@@ -543,6 +517,56 @@ async fn stop_terminal(
         "truncated": truncated,
         "reader_drained": true,
     })))
+}
+
+async fn wait_for_terminal_data(
+    ctx: &ToolContext,
+    session: &TerminalClientSession,
+    mode: TerminalMode,
+    read_offset: u64,
+    yield_for: Duration,
+) -> Result<(), ToolError> {
+    if yield_for.is_zero() || session.client.final_result().is_some() {
+        return Ok(());
+    }
+    let started_at = Instant::now();
+    let deadline = started_at + yield_for;
+    // Raw PTY bootstrap bytes can precede child output on ConPTY.
+    let quiet_not_before = started_at
+        + if mode == TerminalMode::Start {
+            yield_for.min(TERMINAL_START_WRITE_YIELD)
+        } else {
+            Duration::ZERO
+        };
+    let mut last_total = 0;
+    let mut last_change = started_at;
+    while Instant::now() < deadline {
+        if ctx.cancel_token.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        let snapshot = match session.client.read_terminal(read_offset, 0).await {
+            Ok(snapshot) => snapshot,
+            Err(_) if session.client.final_result().is_some() => break,
+            Err(error) => return Err(error),
+        };
+        if snapshot.total != last_total {
+            last_total = snapshot.total;
+            last_change = Instant::now();
+        } else if snapshot.total > read_offset
+            && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD
+            && Instant::now() >= quiet_not_before
+        {
+            break;
+        }
+        if session.client.final_result().is_some() {
+            break;
+        }
+        tokio::select! {
+            () = ctx.cancel_token.cancelled() => return Err(ToolError::Cancelled),
+            () = tokio::time::sleep(TERMINAL_READ_POLL_INTERVAL) => {}
+        }
+    }
+    Ok(())
 }
 
 fn terminal_snapshot_from_final(

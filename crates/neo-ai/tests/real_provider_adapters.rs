@@ -1777,7 +1777,10 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
         ]
     );
 
-    let sent = server.requests().pop().unwrap();
+    assert_anthropic_request(&server.requests().pop().unwrap());
+}
+
+fn assert_anthropic_request(sent: &RecordedRequest) {
     assert_eq!(sent.method, "POST");
     assert_eq!(sent.path, "/messages");
     assert_eq!(sent.headers.get("x-api-key").unwrap(), "test-key");
@@ -2356,7 +2359,10 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
         }
     );
 
-    let sent = server.requests().pop().unwrap();
+    assert_google_request(&server.requests().pop().unwrap());
+}
+
+fn assert_google_request(sent: &RecordedRequest) {
     assert_eq!(sent.method, "POST");
     assert_eq!(
         sent.path,

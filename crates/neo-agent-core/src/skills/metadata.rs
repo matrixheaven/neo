@@ -97,6 +97,7 @@ struct DepToolOutput<'a> {
 /// Missing or empty files return empty metadata without diagnostics. Structural
 /// YAML errors fall back to empty metadata. Invalid fields and unsupported
 /// dependency types are diagnosed and omitted without discarding valid fields.
+#[must_use]
 pub fn load_host_metadata(skill_root: &Path) -> (SkillHostMetadata, Vec<String>) {
     let sidecar_path = skill_root.join("agents").join("neo.yaml");
     let raw = match std::fs::read_to_string(&sidecar_path) {

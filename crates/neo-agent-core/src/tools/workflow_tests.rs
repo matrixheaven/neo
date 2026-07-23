@@ -48,7 +48,7 @@ async fn rollback_failure_terminalizes_run_and_consumes_capability() {
     let session = tempfile::tempdir().unwrap();
     let runtime = crate::workflow::WorkflowRuntime::default();
     let capability = crate::workflow::WorkflowCapability::default();
-    capability.grant().await;
+    capability.grant();
     let reservation = capability.reserve().expect("reservation");
     let input = validated_input(&serde_json::json!({
         "name": "rollback",
@@ -109,7 +109,7 @@ async fn capability_generation_change_rollback_failure_terminalizes_old_run() {
     let runtime = crate::workflow::WorkflowRuntime::default();
     let background_tasks = crate::tools::BackgroundTaskManager::new();
     let capability = crate::workflow::WorkflowCapability::default();
-    capability.grant().await;
+    capability.grant();
     let reservation = capability.reserve().expect("reservation");
     let input = validated_input(&serde_json::json!({
         "name": "generation race",
@@ -132,8 +132,8 @@ async fn capability_generation_change_rollback_failure_terminalizes_old_run() {
         .await
         .unwrap();
 
-    capability.revoke().await;
-    capability.grant().await;
+    capability.revoke();
+    capability.grant();
     assert!(!reservation.commit());
     runtime.inject_rollback_remove_failure();
 

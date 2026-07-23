@@ -911,6 +911,41 @@ fn persist_prefix_rule_or_error(
     None
 }
 
+fn reject_approval(operation: PermissionOperation, subject: &str) -> AppliedApproval {
+    AppliedApproval::Terminal {
+        result: permission_error(
+            operation,
+            subject,
+            PermissionTerminalDecision::Denied,
+            "approval denied",
+        ),
+        permission_decision: Some(PermissionTerminalDecision::Denied),
+    }
+}
+
+fn revise_approval(prefix: &str, feedback: Option<String>) -> AppliedApproval {
+    let feedback = feedback.unwrap_or_default();
+    AppliedApproval::Terminal {
+        result: ToolResult::ok(format!(
+            "User requested {prefix} revisions.\n\nFeedback: {feedback}"
+        )),
+        permission_decision: None,
+    }
+}
+
+fn cancel_workflow_approval(config: &AgentConfig) -> AppliedApproval {
+    config.workflow_capability.revoke_now();
+    AppliedApproval::Terminal {
+        result: permission_error(
+            PermissionOperation::WorkflowLaunch,
+            "Launch workflow",
+            PermissionTerminalDecision::Cancelled,
+            "approval cancelled",
+        ),
+        permission_decision: Some(PermissionTerminalDecision::Cancelled),
+    }
+}
+
 fn apply_approval_resolution(
     config: &AgentConfig,
     operation: PermissionOperation,
@@ -933,7 +968,7 @@ fn apply_approval_resolution(
             }
         }
         ApprovalResolution::Selected {
-            action: ApprovalAction::PermitOnce,
+            action: ApprovalAction::PermitOnce | ApprovalAction::LaunchWorkflow,
             ..
         } => AppliedApproval::Allow { approval: None },
         ApprovalResolution::Selected {
@@ -961,15 +996,7 @@ fn apply_approval_resolution(
         ApprovalResolution::Selected {
             action: ApprovalAction::Reject,
             ..
-        } => AppliedApproval::Terminal {
-            result: permission_error(
-                operation,
-                subject,
-                PermissionTerminalDecision::Denied,
-                "approval denied",
-            ),
-            permission_decision: Some(PermissionTerminalDecision::Denied),
-        },
+        } => reject_approval(operation, subject),
         ApprovalResolution::Selected {
             action: ApprovalAction::ApprovePlan { selection },
             ..
@@ -983,74 +1010,27 @@ fn apply_approval_resolution(
             approval: Some(ApprovalExecutionContext::Goal),
         },
         ApprovalResolution::Selected {
-            action: ApprovalAction::LaunchWorkflow,
-            ..
-        } => AppliedApproval::Allow { approval: None },
-        ApprovalResolution::Selected {
             action: ApprovalAction::CancelWorkflow,
             ..
-        } => {
-            config.workflow_capability.revoke_now();
-            AppliedApproval::Terminal {
-                result: permission_error(
-                    PermissionOperation::WorkflowLaunch,
-                    "Launch workflow",
-                    PermissionTerminalDecision::Cancelled,
-                    "approval cancelled",
-                ),
-                permission_decision: Some(PermissionTerminalDecision::Cancelled),
-            }
-        }
+        } => cancel_workflow_approval(config),
         ApprovalResolution::Selected {
             action: ApprovalAction::RejectPlan,
             ..
-        } => AppliedApproval::Terminal {
-            result: permission_error(
-                PermissionOperation::PlanTransition,
-                "Exit plan mode",
-                PermissionTerminalDecision::Denied,
-                "approval denied",
-            ),
-            permission_decision: Some(PermissionTerminalDecision::Denied),
-        },
+        } => reject_approval(PermissionOperation::PlanTransition, "Exit plan mode"),
         ApprovalResolution::Selected {
             action: ApprovalAction::RejectGoal,
             ..
-        } => AppliedApproval::Terminal {
-            result: permission_error(
-                PermissionOperation::GoalTransition,
-                "Start reviewed goal",
-                PermissionTerminalDecision::Denied,
-                "approval denied",
-            ),
-            permission_decision: Some(PermissionTerminalDecision::Denied),
-        },
+        } => reject_approval(PermissionOperation::GoalTransition, "Start reviewed goal"),
         ApprovalResolution::Selected {
             action: ApprovalAction::RevisePlan { .. },
             feedback,
             ..
-        } => {
-            let feedback = feedback.unwrap_or_default();
-            AppliedApproval::Terminal {
-                result: ToolResult::ok(format!(
-                    "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
-                )),
-                permission_decision: None,
-            }
-        }
+        } => revise_approval("Plan. Plan mode remains active", feedback),
         ApprovalResolution::Selected {
             action: ApprovalAction::ReviseGoal { .. },
             feedback,
             ..
-        } => {
-            let feedback = feedback.unwrap_or_default();
-            AppliedApproval::Terminal {
-                result: ToolResult::ok(format!(
-                    "User requested revisions. Goal mode remains active.\n\nFeedback: {feedback}"
-                )),
-                permission_decision: None,
-            }
-        }
+        } => revise_approval("Goal. Goal mode remains active", feedback),
         ApprovalResolution::Selected {
             action: ApprovalAction::ReviseWorkflow { .. },
             feedback,
@@ -1477,7 +1457,7 @@ fn approval_scope_for_prepared_call(
 }
 
 /// Multi-key session scope for a prepared Edit batch. Omitted when any target
-/// cannot participate in a narrow workspace-contained FileWrite key.
+/// cannot participate in a narrow workspace-contained `FileWrite` key.
 fn edit_session_approval_scope(
     config: &AgentConfig,
     edit: &PreparedEdit,
@@ -1489,7 +1469,7 @@ fn edit_session_approval_scope(
 
 /// Multi-key session scope for a prepared batch Write. Omitted when the
 /// workspace root is unknown or any target cannot participate in a narrow
-/// workspace-contained FileWrite key.
+/// workspace-contained `FileWrite` key.
 fn write_session_approval_scope(
     config: &AgentConfig,
     write: &PreparedWrite,

@@ -150,24 +150,22 @@ impl Tool for WriteTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             ctx.ensure_file_write_allowed()?;
-            let prepared = match PreparedWrite::prepare(ctx, &input).await {
+            let prepared = match PreparedWrite::prepare(ctx, &input) {
                 Ok(prepared) => prepared,
                 Err(result) => return Ok(result),
             };
-            if let Err(result) = prepared.recheck_all(ctx).await {
+            if let Err(result) = prepared.recheck_all(ctx) {
                 return Ok(result);
             }
             let mut on_progress = |_update: ToolResult| {};
-            Ok(prepared
-                .commit(ctx, &ctx.cancel_token, &mut on_progress)
-                .await)
+            Ok(prepared.commit(ctx, &ctx.cancel_token, &mut on_progress))
         })
     }
 }
 
 impl PreparedWrite {
     /// Side-effect-free preparation of a complete Write batch.
-    pub async fn prepare(
+    pub fn prepare(
         context: &ToolContext,
         arguments: &serde_json::Value,
     ) -> Result<Arc<Self>, ToolResult> {
@@ -186,7 +184,7 @@ impl PreparedWrite {
                     return Err(prepare_failed(
                         Some(file_index),
                         Some(file.path.display().to_string()),
-                        format!(
+                        &format!(
                             "refusing symlink or reparse point target: {}",
                             file.path.display()
                         ),
@@ -198,7 +196,7 @@ impl PreparedWrite {
                     return Err(prepare_failed(
                         Some(file_index),
                         Some(file.path.display().to_string()),
-                        format!(
+                        &format!(
                             "target exists and is not a regular file: {}",
                             file.path.display()
                         ),
@@ -210,7 +208,7 @@ impl PreparedWrite {
                     return Err(prepare_failed(
                         Some(file_index),
                         Some(file.path.display().to_string()),
-                        format!(
+                        &format!(
                             "failed to read metadata for {}: {error}",
                             file.path.display()
                         ),
@@ -225,7 +223,7 @@ impl PreparedWrite {
                     prepare_failed(
                         Some(file_index),
                         Some(file.path.display().to_string()),
-                        format!("path resolution failed: {error}"),
+                        &format!("path resolution failed: {error}"),
                         "Re-read the path and submit a fresh Write call.",
                     )
                 })?;
@@ -237,7 +235,7 @@ impl PreparedWrite {
                     prepare_failed(
                         Some(file_index),
                         Some(file.path.display().to_string()),
-                        format!("failed to resolve existing target: {error}"),
+                        &format!("failed to resolve existing target: {error}"),
                         "Re-read the path and submit a fresh Write call.",
                     )
                 })?
@@ -250,7 +248,7 @@ impl PreparedWrite {
                 return Err(prepare_failed(
                     Some(file_index),
                     Some(file.path.display().to_string()),
-                    format!("duplicate effective target path: {}", resolved.display()),
+                    &format!("duplicate effective target path: {}", resolved.display()),
                     "Remove duplicate paths and submit a fresh Write call.",
                 ));
             }
@@ -264,27 +262,24 @@ impl PreparedWrite {
                             return Err(prepare_failed(
                                 Some(file_index),
                                 Some(file.path.display().to_string()),
-                                format!("failed to read {}: {error}", resolved.display()),
+                                &format!("failed to read {}: {error}", resolved.display()),
                                 "Write only overwrites existing UTF-8 regular files. Re-read the file and submit a fresh Write call.",
                             ));
                         }
                     };
-                    let original = match String::from_utf8(bytes.clone()) {
-                        Ok(text) => text,
-                        Err(_) => {
-                            return Err(prepare_failed(
-                                Some(file_index),
-                                Some(file.path.display().to_string()),
-                                format!("file is not valid UTF-8: {}", resolved.display()),
-                                "Write only overwrites existing UTF-8 regular files.",
-                            ));
-                        }
+                    let Ok(original) = String::from_utf8(bytes.clone()) else {
+                        return Err(prepare_failed(
+                            Some(file_index),
+                            Some(file.path.display().to_string()),
+                            &format!("file is not valid UTF-8: {}", resolved.display()),
+                            "Write only overwrites existing UTF-8 regular files.",
+                        ));
                     };
                     if original == file.content {
                         return Err(prepare_failed(
                             Some(file_index),
                             Some(file.path.display().to_string()),
-                            format!(
+                            &format!(
                                 "file already has the requested contents (no-op overwrite): {}",
                                 file.path.display()
                             ),
@@ -304,7 +299,7 @@ impl PreparedWrite {
                         return Err(prepare_failed(
                             Some(file_index),
                             Some(file.path.display().to_string()),
-                            format!("no existing ancestor directory for {}", resolved.display()),
+                            &format!("no existing ancestor directory for {}", resolved.display()),
                             "Provide a path under an existing directory and submit a fresh Write call.",
                         ));
                     };
@@ -461,15 +456,14 @@ impl PreparedWrite {
     }
 
     /// Whole-batch fingerprint recheck. Zero writes on mismatch.
-    pub async fn recheck_all(&self, context: &ToolContext) -> Result<(), ToolResult> {
+    pub fn recheck_all(&self, context: &ToolContext) -> Result<(), ToolResult> {
         for (file_index, file) in self.files.iter().enumerate() {
-            self.recheck_file(context, file_index, file).await?;
+            Self::recheck_file(context, file_index, file)?;
         }
         Ok(())
     }
 
-    async fn recheck_file(
-        &self,
+    fn recheck_file(
         context: &ToolContext,
         file_index: usize,
         file: &PreparedWriteFile,
@@ -478,120 +472,22 @@ impl PreparedWrite {
             WriteFingerprint::Existing {
                 resolved_path,
                 sha256,
-            } => {
-                let resolved = context
-                    .resolve_parent_for_write(&file.requested_path)
-                    .map_err(|error| {
-                        stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            format!("path resolution changed after approval: {error}"),
-                        )
-                    })?
-                    .canonicalize()
-                    .map_err(|error| {
-                        stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            format!("path resolution changed after approval: {error}"),
-                        )
-                    })?;
-                if resolved != *resolved_path {
-                    return Err(stale_result(
-                        Some(file_index),
-                        Some(file.requested_path.display().to_string()),
-                        format!(
-                            "{} resolves to a different target after approval",
-                            file.requested_path.display()
-                        ),
-                    ));
-                }
-                let current = match read_existing_fingerprint(&resolved) {
-                    Ok(sha) => sha,
-                    Err(message) => {
-                        return Err(stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            message,
-                        ));
-                    }
-                };
-                if current != *sha256 {
-                    return Err(stale_result(
-                        Some(file_index),
-                        Some(file.requested_path.display().to_string()),
-                        format!(
-                            "{} changed after approval; planned content no longer matches the current workspace",
-                            file.requested_path.display()
-                        ),
-                    ));
-                }
-                Ok(())
-            }
+            } => recheck_existing_write(context, file_index, file, resolved_path, sha256),
             WriteFingerprint::Absent {
                 resolved_path,
                 nearest_existing_ancestor,
-            } => {
-                let candidate = absolute_candidate(context, &file.requested_path);
-                match std::fs::symlink_metadata(&candidate) {
-                    Ok(_) => {
-                        return Err(stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            format!(
-                                "{} appeared after approval and will not be overwritten by a create",
-                                file.requested_path.display()
-                            ),
-                        ));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            format!(
-                                "failed to recheck {}: {error}",
-                                file.requested_path.display()
-                            ),
-                        ));
-                    }
-                }
-                let resolved = context
-                    .resolve_parent_for_write(&file.requested_path)
-                    .map_err(|error| {
-                        stale_result(
-                            Some(file_index),
-                            Some(file.requested_path.display().to_string()),
-                            format!("path resolution changed after approval: {error}"),
-                        )
-                    })?;
-                if resolved != *resolved_path {
-                    return Err(stale_result(
-                        Some(file_index),
-                        Some(file.requested_path.display().to_string()),
-                        format!(
-                            "{} resolves to a different target after approval",
-                            file.requested_path.display()
-                        ),
-                    ));
-                }
-                if validate_safe_directory(nearest_existing_ancestor).is_err() {
-                    return Err(stale_result(
-                        Some(file_index),
-                        Some(file.requested_path.display().to_string()),
-                        format!(
-                            "ancestor directory {} is no longer a safe directory",
-                            nearest_existing_ancestor.display()
-                        ),
-                    ));
-                }
-                Ok(())
-            }
+            } => recheck_absent_write(
+                context,
+                file_index,
+                file,
+                resolved_path,
+                nearest_existing_ancestor,
+            ),
         }
     }
 
     /// Commit prepared files in declaration order with per-file atomic installs.
-    pub async fn commit(
+    pub fn commit(
         &self,
         context: &ToolContext,
         cancel_token: &CancellationToken,
@@ -600,10 +496,9 @@ impl PreparedWrite {
         self.commit_with_installer(context, cancel_token, on_progress, |_, file| {
             default_install(file)
         })
-        .await
     }
 
-    async fn commit_with_installer(
+    fn commit_with_installer(
         &self,
         context: &ToolContext,
         cancel_token: &CancellationToken,
@@ -644,7 +539,7 @@ impl PreparedWrite {
                 }));
             }
 
-            if let Err(result) = self.recheck_file(context, file_index, file).await {
+            if let Err(result) = Self::recheck_file(context, file_index, file) {
                 if committed_count == 0 {
                     return result;
                 }
@@ -811,6 +706,126 @@ impl PreparedWrite {
     }
 }
 
+fn recheck_existing_write(
+    context: &ToolContext,
+    file_index: usize,
+    file: &PreparedWriteFile,
+    resolved_path: &Path,
+    sha256: &[u8; 32],
+) -> Result<(), ToolResult> {
+    let resolved = context
+        .resolve_parent_for_write(&file.requested_path)
+        .map_err(|error| {
+            stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &format!("path resolution changed after approval: {error}"),
+            )
+        })?
+        .canonicalize()
+        .map_err(|error| {
+            stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &format!("path resolution changed after approval: {error}"),
+            )
+        })?;
+    if resolved != *resolved_path {
+        return Err(stale_result(
+            Some(file_index),
+            Some(file.requested_path.display().to_string()),
+            &format!(
+                "{} resolves to a different target after approval",
+                file.requested_path.display()
+            ),
+        ));
+    }
+    let current = match read_existing_fingerprint(&resolved) {
+        Ok(sha) => sha,
+        Err(message) => {
+            return Err(stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &message,
+            ));
+        }
+    };
+    if current != *sha256 {
+        return Err(stale_result(
+            Some(file_index),
+            Some(file.requested_path.display().to_string()),
+            &format!(
+                "{} changed after approval; planned content no longer matches the current workspace",
+                file.requested_path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn recheck_absent_write(
+    context: &ToolContext,
+    file_index: usize,
+    file: &PreparedWriteFile,
+    resolved_path: &Path,
+    nearest_existing_ancestor: &Path,
+) -> Result<(), ToolResult> {
+    let candidate = absolute_candidate(context, &file.requested_path);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(_) => {
+            return Err(stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &format!(
+                    "{} appeared after approval and will not be overwritten by a create",
+                    file.requested_path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &format!(
+                    "failed to recheck {}: {error}",
+                    file.requested_path.display()
+                ),
+            ));
+        }
+    }
+    let resolved = context
+        .resolve_parent_for_write(&file.requested_path)
+        .map_err(|error| {
+            stale_result(
+                Some(file_index),
+                Some(file.requested_path.display().to_string()),
+                &format!("path resolution changed after approval: {error}"),
+            )
+        })?;
+    if resolved != *resolved_path {
+        return Err(stale_result(
+            Some(file_index),
+            Some(file.requested_path.display().to_string()),
+            &format!(
+                "{} resolves to a different target after approval",
+                file.requested_path.display()
+            ),
+        ));
+    }
+    if validate_safe_directory(nearest_existing_ancestor).is_err() {
+        return Err(stale_result(
+            Some(file_index),
+            Some(file.requested_path.display().to_string()),
+            &format!(
+                "ancestor directory {} is no longer a safe directory",
+                nearest_existing_ancestor.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Default per-file installer. Created files create missing parents (recording
 /// each directory) then use the create-new atomic helper; overwritten files use
 /// the strict existing-file replacement helper.
@@ -858,7 +873,7 @@ fn parse_write_input(arguments: &serde_json::Value) -> Result<WriteInput, ToolRe
         Err(error) => Err(prepare_failed(
             None,
             None,
-            format!("invalid Write arguments: {error}"),
+            &format!("invalid Write arguments: {error}"),
             "Submit a fresh Write call using the files[] contract.",
         )),
     }
@@ -869,7 +884,7 @@ fn validate_write_input(input: &WriteInput) -> Result<(), ToolResult> {
         return Err(prepare_failed(
             None,
             None,
-            "files must be a non-empty array".to_owned(),
+            "files must be a non-empty array",
             "Group at least one file into files[] and submit a fresh Write call.",
         ));
     }
@@ -878,7 +893,7 @@ fn validate_write_input(input: &WriteInput) -> Result<(), ToolResult> {
             return Err(prepare_failed(
                 Some(file_index),
                 None,
-                "path must be non-empty".to_owned(),
+                "path must be non-empty",
                 "Provide a non-empty path and submit a fresh Write call.",
             ));
         }
@@ -889,7 +904,7 @@ fn validate_write_input(input: &WriteInput) -> Result<(), ToolResult> {
 fn prepare_failed(
     file_index: Option<usize>,
     path: Option<String>,
-    message: String,
+    message: &str,
     guidance: &str,
 ) -> ToolResult {
     let mut content = String::from("Write prepare failed · zero writes");
@@ -898,7 +913,7 @@ fn prepare_failed(
         content.push_str(path);
     }
     content.push('\n');
-    content.push_str(&message);
+    content.push_str(message);
     content.push('\n');
     content.push_str(guidance);
 
@@ -916,13 +931,13 @@ fn prepare_failed(
     ToolResult::error(content).with_details(details)
 }
 
-fn stale_result(file_index: Option<usize>, path: Option<String>, message: String) -> ToolResult {
+fn stale_result(file_index: Option<usize>, path: Option<String>, message: &str) -> ToolResult {
     let mut content = String::from("Write failed · stale · zero writes\n");
     if let Some(path) = path.as_ref() {
         content.push_str(path);
         content.push('\n');
     }
-    content.push_str(&message);
+    content.push_str(message);
     content.push_str("\nRe-read affected files and submit a new Write call.");
     let mut details = json!({
         "kind": "write",
@@ -1010,14 +1025,14 @@ fn created_directories_json(context: &ToolContext, dirs: &[PathBuf]) -> Vec<Stri
         .collect()
 }
 
-fn append_created_directories(context: &ToolContext, content: &mut String, dirs: &[PathBuf]) {
+fn append_created_directories(context: &ToolContext, buf: &mut String, dirs: &[PathBuf]) {
     if dirs.is_empty() {
         return;
     }
-    content.push_str("\nCreated directories remain:");
+    buf.push_str("\nCreated directories remain:");
     for path in created_directories_json(context, dirs) {
-        content.push_str("\n  ");
-        content.push_str(&path);
+        buf.push_str("\n  ");
+        buf.push_str(&path);
     }
 }
 
@@ -1185,7 +1200,6 @@ mod tests {
                 ]
             }),
         )
-        .await
         .expect_err("duplicate rejected");
         assert_eq!(
             duplicate.details.expect("dup details")["status"],
@@ -1198,7 +1212,6 @@ mod tests {
             &ctx,
             &json!({ "files": [{ "path": "adir", "content": "x" }] }),
         )
-        .await
         .expect_err("directory rejected");
         assert_eq!(
             directory.details.expect("dir details")["status"],
@@ -1212,7 +1225,6 @@ mod tests {
             &ctx,
             &json!({ "files": [{ "path": "binary.bin", "content": "text\n" }] }),
         )
-        .await
         .expect_err("non-utf8 rejected");
         assert_eq!(
             non_utf8.details.expect("binary details")["status"],
@@ -1229,7 +1241,6 @@ mod tests {
             &ctx,
             &json!({ "files": [{ "path": "noop.txt", "content": "same\n" }] }),
         )
-        .await
         .expect_err("no-op rejected");
         assert_eq!(
             noop.details.expect("noop details")["status"],
@@ -1259,19 +1270,19 @@ mod tests {
                 ]
             }),
         )
-        .await
         .expect("prepare");
         let mut on_progress = |_update| {};
 
         // Failure at the very first file installs nothing.
-        let zero = prepared
-            .commit_with_installer(&ctx, &CancellationToken::new(), &mut on_progress, |_, _| {
-                WriteInstallOutcome {
-                    created_directories: Vec::new(),
-                    result: Err(io::Error::other("first install failure")),
-                }
-            })
-            .await;
+        let zero = prepared.commit_with_installer(
+            &ctx,
+            &CancellationToken::new(),
+            &mut on_progress,
+            |_, _| WriteInstallOutcome {
+                created_directories: Vec::new(),
+                result: Err(io::Error::other("first install failure")),
+            },
+        );
         assert!(zero.is_error);
         let details = zero.details.expect("zero details");
         assert_eq!(details["status"], "commit_failed");
@@ -1289,23 +1300,21 @@ mod tests {
         assert!(!workspace.path().join("a.txt").exists());
 
         // Failure at the second file keeps the first committed, no rollback.
-        let partial = prepared
-            .commit_with_installer(
-                &ctx,
-                &CancellationToken::new(),
-                &mut on_progress,
-                |index, file| {
-                    if index == 1 {
-                        WriteInstallOutcome {
-                            created_directories: Vec::new(),
-                            result: Err(io::Error::other("injected install failure")),
-                        }
-                    } else {
-                        default_install(file)
+        let partial = prepared.commit_with_installer(
+            &ctx,
+            &CancellationToken::new(),
+            &mut on_progress,
+            |index, file| {
+                if index == 1 {
+                    WriteInstallOutcome {
+                        created_directories: Vec::new(),
+                        result: Err(io::Error::other("injected install failure")),
                     }
-                },
-            )
-            .await;
+                } else {
+                    default_install(file)
+                }
+            },
+        );
         assert!(partial.is_error);
         let details = partial.details.expect("partial details");
         assert_eq!(details["status"], "partial_commit");
@@ -1334,25 +1343,22 @@ mod tests {
             &ctx,
             &json!({ "files": [{ "path": "deep/nested/dir/file.txt", "content": "x\n" }] }),
         )
-        .await
         .expect("prepare");
         let mut on_progress = |_update| {};
 
-        let result = prepared
-            .commit_with_installer(
-                &ctx,
-                &CancellationToken::new(),
-                &mut on_progress,
-                |_, file| {
-                    let parent = file.resolved_path.parent().expect("parent");
-                    let directories = create_missing_directories_recording(parent);
-                    WriteInstallOutcome {
-                        created_directories: directories.created,
-                        result: Err(io::Error::other("disk full after directories")),
-                    }
-                },
-            )
-            .await;
+        let result = prepared.commit_with_installer(
+            &ctx,
+            &CancellationToken::new(),
+            &mut on_progress,
+            |_, file| {
+                let parent = file.resolved_path.parent().expect("parent");
+                let directories = create_missing_directories_recording(parent);
+                WriteInstallOutcome {
+                    created_directories: directories.created,
+                    result: Err(io::Error::other("disk full after directories")),
+                }
+            },
+        );
 
         assert!(result.is_error);
         assert!(
@@ -1388,17 +1394,14 @@ mod tests {
                 ]
             }),
         )
-        .await
         .expect("prepare");
         let mut on_progress = |_update| {};
 
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let before = prepared
-            .commit_with_installer(&ctx, &cancel, &mut on_progress, |_, _| {
-                panic!("installer must not run after cancellation")
-            })
-            .await;
+        let before = prepared.commit_with_installer(&ctx, &cancel, &mut on_progress, |_, _| {
+            panic!("installer must not run after cancellation")
+        });
         assert!(before.is_error);
         let details = before.details.expect("before details");
         assert_eq!(details["status"], "cancelled");
@@ -1410,13 +1413,16 @@ mod tests {
 
         let partial_cancel = CancellationToken::new();
         let cancel_after_write = partial_cancel.clone();
-        let after = prepared
-            .commit_with_installer(&ctx, &partial_cancel, &mut on_progress, move |_, file| {
+        let after = prepared.commit_with_installer(
+            &ctx,
+            &partial_cancel,
+            &mut on_progress,
+            move |_, file| {
                 let outcome = default_install(file);
                 cancel_after_write.cancel();
                 outcome
-            })
-            .await;
+            },
+        );
         assert!(after.is_error);
         let details = after.details.expect("after details");
         assert_eq!(details["status"], "partial_commit");
@@ -1441,9 +1447,7 @@ mod tests {
             json!({ "files": [{ "path": "x.txt", "content": "x", "mode": 1 }] }),
             json!({ "files": [{ "path": "x.txt" }] }),
         ] {
-            let rejected = PreparedWrite::prepare(&ctx, &arguments)
-                .await
-                .expect_err("schema rejected");
+            let rejected = PreparedWrite::prepare(&ctx, &arguments).expect_err("schema rejected");
             assert_eq!(
                 rejected.details.expect("schema details")["status"],
                 "prepare_failed"

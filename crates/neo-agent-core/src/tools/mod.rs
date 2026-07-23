@@ -274,6 +274,8 @@ impl std::fmt::Debug for ToolContext {
             .field("process_supervisor", &self.process_supervisor)
             .field("background_tasks", &self.background_tasks)
             .field("shell_runtime", &self.shell_runtime)
+            .field("workflow_capability", &self.workflow_capability)
+            .field("workflow_runtime", &"_")
             .field("multi_agent", &self.multi_agent)
             .field("child_config", &self.child_config.is_some())
             .field("child_model", &self.child_model.is_some())

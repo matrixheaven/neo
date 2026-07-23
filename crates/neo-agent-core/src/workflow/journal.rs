@@ -398,7 +398,7 @@ pub fn find_incomplete_invocations(records: &[JournalRecord]) -> Vec<IncompleteI
                     canonical_input_hash: canonical_input_hash.clone(),
                 });
             }
-            _ => {}
+            JournalRecord::StateChanged { .. } => {}
         }
     }
 

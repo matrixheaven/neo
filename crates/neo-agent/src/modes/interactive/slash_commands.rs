@@ -81,7 +81,7 @@ impl InteractiveController {
             "/add-workspace" => self.open_workspace_manager(),
             "/tasks" => self.show_background_tasks().await,
             "/workflow" => {
-                self.workflow_capability.grant().await;
+                self.workflow_capability.grant();
                 self.push_status(
                     "Workflow launch capability granted. Call RunWorkflow to use it.".to_owned(),
                 );

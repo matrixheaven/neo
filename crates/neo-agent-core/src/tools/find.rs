@@ -42,8 +42,10 @@ const fn default_include_dirs() -> bool {
 }
 
 fn display_path(path: &Path) -> String {
-    path.to_str()
-        .map_or_else(|| format!("<non-UTF-8 path:{path:?}>"), ToOwned::to_owned)
+    path.to_str().map_or_else(
+        || format!("<non-UTF-8 path:{}>", path.display()),
+        ToOwned::to_owned,
+    )
 }
 
 pub struct FindTool;

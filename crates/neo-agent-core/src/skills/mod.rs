@@ -128,6 +128,7 @@ impl SkillStore {
     /// Load skills from all tiers. If `user_dir` is provided, built-in skills
     /// are extracted into `user_dir/skills/.builtin/` first and then loaded
     /// from disk, so users can inspect and override them.
+    #[must_use]
     pub fn load(
         user_dirs: &[PathBuf],
         extra_dirs: &[PathBuf],

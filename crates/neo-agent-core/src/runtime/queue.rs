@@ -125,6 +125,7 @@ impl WorkflowNotificationQueue {
     }
 
     /// Queue a notice after its workflow journal transition is durable.
+    #[must_use]
     pub fn enqueue(&self, notification: WorkflowNotification) -> bool {
         let mut state = self.lock();
         if state.projected.contains(&notification.id)
@@ -148,6 +149,7 @@ impl WorkflowNotificationQueue {
     }
 
     /// Mark a reminder durable in Session JSONL and remove it from delivery.
+    #[must_use]
     pub fn mark_projected(&self, id: &str) -> bool {
         let mut state = self.lock();
         let queued = state

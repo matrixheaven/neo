@@ -779,15 +779,14 @@ fn unexpected_response(operation: &str) -> ToolError {
 
 #[cfg(unix)]
 async fn emergency_cleanup(guardian: &mut Child, command_pid: u32, command_start_id: u64) {
-    if identity_matches(command_pid, command_start_id) {
-        if let Some(group) = i32::try_from(command_pid)
+    if identity_matches(command_pid, command_start_id)
+        && let Some(group) = i32::try_from(command_pid)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
+    {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
     terminate_guardian(guardian).await;
 }

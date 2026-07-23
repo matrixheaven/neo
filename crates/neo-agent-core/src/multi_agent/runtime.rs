@@ -1288,12 +1288,12 @@ impl MultiAgentRuntime {
             };
         }
         if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
-            return self.finish_child_run(snapshot, started_at, Err(error));
+            return self.finish_child_run(&snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
-            Err(error) => return self.finish_child_run(snapshot, started_at, Err(error)),
+            Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),
         };
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
@@ -1321,7 +1321,7 @@ impl MultiAgentRuntime {
         )
         .await;
         drop(live_cancel);
-        self.finish_child_run(snapshot, started_at, run)
+        self.finish_child_run(&snapshot, started_at, run)
     }
 
     pub async fn run_swarm_child_turn(
@@ -1381,12 +1381,12 @@ impl MultiAgentRuntime {
             .register_persistent_agent(&snapshot, Some(swarm_id), Some(swarm_item))
             .await
         {
-            return self.finish_child_run(snapshot, started_at, Err(error));
+            return self.finish_child_run(&snapshot, started_at, Err(error));
         }
         let prompt = child_prompt(&snapshot.task, context, snapshot.role);
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
-            Err(error) => return self.finish_child_run(snapshot, started_at, Err(error)),
+            Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),
         };
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
@@ -1410,7 +1410,7 @@ impl MultiAgentRuntime {
         )
         .await;
         drop(live_cancel);
-        self.finish_child_run(snapshot, started_at, run)
+        self.finish_child_run(&snapshot, started_at, run)
     }
 
     #[must_use]
@@ -1605,7 +1605,7 @@ impl MultiAgentRuntime {
 
     fn finish_child_run(
         &self,
-        snapshot: AgentSnapshot,
+        snapshot: &AgentSnapshot,
         started_at: Instant,
         run: Result<(Vec<AgentEvent>, Vec<AgentMessage>), String>,
     ) -> ChildRunOutput {
@@ -2295,6 +2295,23 @@ fn apply_activity_event(
     }
 }
 
+fn tool_summary_from_event(
+    details: Option<&serde_json::Value>,
+    tool_args: &HashMap<String, serde_json::Value>,
+    activity: &[AgentActivityEntry],
+    id: &str,
+    name: &str,
+) -> Option<String> {
+    details
+        .and_then(summarize_batch_tool_details)
+        .or_else(|| {
+            tool_args
+                .get(id)
+                .and_then(|arguments| summarize_tool_arguments(name, arguments))
+        })
+        .or_else(|| last_tool_summary(activity, id))
+}
+
 /// Process tool-related activity events. Returns `true` if the event was handled.
 fn apply_tool_activity_event(
     activity: &mut Vec<AgentActivityEntry>,
@@ -2357,16 +2374,13 @@ fn apply_tool_activity_event(
             } else {
                 AgentToolActivityPhase::Done
             };
-            let summary = result
-                .details
-                .as_ref()
-                .and_then(summarize_batch_tool_details)
-                .or_else(|| {
-                    tool_args
-                        .get(id)
-                        .and_then(|arguments| summarize_tool_arguments(name, arguments))
-                })
-                .or_else(|| last_tool_summary(activity.as_slice(), id));
+            let summary = tool_summary_from_event(
+                result.details.as_ref(),
+                tool_args,
+                activity.as_slice(),
+                id,
+                name,
+            );
             upsert_tool_activity(
                 activity,
                 id,
@@ -2383,16 +2397,13 @@ fn apply_tool_activity_event(
             partial_result,
             ..
         } => {
-            let summary = partial_result
-                .details
-                .as_ref()
-                .and_then(summarize_batch_tool_details)
-                .or_else(|| {
-                    tool_args
-                        .get(id)
-                        .and_then(|arguments| summarize_tool_arguments(name, arguments))
-                })
-                .or_else(|| last_tool_summary(activity.as_slice(), id));
+            let summary = tool_summary_from_event(
+                partial_result.details.as_ref(),
+                tool_args,
+                activity.as_slice(),
+                id,
+                name,
+            );
             upsert_tool_activity(
                 activity,
                 id,
@@ -2979,13 +2990,10 @@ fn summarize_write_details(details: &serde_json::Value) -> Option<String> {
                         "wrote {files} files · {created} created · {overwritten} overwritten · +{added} -{removed}"
                     )
                 }
-                "prepare_failed" => "failed · zero writes".to_owned(),
-                "stale" => "failed · zero writes".to_owned(),
-                "cancelled" if committed == 0 => "failed · zero writes".to_owned(),
-                "cancelled" => format!("partial {committed}/{files} · +{added} -{removed}"),
-                "commit_failed" if committed == 0 => "failed · zero writes".to_owned(),
-                "commit_failed" => format!("partial {committed}/{files} · +{added} -{removed}"),
-                "partial_commit" => {
+                "prepare_failed" | "stale" | "cancelled" | "commit_failed" if committed == 0 => {
+                    "failed · zero writes".to_owned()
+                }
+                "cancelled" | "commit_failed" | "partial_commit" => {
                     format!("partial {committed}/{files} · +{added} -{removed}")
                 }
                 "durability_uncertain" => {
@@ -3388,7 +3396,7 @@ mod tests {
         assert!(
             activity.iter().all(|entry| match &entry.kind {
                 AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
-                _ => true,
+                AgentActivityKind::Text { .. } => true,
             }),
             "progress alone must not invent a completed commit"
         );
@@ -3572,7 +3580,7 @@ mod tests {
         assert!(
             activity.iter().all(|entry| match &entry.kind {
                 AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
-                _ => true,
+                AgentActivityKind::Text { .. } => true,
             }),
             "progress alone must not invent a completed commit"
         );
@@ -4087,7 +4095,7 @@ mod tests {
         let messages = vec![AgentMessage::user_text("keep this context")];
 
         let output =
-            runtime.finish_child_run(child, Instant::now(), Ok((Vec::new(), messages.clone())));
+            runtime.finish_child_run(&child, Instant::now(), Ok((Vec::new(), messages.clone())));
 
         assert_eq!(output.snapshot.state, AgentLifecycleState::Cancelled);
         assert_eq!(
@@ -4101,7 +4109,7 @@ mod tests {
         let event_cancelled = runtime.start_foreground_delegate_for_test("event cancelled child");
         let event_messages = vec![AgentMessage::user_text("event cancel context")];
         let event_output = runtime.finish_child_run(
-            event_cancelled,
+            &event_cancelled,
             Instant::now(),
             Ok((
                 vec![AgentEvent::RunFinished {
@@ -4123,7 +4131,7 @@ mod tests {
         let completed = runtime.start_foreground_delegate_for_test("completed child");
         let completed_messages = vec![AgentMessage::user_text("completed context")];
         let completed_output = runtime.finish_child_run(
-            completed,
+            &completed,
             Instant::now(),
             Ok((Vec::new(), completed_messages.clone())),
         );
@@ -4150,7 +4158,7 @@ mod tests {
             .cancel_agent(&errored.id)
             .expect("cancel error child");
         let error_output = runtime.finish_child_run(
-            errored.clone(),
+            &errored,
             Instant::now(),
             Err("stream failed after cancellation".to_owned()),
         );

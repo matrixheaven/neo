@@ -39,8 +39,7 @@ struct Entry {
 
 fn display_name(name: &OsStr) -> String {
     name.to_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("<non-UTF-8:{name:?}>"))
+        .map_or_else(|| format!("<non-UTF-8:{}>", name.display()), str::to_owned)
 }
 
 pub struct ListTool;

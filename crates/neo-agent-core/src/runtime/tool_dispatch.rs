@@ -9,8 +9,8 @@ use super::config::{AgentConfig, BlockedInstructionScope, ToolExecutionMode};
 use super::context::AgentContext;
 use super::error::AgentRuntimeError;
 use super::events::{
-    EventEmitter, emit_shell_finished, emit_terminal_events, make_shell_admission_callback,
-    make_tool_event_callback, make_tool_update_callback,
+    EventEmitter, EventSink, emit_shell_finished, emit_terminal_events,
+    make_shell_admission_callback, make_tool_event_callback, make_tool_update_callback,
 };
 use super::instruction_context::InstructionContextBridge;
 use super::permission::{
@@ -569,7 +569,7 @@ fn emit_synthesized_finished(
 /// Prepare every successfully parsed Edit call without side effects. Failures
 /// replace the prepared call with a terminal `prepare_failed` result so Ask
 /// mode never opens an approval dialog.
-async fn prepare_edit_calls(
+fn prepare_edit_calls(
     tool_context: &ToolContext,
     registry: &ToolRegistry,
     prepared: &mut [(
@@ -592,7 +592,7 @@ async fn prepare_edit_calls(
             file_write: true,
             ..ToolAccess::none()
         });
-        match PreparedEdit::prepare(&prepare_ctx, &prepared_call.arguments).await {
+        match PreparedEdit::prepare(&prepare_ctx, &prepared_call.arguments) {
             Ok(edit) => {
                 prepared_call.execution = PreparedExecution::Edit(edit);
             }
@@ -607,7 +607,7 @@ async fn prepare_edit_calls(
 /// Prepare every successfully parsed Write call without side effects. Failures
 /// replace the prepared call with a terminal `prepare_failed` result so Ask
 /// mode never opens an approval dialog and no bytes or directories are written.
-async fn prepare_write_calls(
+fn prepare_write_calls(
     tool_context: &ToolContext,
     registry: &ToolRegistry,
     prepared: &mut [(
@@ -630,7 +630,7 @@ async fn prepare_write_calls(
             file_write: true,
             ..ToolAccess::none()
         });
-        match PreparedWrite::prepare(&prepare_ctx, &prepared_call.arguments).await {
+        match PreparedWrite::prepare(&prepare_ctx, &prepared_call.arguments) {
             Ok(write) => {
                 prepared_call.execution = PreparedExecution::Write(write);
             }
@@ -644,7 +644,7 @@ async fn prepare_write_calls(
 
 /// Recheck every authorized prepared mutation (Edit or Write). Stale targets
 /// become terminal results with zero writes.
-async fn recheck_prepared_mutations(
+fn recheck_prepared_mutations(
     tool_context: &ToolContext,
     authorized: &mut [AuthorizedToolCall<'_>],
 ) {
@@ -656,8 +656,8 @@ async fn recheck_prepared_mutations(
             continue;
         };
         let recheck = match &prepared.execution {
-            PreparedExecution::Edit(edit) => edit.recheck_all(tool_context).await,
-            PreparedExecution::Write(write) => write.recheck_all(tool_context).await,
+            PreparedExecution::Edit(edit) => edit.recheck_all(tool_context),
+            PreparedExecution::Write(write) => write.recheck_all(tool_context),
             PreparedExecution::Direct => continue,
         };
         if let Err(result) = recheck {
@@ -908,8 +908,8 @@ pub(super) async fn execute_tool_calls(
             .then(|| emitter.context.instruction_state().clone()),
     )?;
     let mut prepared = prepared;
-    prepare_edit_calls(&tool_context, registry.as_ref(), &mut prepared).await;
-    prepare_write_calls(&tool_context, registry.as_ref(), &mut prepared).await;
+    prepare_edit_calls(&tool_context, registry.as_ref(), &mut prepared);
+    prepare_write_calls(&tool_context, registry.as_ref(), &mut prepared);
 
     // Phase 4 — authorize the full batch (dialogs await sequentially).
     // Consumes `prepared` so Allow can write Plan/Goal context onto
@@ -989,7 +989,7 @@ pub(super) async fn execute_tool_calls(
 
     // Phase 6 — recheck every prepared Edit and Write target after approval and
     // instruction recheck. Stale targets become terminal results with zero writes.
-    recheck_prepared_mutations(&tool_context, &mut authorized).await;
+    recheck_prepared_mutations(&tool_context, &mut authorized);
 
     // Phase 7 — schedule and execute the authorized batch.
     let needs_sequential = matches!(config.tool_execution_mode, ToolExecutionMode::Sequential)
@@ -1005,8 +1005,7 @@ pub(super) async fn execute_tool_calls(
             turn,
             &authorized,
             &tool_context,
-            emitter,
-            cancel_token,
+            (emitter, cancel_token),
         )
         .await?
     } else {
@@ -1209,13 +1208,160 @@ pub(super) fn ask_user_runs_in_background(arguments: &serde_json::Value) -> bool
         .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn execute_one_authorized_tool(
+    config: &AgentConfig,
+    registry: Arc<ToolRegistry>,
+    skills: Option<&SkillStoreHandle>,
+    turn: u32,
+    entry: &AuthorizedToolCall<'_>,
+    tool_context: &ToolContext,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Result<(AgentToolCall, ToolResult, bool), AgentRuntimeError> {
+    let tool_call = entry.tool_call;
+    let Some(prepared_call) = entry.prepared.as_ref() else {
+        // Invalid arguments: emit a finished error without starting execution.
+        let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
+            unreachable!("unparsed calls always carry a terminal result");
+        };
+        emit_tool_execution_finished(turn, tool_call, None, result, emitter);
+        return Ok((tool_call.clone(), result.clone(), false));
+    };
+    let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
+        // Terminal result (before-hook block or permission denial).
+        let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
+            unreachable!("matched above");
+        };
+        let mut result = result.clone();
+        if !cancel_token.is_cancelled() {
+            result = after_tool_result(config, tool_call, result, cancel_token).await;
+        }
+        emit_authorized_call_result(
+            turn,
+            tool_call,
+            Some(&prepared_call.arguments),
+            &result,
+            tool_context,
+            emitter,
+        );
+        return Ok((tool_call.clone(), result, false));
+    };
+    let sink = emitter.sink();
+    let arguments = Arc::new(prepared_call.arguments.clone());
+    let mut context = tool_context
+        .clone()
+        .with_access(*access)
+        .with_tool_update(make_tool_update_callback(
+            sink.clone(),
+            turn,
+            tool_call.id.to_string(),
+            tool_call.name.to_string(),
+        ))
+        .with_tool_event(make_tool_event_callback(sink.clone()));
+    if uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref()) {
+        let workspace_root = context.workspace_root().to_path_buf();
+        context = context.with_shell_admission_callback(make_shell_admission_callback(
+            sink.clone(),
+            turn,
+            tool_call.id.to_string(),
+            tool_call.name.to_string(),
+            Arc::clone(&arguments),
+            workspace_root,
+        ));
+    } else {
+        emitter.emit(AgentEvent::ToolExecutionStarted {
+            turn,
+            id: tool_call.id.to_string(),
+            name: tool_call.name.to_string(),
+            arguments: arguments.as_ref().clone(),
+        });
+    }
+    let result = execute_prepared_tool(
+        &prepared_call.execution,
+        skills,
+        registry,
+        (tool_call, arguments.as_ref()),
+        (&context, cancel_token),
+        (sink, turn, emitter),
+    )
+    .await;
+    let mut result = result;
+    if !cancel_token.is_cancelled() {
+        result = after_tool_result(config, tool_call, result, cancel_token).await;
+    }
+    emit_authorized_call_result(
+        turn,
+        tool_call,
+        Some(arguments.as_ref()),
+        &result,
+        tool_context,
+        emitter,
+    );
+    Ok((tool_call.clone(), result, true))
+}
+
+async fn execute_prepared_tool(
+    execution: &PreparedExecution,
+    skills: Option<&SkillStoreHandle>,
+    registry: Arc<ToolRegistry>,
+    (tool_call, arguments): (&AgentToolCall, &serde_json::Value),
+    (context, cancel_token): (&ToolContext, &CancellationToken),
+    (sink, turn, emitter): (EventSink, u32, &mut EventEmitter),
+) -> ToolResult {
+    match execution {
+        PreparedExecution::Edit(_) | PreparedExecution::Write(_) => {
+            // Emit the verified planned projection before the first commit,
+            // then drive the ordered per-file commit with progress updates.
+            // Edit and Write expose identical prepared_update/commit shapes.
+            macro_rules! commit_prepared_mutation {
+                ($prepared:expr) => {{
+                    emitter.emit(AgentEvent::ToolExecutionUpdate {
+                        turn,
+                        id: tool_call.id.to_string(),
+                        name: tool_call.name.to_string(),
+                        partial_result: $prepared.prepared_update(),
+                    });
+                    let progress_sink = sink;
+                    let progress_id = tool_call.id.to_string();
+                    let progress_name = tool_call.name.to_string();
+                    let mut on_progress = move |update: ToolResult| {
+                        progress_sink.emit_event(AgentEvent::ToolExecutionUpdate {
+                            turn,
+                            id: progress_id.clone(),
+                            name: progress_name.clone(),
+                            partial_result: update,
+                        });
+                    };
+                    $prepared.commit(context, cancel_token, &mut on_progress)
+                }};
+            }
+            match execution {
+                PreparedExecution::Edit(edit) => commit_prepared_mutation!(edit),
+                PreparedExecution::Write(write) => commit_prepared_mutation!(write),
+                PreparedExecution::Direct => unreachable!("guarded by outer match"),
+            }
+        }
+        PreparedExecution::Direct => {
+            run_tool_with_cancel(
+                skills,
+                registry.as_ref(),
+                tool_call,
+                arguments,
+                context,
+                cancel_token,
+            )
+            .await
+        }
+    }
+}
+
 fn uses_shell_admission(name: &str, arguments: &serde_json::Value) -> bool {
     name == "Bash"
         || (name == "Terminal"
             && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_authorized_sequential(
     config: &AgentConfig,
     registry: Arc<ToolRegistry>,
@@ -1223,135 +1369,24 @@ async fn execute_authorized_sequential(
     turn: u32,
     authorized: &[AuthorizedToolCall<'_>],
     tool_context: &ToolContext,
-    emitter: &mut EventEmitter,
-    cancel_token: &CancellationToken,
+    (emitter, cancel_token): (&mut EventEmitter, &CancellationToken),
 ) -> Result<(Vec<(AgentToolCall, ToolResult)>, bool), AgentRuntimeError> {
     let mut results = Vec::new();
     let mut executed_any = false;
     for entry in authorized {
-        let tool_call = entry.tool_call;
-        let Some(prepared_call) = entry.prepared.as_ref() else {
-            // Invalid arguments: emit a finished error without starting execution.
-            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
-                unreachable!("unparsed calls always carry a terminal result");
-            };
-            emit_tool_execution_finished(turn, tool_call, None, result, emitter);
-            results.push((tool_call.clone(), result.clone()));
-            continue;
-        };
-        let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
-            // Terminal result (before-hook block or permission denial).
-            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
-                unreachable!("matched above");
-            };
-            let mut result = result.clone();
-            if !cancel_token.is_cancelled() {
-                result = after_tool_result(config, tool_call, result, cancel_token).await;
-            }
-            emit_authorized_call_result(
-                turn,
-                tool_call,
-                Some(&prepared_call.arguments),
-                &result,
-                tool_context,
-                emitter,
-            );
-            results.push((tool_call.clone(), result));
-            if cancel_token.is_cancelled() {
-                break;
-            }
-            continue;
-        };
-        let sink = emitter.sink();
-        let arguments = Arc::new(prepared_call.arguments.clone());
-        let mut context = tool_context
-            .clone()
-            .with_access(*access)
-            .with_tool_update(make_tool_update_callback(
-                sink.clone(),
-                turn,
-                tool_call.id.to_string(),
-                tool_call.name.to_string(),
-            ))
-            .with_tool_event(make_tool_event_callback(sink.clone()));
-        if uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref()) {
-            let workspace_root = context.workspace_root().to_path_buf();
-            context = context.with_shell_admission_callback(make_shell_admission_callback(
-                sink.clone(),
-                turn,
-                tool_call.id.to_string(),
-                tool_call.name.to_string(),
-                Arc::clone(&arguments),
-                workspace_root,
-            ));
-        } else {
-            emitter.emit(AgentEvent::ToolExecutionStarted {
-                turn,
-                id: tool_call.id.to_string(),
-                name: tool_call.name.to_string(),
-                arguments: arguments.as_ref().clone(),
-            });
-        }
-        let mut result = match &prepared_call.execution {
-            PreparedExecution::Edit(_) | PreparedExecution::Write(_) => {
-                // Emit the verified planned projection before the first commit,
-                // then drive the ordered per-file commit with progress updates.
-                // Edit and Write expose identical prepared_update/commit shapes.
-                macro_rules! commit_prepared_mutation {
-                    ($prepared:expr) => {{
-                        emitter.emit(AgentEvent::ToolExecutionUpdate {
-                            turn,
-                            id: tool_call.id.to_string(),
-                            name: tool_call.name.to_string(),
-                            partial_result: $prepared.prepared_update(),
-                        });
-                        let progress_sink = sink;
-                        let progress_id = tool_call.id.to_string();
-                        let progress_name = tool_call.name.to_string();
-                        let mut on_progress = move |update: ToolResult| {
-                            progress_sink.emit_event(AgentEvent::ToolExecutionUpdate {
-                                turn,
-                                id: progress_id.clone(),
-                                name: progress_name.clone(),
-                                partial_result: update,
-                            });
-                        };
-                        $prepared
-                            .commit(&context, cancel_token, &mut on_progress)
-                            .await
-                    }};
-                }
-                match &prepared_call.execution {
-                    PreparedExecution::Edit(edit) => commit_prepared_mutation!(edit),
-                    PreparedExecution::Write(write) => commit_prepared_mutation!(write),
-                    PreparedExecution::Direct => unreachable!("guarded by outer match"),
-                }
-            }
-            PreparedExecution::Direct => {
-                run_tool_with_cancel(
-                    skills,
-                    registry.as_ref(),
-                    tool_call,
-                    arguments.as_ref(),
-                    &context,
-                    cancel_token,
-                )
-                .await
-            }
-        };
-        executed_any = true;
-        if !cancel_token.is_cancelled() {
-            result = after_tool_result(config, tool_call, result, cancel_token).await;
-        }
-        emit_authorized_call_result(
+        let (tool_call, result, executed) = execute_one_authorized_tool(
+            config,
+            Arc::clone(&registry),
+            skills,
             turn,
-            tool_call,
-            Some(arguments.as_ref()),
-            &result,
+            entry,
             tool_context,
             emitter,
-        );
-        results.push((tool_call.clone(), result));
+            cancel_token,
+        )
+        .await?;
+        executed_any |= executed;
+        results.push((tool_call, result));
         if cancel_token.is_cancelled() {
             break;
         }
@@ -1840,7 +1875,7 @@ mod tests {
 
         let unregistered = ToolRegistry::new();
         let mut prepared = prepare_tool_calls_for_execution(&calls, &unregistered.specs());
-        prepare_edit_calls(&context, &unregistered, &mut prepared).await;
+        prepare_edit_calls(&context, &unregistered, &mut prepared);
         assert!(matches!(
             prepared[0].1.as_ref().expect("parsed").execution,
             PreparedExecution::Direct
@@ -1849,7 +1884,7 @@ mod tests {
         let mut custom = ToolRegistry::with_builtin_tools();
         custom.register(CustomEdit);
         let mut prepared = prepare_tool_calls_for_execution(&calls, &custom.specs());
-        prepare_edit_calls(&context, &custom, &mut prepared).await;
+        prepare_edit_calls(&context, &custom, &mut prepared);
         assert!(matches!(
             prepared[0].1.as_ref().expect("parsed").execution,
             PreparedExecution::Direct
@@ -1873,7 +1908,7 @@ mod tests {
 
         let unregistered = ToolRegistry::new();
         let mut prepared = prepare_tool_calls_for_execution(&calls, &unregistered.specs());
-        prepare_write_calls(&context, &unregistered, &mut prepared).await;
+        prepare_write_calls(&context, &unregistered, &mut prepared);
         assert!(matches!(
             prepared[0].1.as_ref().expect("parsed").execution,
             PreparedExecution::Direct
@@ -1882,7 +1917,7 @@ mod tests {
         let mut custom = ToolRegistry::with_builtin_tools();
         custom.register(CustomWrite);
         let mut prepared = prepare_tool_calls_for_execution(&calls, &custom.specs());
-        prepare_write_calls(&context, &custom, &mut prepared).await;
+        prepare_write_calls(&context, &custom, &mut prepared);
         assert!(matches!(
             prepared[0].1.as_ref().expect("parsed").execution,
             PreparedExecution::Direct
