@@ -112,14 +112,13 @@ pub struct WorkflowDispatchApprovalLease {
 
 impl Drop for WorkflowDispatchEventLease {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.resolver.state.write() {
-            if let Some(route) = state
+        if let Ok(mut state) = self.resolver.state.write()
+            && let Some(route) = state
                 .event_routes
                 .get_mut(&self.session)
                 .filter(|route| route.lease_id == self.lease_id)
-            {
-                route.handler = None;
-            }
+        {
+            route.handler = None;
         }
     }
 }
