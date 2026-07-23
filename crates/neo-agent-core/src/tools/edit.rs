@@ -292,7 +292,7 @@ impl PreparedEdit {
                             .join(", ")
                     };
                     return Err(prepare_failed(
-                        Some(file_index),
+                        None,
                         Some(*edit_index),
                         Some(plan.path.display().to_string()),
                         format!(

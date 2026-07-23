@@ -155,6 +155,7 @@ async fn edit_flat_match_mismatch_reports_global_index_and_writes_nothing() {
     let details = edit.details.expect("details");
     assert_eq!(details["status"], "prepare_failed");
     assert_eq!(details["edit_index"], 1);
+    assert!(details["file_index"].is_null());
     assert_eq!(details["path"], "src/b.txt");
     let content = &edit.content;
     assert!(content.contains("expected 1 exact matches"), "{content}");
