@@ -20,6 +20,7 @@ use super::state::{
     WorkflowRunMetadata, WorkflowState,
 };
 use crate::AgentTokenUsage;
+use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 
 #[path = "runtime_support.rs"]
 mod support;
@@ -136,6 +137,7 @@ impl RunState {
 pub struct WorkflowRuntime {
     runs: Arc<Mutex<HashMap<String, Arc<Mutex<RunState>>>>>,
     limits: WorkflowLimits,
+    notifications: WorkflowNotificationQueue,
     runner: Arc<RwLock<Option<Arc<Runner>>>>,
     recovery_resolver: Arc<RwLock<Option<Arc<RecoveryResolver>>>>,
     #[cfg(test)]
@@ -163,11 +165,17 @@ impl WorkflowRuntime {
         Self {
             runs: Arc::new(Mutex::new(HashMap::new())),
             limits,
+            notifications: WorkflowNotificationQueue::default(),
             runner: Arc::new(RwLock::new(None)),
             recovery_resolver: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             rollback_remove_failure: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[must_use]
+    pub fn notification_queue(&self) -> WorkflowNotificationQueue {
+        self.notifications.clone()
     }
 
     /// Bind the production worker supplied by the Lua/dispatch composition root.
@@ -542,6 +550,24 @@ impl WorkflowRuntime {
                 continue;
             }
             let fallback_id = WorkflowId(entry.file_name().to_string_lossy().into_owned());
+            let existing = self.runs.lock().await.get(&fallback_id.0).cloned();
+            if let Some(existing) = existing {
+                let guard = existing.lock().await;
+                if guard.run_dir != run_dir {
+                    return Err(WorkflowError::Journal(format!(
+                        "workflow {} is already registered from {} instead of {}",
+                        fallback_id,
+                        guard.run_dir.display(),
+                        run_dir.display()
+                    )));
+                }
+                handles.push(WorkflowHandle {
+                    run_id: fallback_id,
+                    control: Arc::clone(&guard.control),
+                    runtime: self.clone(),
+                });
+                continue;
+            }
             let metadata = match journal::read_run_metadata(&run_dir) {
                 Ok(metadata) if metadata.run_id == fallback_id => metadata,
                 Ok(_) => {
@@ -631,9 +657,9 @@ impl WorkflowRuntime {
             } else {
                 last_state
             };
-            let terminal_reason = if final_state == WorkflowState::Paused {
+            let terminal_reason = if last_state == WorkflowState::Running {
                 Some("host_exit".to_owned())
-            } else if final_state.is_terminal() {
+            } else if final_state == WorkflowState::Paused || final_state.is_terminal() {
                 last_reason
             } else {
                 None
@@ -648,6 +674,22 @@ impl WorkflowRuntime {
                 )
                 .await,
             );
+        }
+        for handle in &handles {
+            let snapshot = handle.snapshot().await;
+            if snapshot.state.is_terminal()
+                || (snapshot.state == WorkflowState::Paused
+                    && snapshot.terminal_reason.as_deref() == Some("host_exit"))
+            {
+                self.notifications.enqueue(WorkflowNotification::new(
+                    session_dir,
+                    snapshot.run_id,
+                    snapshot.state,
+                    snapshot
+                        .terminal_reason
+                        .unwrap_or_else(|| "terminal".to_owned()),
+                ));
+            }
         }
         Ok(handles)
     }
@@ -864,6 +906,16 @@ impl WorkflowRuntime {
         state.state = new_state;
         if new_state.is_terminal() || new_state == WorkflowState::Paused {
             state.terminal_reason = Some(reason.to_owned());
+        }
+        if new_state.is_terminal()
+            && let Some(session_dir) = state.run_dir.parent().and_then(Path::parent)
+        {
+            self.notifications.enqueue(WorkflowNotification::new(
+                session_dir,
+                state.metadata.run_id.clone(),
+                new_state,
+                reason,
+            ));
         }
         Ok(())
     }

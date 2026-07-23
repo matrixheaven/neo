@@ -15,10 +15,6 @@ use super::InteractiveController;
 use super::{FrameRequest, RunningTurn, TurnChannels, TurnRequest};
 
 impl InteractiveController {
-    pub(super) fn start_turn_with_prompt(&mut self, prompt: Vec<Content>) {
-        self.start_turn_with_prompt_projection(prompt, MessageOrigin::User, None);
-    }
-
     pub(super) fn start_turn_with_prompt_display(
         &mut self,
         prompt: Vec<Content>,

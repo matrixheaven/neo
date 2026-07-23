@@ -214,6 +214,10 @@ impl AgentRuntime {
         let mut config = self.config.clone();
         config.instruction_registry = instruction_registry;
         let steer_input = self.steer_input.clone();
+        let natural_user_turn = matches!(
+            &message,
+            AgentMessage::User { origin, .. } if origin.is_user()
+        );
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (final_sender, final_receiver) = oneshot::channel();
@@ -259,6 +263,9 @@ impl AgentRuntime {
             }
             append_available_skills_snapshot(skills.as_ref(), &mut emitter);
             emitter.emit(AgentEvent::MessageAppended { message });
+            if natural_user_turn {
+                append_pending_workflow_notifications(&config, &mut emitter);
+            }
             if let Err(err) = run_agent_turn(
                 model,
                 config,

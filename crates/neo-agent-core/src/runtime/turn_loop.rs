@@ -18,7 +18,8 @@ use super::plan_orchestration::{
     attach_enter_plan_details, emit_plan_tool_event, enter_plan_mode_state,
 };
 use super::queue::{
-    SteerInputHandle, drain_live_steer_input, drain_next_pending_queue, drain_steering_queue,
+    SteerInputHandle, append_pending_workflow_notifications, drain_live_steer_input,
+    drain_next_pending_queue, drain_steering_queue,
 };
 use super::retry::{retry_delay, wait_for_retry};
 use super::stream_aggregator::run_model_attempt;
@@ -227,10 +228,18 @@ pub(super) async fn run_agent_turn(
     let mut pending_compaction_debt: Option<DeferredCompaction> = None;
     drain_live_steer_input(&steer_input, emitter);
     let mut pending_messages = drain_steering_queue(&config, emitter);
+    let mut pending_is_follow_up = false;
 
     loop {
         if !pending_messages.is_empty() {
+            let has_user_message = pending_messages.iter().any(
+                |message| matches!(message, AgentMessage::User { origin, .. } if origin.is_user()),
+            );
             append_queued_messages(emitter, pending_messages);
+            if pending_is_follow_up && has_user_message {
+                append_pending_workflow_notifications(&config, emitter);
+            }
+            pending_is_follow_up = false;
         }
 
         append_available_skills_snapshot(skills.as_ref(), emitter);
@@ -314,10 +323,11 @@ pub(super) async fn run_agent_turn(
         }) = assistant.clone()
         else {
             drain_live_steer_input(&steer_input, emitter);
-            if let Some(messages) =
+            if let Some((messages, is_follow_up)) =
                 next_pending_after_assistant(&config, emitter, goal_manager.as_deref())
             {
                 pending_messages = messages;
+                pending_is_follow_up = is_follow_up;
                 continue;
             }
             break;
@@ -501,12 +511,12 @@ fn next_pending_after_assistant(
     config: &AgentConfig,
     emitter: &mut EventEmitter,
     goal_manager: Option<&GoalManager>,
-) -> Option<Vec<AgentMessage>> {
-    let pending_messages = drain_next_pending_queue(config, emitter);
+) -> Option<(Vec<AgentMessage>, bool)> {
+    let (pending_messages, kind) = drain_next_pending_queue(config, emitter);
     if pending_messages.is_empty() {
-        goal_continuation_messages(goal_manager)
+        goal_continuation_messages(goal_manager).map(|messages| (messages, false))
     } else {
-        Some(pending_messages)
+        Some((pending_messages, kind == Some(crate::QueueKind::FollowUp)))
     }
 }
 

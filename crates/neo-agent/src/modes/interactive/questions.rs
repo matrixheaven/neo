@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use neo_agent_core::{
-    AgentEvent, Content, PendingQuestion, QuestionResponse, format_collected_answers,
+    AgentEvent, Content, MessageOrigin, PendingQuestion, QuestionResponse, format_collected_answers,
 };
 
 use super::InteractiveController;
@@ -60,7 +60,10 @@ impl InteractiveController {
             let Some(prompt) = self.pending_background_question_followups.pop_front() else {
                 break;
             };
-            self.start_turn_with_prompt(vec![Content::text(prompt)]);
+            self.start_turn_with_prompt_origin(
+                vec![Content::text(prompt)],
+                MessageOrigin::injection("background_question"),
+            );
             self.drain_active_turn().await?;
         }
         Ok(())

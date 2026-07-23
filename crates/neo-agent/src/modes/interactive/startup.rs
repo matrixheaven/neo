@@ -38,6 +38,8 @@ impl InteractiveController {
         let loaded = (self.load_session)(session_id.to_owned())
             .await
             .with_context(|| format!("failed to load session {session_id}"))?;
+        self.rehydrate_session_workflows(session_id, &loaded)
+            .await?;
         self.tui
             .chrome_mut()
             .set_session_label(loaded.label.clone());

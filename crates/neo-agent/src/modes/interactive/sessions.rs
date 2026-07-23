@@ -21,6 +21,8 @@ impl InteractiveController {
             let loaded = (self.load_session)(session.id.clone())
                 .await
                 .with_context(|| format!("failed to load session {}", session.id))?;
+            self.rehydrate_session_workflows(&session.id, &loaded)
+                .await?;
             self.tui
                 .chrome_mut()
                 .set_session_label(loaded.label.clone());
@@ -36,6 +38,24 @@ impl InteractiveController {
             tracing::warn!("failed to copy resume command to clipboard: {error}");
         }
         Ok(())
+    }
+
+    pub(super) async fn rehydrate_session_workflows(
+        &self,
+        session_id: &str,
+        loaded: &LoadedSessionTranscript,
+    ) -> Result<()> {
+        let Some(config) = self.local_config.as_ref() else {
+            return Ok(());
+        };
+        let session_dir = crate::config::workspace_sessions_dir(config).join(session_id);
+        crate::modes::run::rehydrate_session_workflows(
+            config,
+            session_id,
+            &session_dir,
+            &loaded.events,
+        )
+        .await
     }
 
     pub(super) fn toggle_session_picker_scope(&mut self) {

@@ -966,6 +966,23 @@ pub fn replay_messages<'a>(events: impl IntoIterator<Item = &'a AgentEvent>) -> 
         .collect()
 }
 
+/// Restore the stable identities of workflow reminders already projected into
+/// Session JSONL. The journal remains the workflow state owner.
+#[must_use]
+pub fn workflow_notification_projection_ids<'a>(
+    events: impl IntoIterator<Item = &'a AgentEvent>,
+) -> Vec<String> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended { message } => {
+                crate::runtime::WorkflowNotification::projection_id(message).map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn summarize_transcript(messages: &[AgentMessage]) -> String {
     if messages.is_empty() {
         return "Algorithmic transcript summary: no earlier messages were compacted.".to_owned();

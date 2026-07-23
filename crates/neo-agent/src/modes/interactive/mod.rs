@@ -2066,6 +2066,15 @@ impl InteractiveController {
     fn apply_turn_event(&mut self, event: AgentEvent) -> FrameRequest {
         let frame_request = Self::frame_request_for_agent_event(&event);
         let should_refresh_git_status = event_should_refresh_git_status(&event);
+        if let AgentEvent::MessageAppended { message } = &event
+            && let Some(id) = neo_agent_core::WorkflowNotification::projection_id(message)
+            && let Some(config) = &self.local_config
+        {
+            config
+                .workflow_runtime
+                .notification_queue()
+                .mark_projected(id);
+        }
         self.render_appended_user_message_if_needed(&event);
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"

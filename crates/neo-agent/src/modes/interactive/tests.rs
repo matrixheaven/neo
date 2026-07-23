@@ -904,6 +904,19 @@ async fn resolving_question_records_collected_answers_in_transcript() {
 
 #[tokio::test]
 async fn background_question_answer_starts_followup_turn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("workspace");
+    std::fs::create_dir_all(&project_dir).expect("workspace");
+    let config = test_config(&project_dir, temp.path().join("sessions"));
+    let session_dir = workspace_sessions_dir(&config).join(SESSION_A);
+    assert!(config.workflow_runtime.notification_queue().enqueue(
+        neo_agent_core::WorkflowNotification::new(
+            &session_dir,
+            neo_agent_core::workflow::WorkflowId("wf_background_question".to_owned()),
+            neo_agent_core::workflow::WorkflowState::Completed,
+            "worker completed",
+        ),
+    ));
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_for_test(
@@ -919,6 +932,8 @@ async fn background_question_answer_starts_followup_turn() {
             }
         },
     );
+    controller.local_config = Some(config.clone());
+    controller.set_active_session_id(SESSION_A.to_owned());
     let (response_tx, mut response_rx) = oneshot::channel();
     controller.register_pending_question(PendingQuestion {
         id: "question-1".to_owned(),
@@ -959,7 +974,11 @@ async fn background_question_answer_starts_followup_turn() {
     );
     let requests = requests.lock().expect("requests");
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].session_id.as_deref(), None);
+    assert_eq!(requests[0].session_id.as_deref(), Some(SESSION_A));
+    assert_eq!(
+        requests[0].prompt_origin,
+        MessageOrigin::injection("background_question")
+    );
     assert!(
         requests[0].prompt[0]
             .as_text()
@@ -971,6 +990,15 @@ async fn background_question_answer_starts_followup_turn() {
             .as_text()
             .unwrap()
             .contains("TaskOutput")
+    );
+    assert_eq!(
+        config
+            .workflow_runtime
+            .notification_queue()
+            .pending_for_session(&session_dir)
+            .len(),
+        1,
+        "background-question continuation must not consume workflow notifications"
     );
 }
 
@@ -1593,7 +1621,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                 }],
             }),
         });
-    controller.start_turn_with_prompt(Vec::new());
+    controller.start_turn_with_prompt_origin(Vec::new(), MessageOrigin::User);
     finish_queued_rx.await.expect("finish event queued");
 
     let mut rendered = Vec::new();
@@ -5445,7 +5473,7 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
         .expect("ctrl-o opens transcript browser");
     assert!(controller.chrome().transcript_browser_state().is_some());
 
-    controller.start_turn_with_prompt(Vec::new());
+    controller.start_turn_with_prompt_origin(Vec::new(), MessageOrigin::User);
     let token = captured_token
         .lock()
         .expect("token lock")

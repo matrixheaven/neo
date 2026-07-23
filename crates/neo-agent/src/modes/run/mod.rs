@@ -36,7 +36,7 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEve
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalRequest, ApprovalResponse,
     AskUserTool, Content, CreateSkillTool, ListSkillsTool, McpConnectionManager, MessageOrigin,
-    MoveSkillTool, PendingQuestion, SteerInputHandle, SummarizeSessionsTool,
+    MoveSkillTool, PendingQuestion, SteerInputHandle, SummarizeSessionsTool, WorkflowNotification,
     instructions::InstructionRegistry, mode::PlanMode, skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -70,6 +70,37 @@ pub async fn execute(
         RunOutput::Text => Ok(format!("{}\n", turn.assistant_text)),
         RunOutput::Events => events_output(&turn, config),
     }
+}
+
+pub(crate) async fn rehydrate_session_workflows(
+    config: &AppConfig,
+    session_id: &str,
+    session_dir: &std::path::Path,
+    replayed_events: &[AgentEvent],
+) -> anyhow::Result<()> {
+    let runtime = config.workflow_runtime.clone();
+    let background_tasks = config.background_tasks.clone();
+    runtime.notification_queue().restore_projected(
+        neo_agent_core::session::workflow_notification_projection_ids(replayed_events),
+    );
+    for handle in runtime
+        .rehydrate(session_dir)
+        .await
+        .with_context(|| format!("failed to recover workflows for session {session_id}"))?
+    {
+        let task_id = handle.run_id.0.clone();
+        if background_tasks.workflow_handle(&task_id).await.is_some() {
+            continue;
+        }
+        let description = handle.snapshot().await.name;
+        background_tasks
+            .start_workflow(task_id, description, handle)
+            .await
+            .with_context(|| {
+                format!("failed to register recovered workflow for session {session_id}")
+            })?;
+    }
+    Ok(())
 }
 
 fn events_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
@@ -207,9 +238,12 @@ async fn run_prompt_in_session(
     let prompt_text = prompt.join(" ");
     let user_content = vec![Content::text(prompt_text.as_str())];
     let session_path = sessions::session_path(session_id, config)?;
-    let context = JsonlSessionReader::replay_context(&session_path)
+    let replayed_events = JsonlSessionReader::read_all(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
+    let context = AgentContext::from_replay(replayed_events.iter());
+    let session_dir = session_root_from_wire_path(&session_path)?;
+    rehydrate_session_workflows(config, session_id, &session_dir, &replayed_events).await?;
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
@@ -218,7 +252,7 @@ async fn run_prompt_in_session(
     record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
-        Some(session_root_from_wire_path(&session_path)?),
+        Some(session_dir),
         None,
         None,
         None,
@@ -230,7 +264,7 @@ async fn run_prompt_in_session(
     )
     .await?;
     runtime.restore_plan_mode(&context);
-    finish_prompt_turn(
+    let turn = finish_prompt_turn(
         user_message,
         context,
         &mut writer,
@@ -239,7 +273,12 @@ async fn run_prompt_in_session(
         session_id.to_owned(),
         show_retry_notices,
     )
-    .await
+    .await?;
+    let notification_queue = config.workflow_runtime.notification_queue();
+    for id in neo_agent_core::session::workflow_notification_projection_ids(&turn.events) {
+        notification_queue.mark_projected(&id);
+    }
+    Ok(turn)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -882,6 +921,13 @@ async fn append_streaming_event(
     if effect.persist {
         for persisted in persistence.persisted_events(event) {
             writer.append_event(&persisted).await?;
+        }
+        if matches!(
+            event,
+            AgentEvent::MessageAppended { message }
+                if WorkflowNotification::projection_id(message).is_some()
+        ) {
+            writer.flush().await?;
         }
     }
     if effect.forward {

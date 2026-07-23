@@ -124,6 +124,32 @@ async fn rollback_created_run_removes_only_unstarted_transaction() {
 }
 
 #[tokio::test]
+async fn manually_paused_run_rehydrates_without_host_exit_notification() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    handle.pause(WorkflowActor::Human).await.unwrap();
+    assert_eq!(
+        handle.snapshot().await.terminal_reason.as_deref(),
+        Some("pause")
+    );
+    drop(handle);
+    drop(runtime);
+
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Paused);
+    assert_eq!(snapshot.terminal_reason.as_deref(), Some("pause"));
+    assert!(
+        recovered
+            .notification_queue()
+            .pending_for_session(dir.path())
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn worker_start_failure_is_durably_terminalized() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
