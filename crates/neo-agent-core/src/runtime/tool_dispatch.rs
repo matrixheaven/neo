@@ -14,11 +14,13 @@ use super::events::{
 };
 use super::instruction_context::InstructionContextBridge;
 use super::permission::{
-    current_permission_mode, permission_preparation_for_mode, resolve_permission_preparation,
+    PermissionTerminalDecision, current_permission_mode, permission_preparation_for_mode,
+    resolve_permission_preparation,
 };
 use super::plan_orchestration::{attach_exit_plan_details, exit_plan_mode_has_reviewable_plan};
 use super::skill_dispatch::{execute_invoke_skill, format_skill_tool_arguments};
 use super::tool_arguments::{InstructionScopeProbe, PreparedExecution, prepare_tool_arguments};
+use super::workflow_dispatch::WorkflowDispatchSnapshot;
 use crate::instructions::{
     InstructionEpochData, InstructionFailure, InstructionFingerprint, InstructionPreflightDecision,
     InstructionReconcileKind, InstructionReconcileRequest,
@@ -29,7 +31,7 @@ use crate::tools::{PreparedEdit, PreparedWrite};
 use crate::{
     AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ResourceLimitDetail,
     SkillInvocationOutcome, SkillInvocationSource, ToolAccess, ToolContext, ToolError,
-    ToolRegistry, ToolResult,
+    ToolEventCallback, ToolRegistry, ToolResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +102,10 @@ pub fn emit_repaired_tool_arguments_warning(tool_name: &str, warning: &str) {
 /// epoch the turn loop must emit after appending the results.
 pub(super) struct ToolBatchOutcome {
     pub results: Vec<(AgentToolCall, ToolResult)>,
+    /// Canonical typed permission decision aligned with each result. Display
+    /// text and serialized result details are projections, never authority.
+    pub permission_decisions: Vec<Option<PermissionTerminalDecision>>,
+    pub instruction_interruption: Option<InstructionInterruption>,
     /// Fresh epoch to emit after the tool results (defer/block). `None` for
     /// executed batches and for policy-blocked batches (whose blocked epoch
     /// is already visible).
@@ -110,6 +116,12 @@ pub(super) struct ToolBatchOutcome {
     /// attached — also when empty — so post-tool reconciliation can run;
     /// `None` when instruction preflight is not wired at all.
     pub preflight_targets: Option<Vec<PathBuf>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InstructionInterruption {
+    Deferred { generation: u64 },
+    Blocked { generation: u64 },
 }
 
 /// A fresh defer/block epoch plus the fingerprint to record after emission.
@@ -430,6 +442,26 @@ pub(super) fn apply_reconciliation_decision(
     }
 }
 
+fn apply_pending_instruction_epoch(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    pending: &PendingInstructionEpoch,
+    targets: &[PathBuf],
+) {
+    let decision = if pending.epoch.failure.is_some() {
+        InstructionPreflightDecision::Block {
+            epoch: pending.epoch.clone(),
+            fingerprint: pending.fingerprint.clone(),
+        }
+    } else {
+        InstructionPreflightDecision::Defer {
+            epoch: pending.epoch.clone(),
+            fingerprint: pending.fingerprint.clone(),
+        }
+    };
+    let _ = apply_reconciliation_decision(config, emitter, decision, targets);
+}
+
 /// Emit the epoch event (which applies model visibility) and then record the
 /// decision fingerprint.
 fn record_decision_fingerprint_after_epoch(
@@ -629,7 +661,10 @@ async fn recheck_prepared_mutations(
             PreparedExecution::Direct => continue,
         };
         if let Err(result) = recheck {
-            entry.outcome = AuthorizedToolCallOutcome::Terminal(result);
+            entry.outcome = AuthorizedToolCallOutcome::Terminal {
+                result,
+                permission_decision: None,
+            };
         }
     }
 }
@@ -654,7 +689,22 @@ enum AuthorizedToolCallOutcome {
     Run { access: ToolAccess },
     /// Terminal result without running the body (invalid arguments,
     /// `before_tool_call` block, permission denial, or revision feedback).
-    Terminal(ToolResult),
+    Terminal {
+        result: ToolResult,
+        permission_decision: Option<PermissionTerminalDecision>,
+    },
+}
+
+impl AuthorizedToolCallOutcome {
+    const fn permission_decision(&self) -> Option<PermissionTerminalDecision> {
+        match self {
+            Self::Run { .. } => None,
+            Self::Terminal {
+                permission_decision,
+                ..
+            } => *permission_decision,
+        }
+    }
 }
 
 /// Build the permission decision for every call in the batch. Dialogs await
@@ -680,7 +730,10 @@ async fn authorize_tool_batch<'a>(
                 tool_call,
                 prepared: None,
                 class: ToolSchedulingClass::ParallelSafe,
-                outcome: AuthorizedToolCallOutcome::Terminal(error),
+                outcome: AuthorizedToolCallOutcome::Terminal {
+                    result: error,
+                    permission_decision: None,
+                },
             },
             Ok(mut prepared_call) => {
                 let preparation =
@@ -694,7 +747,10 @@ async fn authorize_tool_batch<'a>(
                 let outcome = if let Some(blocked) =
                     before_tool_result(config, tool_call, cancel_token).await
                 {
-                    AuthorizedToolCallOutcome::Terminal(blocked)
+                    AuthorizedToolCallOutcome::Terminal {
+                        result: blocked,
+                        permission_decision: None,
+                    }
                 } else {
                     match resolve_permission_preparation(
                         config,
@@ -712,9 +768,13 @@ async fn authorize_tool_batch<'a>(
                             prepared_call.approval = approval;
                             AuthorizedToolCallOutcome::Run { access }
                         }
-                        super::permission::PermissionResolution::Terminal(result) => {
-                            AuthorizedToolCallOutcome::Terminal(result)
-                        }
+                        super::permission::PermissionResolution::Terminal {
+                            result,
+                            permission_decision,
+                        } => AuthorizedToolCallOutcome::Terminal {
+                            result,
+                            permission_decision,
+                        },
                     }
                 };
                 AuthorizedToolCall {
@@ -746,6 +806,18 @@ pub(super) async fn execute_tool_calls(
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
 ) -> Result<ToolBatchOutcome, AgentRuntimeError> {
+    config
+        .workflow_dispatch_resolver
+        .refresh(WorkflowDispatchSnapshot {
+            config: config.clone(),
+            model_client: Arc::clone(&model),
+            registry: Arc::clone(&registry),
+            skills: skills.cloned(),
+            process_supervisor: process_supervisor.clone(),
+            context: emitter.context.clone(),
+        })
+        .map_err(std::io::Error::other)?;
+
     // Phase 1 — parse every call up front. Invalid arguments produce valid
     // error results later without letting valid calls bypass preflight.
     let tool_specs = registry.specs();
@@ -761,6 +833,15 @@ pub(super) async fn execute_tool_calls(
         InstructionGate::Proceed(fingerprint) => Some(fingerprint),
         InstructionGate::Synthesize(pending) => {
             let PendingInstructionEpoch { epoch, fingerprint } = *pending;
+            let instruction_interruption = Some(if epoch.failure.is_some() {
+                InstructionInterruption::Blocked {
+                    generation: epoch.generation,
+                }
+            } else {
+                InstructionInterruption::Deferred {
+                    generation: epoch.generation,
+                }
+            });
             if let Some(failure) = epoch.failure.clone() {
                 let targets = preflight_targets.clone().unwrap_or_default();
                 register_blocked_scope(
@@ -774,8 +855,11 @@ pub(super) async fn execute_tool_calls(
             }
             let results = synthesized_batch_results(&prepared, &epoch);
             emit_synthesized_finished(turn, &results, emitter);
+            let permission_decisions = vec![None; results.len()];
             return Ok(ToolBatchOutcome {
                 results,
+                permission_decisions,
+                instruction_interruption,
                 pending_epoch: Some(PendingInstructionEpoch { epoch, fingerprint }),
                 executed_any: false,
                 preflight_targets,
@@ -793,8 +877,13 @@ pub(super) async fn execute_tool_calls(
                 })
                 .collect::<Vec<_>>();
             emit_synthesized_finished(turn, &results, emitter);
+            let permission_decisions = vec![None; results.len()];
             return Ok(ToolBatchOutcome {
                 results,
+                permission_decisions,
+                instruction_interruption: Some(InstructionInterruption::Blocked {
+                    generation: blocked.generation,
+                }),
                 pending_epoch: None,
                 executed_any: false,
                 preflight_targets,
@@ -868,14 +957,28 @@ pub(super) async fn execute_tool_calls(
                                 Some(failure) => blocked_tool_result(failure, epoch.generation),
                                 None => deferred_tool_result(&epoch),
                             },
-                            AuthorizedToolCallOutcome::Terminal(result) => result.clone(),
+                            AuthorizedToolCallOutcome::Terminal { result, .. } => result.clone(),
                         };
                         (entry.tool_call.clone(), result)
                     })
                     .collect::<Vec<_>>();
                 emit_synthesized_finished(turn, &results, emitter);
+                let permission_decisions = authorized
+                    .iter()
+                    .map(|entry| entry.outcome.permission_decision())
+                    .collect();
                 return Ok(ToolBatchOutcome {
                     results,
+                    permission_decisions,
+                    instruction_interruption: Some(if epoch.failure.is_some() {
+                        InstructionInterruption::Blocked {
+                            generation: epoch.generation,
+                        }
+                    } else {
+                        InstructionInterruption::Deferred {
+                            generation: epoch.generation,
+                        }
+                    }),
                     pending_epoch: Some(PendingInstructionEpoch { epoch, fingerprint }),
                     executed_any: false,
                     preflight_targets,
@@ -942,12 +1045,81 @@ pub(super) async fn execute_tool_calls(
             });
         }
     }
+    let permission_decisions = authorized
+        .iter()
+        .take(results.len())
+        .map(|entry| entry.outcome.permission_decision())
+        .collect();
     Ok(ToolBatchOutcome {
         results,
+        permission_decisions,
+        instruction_interruption: None,
         pending_epoch: None,
         executed_any,
         preflight_targets,
     })
+}
+
+/// Run one workflow-hosted call through the canonical batch dispatcher while
+/// forwarding its existing event stream to the session owner.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_workflow_tool_call(
+    config: &AgentConfig,
+    model: Arc<dyn ModelClient>,
+    registry: Arc<ToolRegistry>,
+    skills: Option<&SkillStoreHandle>,
+    tool_call: &AgentToolCall,
+    context: AgentContext,
+    cancel_token: &CancellationToken,
+    process_supervisor: &ProcessSupervisor,
+    turn: u32,
+    event_handler: Option<ToolEventCallback>,
+) -> (
+    Result<ToolBatchOutcome, AgentRuntimeError>,
+    AgentContext,
+    Vec<AgentEvent>,
+) {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let dispatch = async move {
+        let mut emitter = EventEmitter::new(sender, context);
+        let outcome = execute_tool_calls(
+            config,
+            model,
+            registry,
+            skills,
+            turn,
+            std::slice::from_ref(tool_call),
+            &mut emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+        if let Ok(batch) = &outcome
+            && let Some(pending) = &batch.pending_epoch
+        {
+            apply_pending_instruction_epoch(
+                config,
+                &mut emitter,
+                pending,
+                batch.preflight_targets.as_deref().unwrap_or_default(),
+            );
+        }
+        (outcome, emitter.context)
+    };
+    let forward = async move {
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            if let Ok(event) = event {
+                if let Some(handler) = event_handler.as_ref() {
+                    handler(event.clone());
+                }
+                events.push(event);
+            }
+        }
+        events
+    };
+    let ((outcome, context), events) = tokio::join!(dispatch, forward);
+    (outcome, context, events)
 }
 
 fn emit_tool_execution_finished(
@@ -1060,7 +1232,7 @@ async fn execute_authorized_sequential(
         let tool_call = entry.tool_call;
         let Some(prepared_call) = entry.prepared.as_ref() else {
             // Invalid arguments: emit a finished error without starting execution.
-            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
                 unreachable!("unparsed calls always carry a terminal result");
             };
             emit_tool_execution_finished(turn, tool_call, None, result, emitter);
@@ -1069,7 +1241,7 @@ async fn execute_authorized_sequential(
         };
         let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
             // Terminal result (before-hook block or permission denial).
-            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
                 unreachable!("matched above");
             };
             let mut result = result.clone();
@@ -1222,7 +1394,7 @@ async fn execute_authorized_parallel(
         let tool_call = entry.tool_call;
         let Some(prepared_call) = entry.prepared.as_ref() else {
             // Invalid arguments: emit a finished error without starting execution.
-            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
                 unreachable!("unparsed calls always carry a terminal result");
             };
             emit_tool_execution_finished(turn, tool_call, None, result, emitter);
@@ -1231,7 +1403,7 @@ async fn execute_authorized_parallel(
         };
         let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
             // Terminal result (before-hook block or permission denial).
-            let AuthorizedToolCallOutcome::Terminal(result) = &entry.outcome else {
+            let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
                 unreachable!("matched above");
             };
             let mut result = result.clone();
@@ -1416,7 +1588,10 @@ async fn run_tool_with_cancel(
 }
 
 pub(super) fn cancelled_tool_result() -> ToolResult {
-    ToolResult::error(ToolError::Cancelled.to_string())
+    ToolResult::error(ToolError::Cancelled.to_string()).with_details(serde_json::json!({
+        "kind": "cancelled",
+        "side_effect_occurred": false,
+    }))
 }
 
 async fn run_model_bash_with_cancel(

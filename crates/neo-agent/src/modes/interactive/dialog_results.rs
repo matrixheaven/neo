@@ -113,6 +113,7 @@ impl InteractiveController {
                 config.default_provider.clone_from(&model.provider);
             }
         }
+        self.refresh_workflow_dispatch_model();
         // Persist the complete selection so startup cannot combine the new
         // model with a stale provider or reasoning setting.
         if let Some(config_path) = self.config_path()

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use neo_agent_core::AgentContext;
-use neo_agent_core::ToolAccess;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::runtime::WorkflowDispatchHandle;
 use neo_agent_core::tools::{ProcessSupervisor, ToolRegistry};
@@ -22,7 +21,6 @@ async fn make_runner() -> LuaWorkflowRunner {
         registry,
         process_supervisor: ProcessSupervisor::default(),
         context: AgentContext::new(),
-        tool_access: Some(ToolAccess::all()),
     };
 
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
@@ -93,7 +91,6 @@ async fn infinite_lua_hits_instruction_resource_limit() {
         registry,
         process_supervisor: ProcessSupervisor::default(),
         context: AgentContext::new(),
-        tool_access: Some(ToolAccess::all()),
     };
 
     let runtime = WorkflowRuntime::new(limits.clone());

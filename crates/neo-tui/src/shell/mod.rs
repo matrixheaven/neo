@@ -191,6 +191,19 @@ impl NeoChromeState {
         results
     }
 
+    /// Remove one live approval without manufacturing a user decision.
+    /// Runtime/controller cleanup owns whether the transcript is resolved.
+    pub fn remove_approval(&mut self, request_id: &str) -> bool {
+        let previous_len = self.pending_approvals.len();
+        self.pending_approvals
+            .retain(|approval| approval.request.id != request_id);
+        let removed = self.pending_approvals.len() != previous_len;
+        if removed {
+            self.mode = self.overlay_mode();
+        }
+        removed
+    }
+
     /// Confirm the selected option, or enter revision feedback editing when
     /// a revise action is first confirmed.
     pub fn confirm_or_edit_selected_approval(&mut self) -> Option<ApprovalResponse> {

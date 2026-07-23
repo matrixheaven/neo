@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
-    SummaryScope, agent_details, context_mode_label, delegate_result_content,
-    model_safe_swarm_snapshot, swarm_details,
+    SummaryScope, accumulate_actual_usage, agent_details, context_mode_label,
+    delegate_result_content, model_safe_swarm_snapshot, swarm_details,
 };
 use super::{
     Tool, ToolContext, ToolError, ToolEventCallback, ToolFuture, ToolResult, parse_input, schema,
@@ -22,6 +22,11 @@ use crate::multi_agent::{
 };
 
 type SwarmProgressUpdate = (SwarmChildProgress, SwarmAggregate, AgentLifecycleState);
+
+struct SwarmRunOutput {
+    snapshot: SwarmSnapshot,
+    actual_usage: Option<crate::AgentTokenUsage>,
+}
 
 async fn publish_swarm_progress(
     event_callback: Option<&ToolEventCallback>,
@@ -206,23 +211,27 @@ impl Tool for DelegateTool {
                     ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
                 })
                 .await;
+            let actual_usage = accumulate_actual_usage(None, &output.events);
             let completed = output.snapshot;
             ctx.emit_event(AgentEvent::DelegateFinished {
                 turn,
                 agent: completed.clone(),
             });
+            let mut details = agent_details(
+                "delegate",
+                &completed,
+                Some(request.context),
+                SummaryScope::CurrentRun,
+                true,
+                true,
+                false,
+            );
+            if let Some(usage) = actual_usage {
+                details["actual_usage"] = json!(usage);
+            }
             Ok(
-                ToolResult::ok(delegate_result_content(&completed, request.context)).with_details(
-                    agent_details(
-                        "delegate",
-                        &completed,
-                        Some(request.context),
-                        SummaryScope::CurrentRun,
-                        true,
-                        true,
-                        false,
-                    ),
-                ),
+                ToolResult::ok(delegate_result_content(&completed, request.context))
+                    .with_details(details),
             )
         })
     }
@@ -338,7 +347,7 @@ impl Tool for DelegateSwarmTool {
                 let event_callback = ctx.tool_event.clone();
                 let initial_snapshot_for_worker = initial_snapshot.clone();
                 tokio::spawn(async move {
-                    let final_snapshot = run_swarm_children(
+                    let output = run_swarm_children(
                         runtime.clone(),
                         deps,
                         initial_snapshot_for_worker,
@@ -348,6 +357,7 @@ impl Tool for DelegateSwarmTool {
                         Some((background_tasks.clone(), task_id_for_worker.clone())),
                     )
                     .await;
+                    let final_snapshot = output.snapshot;
                     runtime.register_swarm(final_snapshot.clone());
                     background_tasks
                         .finish_delegate_swarm(&task_id_for_worker, final_snapshot)
@@ -369,7 +379,7 @@ impl Tool for DelegateSwarmTool {
                 swarm: initial_snapshot.clone(),
             });
 
-            let final_snapshot = run_swarm_children(
+            let output = run_swarm_children(
                 ctx.multi_agent.clone(),
                 deps,
                 initial_snapshot,
@@ -379,11 +389,16 @@ impl Tool for DelegateSwarmTool {
                 None,
             )
             .await;
+            let final_snapshot = output.snapshot;
             ctx.multi_agent.register_swarm(final_snapshot.clone());
             ctx.emit_event(AgentEvent::DelegateSwarmFinished {
                 turn,
                 swarm: final_snapshot.clone(),
             });
+            let mut details = swarm_details(&final_snapshot);
+            if let Some(usage) = output.actual_usage {
+                details["actual_usage"] = json!(usage);
+            }
             Ok(ToolResult::ok(format!(
                 "swarm_id: {}\nstatus: {}\nsummary_scope: swarm_items\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
                 final_snapshot.swarm_id,
@@ -396,7 +411,7 @@ impl Tool for DelegateSwarmTool {
                 final_snapshot.aggregate.cancelled,
                 final_snapshot.aggregate.timed_out,
             ))
-            .with_details(swarm_details(&final_snapshot)))
+            .with_details(details))
         })
     }
 }
@@ -429,7 +444,7 @@ async fn run_swarm_children(
     turn: u32,
     event_callback: Option<ToolEventCallback>,
     background: Option<(crate::BackgroundTaskManager, String)>,
-) -> SwarmSnapshot {
+) -> SwarmRunOutput {
     const PROGRESS_QUEUE_CAPACITY: usize = 64;
     let mut ordered_children: Vec<Option<SwarmChildSnapshot>> =
         vec![None; initial_snapshot.children.len()];
@@ -453,11 +468,14 @@ async fn run_swarm_children(
                 if let Some(current) = runtime.agent_snapshot(child.agent.id.as_str())
                     && current.state.is_terminal()
                 {
-                    return SwarmChildSnapshot {
-                        item_index,
-                        item,
-                        agent: current,
-                    };
+                    return (
+                        SwarmChildSnapshot {
+                            item_index,
+                            item,
+                            agent: current,
+                        },
+                        None,
+                    );
                 }
                 let output = runtime
                     .run_started_swarm_child_turn(
@@ -505,16 +523,21 @@ async fn run_swarm_children(
                         },
                     )
                     .await;
-                SwarmChildSnapshot {
-                    item_index,
-                    item,
-                    agent: output.snapshot,
-                }
+                let actual_usage = accumulate_actual_usage(None, &output.events);
+                (
+                    SwarmChildSnapshot {
+                        item_index,
+                        item,
+                        agent: output.snapshot,
+                    },
+                    actual_usage,
+                )
             }
         })
         .buffer_unordered(max_concurrency);
 
     let mut completed_count = 0;
+    let mut actual_usage: Option<crate::AgentTokenUsage> = None;
     loop {
         tokio::select! {
             Some((child_progress, aggregate, state)) = progress_rx.recv() => {
@@ -547,7 +570,12 @@ async fn run_swarm_children(
                     ).await;
                 }
             }
-            Some(completed_child) = stream.next() => {
+            Some((completed_child, child_usage)) = stream.next() => {
+        if let Some(child_usage) = child_usage {
+            actual_usage = Some(actual_usage.map_or(child_usage, |total| {
+                total.saturating_add(child_usage)
+            }));
+        }
         while let Ok(update) = progress_rx.try_recv() {
             publish_swarm_progress(
                 event_callback.as_ref(),
@@ -622,9 +650,19 @@ async fn run_swarm_children(
     if let Some(current) = runtime.swarm_snapshot(&initial_snapshot.swarm_id)
         && current.state == crate::multi_agent::AgentLifecycleState::Cancelled
     {
-        return current;
+        return SwarmRunOutput {
+            snapshot: current,
+            actual_usage,
+        };
     }
-    swarm_snapshot_from_progress(&initial_snapshot, &ordered_children, initial_snapshot.mode)
+    SwarmRunOutput {
+        snapshot: swarm_snapshot_from_progress(
+            &initial_snapshot,
+            &ordered_children,
+            initial_snapshot.mode,
+        ),
+        actual_usage,
+    }
 }
 
 fn swarm_snapshot_from_progress(

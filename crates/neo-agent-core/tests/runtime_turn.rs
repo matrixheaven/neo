@@ -1,4 +1,6 @@
 use futures::StreamExt;
+use neo_agent_core::runtime::WorkflowDispatchHandle;
+use neo_agent_core::workflow::WorkflowInvocationContext;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest,
@@ -7749,6 +7751,136 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
 
 struct EchoTool;
 
+struct StoreWorkflowDispatchHandleTool {
+    slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
+}
+
+impl Tool for StoreWorkflowDispatchHandleTool {
+    fn name(&self) -> &'static str {
+        "StoreWorkflowDispatchHandle"
+    }
+
+    fn description(&self) -> &'static str {
+        "Stores a workflow dispatch handle for a later natural turn."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let handle = WorkflowDispatchHandle {
+                config: ctx.child_config.clone().expect("runtime config"),
+                model_client: ctx.child_model.clone().expect("runtime model"),
+                registry: ctx.child_tools.clone().expect("runtime tools"),
+                process_supervisor: ctx.process_supervisor.clone(),
+                context: AgentContext::new(),
+            };
+            *self.slot.lock().expect("dispatch slot") = Some(handle);
+            Ok(ToolResult::ok("stored"))
+        })
+    }
+}
+
+struct InvokeStoredWorkflowDispatchHandleTool {
+    slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
+}
+
+impl Tool for InvokeStoredWorkflowDispatchHandleTool {
+    fn name(&self) -> &'static str {
+        "InvokeStoredWorkflowDispatchHandle"
+    }
+
+    fn description(&self) -> &'static str {
+        "Invokes a stored workflow dispatch handle."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let handle = self
+                .slot
+                .lock()
+                .expect("dispatch slot")
+                .clone()
+                .expect("stored workflow dispatch handle");
+            let outcome = handle
+                .run_one(
+                    WorkflowInvocationContext {
+                        invocation_id: "nested_turn_two".to_owned(),
+                        cancel_token: ctx.cancel_token.clone(),
+                    },
+                    "NestedWorkflowEcho",
+                    json!({}),
+                )
+                .await;
+            if outcome.ok {
+                Ok(ToolResult::ok(outcome.summary))
+            } else {
+                Ok(ToolResult::error(outcome.summary))
+            }
+        })
+    }
+}
+
+struct NestedWorkflowEchoTool;
+
+impl Tool for NestedWorkflowEchoTool {
+    fn name(&self) -> &'static str {
+        "NestedWorkflowEcho"
+    }
+
+    fn description(&self) -> &'static str {
+        "Completes one nested canonical workflow call."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async { Ok(ToolResult::ok("nested complete")) })
+    }
+}
+
+struct WorkflowToolEventProbe;
+
+impl Tool for WorkflowToolEventProbe {
+    fn name(&self) -> &'static str {
+        "Delegate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Emits a structured event through the production workflow ToolContext."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let turn = ctx.current_turn.expect("workflow dispatch turn");
+            ctx.emit_event(AgentEvent::ToolExecutionUpdate {
+                turn,
+                id: "workflow_tool_event_probe".to_owned(),
+                name: "Delegate".to_owned(),
+                partial_result: ToolResult::ok("tool event reached production sink"),
+            });
+            Ok(ToolResult::ok("probe complete").with_details(json!({
+                "kind": "delegate",
+                "agent_id": "agent_probe",
+                "status": "completed",
+                "mode": "foreground",
+            })))
+        })
+    }
+}
+
 fn runtime_with_large_tool(harness: &FakeHarness) -> AgentRuntime {
     let mut registry = ToolRegistry::new();
     registry.register(LargeTool);
@@ -11949,4 +12081,142 @@ async fn instruction_preflight_defers_whole_edit_for_one_new_scope() {
         "nested\n"
     );
     assert_eq!(std::fs::read_to_string(&root_file).expect("root"), "root\n");
+}
+
+#[tokio::test]
+async fn run_workflow_forwards_tool_context_events_with_live_turn_and_closes_stream() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("prepare", "TodoList", json!({"todos": []}))]),
+        tool_call_turn(&[(
+            "workflow",
+            "RunWorkflow",
+            json!({
+                "title": "verify production events",
+                "script": "neo.delegate({ task = 'emit structured event' })",
+            }),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let config = AgentConfig::for_model(harness.model())
+        .with_workspace_root(workspace.path())
+        .expect("workspace root")
+        .with_permission_mode(PermissionMode::Yolo);
+    config.workflow_capability.grant().await;
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register(WorkflowToolEventProbe);
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry);
+    let mut context = AgentContext::new();
+
+    let events = timeout(
+        Duration::from_secs(10),
+        runtime
+            .run_turn(&mut context, AgentMessage::user_text("run workflow"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("production event stream closes")
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("turn succeeds");
+
+    let live_turn = events.iter().find_map(|event| match event {
+        AgentEvent::ToolExecutionUpdate { turn, id, name, .. }
+            if id == "workflow_tool_event_probe" && name == "Delegate" =>
+        {
+            Some(*turn)
+        }
+        _ => None,
+    });
+    let turn = live_turn.expect("ToolContext::tool_event reaches production stream");
+    assert_ne!(turn, 0, "workflow dispatch must retain the live outer turn");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionStarted { turn: started_turn, name, .. }
+            if *started_turn == turn && name == "Delegate"
+    )));
+}
+
+#[tokio::test]
+async fn stored_workflow_handle_routes_nested_events_only_to_the_active_turn() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[("store_dispatch", "StoreWorkflowDispatchHandle", json!({}))]),
+        end_turn_events("stored"),
+        tool_call_turn(&[(
+            "invoke_dispatch",
+            "InvokeStoredWorkflowDispatchHandle",
+            json!({}),
+        )]),
+        end_turn_events("invoked"),
+    ]);
+    let slot = Arc::new(Mutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.register(StoreWorkflowDispatchHandleTool {
+        slot: Arc::clone(&slot),
+    });
+    registry.register(InvokeStoredWorkflowDispatchHandleTool {
+        slot: Arc::clone(&slot),
+    });
+    registry.register(NestedWorkflowEchoTool);
+    let config = AgentConfig::for_model(harness.model())
+        .with_workspace_root(workspace.path())
+        .expect("workspace root")
+        .with_permission_mode(PermissionMode::Yolo);
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry);
+    let mut context = AgentContext::new();
+
+    let turn_one = timeout(
+        Duration::from_secs(5),
+        runtime
+            .run_turn(&mut context, AgentMessage::user_text("store handle"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("turn one stream closes while handle remains stored")
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("turn one succeeds");
+    assert!(slot.lock().expect("dispatch slot").is_some());
+    assert!(!turn_one.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionStarted { id, .. }
+            | AgentEvent::ToolExecutionFinished { id, .. }
+            if id == "nested_turn_two"
+    )));
+
+    let turn_two = timeout(
+        Duration::from_secs(5),
+        runtime
+            .run_turn(&mut context, AgentMessage::user_text("invoke handle"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("turn two stream closes after nested completion")
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("turn two succeeds");
+    let active_turn = turn_two
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionStarted { turn, id, .. } if id == "invoke_dispatch" => {
+                Some(*turn)
+            }
+            _ => None,
+        })
+        .expect("turn two outer tool start");
+    assert!(turn_two.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionStarted { turn, id, name, .. }
+            if *turn == active_turn
+                && id == "nested_turn_two"
+                && name == "NestedWorkflowEcho"
+    )));
+    assert!(turn_two.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished { turn, id, name, .. }
+            if *turn == active_turn
+                && id == "nested_turn_two"
+                && name == "NestedWorkflowEcho"
+    )));
 }

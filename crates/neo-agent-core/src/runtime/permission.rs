@@ -43,7 +43,10 @@ pub(super) enum PermissionResolution {
         access: ToolAccess,
         approval: Option<ApprovalExecutionContext>,
     },
-    Terminal(ToolResult),
+    Terminal {
+        result: ToolResult,
+        permission_decision: Option<PermissionTerminalDecision>,
+    },
 }
 
 /// Resolve one permission preparation into an execution decision. Approval
@@ -64,9 +67,10 @@ pub(super) async fn resolve_permission_preparation(
             access,
             approval: None,
         },
-        PermissionPreparation::Deny(message) => {
-            PermissionResolution::Terminal(ToolResult::error(message))
-        }
+        PermissionPreparation::Deny(message) => PermissionResolution::Terminal {
+            result: ToolResult::error(message),
+            permission_decision: Some(PermissionTerminalDecision::Denied),
+        },
         PermissionPreparation::Ask {
             operation,
             subject,
@@ -87,7 +91,13 @@ pub(super) async fn resolve_permission_preparation(
             )
             .await
             {
-                AppliedApproval::Terminal(result) => PermissionResolution::Terminal(result),
+                AppliedApproval::Terminal {
+                    result,
+                    permission_decision,
+                } => PermissionResolution::Terminal {
+                    result,
+                    permission_decision,
+                },
                 AppliedApproval::Allow { approval } => PermissionResolution::Run {
                     access: access_for_tool(tool_call, true),
                     approval,
@@ -763,7 +773,27 @@ enum AppliedApproval {
     Allow {
         approval: Option<ApprovalExecutionContext>,
     },
-    Terminal(ToolResult),
+    Terminal {
+        result: ToolResult,
+        permission_decision: Option<PermissionTerminalDecision>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PermissionTerminalDecision {
+    Denied,
+    Cancelled,
+    Required,
+}
+
+impl PermissionTerminalDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Cancelled => "cancelled",
+            Self::Required => "required",
+        }
+    }
 }
 
 /// Persist a Layer-2 prefix rule, rolling back the in-memory insert when disk
@@ -803,9 +833,15 @@ fn apply_approval_resolution(
     resolution: ApprovalResolution,
 ) -> AppliedApproval {
     match resolution {
-        ApprovalResolution::Cancelled { .. } => {
-            AppliedApproval::Terminal(permission_error(operation, subject, "approval cancelled"))
-        }
+        ApprovalResolution::Cancelled { .. } => AppliedApproval::Terminal {
+            result: permission_error(
+                operation,
+                subject,
+                PermissionTerminalDecision::Cancelled,
+                "approval cancelled",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Cancelled),
+        },
         ApprovalResolution::Selected {
             action: ApprovalAction::PermitOnce,
             ..
@@ -826,13 +862,24 @@ fn apply_approval_resolution(
             action: ApprovalAction::PermitForPrefix { rule },
             ..
         } => match persist_prefix_rule_or_error(config, &rule) {
-            Some(error) => AppliedApproval::Terminal(error),
+            Some(error) => AppliedApproval::Terminal {
+                result: error,
+                permission_decision: None,
+            },
             None => AppliedApproval::Allow { approval: None },
         },
         ApprovalResolution::Selected {
             action: ApprovalAction::Reject,
             ..
-        } => AppliedApproval::Terminal(permission_error(operation, subject, "approval denied")),
+        } => AppliedApproval::Terminal {
+            result: permission_error(
+                operation,
+                subject,
+                PermissionTerminalDecision::Denied,
+                "approval denied",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Denied),
+        },
         ApprovalResolution::Selected {
             action: ApprovalAction::ApprovePlan { selection },
             ..
@@ -848,28 +895,39 @@ fn apply_approval_resolution(
         ApprovalResolution::Selected {
             action: ApprovalAction::RejectPlan,
             ..
-        } => AppliedApproval::Terminal(permission_error(
-            PermissionOperation::PlanTransition,
-            "Exit plan mode",
-            "approval denied",
-        )),
+        } => AppliedApproval::Terminal {
+            result: permission_error(
+                PermissionOperation::PlanTransition,
+                "Exit plan mode",
+                PermissionTerminalDecision::Denied,
+                "approval denied",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Denied),
+        },
         ApprovalResolution::Selected {
             action: ApprovalAction::RejectGoal,
             ..
-        } => AppliedApproval::Terminal(permission_error(
-            PermissionOperation::GoalTransition,
-            "Start reviewed goal",
-            "approval denied",
-        )),
+        } => AppliedApproval::Terminal {
+            result: permission_error(
+                PermissionOperation::GoalTransition,
+                "Start reviewed goal",
+                PermissionTerminalDecision::Denied,
+                "approval denied",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Denied),
+        },
         ApprovalResolution::Selected {
             action: ApprovalAction::RevisePlan { .. },
             feedback,
             ..
         } => {
             let feedback = feedback.unwrap_or_default();
-            AppliedApproval::Terminal(ToolResult::ok(format!(
-                "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
-            )))
+            AppliedApproval::Terminal {
+                result: ToolResult::ok(format!(
+                    "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
+                )),
+                permission_decision: None,
+            }
         }
         ApprovalResolution::Selected {
             action: ApprovalAction::ReviseGoal { .. },
@@ -877,9 +935,12 @@ fn apply_approval_resolution(
             ..
         } => {
             let feedback = feedback.unwrap_or_default();
-            AppliedApproval::Terminal(ToolResult::ok(format!(
-                "User requested revisions. Goal mode remains active.\n\nFeedback: {feedback}"
-            )))
+            AppliedApproval::Terminal {
+                result: ToolResult::ok(format!(
+                    "User requested revisions. Goal mode remains active.\n\nFeedback: {feedback}"
+                )),
+                permission_decision: None,
+            }
         }
     }
 }
@@ -950,7 +1011,10 @@ async fn resolve_approval(
                     PreparedExecution::Write(write) => write.cancelled_before_commit_result(),
                     PreparedExecution::Direct => cancelled_tool_result(),
                 };
-                return AppliedApproval::Terminal(result);
+                return AppliedApproval::Terminal {
+                    result,
+                    permission_decision: None,
+                };
             }
             response = handler(request.clone()) => response,
         }
@@ -965,11 +1029,15 @@ async fn resolve_approval(
                 reason: ApprovalCancelReason::SessionEnded,
             },
         );
-        return AppliedApproval::Terminal(permission_error(
-            operation,
-            &subject,
-            "approval required",
-        ));
+        return AppliedApproval::Terminal {
+            result: permission_error(
+                operation,
+                &subject,
+                PermissionTerminalDecision::Required,
+                "approval required",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Required),
+        };
     };
     let resolution = match request.validate_response(&response) {
         Ok(resolution) => resolution,
@@ -984,10 +1052,13 @@ async fn resolve_approval(
                     reason: ApprovalCancelReason::SessionEnded,
                 },
             );
-            return AppliedApproval::Terminal(ToolResult::error(format!(
-                "invalid approval response for {}: {error:?}",
-                request.id
-            )));
+            return AppliedApproval::Terminal {
+                result: ToolResult::error(format!(
+                    "invalid approval response for {}: {error:?}",
+                    request.id
+                )),
+                permission_decision: None,
+            };
         }
     };
     emit_approval_resolved(emitter, request.turn, &request.id, resolution.clone());
@@ -997,6 +1068,7 @@ async fn resolve_approval(
 fn permission_error(
     operation: PermissionOperation,
     subject: &str,
+    decision: PermissionTerminalDecision,
     prefix: &'static str,
 ) -> ToolResult {
     let noun = match operation {
@@ -1008,7 +1080,13 @@ fn permission_error(
         PermissionOperation::PlanTransition => "plan transition",
         PermissionOperation::GoalTransition => "goal transition",
     };
-    ToolResult::error(format!("{prefix} for {noun}: {subject}"))
+    ToolResult::error(format!("{prefix} for {noun}: {subject}")).with_details(serde_json::json!({
+        "kind": "permission",
+        "decision": decision.as_str(),
+        "operation": noun,
+        "subject": subject,
+        "side_effect_occurred": false,
+    }))
 }
 
 fn permission_operation_for_tool(

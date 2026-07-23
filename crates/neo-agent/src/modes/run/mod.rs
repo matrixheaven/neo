@@ -23,6 +23,7 @@ use session_mgmt::{
 };
 
 use std::{
+    collections::HashMap,
     io::IsTerminal as _,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -699,6 +700,76 @@ struct StreamingTurnIo {
     cancel_token: CancellationToken,
 }
 
+#[derive(Debug)]
+pub(crate) struct SessionWorkflowEvent {
+    pub(crate) session_id: String,
+    pub(crate) generation: u64,
+    pub(crate) event: AgentEvent,
+}
+
+#[derive(Debug)]
+pub(crate) enum PersistedSessionWorkflowEvent {
+    Event(SessionWorkflowEvent),
+    Error {
+        session_id: String,
+        generation: u64,
+        message: String,
+    },
+}
+
+struct IdleSessionEventWriter {
+    writer: JsonlSessionWriter,
+    persistence: SessionEventPersistence,
+}
+
+pub(crate) async fn persist_session_workflow_events(
+    config: AppConfig,
+    mut events: mpsc::UnboundedReceiver<SessionWorkflowEvent>,
+    persisted: mpsc::UnboundedSender<PersistedSessionWorkflowEvent>,
+) {
+    let mut writers = HashMap::<String, IdleSessionEventWriter>::new();
+    while let Some(envelope) = events.recv().await {
+        let result = persist_session_workflow_event(&config, &mut writers, &envelope).await;
+        let delivery = match result {
+            Ok(()) => PersistedSessionWorkflowEvent::Event(envelope),
+            Err(error) => PersistedSessionWorkflowEvent::Error {
+                session_id: envelope.session_id,
+                generation: envelope.generation,
+                message: error.to_string(),
+            },
+        };
+        if persisted.send(delivery).is_err() {
+            break;
+        }
+    }
+}
+
+async fn persist_session_workflow_event(
+    config: &AppConfig,
+    writers: &mut HashMap<String, IdleSessionEventWriter>,
+    envelope: &SessionWorkflowEvent,
+) -> anyhow::Result<()> {
+    if !writers.contains_key(&envelope.session_id) {
+        let path = sessions::session_path(&envelope.session_id, config)?;
+        let writer = JsonlSessionWriter::open_append(path).await?;
+        writers.insert(
+            envelope.session_id.clone(),
+            IdleSessionEventWriter {
+                writer,
+                persistence: SessionEventPersistence::default(),
+            },
+        );
+    }
+    let session = writers
+        .get_mut(&envelope.session_id)
+        .expect("idle session writer inserted above");
+    for event in session.persistence.persisted_events(&envelope.event) {
+        session.writer.append_event(&event).await?;
+    }
+    session.writer.flush().await?;
+    Ok(())
+}
+
 struct PreparedStreamingTurn {
     prompt: String,
     session_id: String,
@@ -924,6 +995,8 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1018,6 +1091,8 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1088,6 +1163,8 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1142,6 +1219,8 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1217,6 +1296,8 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1300,6 +1381,8 @@ mod tests {
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -1414,6 +1497,8 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -2790,6 +2875,8 @@ mod tests {
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
@@ -2804,6 +2891,66 @@ mod tests {
             config_path: project_dir.join(".neo/config.toml"),
             config_file_exists: true,
         }
+    }
+
+    #[tokio::test]
+    async fn idle_workflow_event_is_flushed_before_persisted_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000777";
+        let session_directory = crate::config::workspace_sessions_dir(&config).join(session_id);
+        tokio::fs::create_dir_all(&session_directory)
+            .await
+            .expect("session directory");
+        let wire_path = neo_agent_core::session::main_agent_wire_path(&session_directory);
+        tokio::fs::create_dir_all(wire_path.parent().expect("wire parent"))
+            .await
+            .expect("wire directory");
+        let mut seed = JsonlSessionWriter::create(&wire_path)
+            .await
+            .expect("session writer");
+        seed.flush().await.expect("seed flush");
+        drop(seed);
+        let event = AgentEvent::ToolExecutionStarted {
+            turn: 9,
+            id: "workflow-idle".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({"command": "cargo --version"}),
+        };
+        let (ingress, events) = tokio::sync::mpsc::unbounded_channel();
+        let (persisted, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(super::persist_session_workflow_events(
+            config, events, persisted,
+        ));
+
+        ingress
+            .send(super::SessionWorkflowEvent {
+                session_id: session_id.to_owned(),
+                generation: 4,
+                event: event.clone(),
+            })
+            .expect("idle event");
+        let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), deliveries.recv())
+            .await
+            .expect("persisted delivery timeout")
+            .expect("persisted delivery");
+        assert!(matches!(
+            delivery,
+            super::PersistedSessionWorkflowEvent::Event(super::SessionWorkflowEvent {
+                generation: 4,
+                ..
+            })
+        ));
+        let stored = JsonlSessionReader::read_all(&wire_path)
+            .await
+            .expect("persisted session");
+        assert!(
+            stored.contains(&event),
+            "delivery must follow durable flush"
+        );
+
+        drop(ingress);
+        worker.await.expect("idle persistence worker");
     }
 
     #[tokio::test]

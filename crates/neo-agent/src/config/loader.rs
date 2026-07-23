@@ -150,6 +150,8 @@ impl AppConfig {
             runtime,
             background_tasks: BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
             multi_agent: MultiAgentRuntime::new(),
             tui,
             theme,

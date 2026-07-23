@@ -31,7 +31,7 @@ use tracing_subscriber::prelude::*;
 use super::git_status::{git_status_label_with_program, parse_git_status_porcelain};
 use super::snapshot::{compose_tui_frame, render_overlay_snapshot};
 use super::*;
-use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
+use crate::config::{Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig};
 
 const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000601";
 const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000602";
@@ -8832,6 +8832,140 @@ fn model_selection_persists_reasoning_and_provider_across_reload() {
     assert_eq!(reloaded.default_provider, "anthropic");
 }
 
+#[test]
+fn idle_model_and_provider_refresh_replace_bound_workflow_dispatch_client() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    config.providers.insert(
+        "anthropic".to_owned(),
+        ProviderConfig {
+            display_name: Some("Anthropic test".to_owned()),
+            provider_type: Some(neo_ai::ApiType::Anthropic),
+            base_url: None,
+            api_key: Some("test-key".to_owned()),
+            api_key_env: None,
+        },
+    );
+    config.models.insert(
+        "selected-model".to_owned(),
+        ModelConfig {
+            provider: "anthropic".to_owned(),
+            model: "claude-test".to_owned(),
+            max_context_tokens: Some(200_000),
+            max_output_tokens: Some(8_192),
+            capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+            reasoning: neo_ai::ReasoningCapability::default(),
+            display_name: Some("Selected model".to_owned()),
+        },
+    );
+    let initial_harness = neo_agent_core::harness::FakeHarness::from_turns([]);
+    let initial_client = initial_harness.client();
+    let initial_agent_config = neo_agent_core::AgentConfig::for_model(initial_harness.model())
+        .with_workspace_root(temp.path())
+        .expect("workspace root");
+    config
+        .workflow_dispatch_resolver
+        .replace(neo_agent_core::runtime::WorkflowDispatchSnapshot {
+            config: initial_agent_config,
+            model_client: Arc::clone(&initial_client),
+            registry: Arc::new(neo_agent_core::ToolRegistry::with_builtin_tools()),
+            skills: None,
+            process_supervisor: neo_agent_core::ProcessSupervisor::default(),
+            context: neo_agent_core::AgentContext::new(),
+        })
+        .expect("bind initial workflow dispatch");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.local_config = Some(config);
+
+    controller.apply_model_selection(&neo_tui::dialogs::ModelSelection {
+        alias: "selected-model".to_owned(),
+        thinking: false,
+        reasoning: neo_ai::ReasoningSelection::Off,
+    });
+
+    let snapshot = controller
+        .local_config
+        .as_ref()
+        .expect("local config")
+        .workflow_dispatch_resolver
+        .resolve()
+        .expect("updated workflow dispatch");
+    assert_eq!(snapshot.config.model.provider.0, "anthropic");
+    assert_eq!(snapshot.config.model.model, "claude-test");
+    assert!(
+        !Arc::ptr_eq(&initial_client, &snapshot.model_client),
+        "idle selection must replace the bound workflow client before another tool batch",
+    );
+    let selected_client = Arc::clone(&snapshot.model_client);
+
+    controller.active_model = None;
+    let config_path = controller
+        .local_config
+        .as_ref()
+        .expect("local config")
+        .config_path
+        .clone();
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("config directory");
+    fs::write(
+        &config_path,
+        r#"
+default_model = "provider_refreshed_model"
+default_provider = "refreshed-provider"
+
+[providers.refreshed-provider]
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+
+[models.provider_refreshed_model]
+provider = "refreshed-provider"
+model = "provider-refreshed-model"
+"#,
+    )
+    .expect("provider config");
+    controller.refresh_config();
+    assert_eq!(
+        controller
+            .local_config
+            .as_ref()
+            .expect("refreshed config")
+            .default_provider,
+        "refreshed-provider"
+    );
+    assert_eq!(controller.active_session_id(), None);
+    let resolved_model = crate::modes::run::resolve_model(
+        controller.local_config.as_ref().expect("refreshed config"),
+    )
+    .expect("refreshed model resolves");
+    assert_eq!(resolved_model.provider.0, "refreshed-provider");
+    assert_eq!(resolved_model.model, "provider-refreshed-model");
+    crate::modes::run::resolve_model_client(
+        controller.local_config.as_ref().expect("refreshed config"),
+        &resolved_model,
+    )
+    .expect("refreshed client resolves");
+
+    let refreshed = controller
+        .local_config
+        .as_ref()
+        .expect("refreshed config")
+        .workflow_dispatch_resolver
+        .resolve()
+        .expect("provider-refreshed workflow dispatch");
+    assert_eq!(refreshed.config.model.provider.0, "refreshed-provider");
+    assert_eq!(refreshed.config.model.model, "provider-refreshed-model");
+    assert!(
+        !Arc::ptr_eq(&selected_client, &refreshed.model_client),
+        "idle provider refresh must replace the matching workflow client",
+    );
+}
+
 #[tokio::test]
 async fn refresh_config_preserves_live_task_and_multi_agent_state() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -10002,6 +10136,7 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         runtime: RuntimeConfig::default(),
         background_tasks: neo_agent_core::BackgroundTaskManager::new(),
         workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
+        workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
         multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
         tui: TuiConfig::default(),
         theme: crate::themes::ResolvedTheme::default(),
@@ -10069,6 +10204,463 @@ fn instruction_registry_cache_is_scoped_by_session_id() {
         .expect("session A registry after switch")
         .expect("configured controller registry");
     assert!(Arc::ptr_eq(&session_a, &session_a_after_switch));
+}
+
+#[test]
+fn persisted_workflow_events_apply_only_to_matching_session_generation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let first_generation_a = controller.workflow_event_generation;
+    controller.set_active_session_id(SESSION_B.to_owned());
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let current_generation_a = controller.workflow_event_generation;
+    let (persisted, workflow_events) = tokio::sync::mpsc::unbounded_channel();
+    controller.workflow_events = workflow_events;
+    let error_event = |message: &str| AgentEvent::Error {
+        turn: 3,
+        message: message.to_owned(),
+        code: None,
+        retry_after: None,
+    };
+    persisted
+        .send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
+            crate::modes::run::SessionWorkflowEvent {
+                session_id: SESSION_A.to_owned(),
+                generation: first_generation_a,
+                event: error_event("stale session A generation must stay hidden"),
+            },
+        ))
+        .expect("session A delivery");
+    persisted
+        .send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
+            crate::modes::run::SessionWorkflowEvent {
+                session_id: SESSION_A.to_owned(),
+                generation: current_generation_a,
+                event: error_event("current session A generation is visible"),
+            },
+        ))
+        .expect("session B delivery");
+    let entries_before = controller.tui.transcript().transcript().entries().len();
+
+    controller.drain_workflow_events();
+
+    let entries_after = controller.tui.transcript().transcript().entries().len();
+    assert_eq!(entries_after, entries_before + 1);
+}
+
+#[tokio::test]
+async fn workflow_event_routes_are_retained_across_switch_and_released_on_exit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+    controller.set_active_session_id(SESSION_B.to_owned());
+    let generation_b = controller.workflow_event_generation;
+    controller.set_active_session_id(SESSION_A.to_owned());
+    assert_eq!(controller.workflow_event_routes.len(), 2);
+    assert_eq!(controller.workflow_approval_routes.len(), 2);
+    assert!(controller.workflow_event_generation > generation_b);
+
+    controller.finalize_terminal_exit();
+
+    assert!(controller.workflow_event_routes.is_empty());
+    assert!(controller.workflow_approval_routes.is_empty());
+    assert!(controller.workflow_event_ingress.is_none());
+}
+
+#[tokio::test]
+async fn inactive_session_workflow_approval_is_backlogged_until_reactivated() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+
+    controller.set_active_session_id(SESSION_B.to_owned());
+    let (pending, mut response_rx) = make_pending_approval(ordinary_shell_request(
+        "session-a-approval",
+        "sudo --version",
+        None,
+        None,
+    ));
+    controller
+        .workflow_approval_ingress
+        .send(SessionWorkflowApproval {
+            session_id: SESSION_A.to_owned(),
+            pending,
+        })
+        .expect("session A delivery");
+
+    assert_eq!(controller.drain_workflow_approvals(), FrameRequest::None);
+    assert!(controller.pending_approvals.is_empty());
+    assert!(!controller.chrome().approval_is_pending());
+    assert_eq!(controller.workflow_approval_backlog[SESSION_A].len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    assert!(
+        controller
+            .pending_approvals
+            .contains_key("session-a-approval")
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|value| value.0),
+        Some("session-a-approval")
+    );
+    assert!(!controller.workflow_approval_backlog.contains_key(SESSION_A));
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn registered_workflow_approval_is_parked_and_restored_across_session_navigation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let (pending, mut response_rx) = make_pending_approval(ordinary_shell_request(
+        "parked-approval",
+        "sudo --version",
+        None,
+        None,
+    ));
+    controller
+        .workflow_approval_ingress
+        .send(SessionWorkflowApproval {
+            session_id: SESSION_A.to_owned(),
+            pending,
+        })
+        .expect("session A delivery");
+    assert_eq!(
+        controller.drain_workflow_approvals(),
+        FrameRequest::Immediate
+    );
+    assert!(controller.chrome().approval_is_pending());
+
+    controller.set_active_session_id(SESSION_B.to_owned());
+
+    assert!(controller.pending_approvals.is_empty());
+    assert!(!controller.chrome().approval_is_pending());
+    assert_eq!(controller.workflow_approval_backlog[SESSION_A].len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    assert!(controller.pending_approvals.contains_key("parked-approval"));
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|value| value.0),
+        Some("parked-approval")
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+async fn spawn_workflow_approval_invocation(
+    config: &AppConfig,
+    session_id: &str,
+) -> (
+    neo_agent_core::workflow::WorkflowHandle,
+    tokio::task::JoinHandle<
+        Result<
+            neo_agent_core::workflow::WorkflowInvocationOutcome,
+            neo_agent_core::workflow::WorkflowError,
+        >,
+    >,
+    PathBuf,
+) {
+    let session_directory = workspace_sessions_dir(config).join(session_id);
+    let runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+        neo_agent_core::workflow::WorkflowLimits::default(),
+    );
+    let handle = runtime
+        .create_run(
+            &session_directory,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "approval-stop".to_owned(),
+                description: "approval stop cleanup".to_owned(),
+                phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                    id: "verify".to_owned(),
+                    description: "verify".to_owned(),
+                }],
+                script: "neo.phase('verify')".to_owned(),
+                args: serde_json::json!({}),
+                launch_source: "test".to_owned(),
+                parent_run_id: None,
+            },
+        )
+        .await
+        .expect("create workflow");
+    let harness = neo_agent_core::harness::FakeHarness::from_turns([]);
+    let agent_config = neo_agent_core::AgentConfig::for_model(harness.model())
+        .with_workspace_root(&config.project_dir)
+        .expect("workspace root")
+        .with_session_directory(&session_directory)
+        .with_permission_mode(PermissionMode::Ask)
+        .with_workflow_dispatch_resolver(config.workflow_dispatch_resolver.clone());
+    let dispatch = neo_agent_core::runtime::WorkflowDispatchHandle {
+        config: agent_config,
+        model_client: harness.client(),
+        registry: Arc::new(neo_agent_core::ToolRegistry::with_builtin_tools()),
+        process_supervisor: neo_agent_core::ProcessSupervisor::default(),
+        context: neo_agent_core::AgentContext::new(),
+    };
+    let invocation_handle = handle.clone();
+    let invocation = tokio::spawn(async move {
+        invocation_handle
+            .invoke(
+                0,
+                neo_agent_core::workflow::WorkflowInvocationKind::VerifyCommand,
+                serde_json::json!({"command": "sudo --version"}),
+                false,
+                move |context| async move {
+                    dispatch
+                        .run_one(
+                            context,
+                            "Bash",
+                            serde_json::json!({"command": "sudo --version"}),
+                        )
+                        .await
+                },
+            )
+            .await
+    });
+    let journal_path = session_directory
+        .join("workflows")
+        .join(&handle.run_id.0)
+        .join("journal.jsonl");
+    (handle, invocation, journal_path)
+}
+
+fn assert_cancelled_workflow_invocation_journal(journal_path: &Path) {
+    let records = neo_agent_core::workflow::read_journal(journal_path).expect("read journal");
+    assert!(records.iter().any(|record| {
+        matches!(
+            record,
+            neo_agent_core::workflow::JournalRecord::InvocationFinished { outcome, .. }
+                if outcome.status == neo_agent_core::workflow::WorkflowOutcomeStatus::Cancelled
+        )
+    }));
+}
+
+#[tokio::test]
+async fn workflow_stop_before_approval_delivery_drain_removes_closed_responder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let (handle, invocation, journal_path) =
+        spawn_workflow_approval_invocation(&config, SESSION_A).await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while controller.workflow_approvals.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval delivery reaches controller queue");
+    handle
+        .stop(neo_agent_core::workflow::WorkflowActor::Human)
+        .await
+        .expect("stop workflow");
+    let outcome = invocation
+        .await
+        .expect("invocation task")
+        .expect("workflow invocation");
+    assert_eq!(
+        outcome.status,
+        neo_agent_core::workflow::WorkflowOutcomeStatus::Cancelled
+    );
+
+    controller.drain_workflow_approvals();
+
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Cancelled
+    );
+    assert!(controller.pending_approvals.is_empty());
+    assert!(controller.workflow_approval_backlog.is_empty());
+    assert!(!controller.chrome().approval_is_pending());
+    assert_cancelled_workflow_invocation_journal(&journal_path);
+}
+
+#[tokio::test]
+async fn workflow_stop_after_modal_registration_clears_chrome_and_resolves_transcript() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let (handle, invocation, journal_path) =
+        spawn_workflow_approval_invocation(&config, SESSION_A).await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            controller.drain_workflow_approvals();
+            if controller.pending_approvals.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval modal is registered");
+    let request_id = controller
+        .pending_approvals
+        .keys()
+        .next()
+        .expect("pending approval")
+        .clone();
+    assert!(controller.chrome().approval_is_pending());
+    assert!(matches!(
+        controller
+            .tui
+            .transcript()
+            .transcript()
+            .approval(&request_id)
+            .expect("approval transcript")
+            .state,
+        ApprovalDisplayState::Pending
+    ));
+
+    handle
+        .stop(neo_agent_core::workflow::WorkflowActor::Human)
+        .await
+        .expect("stop workflow");
+    let outcome = invocation
+        .await
+        .expect("invocation task")
+        .expect("workflow invocation");
+    assert_eq!(
+        outcome.status,
+        neo_agent_core::workflow::WorkflowOutcomeStatus::Cancelled
+    );
+    assert_eq!(
+        controller.drain_workflow_approvals(),
+        FrameRequest::Immediate
+    );
+
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Cancelled
+    );
+    assert!(!controller.pending_approvals.contains_key(&request_id));
+    assert!(!controller.chrome().approval_is_pending());
+    assert!(matches!(
+        controller
+            .tui
+            .transcript()
+            .transcript()
+            .approval(&request_id)
+            .expect("resolved approval transcript")
+            .state,
+        ApprovalDisplayState::Resolved(ApprovalResolution::Cancelled {
+            reason: ApprovalCancelReason::Interrupt,
+        })
+    ));
+    assert_cancelled_workflow_invocation_journal(&journal_path);
+}
+
+#[tokio::test]
+async fn idle_workflow_approval_uses_current_controller_route_without_model_turn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+    controller.set_active_session_id(SESSION_B.to_owned());
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    let session_directory = workspace_sessions_dir(&config).join(SESSION_A);
+    let harness = neo_agent_core::harness::FakeHarness::from_turns([]);
+    let stale_handler_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let called = Arc::clone(&stale_handler_called);
+    let agent_config = neo_agent_core::AgentConfig::for_model(harness.model())
+        .with_workspace_root(temp.path())
+        .expect("workspace root")
+        .with_session_directory(&session_directory)
+        .with_permission_mode(PermissionMode::Ask)
+        .with_workflow_dispatch_resolver(config.workflow_dispatch_resolver.clone())
+        .with_async_approval_handler(move |request| {
+            let called = Arc::clone(&called);
+            async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                ApprovalResponse::Cancelled {
+                    request_id: request.id,
+                    reason: ApprovalCancelReason::SessionEnded,
+                }
+            }
+        });
+    let handle = neo_agent_core::runtime::WorkflowDispatchHandle {
+        config: agent_config,
+        model_client: harness.client(),
+        registry: Arc::new(neo_agent_core::ToolRegistry::with_builtin_tools()),
+        process_supervisor: neo_agent_core::ProcessSupervisor::default(),
+        context: neo_agent_core::AgentContext::new(),
+    };
+    let dispatch = tokio::spawn(async move {
+        handle
+            .run_one(
+                neo_agent_core::workflow::WorkflowInvocationContext {
+                    invocation_id: "idle-workflow-bash".to_owned(),
+                    cancel_token: tokio_util::sync::CancellationToken::new(),
+                },
+                "Bash",
+                serde_json::json!({"command": "sudo --version"}),
+            )
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            controller.drain_workflow_approvals();
+            if controller
+                .pending_approvals
+                .contains_key("idle-workflow-bash")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("idle workflow approval reaches controller");
+    controller.resolve_approval(ApprovalResponse::Selected {
+        request_id: "idle-workflow-bash".to_owned(),
+        action: ApprovalAction::Reject,
+        feedback: None,
+    });
+
+    let outcome = dispatch.await.expect("workflow dispatch task");
+    assert_eq!(
+        outcome.status,
+        neo_agent_core::workflow::WorkflowOutcomeStatus::Denied
+    );
+    assert!(!stale_handler_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        harness.requests().is_empty(),
+        "approval must not run a model turn"
+    );
 }
 
 /// Regression: the turn driver must receive the controller's *live*
@@ -10290,6 +10882,62 @@ async fn slash_new_resets_to_unsaved_fresh_session_without_streaming() {
 }
 
 #[tokio::test]
+async fn slash_new_parks_workflow_approval_until_origin_session_reactivated() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+    let mut controller = controller_for_config(&config);
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let (pending, mut response_rx) = make_pending_approval(ordinary_shell_request(
+        "workflow-before-new",
+        "sudo --version",
+        None,
+        None,
+    ));
+    controller
+        .workflow_approval_ingress
+        .send(SessionWorkflowApproval {
+            session_id: SESSION_A.to_owned(),
+            pending,
+        })
+        .expect("workflow approval delivery");
+    assert_eq!(
+        controller.drain_workflow_approvals(),
+        FrameRequest::Immediate
+    );
+    assert!(controller.chrome().approval_is_pending());
+
+    controller.start_new_session_from_slash();
+
+    assert_eq!(controller.active_session_id(), None);
+    assert!(controller.pending_approvals.is_empty());
+    assert!(!controller.chrome().approval_is_pending());
+    assert_eq!(controller.workflow_approval_backlog[SESSION_A].len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    controller.set_active_session_id(SESSION_A.to_owned());
+
+    assert!(
+        controller
+            .pending_approvals
+            .contains_key("workflow-before-new")
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|selection| selection.0),
+        Some("workflow-before-new")
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
     let (mut controller, _requests) = controller_with_session_for_new_tests();
 
@@ -10323,6 +10971,12 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
     controller.refresh_config();
     let refreshed = controller.local_config.as_ref().expect("refreshed config");
     assert!(refreshed.workflow_capability.is_available().await);
+    assert!(
+        refreshed
+            .workflow_dispatch_resolver
+            .shares_state_with(&config.workflow_dispatch_resolver),
+        "config refresh must retain the session workflow resolver",
+    );
     let agent_config = crate::modes::run::agent_config_for_app(
         neo_ai::ModelSpec {
             provider: neo_ai::ProviderId("test-provider".to_owned()),
@@ -10336,6 +10990,12 @@ async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
     )
     .expect("agent config");
     assert!(agent_config.workflow_capability.is_available().await);
+    assert!(
+        agent_config
+            .workflow_dispatch_resolver
+            .shares_state_with(&refreshed.workflow_dispatch_resolver),
+        "each fresh turn config must use the session workflow resolver",
+    );
 
     controller.type_text("/clear");
     controller

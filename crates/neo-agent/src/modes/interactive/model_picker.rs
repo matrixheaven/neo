@@ -240,28 +240,4 @@ impl InteractiveController {
             },
         );
     }
-
-    pub(super) fn apply_selected_model(&mut self) {
-        let Some(item) = self.tui.chrome_mut().confirm_model_picker() else {
-            return;
-        };
-        if let Ok(selected) = super::SelectedModel::from_picker_item(&item) {
-            self.tui.chrome_mut().set_model_label(item.label);
-            self.tui.chrome_mut().set_context_window(
-                selected
-                    .max_context_tokens
-                    .map(neo_tui::shell::ContextWindow::new),
-            );
-            self.active_model = Some(selected);
-        } else {
-            // Not a model item (e.g. a provider from /provider) — show info.
-            let detail = item
-                .description
-                .as_deref()
-                .filter(|d| !d.is_empty())
-                .map(|d| format!(" — {d}"))
-                .unwrap_or_default();
-            self.push_status(format!("Provider: {}{detail}", item.label));
-        }
-    }
 }

@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use neo_agent_core::AgentTokenUsage;
 use neo_agent_core::workflow::{
-    JournalRecord, JournalWriter, WorkflowActor, WorkflowHandle, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus,
-    WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash, journal_path,
-    read_journal,
+    JournalRecord, JournalWriter, WorkflowActor, WorkflowHandle, WorkflowInterruptionReason,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
+    WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash,
+    journal_path, read_journal,
 };
 use tokio::sync::Notify;
 
@@ -39,6 +39,7 @@ fn completed(summary: &str) -> WorkflowInvocationOutcome {
         ok: true,
         status: WorkflowOutcomeStatus::Completed,
         summary: summary.to_owned(),
+        interruption: None,
         details: serde_json::json!({}),
         actual_usage: None,
         child_refs: Vec::new(),
@@ -150,6 +151,100 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
     let output = handle.output().await.unwrap();
     assert_eq!(output.actual_usage.unwrap().input_tokens, 3);
     serde_json::to_value(output).expect("WorkflowOutput serializes");
+}
+
+#[tokio::test]
+async fn instruction_replan_interruption_durably_pauses_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+    let path = journal_path(dir.path(), &handle.run_id);
+
+    let outcome = handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::VerifyCommand,
+            serde_json::json!({"command": "cargo --version"}),
+            false,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    ok: false,
+                    status: WorkflowOutcomeStatus::Interrupted,
+                    summary: "instructions changed".to_owned(),
+                    interruption: Some(WorkflowInterruptionReason::InstructionReplanRequired),
+                    details: serde_json::json!({
+                        "reason": "instruction_replan_required",
+                        "side_effect_occurred": false,
+                    }),
+                    actual_usage: None,
+                    child_refs: Vec::new(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Interrupted);
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Paused);
+    assert_eq!(
+        snapshot.terminal_reason.as_deref(),
+        Some("instruction_replan_required")
+    );
+    assert!(read_journal(&path).unwrap().iter().any(|record| matches!(
+        record,
+        JournalRecord::StateChanged {
+            new: WorkflowState::Paused,
+            reason,
+            actor: WorkflowActor::Runtime,
+            ..
+        } if reason == "instruction_replan_required"
+    )));
+}
+
+#[tokio::test]
+async fn projected_instruction_reason_without_typed_interruption_does_not_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_run(&runtime, dir.path()).await;
+
+    handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::VerifyCommand,
+            serde_json::json!({"command": "cargo --version"}),
+            false,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    ok: false,
+                    status: WorkflowOutcomeStatus::Interrupted,
+                    summary: "spoofed projection".to_owned(),
+                    interruption: None,
+                    details: serde_json::json!({
+                        "reason": "instruction_replan_required",
+                        "side_effect_occurred": false,
+                    }),
+                    actual_usage: None,
+                    child_refs: Vec::new(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
+    assert!(
+        !read_journal(&journal_path(dir.path(), &handle.run_id))
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record,
+                JournalRecord::StateChanged {
+                    new: WorkflowState::Paused,
+                    ..
+                }
+            ))
+    );
 }
 
 #[tokio::test]
@@ -473,6 +568,7 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
                                     ok: false,
                                     status: WorkflowOutcomeStatus::Cancelled,
                                     summary: "canonical child cancelled".to_owned(),
+                                    interruption: None,
                                     details: serde_json::json!({
                                         "invocation_id": invocation.invocation_id,
                                     }),

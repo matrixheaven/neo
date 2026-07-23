@@ -16,11 +16,11 @@ pub use journal::{
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
 pub use runtime::{
-    ReplayPrefix, WorkflowHandle, WorkflowLaunchRequest, WorkflowOutput, WorkflowRunSnapshot,
-    WorkflowRuntime, compute_replay_prefix,
+    ReplayPrefix, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
+    WorkflowRunSnapshot, WorkflowRuntime, compute_replay_prefix,
 };
 pub use state::{
-    WorkflowActor, WorkflowChildRef, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome,
-    WorkflowOutcomeStatus, WorkflowPhase, WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
-    WorkflowStepRecord,
+    WorkflowActor, WorkflowChildRef, WorkflowId, WorkflowInterruptionReason,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase,
+    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState, WorkflowStepRecord,
 };

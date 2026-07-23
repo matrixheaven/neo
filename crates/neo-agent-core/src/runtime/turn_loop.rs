@@ -244,6 +244,10 @@ pub(super) async fn run_agent_turn(
         }
 
         let turn = emitter.context.turns.saturating_add(1);
+        config
+            .workflow_dispatch_resolver
+            .update_event_route_turn(config.session_directory.as_deref(), turn)
+            .map_err(std::io::Error::other)?;
         let projection_plan = prepare_model_request(
             &model,
             &config,
@@ -349,7 +353,8 @@ pub(super) async fn run_agent_turn(
             &cancel_token,
             &process_supervisor,
         )
-        .await?;
+        .await;
+        let outcome = outcome?;
         if cancel_token.is_cancelled() {
             emitter.emit(AgentEvent::TurnFinished {
                 turn,
@@ -360,6 +365,8 @@ pub(super) async fn run_agent_turn(
         }
         let super::tool_dispatch::ToolBatchOutcome {
             results: mut tool_results,
+            permission_decisions: _,
+            instruction_interruption: _,
             pending_epoch,
             executed_any,
             preflight_targets,

@@ -351,6 +351,16 @@ pub(crate) struct InteractiveController {
     load_session: SessionLoader,
     fork_session: SessionForker,
     active_session_id: Option<String>,
+    workflow_event_generation: u64,
+    workflow_event_ingress: Option<mpsc::UnboundedSender<crate::modes::run::SessionWorkflowEvent>>,
+    workflow_events: mpsc::UnboundedReceiver<crate::modes::run::PersistedSessionWorkflowEvent>,
+    workflow_event_routes: HashMap<String, neo_agent_core::runtime::WorkflowDispatchIdleEventLease>,
+    workflow_approval_ingress: mpsc::UnboundedSender<SessionWorkflowApproval>,
+    workflow_approvals: mpsc::UnboundedReceiver<SessionWorkflowApproval>,
+    workflow_approval_backlog: HashMap<String, VecDeque<crate::modes::run::PendingApproval>>,
+    workflow_approval_sessions: HashMap<String, String>,
+    workflow_approval_routes:
+        HashMap<String, neo_agent_core::runtime::WorkflowDispatchApprovalLease>,
     instruction_registries: HashMap<String, Arc<InstructionRegistry>>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
@@ -458,6 +468,11 @@ pub(crate) struct TurnChannels {
     /// Shared handle for pushing live steer/follow-up input into the running
     /// turn. The controller writes; the runtime drains at step boundaries.
     steer_input: neo_agent_core::SteerInputHandle,
+}
+
+struct SessionWorkflowApproval {
+    session_id: String,
+    pending: crate::modes::run::PendingApproval,
 }
 
 #[cfg(test)]
@@ -699,6 +714,8 @@ impl InteractiveController {
         load_session: SessionLoader,
         fork_session: SessionForker,
     ) -> Self {
+        let (_workflow_events_tx, workflow_events) = mpsc::unbounded_channel();
+        let (workflow_approval_ingress, workflow_approvals) = mpsc::unbounded_channel();
         let workspace_root = workspace_root.into();
         let git_status_provider: GitStatusProvider = Arc::new(git_status_label);
         let mut chrome =
@@ -801,6 +818,15 @@ impl InteractiveController {
             load_session,
             fork_session,
             active_session_id: None,
+            workflow_event_generation: 0,
+            workflow_event_ingress: None,
+            workflow_events,
+            workflow_event_routes: HashMap::new(),
+            workflow_approval_ingress,
+            workflow_approvals,
+            workflow_approval_backlog: HashMap::new(),
+            workflow_approval_sessions: HashMap::new(),
+            workflow_approval_routes: HashMap::new(),
             instruction_registries: HashMap::new(),
             local_config: None,
             active_model: None,
@@ -1077,6 +1103,7 @@ impl InteractiveController {
                 self.model_items = catalogs.model_items;
                 self.tui.chrome_mut().set_theme(config.theme.theme);
                 self.local_config = Some(config);
+                self.refresh_workflow_dispatch_model();
             }
             Err(error) => {
                 tracing::warn!("failed to reload config: {error}");
@@ -1084,11 +1111,66 @@ impl InteractiveController {
         }
     }
 
+    fn refresh_workflow_dispatch_model(&self) {
+        let session_directory = self.active_session_directory();
+        let Some(base_config) = self.local_config.as_ref() else {
+            return;
+        };
+        let mut effective_config = base_config.clone();
+        if let Some(model) = &self.active_model {
+            effective_config
+                .default_provider
+                .clone_from(&model.provider);
+            effective_config.default_model.clone_from(&model.alias);
+        }
+        effective_config.runtime.reasoning = self.current_reasoning.clone();
+        let model = match crate::modes::run::resolve_model(&effective_config) {
+            Ok(model) => model,
+            Err(error) => {
+                tracing::warn!("failed to resolve workflow dispatch model: {error}");
+                return;
+            }
+        };
+        let client = match crate::modes::run::resolve_model_client(&effective_config, &model) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!("failed to resolve workflow dispatch client: {error}");
+                return;
+            }
+        };
+        if let Err(error) = effective_config
+            .workflow_dispatch_resolver
+            .update_model_for_session(session_directory.as_deref(), model, client)
+        {
+            tracing::warn!("failed to refresh workflow dispatch model: {error}");
+        }
+    }
+
+    pub(super) fn configure_workflow_event_ingress(&mut self, config: &AppConfig) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (ingress, events) = mpsc::unbounded_channel();
+        let (persisted, workflow_events) = mpsc::unbounded_channel();
+        runtime.spawn(crate::modes::run::persist_session_workflow_events(
+            config.clone(),
+            events,
+            persisted,
+        ));
+        self.workflow_event_ingress = Some(ingress);
+        self.workflow_events = workflow_events;
+    }
+
     fn push_status(&mut self, message: impl Into<String>) {
         self.transcript_mut().push_status(message);
     }
 
     fn finalize_terminal_exit(&mut self) {
+        self.invalidate_workflow_event_generation();
+        self.workflow_event_routes.clear();
+        self.workflow_approval_routes.clear();
+        self.drop_all_workflow_approvals();
+        self.workflow_event_ingress = None;
         if self.active_turn.is_some() {
             self.abort_active_turn();
         }
@@ -1261,6 +1343,8 @@ impl InteractiveController {
                 None => tokio::task::yield_now().await,
             }
             let mut frame_request = self.drain_active_turn().await?;
+            frame_request = frame_request.merge(self.drain_workflow_events());
+            frame_request = frame_request.merge(self.drain_workflow_approvals());
             self.drain_active_shell_command().await?;
             if self.drain_btw_sidecar() {
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
@@ -1733,8 +1817,109 @@ impl InteractiveController {
     }
 
     fn set_active_session_id(&mut self, session_id: String) {
+        let changed = self.active_session_id.as_deref() != Some(session_id.as_str());
+        if changed {
+            self.park_workflow_approvals_for_session_change(Some(&session_id));
+            self.invalidate_workflow_event_generation();
+        }
         self.active_session_id = Some(session_id.clone());
-        self.tui.chrome_mut().set_session_label(session_id);
+        self.tui.chrome_mut().set_session_label(session_id.clone());
+        if changed {
+            self.bind_idle_workflow_event_route(&session_id);
+            self.bind_workflow_approval_route(&session_id);
+            self.activate_workflow_approvals_for_session(&session_id);
+        }
+    }
+
+    fn clear_active_session_id(&mut self) {
+        if self.active_session_id.is_some() {
+            self.park_workflow_approvals_for_session_change(None);
+            self.active_session_id = None;
+            self.invalidate_workflow_event_generation();
+        }
+    }
+
+    fn invalidate_workflow_event_generation(&mut self) {
+        self.workflow_event_generation = self.workflow_event_generation.wrapping_add(1).max(1);
+    }
+
+    fn bind_idle_workflow_event_route(&mut self, session_id: &str) {
+        let (Some(config), Some(ingress)) = (
+            self.local_config.as_ref(),
+            self.workflow_event_ingress.as_ref(),
+        ) else {
+            return;
+        };
+        let session_directory = workspace_sessions_dir(config).join(session_id);
+        let session_id = session_id.to_owned();
+        let route_session_id = session_id.clone();
+        let generation = self.workflow_event_generation;
+        let ingress = ingress.clone();
+        let handler: neo_agent_core::tools::ToolEventCallback = Arc::new(move |event| {
+            let _ = ingress.send(crate::modes::run::SessionWorkflowEvent {
+                session_id: session_id.clone(),
+                generation,
+                event,
+            });
+        });
+        match config
+            .workflow_dispatch_resolver
+            .lease_idle_event_route(Some(&session_directory), handler)
+        {
+            Ok(lease) => {
+                self.workflow_event_routes.insert(route_session_id, lease);
+            }
+            Err(error) => tracing::warn!("failed to bind workflow event ingress: {error}"),
+        }
+    }
+
+    fn bind_workflow_approval_route(&mut self, session_id: &str) {
+        let Some(config) = self.local_config.as_ref() else {
+            return;
+        };
+        let session_directory = workspace_sessions_dir(config).join(session_id);
+        let route_session_id = session_id.to_owned();
+        let approval_session_id = route_session_id.clone();
+        let ingress = self.workflow_approval_ingress.clone();
+        let handler: neo_agent_core::runtime::AsyncApprovalHandler = Arc::new(move |request| {
+            let ingress = ingress.clone();
+            let session_id = approval_session_id.clone();
+            Box::pin(async move {
+                let request_id = request.id.clone();
+                let (response_tx, response_rx) = oneshot::channel();
+                if ingress
+                    .send(SessionWorkflowApproval {
+                        session_id,
+                        pending: crate::modes::run::PendingApproval {
+                            request,
+                            response_tx,
+                        },
+                    })
+                    .is_err()
+                {
+                    return neo_agent_core::ApprovalResponse::Cancelled {
+                        request_id,
+                        reason: neo_agent_core::ApprovalCancelReason::SessionEnded,
+                    };
+                }
+                response_rx
+                    .await
+                    .unwrap_or(neo_agent_core::ApprovalResponse::Cancelled {
+                        request_id,
+                        reason: neo_agent_core::ApprovalCancelReason::SessionEnded,
+                    })
+            })
+        });
+        match config
+            .workflow_dispatch_resolver
+            .lease_approval_route(Some(&session_directory), handler)
+        {
+            Ok(lease) => {
+                self.workflow_approval_routes
+                    .insert(route_session_id, lease);
+            }
+            Err(error) => tracing::warn!("failed to bind workflow approval ingress: {error}"),
+        }
     }
 
     fn instruction_registry_for_turn(&mut self) -> Result<Option<Arc<InstructionRegistry>>> {

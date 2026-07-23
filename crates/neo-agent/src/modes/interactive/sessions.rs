@@ -26,7 +26,7 @@ impl InteractiveController {
                 .set_session_label(loaded.label.clone());
             self.set_terminal_title_from_loaded_session(&loaded);
             self.rebuild_transcript_from_session(&loaded);
-            self.active_session_id = Some(session.id);
+            self.set_active_session_id(session.id);
             return Ok(());
         }
 
@@ -98,7 +98,7 @@ impl InteractiveController {
             .set_session_label(forked.transcript.label.clone());
         self.set_terminal_title_from_loaded_session(&forked.transcript);
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id.clone());
+        self.set_active_session_id(forked.session_id.clone());
         self.push_status(format!("fork from session {}", parent.id));
         self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
@@ -117,7 +117,7 @@ impl InteractiveController {
             .set_session_label(forked.transcript.label.clone());
         self.set_terminal_title_from_loaded_session(&forked.transcript);
         self.rebuild_transcript_from_session(&forked.transcript);
-        self.active_session_id = Some(forked.session_id.clone());
+        self.set_active_session_id(forked.session_id.clone());
         self.push_status(format!("fork from session {parent_id}"));
         self.push_status(format!("switch to fork session {}", forked.session_id));
         Ok(())
@@ -176,6 +176,7 @@ impl InteractiveController {
     /// clears transient turn/overlay/transcript state.
     fn reset_for_new_session(&mut self) {
         self.active_turn = None;
+        self.clear_active_session_id();
         self.pending_approvals.clear();
         self.pending_questions.clear();
         self.pending_question_prompts.clear();
@@ -199,7 +200,6 @@ impl InteractiveController {
             .set_main_agent_token_usage(neo_tui::shell::MainAgentTokenUsage::default());
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         self.goal_manager = None;
-        self.active_session_id = None;
         self.tui.chrome_mut().set_session_label("new");
         let terminal_title = self.tui.chrome().title().to_owned();
         self.tui.chrome_mut().set_terminal_title(terminal_title);

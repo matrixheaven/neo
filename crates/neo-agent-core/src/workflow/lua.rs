@@ -1,8 +1,12 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use mlua::{Lua, LuaSerdeExt, Value};
 
 use super::WorkflowError;
 use crate::runtime::WorkflowDispatchHandle;
 use crate::workflow::WorkflowHandle;
+use crate::workflow::WorkflowInvocationKind;
 use crate::workflow::WorkflowLimits;
 
 /// Runs Lua workflow scripts in a sandboxed `mlua` VM with strict host APIs.
@@ -123,11 +127,17 @@ impl LuaWorkflowRunner {
         neo.set("log", log_fn)
             .map_err(|e| WorkflowError::Host(e.to_string()))?;
 
+        let next_effect_call = Arc::new(AtomicU64::new(0));
+
         // neo.delegate(input)
         let dispatch_delegate = self.dispatch.clone();
+        let handle_delegate = self.handle.clone();
+        let delegate_call_index = Arc::clone(&next_effect_call);
         let delegate_fn = lua
             .create_async_function(move |lua, table: Value| {
                 let dispatch = dispatch_delegate.clone();
+                let handle = handle_delegate.clone();
+                let call_index = Arc::clone(&delegate_call_index);
                 async move {
                     let input = lua_value_to_json(&lua, table)?;
                     let task = input
@@ -150,7 +160,20 @@ impl LuaWorkflowRunner {
                         )));
                     }
 
-                    let outcome = dispatch.run_one("Delegate", input).await;
+                    let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let canonical_input = input.clone();
+                    let outcome = handle
+                        .invoke(
+                            index,
+                            WorkflowInvocationKind::Delegate,
+                            canonical_input,
+                            true,
+                            move |invocation| async move {
+                                dispatch.run_one(invocation, "Delegate", input).await
+                            },
+                        )
+                        .await
+                        .map_err(mlua::Error::external)?;
                     let table = outcome_to_lua_table(&lua, &outcome)?;
                     Ok(table)
                 }
@@ -161,9 +184,13 @@ impl LuaWorkflowRunner {
 
         // neo.swarm(input)
         let dispatch_swarm = self.dispatch.clone();
+        let handle_swarm = self.handle.clone();
+        let swarm_call_index = Arc::clone(&next_effect_call);
         let swarm_fn = lua
             .create_async_function(move |lua, table: Value| {
                 let dispatch = dispatch_swarm.clone();
+                let handle = handle_swarm.clone();
+                let call_index = Arc::clone(&swarm_call_index);
                 async move {
                     let input = lua_value_to_json(&lua, table)?;
                     let description = input
@@ -187,7 +214,20 @@ impl LuaWorkflowRunner {
                         )));
                     }
 
-                    let outcome = dispatch.run_one("DelegateSwarm", input).await;
+                    let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let canonical_input = input.clone();
+                    let outcome = handle
+                        .invoke(
+                            index,
+                            WorkflowInvocationKind::Swarm,
+                            canonical_input,
+                            true,
+                            move |invocation| async move {
+                                dispatch.run_one(invocation, "DelegateSwarm", input).await
+                            },
+                        )
+                        .await
+                        .map_err(mlua::Error::external)?;
                     let table = outcome_to_lua_table(&lua, &outcome)?;
                     Ok(table)
                 }
@@ -219,9 +259,13 @@ impl LuaWorkflowRunner {
 
         // neo.verify_command(input)
         let dispatch_vcmd = self.dispatch.clone();
+        let handle_vcmd = self.handle.clone();
+        let verify_command_call_index = Arc::clone(&next_effect_call);
         let verify_command_fn = lua
             .create_async_function(move |lua, table: Value| {
                 let dispatch = dispatch_vcmd.clone();
+                let handle = handle_vcmd.clone();
+                let call_index = Arc::clone(&verify_command_call_index);
                 async move {
                     let input = lua_value_to_json(&lua, table)?;
                     let command = input
@@ -238,7 +282,20 @@ impl LuaWorkflowRunner {
                         )));
                     }
 
-                    let outcome = dispatch.run_one("Bash", input).await;
+                    let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let canonical_input = input.clone();
+                    let outcome = handle
+                        .invoke(
+                            index,
+                            WorkflowInvocationKind::VerifyCommand,
+                            canonical_input,
+                            false,
+                            move |invocation| async move {
+                                dispatch.run_one(invocation, "Bash", input).await
+                            },
+                        )
+                        .await
+                        .map_err(mlua::Error::external)?;
                     let table = outcome_to_lua_table(&lua, &outcome)?;
                     Ok(table)
                 }
@@ -324,9 +381,7 @@ fn outcome_to_lua_table(
     outcome: &super::WorkflowInvocationOutcome,
 ) -> mlua::Result<Value> {
     let table = lua.create_table()?;
-    table
-        .set("ok", outcome.ok)
-        .map_err(|e| mlua::Error::external(e))?;
+    table.set("ok", outcome.ok).map_err(mlua::Error::external)?;
     table
         .set(
             "status",
@@ -339,16 +394,16 @@ fn outcome_to_lua_table(
                 super::WorkflowOutcomeStatus::Interrupted => "interrupted",
             },
         )
-        .map_err(|e| mlua::Error::external(e))?;
+        .map_err(mlua::Error::external)?;
     table
         .set("summary", outcome.summary.as_str())
-        .map_err(|e| mlua::Error::external(e))?;
+        .map_err(mlua::Error::external)?;
     table
         .set(
             "details",
             lua.to_value(&outcome.details)
-                .map_err(|e| mlua::Error::external(e))?,
+                .map_err(mlua::Error::external)?,
         )
-        .map_err(|e| mlua::Error::external(e))?;
+        .map_err(mlua::Error::external)?;
     Ok(Value::Table(table))
 }

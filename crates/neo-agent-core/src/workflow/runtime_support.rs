@@ -193,6 +193,7 @@ pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> Workflow
         ok: false,
         status: WorkflowOutcomeStatus::Interrupted,
         summary: "interrupted by host exit".to_owned(),
+        interruption: None,
         details: serde_json::json!({"reason": "host_exit", "call_index": invocation.call_index}),
         actual_usage: None,
         child_refs: Vec::new(),
@@ -204,6 +205,7 @@ pub(super) fn resource_limited_outcome(reason: &str) -> WorkflowInvocationOutcom
         ok: false,
         status: WorkflowOutcomeStatus::ResourceLimited,
         summary: reason.to_owned(),
+        interruption: None,
         details: serde_json::json!({"reason": reason}),
         actual_usage: None,
         child_refs: Vec::new(),
@@ -231,16 +233,7 @@ pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) 
         input_cache_read_tokens: 0,
         input_cache_write_tokens: 0,
     });
-    AgentTokenUsage {
-        input_tokens: total.input_tokens.saturating_add(usage.input_tokens),
-        output_tokens: total.output_tokens.saturating_add(usage.output_tokens),
-        input_cache_read_tokens: total
-            .input_cache_read_tokens
-            .saturating_add(usage.input_cache_read_tokens),
-        input_cache_write_tokens: total
-            .input_cache_write_tokens
-            .saturating_add(usage.input_cache_write_tokens),
-    }
+    total.saturating_add(usage)
 }
 
 pub(super) fn usage_total(usage: Option<AgentTokenUsage>) -> u64 {

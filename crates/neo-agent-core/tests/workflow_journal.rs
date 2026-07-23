@@ -65,6 +65,7 @@ fn invocation_finished(seq: u64, id: &str, ok: bool) -> JournalRecord {
                 WorkflowOutcomeStatus::Failed
             },
             summary: "done".to_owned(),
+            interruption: None,
             details: json!({}),
             actual_usage: None,
             child_refs: vec![],
@@ -110,6 +111,25 @@ fn journal_writes_and_reads_append_only_records() {
 
     let records2 = read_journal(&jpath).unwrap();
     assert_eq!(records2.len(), 4);
+}
+
+#[test]
+fn journal_reads_outcome_written_before_typed_interruption_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let jpath = dir.path().join("journal.jsonl");
+    let started = serde_json::to_string(&invocation_started(0, "inv_legacy", 0)).unwrap();
+    let mut finished = serde_json::to_value(invocation_finished(1, "inv_legacy", false)).unwrap();
+    finished["outcome"]
+        .as_object_mut()
+        .expect("outcome object")
+        .remove("interruption");
+    std::fs::write(&jpath, format!("{started}\n{finished}\n")).unwrap();
+
+    let records = read_journal(&jpath).unwrap();
+    let JournalRecord::InvocationFinished { outcome, .. } = &records[1] else {
+        panic!("expected invocation finish");
+    };
+    assert_eq!(outcome.interruption, None);
 }
 
 #[test]

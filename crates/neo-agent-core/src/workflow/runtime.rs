@@ -638,6 +638,15 @@ impl WorkflowRuntime {
                 "stopped by user/model",
                 stop_actor,
             )?;
+        } else if outcome.interruption
+            == Some(super::WorkflowInterruptionReason::InstructionReplanRequired)
+        {
+            self.transition_locked(
+                &mut guard,
+                WorkflowState::Paused,
+                "instruction_replan_required",
+                WorkflowActor::Runtime,
+            )?;
         }
         Ok(outcome)
     }

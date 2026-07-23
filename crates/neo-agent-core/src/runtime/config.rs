@@ -158,6 +158,11 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub workflow_capability: crate::workflow::WorkflowCapability,
+    /// Live dependencies used by workflow-hosted tool calls. Every invocation
+    /// snapshots this resolver before awaiting permission or execution.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver,
     /// Shared manual `/compact` request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by the TUI and taken by runtime compaction.
@@ -266,6 +271,8 @@ impl AgentConfig {
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
             workflow_capability: crate::workflow::WorkflowCapability::default(),
+            workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver::default(
+            ),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
             instruction_registry: None,
@@ -540,6 +547,16 @@ impl AgentConfig {
         workflow_capability: crate::workflow::WorkflowCapability,
     ) -> Self {
         self.workflow_capability = workflow_capability;
+        self
+    }
+
+    /// Replace the session-shared workflow dispatch resolver.
+    #[must_use]
+    pub fn with_workflow_dispatch_resolver(
+        mut self,
+        resolver: super::workflow_dispatch::WorkflowDispatchResolver,
+    ) -> Self {
+        self.workflow_dispatch_resolver = resolver;
         self
     }
 

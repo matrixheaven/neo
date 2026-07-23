@@ -187,6 +187,56 @@ impl InteractiveController {
         Ok(frame_request)
     }
 
+    pub(super) fn drain_workflow_events(&mut self) -> FrameRequest {
+        let mut frame_request = FrameRequest::None;
+        while let Ok(delivery) = self.workflow_events.try_recv() {
+            match delivery {
+                crate::modes::run::PersistedSessionWorkflowEvent::Event(envelope)
+                    if self.active_session_id.as_deref() == Some(envelope.session_id.as_str())
+                        && self.workflow_event_generation == envelope.generation =>
+                {
+                    frame_request = frame_request.merge(self.apply_turn_event(envelope.event));
+                }
+                crate::modes::run::PersistedSessionWorkflowEvent::Error {
+                    session_id,
+                    generation,
+                    message,
+                } if self.active_session_id.as_deref() == Some(session_id.as_str())
+                    && self.workflow_event_generation == generation =>
+                {
+                    self.push_status(format!("Failed to persist workflow event: {message}"));
+                    frame_request = frame_request.merge(FrameRequest::Coalesced);
+                }
+                crate::modes::run::PersistedSessionWorkflowEvent::Event(_)
+                | crate::modes::run::PersistedSessionWorkflowEvent::Error { .. } => {}
+            }
+        }
+        frame_request
+    }
+
+    pub(super) fn drain_workflow_approvals(&mut self) -> FrameRequest {
+        let mut frame_request = FrameRequest::None;
+        while let Ok(delivery) = self.workflow_approvals.try_recv() {
+            if self.active_session_id.as_deref() == Some(delivery.session_id.as_str()) {
+                if self.register_workflow_approval(&delivery.session_id, delivery.pending) {
+                    frame_request = frame_request.merge(FrameRequest::Immediate);
+                }
+            } else if !delivery.pending.response_tx.is_closed() {
+                self.workflow_approval_backlog
+                    .entry(delivery.session_id)
+                    .or_default()
+                    .push_back(delivery.pending);
+            } else {
+                self.resolve_closed_approval_ui(&delivery.pending.request.id);
+                frame_request = frame_request.merge(FrameRequest::Immediate);
+            }
+        }
+        if self.prune_closed_pending_approvals() {
+            frame_request = frame_request.merge(FrameRequest::Immediate);
+        }
+        frame_request
+    }
+
     fn drain_turn_channels(&mut self, turn: &mut RunningTurn) -> FrameRequest {
         let mut frame_request = FrameRequest::None;
 

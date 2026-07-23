@@ -43,7 +43,7 @@ impl InteractiveController {
             .set_session_label(loaded.label.clone());
         self.set_terminal_title_from_loaded_session(&loaded);
         self.rebuild_transcript_from_session(&loaded);
-        self.active_session_id = Some(session_id.to_owned());
+        self.set_active_session_id(session_id.to_owned());
         Ok(())
     }
 

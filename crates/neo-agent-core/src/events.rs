@@ -40,6 +40,21 @@ pub struct AgentTokenUsage {
     pub input_cache_write_tokens: u32,
 }
 
+impl AgentTokenUsage {
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            input_cache_read_tokens: self
+                .input_cache_read_tokens
+                .saturating_add(other.input_cache_read_tokens),
+            input_cache_write_tokens: self
+                .input_cache_write_tokens
+                .saturating_add(other.input_cache_write_tokens),
+        }
+    }
+}
+
 impl From<neo_ai::TokenUsage> for AgentTokenUsage {
     fn from(value: neo_ai::TokenUsage) -> Self {
         Self {

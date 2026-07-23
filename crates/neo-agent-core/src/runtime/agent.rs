@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use futures::{StreamExt, stream};
+use futures::{Stream, StreamExt, stream};
 use neo_ai::ModelClient;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,21 @@ use crate::goal::GoalManager;
 use crate::skills::{SkillStore, SkillStoreHandle};
 use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistry};
 
-pub type AgentEventStream<'a> = stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>;
+pub struct AgentEventStream<'a> {
+    inner: stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>,
+    _workflow_event_drain_lease: Option<super::workflow_dispatch::WorkflowDispatchEventDrainLease>,
+}
+
+impl Stream for AgentEventStream<'_> {
+    type Item = Result<AgentEvent, AgentRuntimeError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(context)
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentRuntime {
@@ -203,9 +217,22 @@ impl AgentRuntime {
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (final_sender, final_receiver) = oneshot::channel();
+        let workflow_event_leases = config
+            .workflow_dispatch_resolver
+            .lease_event_route(
+                config.session_directory.as_deref(),
+                context.turns.saturating_add(1),
+                make_tool_event_callback(EventSink {
+                    sender: sender.clone(),
+                }),
+            )
+            .ok();
+        let (workflow_event_lease, workflow_event_drain_lease) =
+            workflow_event_leases.map_or((None, None), |(lease, drain)| (Some(lease), Some(drain)));
 
         tokio::spawn(async move {
             let mut emitter = EventEmitter::new(sender, live_context);
+            let _workflow_event_lease = workflow_event_lease;
             emitter.emit(AgentEvent::RunStarted {
                 turn: emitter.context.turns.saturating_add(1),
             });
@@ -255,7 +282,7 @@ impl AgentRuntime {
             let _ = final_sender.send(emitter.context);
         });
 
-        stream::unfold(
+        let inner = stream::unfold(
             SpawnedRun {
                 receiver,
                 final_receiver: Some(final_receiver),
@@ -276,7 +303,11 @@ impl AgentRuntime {
                 None
             },
         )
-        .boxed()
+        .boxed();
+        AgentEventStream {
+            inner,
+            _workflow_event_drain_lease: workflow_event_drain_lease,
+        }
     }
 
     /// Run a compaction-only turn.  This does not append a user message and does
@@ -339,7 +370,7 @@ impl AgentRuntime {
             let _ = final_sender.send(emitter.context);
         });
 
-        stream::unfold(
+        let inner = stream::unfold(
             SpawnedRun {
                 receiver,
                 final_receiver: Some(final_receiver),
@@ -360,7 +391,11 @@ impl AgentRuntime {
                 None
             },
         )
-        .boxed()
+        .boxed();
+        AgentEventStream {
+            inner,
+            _workflow_event_drain_lease: None,
+        }
     }
 }
 

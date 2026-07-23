@@ -79,7 +79,6 @@ impl Tool for RunWorkflowTool {
                 }),
                 process_supervisor: super::ProcessSupervisor::default(),
                 context: crate::AgentContext::new(),
-                tool_access: Some(ctx.access.clone()),
             };
 
             let handle =

@@ -6,12 +6,31 @@ use crate::multi_agent::{
     AgentLifecycleState, AgentRunMode, AgentSnapshot, AgentTerminalReason, DelegateContext,
     SwarmSnapshot,
 };
+use crate::{AgentEvent, AgentTokenUsage};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SummaryScope {
     CurrentRun,
     SwarmItems,
     None,
+}
+
+pub(crate) fn accumulate_actual_usage(
+    total: Option<AgentTokenUsage>,
+    events: &[AgentEvent],
+) -> Option<AgentTokenUsage> {
+    events.iter().fold(total, |total, event| {
+        let AgentEvent::TokenUsage { usage, .. } = event else {
+            return total;
+        };
+        let total = total.unwrap_or(AgentTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            input_cache_read_tokens: 0,
+            input_cache_write_tokens: 0,
+        });
+        Some(total.saturating_add(*usage))
+    })
 }
 
 impl SummaryScope {
