@@ -179,3 +179,12 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | spec | docs/aegis/specs/2026-07-22-flat-batch-edit-design.md | Neo Flat Batch Edit Contract Design |
 | 2026-07-22 | plan | docs/aegis/plans/2026-07-22-flat-batch-edit.md | Neo Flat Batch Edit Contract Implementation Plan |
 | 2026-07-22 | adr | docs/aegis/adr/ADR-0002-non-blocking-instruction-import-cycles.md | ADR-0002 - Exact AGENTS.md Discovery and Non-Blocking Import Cycles |
+| 2026-07-23 | adr | docs/aegis/adr/ADR-0004-durable-runworkflow-runtime.md | ADR-0004 - Durable RunWorkflow runtime and append-only replay |
+| 2026-07-23 | baseline | docs/aegis/baseline/2026-07-23-runworkflow-runtime-contract.md | RunWorkflow Runtime Contract Baseline |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/10-intent.md | RunWorkflow implementation audit and repair intent |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/20-checkpoint.md | RunWorkflow implementation audit and repair checkpoint |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/90-evidence.md | RunWorkflow implementation audit and repair evidence |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/99-reflection.md | RunWorkflow implementation audit and repair reflection |
+| 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/proof-bundle.md | RunWorkflow implementation audit and repair proof bundle |
+| 2026-07-23 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/gate-input-pack.json | 2026-07-22-runworkflow-audit-repair gate input pack |
+| 2026-07-23 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/proof-bundle.md | 2026-07-22-runworkflow-audit-repair proof bundle |
