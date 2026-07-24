@@ -461,9 +461,9 @@ async fn prepare_new_streaming_turn(
     let writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
-    send_streaming_session_id(session_id_tx, &session_id);
     let user_message = user_message(prompt.to_vec(), prompt_origin, prompt_display_text);
     record_session_activity(config, &session_id, &prompt_text);
+    send_streaming_session_id(session_id_tx, &session_id);
     let session_directory = session_root_from_wire_path(&session_path)?;
     Ok(PreparedStreamingTurn {
         prompt: prompt_text,

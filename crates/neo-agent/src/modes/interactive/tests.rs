@@ -8645,6 +8645,76 @@ async fn event_loop_keeps_started_session_active_after_failed_turn() {
 }
 
 #[tokio::test]
+async fn started_session_sets_terminal_title_before_turn_finishes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    write_main_wire(&bucket_dir, SESSION_NEW, "");
+    SessionMetadataStore::new(&bucket_dir)
+        .record_activity(
+            SESSION_NEW,
+            Some(temp.path().display().to_string()),
+            Some("Fix terminal title regression".to_owned()),
+            "1".to_owned(),
+        )
+        .expect("record initial prompt");
+
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        let release_rx = Arc::clone(&release_rx);
+        Box::pin(async move {
+            channels
+                .session_ids
+                .send(SESSION_NEW.to_owned())
+                .expect("session id sent");
+            let release = release_rx
+                .lock()
+                .expect("release lock")
+                .take()
+                .expect("single turn");
+            let _ = release.await;
+            Ok(TurnOutcome::session(SESSION_NEW))
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "new",
+        "openai/gpt-4.1",
+        temp.path(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+    controller.local_config = Some(config);
+
+    controller.start_turn_with_prompt_display(
+        vec![Content::text("Fix terminal title regression")],
+        "Fix terminal title regression".to_owned(),
+    );
+    tokio::task::yield_now().await;
+    controller
+        .drain_active_turn()
+        .await
+        .expect("drain session id");
+
+    assert_eq!(
+        controller.chrome().terminal_title(),
+        "Fix terminal title regression"
+    );
+
+    release_tx.send(()).expect("release turn");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+}
+
+#[tokio::test]
 async fn event_loop_forks_selected_session_and_continues_child_session() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);

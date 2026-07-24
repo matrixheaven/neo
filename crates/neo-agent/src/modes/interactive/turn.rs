@@ -241,7 +241,8 @@ impl InteractiveController {
                 &session_id,
                 turn.instruction_registry.as_ref(),
             );
-            self.set_active_session_id(session_id);
+            self.set_active_session_id(session_id.clone());
+            self.refresh_terminal_title_for_session(&session_id);
             frame_request = frame_request.merge(FrameRequest::Coalesced);
         }
         while let Ok(approval) = turn.approvals.try_recv() {
