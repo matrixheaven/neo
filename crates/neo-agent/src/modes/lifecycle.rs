@@ -78,9 +78,10 @@ impl UpdateMode {
 /// For version `0.1.0` exactly, Linux/macOS use plain binary assets (no
 /// `.tar.gz` suffix). This is the only historical packaging exception.
 pub(crate) fn platform_asset(version: &Version) -> anyhow::Result<AssetSpec> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+    platform_asset_for(version, std::env::consts::OS, std::env::consts::ARCH)
+}
 
+fn platform_asset_for(version: &Version, os: &str, arch: &str) -> anyhow::Result<AssetSpec> {
     let (base, ext, binary_ext) = match (os, arch) {
         ("linux", "x86_64") => ("neo-linux-x86_64", ".tar.gz", ""),
         ("linux", "aarch64") => ("neo-linux-arm64", ".tar.gz", ""),
@@ -1094,71 +1095,68 @@ mod tests {
 
     #[test]
     fn platform_assets_cover_six_targets_and_v0_1_0() {
-        // This test documents the expected six-platform mapping.
-        // Since we cannot change env::consts at runtime, we verify the
-        // current platform returns a valid asset and test the mapping
-        // logic through the code structure.
-
         let v010 = Version::parse("0.1.0").unwrap();
         let v010build = Version::parse("0.1.0+rebuild").unwrap();
         let v011 = Version::parse("0.1.1").unwrap();
-        let v011rc = Version::parse("0.1.1-rc.2").unwrap();
 
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
+        let cases = [
+            (
+                "linux",
+                "x86_64",
+                "neo-linux-x86_64.tar.gz",
+                "neo-linux-x86_64",
+            ),
+            (
+                "linux",
+                "aarch64",
+                "neo-linux-arm64.tar.gz",
+                "neo-linux-arm64",
+            ),
+            (
+                "macos",
+                "x86_64",
+                "neo-macos-x86_64.tar.gz",
+                "neo-macos-x86_64",
+            ),
+            (
+                "macos",
+                "aarch64",
+                "neo-macos-arm64.tar.gz",
+                "neo-macos-arm64",
+            ),
+            (
+                "windows",
+                "x86_64",
+                "neo-windows-x86_64.zip",
+                "neo-windows-x86_64.exe",
+            ),
+            (
+                "windows",
+                "aarch64",
+                "neo-windows-arm64.zip",
+                "neo-windows-arm64.exe",
+            ),
+        ];
 
-        let asset_011 = platform_asset(&v011).unwrap();
-        let asset_011rc = platform_asset(&v011rc).unwrap();
-        let asset_010build = platform_asset(&v010build).unwrap();
+        for (os, arch, archive_name, binary_name) in cases {
+            let asset = platform_asset_for(&v011, os, arch).unwrap();
+            assert_eq!(asset.archive_name, archive_name);
+            assert_eq!(asset.binary_name, binary_name);
 
-        // Current platform mapping.
-        match (os, arch) {
-            ("linux", "x86_64") => {
-                assert_eq!(asset_011.archive_name, "neo-linux-x86_64.tar.gz");
-                assert_eq!(asset_011.binary_name, "neo-linux-x86_64");
-                // v0.1.0: plain binary on Linux.
-                let asset_010 = platform_asset(&v010).unwrap();
-                assert_eq!(asset_010.archive_name, "neo-linux-x86_64");
-                assert_eq!(asset_010.binary_name, "neo-linux-x86_64");
-            }
-            ("linux", "aarch64") => {
-                assert_eq!(asset_011.archive_name, "neo-linux-arm64.tar.gz");
-                assert_eq!(asset_011.binary_name, "neo-linux-arm64");
-            }
-            ("macos", "x86_64") => {
-                assert_eq!(asset_011.archive_name, "neo-macos-x86_64.tar.gz");
-                assert_eq!(asset_011.binary_name, "neo-macos-x86_64");
-            }
-            ("macos", "aarch64") => {
-                assert_eq!(asset_011.archive_name, "neo-macos-arm64.tar.gz");
-                assert_eq!(asset_011.binary_name, "neo-macos-arm64");
-            }
-            ("windows", "x86_64") => {
-                assert_eq!(asset_011.archive_name, "neo-windows-x86_64.zip");
-                assert_eq!(asset_011.binary_name, "neo-windows-x86_64.exe");
-                // v0.1.0: still .zip on Windows.
-                let asset_010 = platform_asset(&v010).unwrap();
-                assert_eq!(asset_010.archive_name, "neo-windows-x86_64.zip");
-                assert_eq!(asset_010.binary_name, "neo-windows-x86_64.exe");
-            }
-            ("windows", "aarch64") => {
-                assert_eq!(asset_011.archive_name, "neo-windows-arm64.zip");
-                assert_eq!(asset_011.binary_name, "neo-windows-arm64.exe");
-            }
-            _ => {
-                // Unsupported platform should have failed.
-                panic!("test running on unsupported platform: {os}/{arch}");
-            }
+            let rebuilt = platform_asset_for(&v010build, os, arch).unwrap();
+            assert_eq!(rebuilt.archive_name, archive_name);
+
+            let legacy = platform_asset_for(&v010, os, arch).unwrap();
+            let legacy_archive = if os == "windows" {
+                archive_name
+            } else {
+                binary_name
+            };
+            assert_eq!(legacy.archive_name, legacy_archive);
         }
 
-        // RC archive uses .tar.gz on Unix, .zip on Windows (same as stable non-0.1.0).
-        if os != "windows" {
-            assert!(asset_011rc.archive_name.ends_with(".tar.gz"));
-            assert!(asset_010build.archive_name.ends_with(".tar.gz"));
-        } else {
-            assert!(asset_011rc.archive_name.ends_with(".zip"));
-            assert!(asset_010build.archive_name.ends_with(".zip"));
-        }
+        assert!(platform_asset_for(&v011, "freebsd", "x86_64").is_err());
+        assert!(platform_asset_for(&v011, "linux", "riscv64").is_err());
     }
 
     // ── Digest validation test ──────────────────────────────────────
