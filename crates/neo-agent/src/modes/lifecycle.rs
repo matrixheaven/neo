@@ -741,6 +741,222 @@ fn replace_with_recovery(
     }
 }
 
+// ── Uninstall ──────────────────────────────────────────────────────
+
+/// Validate the Neo home directory for safe deletion.
+///
+/// Rejects:
+/// - paths that cannot be canonicalized
+/// - filesystem/drive roots
+/// - the user home directory itself
+/// - non-directory targets
+/// - symlink targets
+fn validate_neo_home(home: &std::path::Path, user_home: Option<&std::path::Path>) -> anyhow::Result<()> {
+    if !home.exists() {
+        return Ok(()); // absent home is fine; we just won't delete anything
+    }
+
+    // Must be a directory, not a symlink.
+    let meta = std::fs::symlink_metadata(home)
+        .with_context(|| format!("failed to read metadata for {home:?}"))?;
+    if meta.is_symlink() {
+        bail!("Neo home is a symlink, refusing to delete: {home:?}");
+    }
+    if !meta.is_dir() {
+        bail!("Neo home is not a directory: {home:?}");
+    }
+
+    // Canonicalize for safety comparisons.
+    let canonical = std::fs::canonicalize(home)
+        .with_context(|| format!("failed to canonicalize Neo home: {home:?}"))?;
+
+    // Reject filesystem root.
+    if canonical.parent().is_none() {
+        bail!("Neo home is a filesystem root, refusing to delete: {canonical:?}");
+    }
+
+    // Reject drive root on Windows (e.g. C:\).
+    if canonical.to_string_lossy().ends_with(':') || canonical.to_string_lossy().ends_with(r":\") {
+        bail!("Neo home is a drive root, refusing to delete: {canonical:?}");
+    }
+
+    // Reject the user home itself.
+    if let Some(uh) = user_home {
+        if let Ok(canonical_uh) = std::fs::canonicalize(uh) {
+            if canonical == canonical_uh {
+                bail!(
+                    "Neo home is the user home directory, refusing to delete: {canonical:?}"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Prompt the user for confirmation to delete the Neo home directory.
+///
+/// Returns `true` if the user confirmed, `false` otherwise.
+/// Accepts case-insensitive `y`/`yes` or `n`/`no`; empty input and
+/// EOF mean No.
+fn confirm_delete_home(
+    reader: &mut impl std::io::BufRead,
+    writer: &mut impl std::io::Write,
+    path: &std::path::Path,
+) -> anyhow::Result<bool> {
+    write!(writer, "Delete Neo data at {}? [y/N] ", path.display())?;
+    writer.flush()?;
+
+    loop {
+        let mut input = String::new();
+        let bytes_read = reader.read_line(&mut input)?;
+        if bytes_read == 0 {
+            // EOF.
+            return Ok(false);
+        }
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" | "" => return Ok(false),
+            _ => {
+                write!(writer, "Please answer y or n: ")?;
+                writer.flush()?;
+            }
+        }
+    }
+}
+
+/// Remove this Neo binary and optionally its data directory.
+///
+/// Deletion order:
+/// 1. Current executable.
+/// 2. Adjacent `.bak` (only if step 1 succeeded or was already absent).
+/// 3. Neo home (only if steps 1 and 2 both succeeded or were absent).
+///
+/// On Windows, removing the running `.exe` fails with a sharing/access
+/// error. Neo reports the error and stops before touching `.bak` or
+/// Neo home.
+pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
+    let current_exe = std::env::current_exe()
+        .context("failed to resolve current executable path")?;
+    let bak = backup_path(&current_exe)?;
+    let neo_home = crate::config::neo_home();
+    let user_home = crate::config::user_home();
+
+    // Resolve and validate all paths before mutation.
+    let home_to_delete: Option<std::path::PathBuf> = if let Some(ref home) = neo_home {
+        if home.exists() {
+            validate_neo_home(home, user_home.as_deref())?;
+            Some(home.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Prompt for confirmation if home exists and --yes not set.
+    let delete_home = if let Some(ref home) = home_to_delete {
+        if yes {
+            true
+        } else {
+            let mut reader = std::io::BufReader::new(std::io::stdin());
+            let mut writer = std::io::stdout();
+            confirm_delete_home(&mut reader, &mut writer, home)?
+        }
+    } else {
+        false
+    };
+
+    let mut result = String::new();
+
+    // 1. Remove current executable.
+    match std::fs::remove_file(&current_exe) {
+        Ok(()) => {
+            result.push_str(&format!("Removed: {current_exe:?}\n"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            result.push_str(&format!("Already absent: {current_exe:?}\n"));
+        }
+        Err(e) => {
+            // On Windows, this typically fails with PermissionDenied or
+            // sharing violation for the running .exe.
+            result.push_str(&format!(
+                "Failed to remove {current_exe:?}: {e}\n"
+            ));
+            result.push_str("Neither .bak nor Neo home data was removed.\n");
+            result.push_str(&format!(
+                "Please close Neo and remove the executable manually: {current_exe:?}"
+            ));
+            bail!(result);
+        }
+    }
+
+    // 2. Remove .bak if present.
+    if bak.exists() {
+        // Verify it's not a directory or something unexpected.
+        let bak_meta = std::fs::symlink_metadata(&bak);
+        let remove_bak = match bak_meta {
+            Ok(m) if m.is_file() || m.is_symlink() => true,
+            Ok(m) => {
+                result.push_str(&format!(
+                    "Backup path is not a regular file, skipping: {bak:?} (kind: {:?})\n",
+                    m.file_type()
+                ));
+                false
+            }
+            Err(e) => {
+                result.push_str(&format!(
+                    "Failed to read backup metadata {bak:?}: {e}\n"
+                ));
+                false
+            }
+        };
+
+        if remove_bak {
+            match std::fs::remove_file(&bak) {
+                Ok(()) => {
+                    result.push_str(&format!("Removed: {bak:?}\n"));
+                }
+                Err(e) => {
+                    result.push_str(&format!("Failed to remove backup {bak:?}: {e}\n"));
+                    if delete_home {
+                        result.push_str("Neo home was not removed because backup removal failed.\n");
+                    }
+                    bail!(result);
+                }
+            }
+        }
+    } else {
+        result.push_str(&format!("No backup found: {bak:?}\n"));
+    }
+
+    // 3. Remove Neo home if confirmed.
+    if delete_home {
+        if let Some(ref home) = home_to_delete {
+            match std::fs::remove_dir_all(home) {
+                Ok(()) => {
+                    result.push_str(&format!("Removed: {home:?}\n"));
+                }
+                Err(e) => {
+                    result.push_str(&format!(
+                        "Binaries removed but failed to delete Neo home {home:?}: {e}\n"
+                    ));
+                    bail!(result);
+                }
+            }
+        }
+    } else if home_to_delete.is_some() {
+        result.push_str(&format!(
+            "Neo home retained: {}\n",
+            home_to_delete.as_ref().unwrap().display()
+        ));
+    } else {
+        result.push_str("No Neo home resolved.\n");
+    }
+
+    Ok(result)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1120,5 +1336,102 @@ mod tests {
         assert!(err_msg.contains("previous version was restored"), "error must mention restore: {err_msg}");
         assert!(bak.exists(), ".bak must be retained after failed replace");
         verify_binary_version(&tmp_exe, &version).unwrap();
+    }
+
+    // ── Uninstall test ───────────────────────────────────────────────
+
+    #[test]
+    fn uninstall_confirmation_and_partial_order_are_safe() {
+        // Test Y/N confirmation parsing.
+        let path = std::path::PathBuf::from("/tmp/test-neo-home");
+
+        // "y" → true
+        let result = confirm_delete_home(
+            &mut "y\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(result);
+
+        // "yes" → true
+        let result = confirm_delete_home(
+            &mut "yes\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(result);
+
+        // "Y" → true (case insensitive)
+        let result = confirm_delete_home(
+            &mut "Y\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(result);
+
+        // "n" → false
+        let result = confirm_delete_home(
+            &mut "n\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(!result);
+
+        // empty → false
+        let result = confirm_delete_home(
+            &mut "\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(!result);
+
+        // EOF → false
+        let result = confirm_delete_home(
+            &mut "".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(!result);
+
+        // "no" → false
+        let result = confirm_delete_home(
+            &mut "no\n".as_bytes(),
+            &mut Vec::new(),
+            &path,
+        ).unwrap();
+        assert!(!result);
+
+        // Test unsafe path rejections.
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Symlink rejection.
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+            let err = validate_neo_home(&link, None).unwrap_err();
+            assert!(err.to_string().contains("symlink"));
+        }
+
+        // Non-directory rejection.
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "test").unwrap();
+        let err = validate_neo_home(&file, None).unwrap_err();
+        assert!(err.to_string().contains("not a directory"));
+
+        // User home rejection.
+        let home_dir = tmp.path().join("home");
+        std::fs::create_dir(&home_dir).unwrap();
+        let err = validate_neo_home(&home_dir, Some(&home_dir)).unwrap_err();
+        assert!(err.to_string().contains("user home"));
+
+        // Absent path → Ok (no-op).
+        let absent = tmp.path().join("nonexistent");
+        validate_neo_home(&absent, None).unwrap();
+
+        // Valid directory → Ok.
+        let valid = tmp.path().join("valid-neo-home");
+        std::fs::create_dir(&valid).unwrap();
+        validate_neo_home(&valid, None).unwrap();
     }
 }
