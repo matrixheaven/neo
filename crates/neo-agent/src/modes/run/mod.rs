@@ -1851,6 +1851,7 @@ mod tests {
         .await
         .expect("append turn finish");
         seed.flush().await.expect("flush seed");
+        drop(seed);
 
         let context = JsonlSessionReader::replay_context(&session_path)
             .await
@@ -2667,6 +2668,7 @@ mod tests {
         .await
         .expect("append user");
         seed.flush().await.expect("flush seed");
+        drop(seed);
 
         let prepared = super::prepare_existing_streaming_turn(
             session_id,

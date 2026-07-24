@@ -923,11 +923,11 @@ fn reject_approval(operation: PermissionOperation, subject: &str) -> AppliedAppr
     }
 }
 
-fn revise_approval(prefix: &str, feedback: Option<String>) -> AppliedApproval {
+fn revise_approval(mode: &str, feedback: Option<String>) -> AppliedApproval {
     let feedback = feedback.unwrap_or_default();
     AppliedApproval::Terminal {
         result: ToolResult::ok(format!(
-            "User requested {prefix} revisions.\n\nFeedback: {feedback}"
+            "User requested revisions. {mode} remains active.\n\nFeedback: {feedback}"
         )),
         permission_decision: None,
     }
@@ -1025,12 +1025,12 @@ fn apply_approval_resolution(
             action: ApprovalAction::RevisePlan { .. },
             feedback,
             ..
-        } => revise_approval("Plan. Plan mode remains active", feedback),
+        } => revise_approval("Plan mode", feedback),
         ApprovalResolution::Selected {
             action: ApprovalAction::ReviseGoal { .. },
             feedback,
             ..
-        } => revise_approval("Goal. Goal mode remains active", feedback),
+        } => revise_approval("Goal mode", feedback),
         ApprovalResolution::Selected {
             action: ApprovalAction::ReviseWorkflow { .. },
             feedback,
