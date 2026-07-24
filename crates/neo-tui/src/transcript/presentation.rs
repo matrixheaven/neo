@@ -56,6 +56,36 @@ pub struct TranscriptTerminalUpdate {
     pub has_live_frontier: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TranscriptRenderOptions<'a> {
+    width: usize,
+    theme: &'a TuiTheme,
+    activity_frame: usize,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
+    live_budget: usize,
+}
+
+impl<'a> TranscriptRenderOptions<'a> {
+    pub(super) const fn new(
+        width: usize,
+        theme: &'a TuiTheme,
+        activity_frame: usize,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
+        live_budget: usize,
+    ) -> Self {
+        Self {
+            width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+            live_budget,
+        }
+    }
+}
+
 const MAX_DIAGNOSTICS: usize = 32;
 
 #[derive(Debug, Clone)]
@@ -101,6 +131,35 @@ impl LiveBlock {
     }
 }
 
+struct PresentationFrame {
+    live_blocks: Vec<LiveBlock>,
+    pending_history: Vec<FinalizedBlock>,
+    commit_blocked: bool,
+    rendered_tail_owner: Option<TranscriptEntryId>,
+}
+
+impl PresentationFrame {
+    fn new(rendered_tail_owner: Option<TranscriptEntryId>) -> Self {
+        Self {
+            live_blocks: Vec::new(),
+            pending_history: Vec::new(),
+            commit_blocked: false,
+            rendered_tail_owner,
+        }
+    }
+
+    fn finish(self, live_budget: usize) -> TranscriptTerminalUpdate {
+        let (live, has_visible_animation) = compose_live_blocks(self.live_blocks);
+        TranscriptTerminalUpdate {
+            live_overflow: live.len() > live_budget,
+            has_live_frontier: self.commit_blocked,
+            history: self.pending_history,
+            live,
+            has_visible_animation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct TranscriptPresentation {
     committed_entry_revisions: BTreeMap<TranscriptEntryId, u64>,
@@ -115,30 +174,16 @@ impl TranscriptPresentation {
         self.committed_entry_revisions.contains_key(&id)
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        clippy::too_many_lines,
-        reason = "render carries the complete terminal presentation context and frontier ledger"
-    )]
     pub(super) fn render(
         &mut self,
         transcript: &mut TranscriptStore,
-        width: usize,
-        theme: &TuiTheme,
-        activity_frame: usize,
-        image_render_policy: ImageRenderPolicy,
-        image_capabilities: TerminalImageCapabilities,
-        live_budget: usize,
+        options: TranscriptRenderOptions<'_>,
     ) -> TranscriptTerminalUpdate {
-        let mut update = TranscriptTerminalUpdate::default();
-        let mut live_blocks = Vec::new();
-        let mut pending_history = Vec::new();
-        let mut commit_blocked = false;
-        let mut rendered_tail_owner = self.acknowledged_tail_owner;
+        let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
         let live_model_attempt_start = transcript.live_model_attempt_start();
         let mut index = 0;
         while index < transcript.entries().len() {
-            commit_blocked |= live_model_attempt_start == Some(index);
+            frame.commit_blocked |= live_model_attempt_start == Some(index);
             let Some(id) = transcript.entry_ids().get(index).copied() else {
                 index += 1;
                 continue;
@@ -150,86 +195,8 @@ impl TranscriptPresentation {
             if let Some(TranscriptEntry::AssistantMessage { content }) =
                 transcript.entries().get(index)
             {
-                let source_mismatch = self
-                    .assistant_sources
-                    .get(&id)
-                    .is_some_and(|source| content.get(..source.len()) != Some(source.as_str()));
-                if source_mismatch {
-                    self.record_diagnostic(format!(
-                        "committed assistant source changed for entry {id:?}"
-                    ));
-                    index += 1;
-                    continue;
-                }
                 let finalization = transcript.entry_finalization(index);
-                let source_start = self.assistant_offsets.get(&id).copied().unwrap_or(0);
-                // Markdown can become temporarily less decidable when a later
-                // delta introduces a reference definition or footnote. A
-                // previously acknowledged prefix is immutable, so the stable
-                // boundary may advance or pause, but it must never rewind.
-                let source_end = if finalization == Some(Finalization::Finalized) {
-                    content.len()
-                } else {
-                    stable_prefix_len(content)
-                        .max(source_start)
-                        .min(content.len())
-                };
-                if commit_blocked {
-                    if source_start < content.len() {
-                        let lines = render_assistant_segment(
-                            &content[source_start..],
-                            width,
-                            theme,
-                            source_start > 0,
-                        );
-                        let separator_before = advance_semantic_owner(
-                            &mut rendered_tail_owner,
-                            Some(id),
-                            Some(id),
-                            !lines.is_empty(),
-                        );
-                        live_blocks.push(LiveBlock::without_header(lines, false, separator_before));
-                    }
-                } else if source_end > source_start {
-                    let source = &content[source_start..source_end];
-                    let id = TranscriptBlockId::AssistantSegment {
-                        entry: id,
-                        source_start,
-                        source_end,
-                    };
-                    let lines = render_assistant_segment(source, width, theme, source_start > 0);
-                    let separator_before = advance_semantic_owner(
-                        &mut rendered_tail_owner,
-                        id.first_owner(),
-                        id.last_owner(),
-                        !lines.is_empty(),
-                    );
-                    pending_history.push(FinalizedBlock {
-                        id,
-                        proof: FinalizedBlockProof::AssistantSource(source.to_owned()),
-                        lines,
-                        separator_before,
-                    });
-                }
-                if !commit_blocked
-                    && finalization == Some(Finalization::Live)
-                    && source_end < content.len()
-                {
-                    let lines = render_assistant_segment(
-                        &content[source_end..],
-                        width,
-                        theme,
-                        source_end > 0,
-                    );
-                    let separator_before = advance_semantic_owner(
-                        &mut rendered_tail_owner,
-                        Some(id),
-                        Some(id),
-                        !lines.is_empty(),
-                    );
-                    live_blocks.push(LiveBlock::without_header(lines, false, separator_before));
-                }
-                commit_blocked |= finalization == Some(Finalization::Live);
+                self.render_assistant_entry(id, content, finalization, options, &mut frame);
                 index += 1;
                 continue;
             }
@@ -244,109 +211,165 @@ impl TranscriptPresentation {
                 continue;
             }
 
-            if let Some(TranscriptEntry::ToolRun { component }) = transcript.entries().get(index) {
-                if transcript.is_tool_run_suppressed(component.id()) {
-                    commit_blocked |=
-                        transcript.entry_finalization(index) == Some(Finalization::Live);
-                    index += 1;
-                    continue;
-                }
-                let end = tool_run_end(self, transcript, index);
-                let indexes = index..end;
-                let ids = indexes
-                    .clone()
-                    .filter_map(|tool_index| transcript.entry_ids().get(tool_index).copied())
-                    .collect::<Vec<_>>();
-                let revisions = indexes
-                    .clone()
-                    .filter_map(|tool_index| transcript.entry_revisions().get(tool_index).copied())
-                    .collect::<Vec<_>>();
-                let all_finalized = indexes.clone().all(|tool_index| {
-                    transcript.entry_finalization(tool_index) == Some(Finalization::Finalized)
-                });
-                let rendered_tools = render_tool_entries(transcript, indexes.clone(), width, theme);
-                let lines = rendered_tools.lines;
-                let id = TranscriptBlockId::Entries(ids);
-                let separator_before = advance_semantic_owner(
-                    &mut rendered_tail_owner,
-                    id.first_owner(),
-                    id.last_owner(),
-                    !lines.is_empty(),
-                );
-                let block = FinalizedBlock {
-                    id,
-                    proof: FinalizedBlockProof::EntryRevisions(revisions),
-                    lines,
-                    separator_before,
-                };
-                if all_finalized && !commit_blocked {
-                    pending_history.push(block);
-                } else {
-                    live_blocks.push(LiveBlock::with_detected_headers(
-                        block.lines,
-                        rendered_tools.animated_header_indices,
-                        block.separator_before,
-                    ));
-                }
-                commit_blocked |= !all_finalized;
-                index = end;
+            if let Some(next_index) = self.render_tool_run(transcript, index, options, &mut frame) {
+                index = next_index;
                 continue;
             }
 
-            let block_id = TranscriptBlockId::Entries(vec![id]);
-
-            let mut lines = transcript.render_entry_ansi_cached(
-                index,
-                width,
-                theme,
-                activity_frame,
-                image_render_policy,
-                image_capabilities,
-            );
-            super::pane::trim_ansi_transcript_block(&mut lines);
-            match transcript.entry_finalization(index) {
-                Some(Finalization::Finalized) if !commit_blocked => {
-                    let separator_before = advance_semantic_owner(
-                        &mut rendered_tail_owner,
-                        block_id.first_owner(),
-                        block_id.last_owner(),
-                        !lines.is_empty(),
-                    );
-                    pending_history.push(FinalizedBlock {
-                        id: block_id,
-                        proof: FinalizedBlockProof::EntryRevisions(vec![revision]),
-                        lines,
-                        separator_before,
-                    });
-                }
-                Some(finalization) => {
-                    let separator_before = advance_semantic_owner(
-                        &mut rendered_tail_owner,
-                        block_id.first_owner(),
-                        block_id.last_owner(),
-                        !lines.is_empty(),
-                    );
-                    live_blocks.push(LiveBlock::with_header(
-                        lines,
-                        transcript
-                            .entries()
-                            .get(index)
-                            .is_some_and(TranscriptEntry::has_visible_animation),
-                        separator_before,
-                    ));
-                    commit_blocked |= finalization == Finalization::Live;
-                }
-                None => {}
-            }
+            render_entry(transcript, index, id, revision, options, &mut frame);
             index += 1;
         }
-        update.history = pending_history;
-        let (live, has_visible_animation) = compose_live_blocks(live_blocks);
-        update.live_overflow = live.len() > live_budget;
-        update.has_live_frontier = commit_blocked;
-        update.live = live;
-        update.has_visible_animation = has_visible_animation;
-        update
+        frame.finish(options.live_budget)
+    }
+
+    fn render_assistant_entry(
+        &mut self,
+        id: TranscriptEntryId,
+        content: &str,
+        finalization: Option<Finalization>,
+        options: TranscriptRenderOptions<'_>,
+        frame: &mut PresentationFrame,
+    ) {
+        let source_mismatch = self
+            .assistant_sources
+            .get(&id)
+            .is_some_and(|source| content.get(..source.len()) != Some(source.as_str()));
+        if source_mismatch {
+            self.record_diagnostic(format!(
+                "committed assistant source changed for entry {id:?}"
+            ));
+            return;
+        }
+
+        let source_start = self.assistant_offsets.get(&id).copied().unwrap_or(0);
+        // Markdown can become temporarily less decidable when a later delta
+        // introduces a reference definition or footnote. An acknowledged
+        // prefix is immutable, so this boundary must never rewind.
+        let source_end = if finalization == Some(Finalization::Finalized) {
+            content.len()
+        } else {
+            stable_prefix_len(content)
+                .max(source_start)
+                .min(content.len())
+        };
+        if frame.commit_blocked {
+            if source_start < content.len() {
+                let lines = render_assistant_segment(
+                    &content[source_start..],
+                    options.width,
+                    options.theme,
+                    source_start > 0,
+                );
+                let separator_before = advance_semantic_owner(
+                    &mut frame.rendered_tail_owner,
+                    Some(id),
+                    Some(id),
+                    !lines.is_empty(),
+                );
+                frame
+                    .live_blocks
+                    .push(LiveBlock::without_header(lines, false, separator_before));
+            }
+        } else if source_end > source_start {
+            let source = &content[source_start..source_end];
+            let block_id = TranscriptBlockId::AssistantSegment {
+                entry: id,
+                source_start,
+                source_end,
+            };
+            let lines =
+                render_assistant_segment(source, options.width, options.theme, source_start > 0);
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                block_id.first_owner(),
+                block_id.last_owner(),
+                !lines.is_empty(),
+            );
+            frame.pending_history.push(FinalizedBlock {
+                id: block_id,
+                proof: FinalizedBlockProof::AssistantSource(source.to_owned()),
+                lines,
+                separator_before,
+            });
+        }
+        if !frame.commit_blocked
+            && finalization == Some(Finalization::Live)
+            && source_end < content.len()
+        {
+            let lines = render_assistant_segment(
+                &content[source_end..],
+                options.width,
+                options.theme,
+                source_end > 0,
+            );
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                Some(id),
+                Some(id),
+                !lines.is_empty(),
+            );
+            frame
+                .live_blocks
+                .push(LiveBlock::without_header(lines, false, separator_before));
+        }
+        frame.commit_blocked |= finalization == Some(Finalization::Live);
+    }
+
+    fn render_tool_run(
+        &self,
+        transcript: &TranscriptStore,
+        index: usize,
+        options: TranscriptRenderOptions<'_>,
+        frame: &mut PresentationFrame,
+    ) -> Option<usize> {
+        let Some(TranscriptEntry::ToolRun { component }) = transcript.entries().get(index) else {
+            return None;
+        };
+        if transcript.is_tool_run_suppressed(component.id()) {
+            frame.commit_blocked |=
+                transcript.entry_finalization(index) == Some(Finalization::Live);
+            return Some(index + 1);
+        }
+
+        let end = tool_run_end(self, transcript, index);
+        let indexes = index..end;
+        let ids = indexes
+            .clone()
+            .filter_map(|tool_index| transcript.entry_ids().get(tool_index).copied())
+            .collect::<Vec<_>>();
+        let revisions = indexes
+            .clone()
+            .filter_map(|tool_index| transcript.entry_revisions().get(tool_index).copied())
+            .collect::<Vec<_>>();
+        let all_finalized = indexes.clone().all(|tool_index| {
+            transcript.entry_finalization(tool_index) == Some(Finalization::Finalized)
+        });
+        let rendered_tools = render_tool_entries(transcript, indexes, options.width, options.theme);
+        let lines = rendered_tools.lines;
+        let id = TranscriptBlockId::Entries(ids);
+        let separator_before = advance_semantic_owner(
+            &mut frame.rendered_tail_owner,
+            id.first_owner(),
+            id.last_owner(),
+            !lines.is_empty(),
+        );
+        let block = FinalizedBlock {
+            id,
+            proof: FinalizedBlockProof::EntryRevisions(revisions),
+            lines,
+            separator_before,
+        };
+        if all_finalized && !frame.commit_blocked {
+            frame.pending_history.push(block);
+        } else {
+            frame.live_blocks.push(LiveBlock::with_detected_headers(
+                block.lines,
+                rendered_tools.animated_header_indices,
+                block.separator_before,
+            ));
+        }
+        frame.commit_blocked |= !all_finalized;
+        Some(end)
     }
 
     pub(super) fn acknowledge(&mut self, blocks: &[FinalizedBlock]) {
@@ -450,6 +473,60 @@ fn render_assistant_segment(
     lines
 }
 
+fn render_entry(
+    transcript: &mut TranscriptStore,
+    index: usize,
+    id: TranscriptEntryId,
+    revision: u64,
+    options: TranscriptRenderOptions<'_>,
+    frame: &mut PresentationFrame,
+) {
+    let block_id = TranscriptBlockId::Entries(vec![id]);
+    let mut lines = transcript.render_entry_ansi_cached(
+        index,
+        options.width,
+        options.theme,
+        options.activity_frame,
+        options.image_render_policy,
+        options.image_capabilities,
+    );
+    super::pane::trim_ansi_transcript_block(&mut lines);
+    match transcript.entry_finalization(index) {
+        Some(Finalization::Finalized) if !frame.commit_blocked => {
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                block_id.first_owner(),
+                block_id.last_owner(),
+                !lines.is_empty(),
+            );
+            frame.pending_history.push(FinalizedBlock {
+                id: block_id,
+                proof: FinalizedBlockProof::EntryRevisions(vec![revision]),
+                lines,
+                separator_before,
+            });
+        }
+        Some(finalization) => {
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                block_id.first_owner(),
+                block_id.last_owner(),
+                !lines.is_empty(),
+            );
+            frame.live_blocks.push(LiveBlock::with_header(
+                lines,
+                transcript
+                    .entries()
+                    .get(index)
+                    .is_some_and(TranscriptEntry::has_visible_animation),
+                separator_before,
+            ));
+            frame.commit_blocked |= finalization == Finalization::Live;
+        }
+        None => {}
+    }
+}
+
 fn tool_run_end(
     presentation: &TranscriptPresentation,
     transcript: &TranscriptStore,
@@ -532,7 +609,7 @@ fn compose_live_blocks(blocks: Vec<LiveBlock>) -> (Vec<String>, bool) {
 mod tests {
     use neo_agent_core::multi_agent::MultiAgentRuntime;
 
-    use super::TranscriptPresentation;
+    use super::{TranscriptPresentation, TranscriptRenderOptions};
     use crate::primitive::theme::TuiTheme;
     use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
     use crate::transcript::{TranscriptBlockId, TranscriptEntry, TranscriptPane, TranscriptStore};
@@ -762,15 +839,16 @@ mod tests {
         let mut transcript = TranscriptStore::new();
         transcript.push(TranscriptEntry::status("ready"));
         let mut presentation = TranscriptPresentation::default();
-        let first = presentation.render(
-            &mut transcript,
+        let theme = TuiTheme::default();
+        let options = TranscriptRenderOptions::new(
             80,
-            &TuiTheme::default(),
+            &theme,
             0,
             ImageRenderPolicy::default(),
             TerminalImageCapabilities::default(),
             8,
         );
+        let first = presentation.render(&mut transcript, options);
         presentation.acknowledge(&first.history);
 
         assert!(transcript.mutate_entry(0, |entry| {
@@ -778,15 +856,7 @@ mod tests {
             true
         }));
         for _ in 0..2 {
-            let update = presentation.render(
-                &mut transcript,
-                80,
-                &TuiTheme::default(),
-                0,
-                ImageRenderPolicy::default(),
-                TerminalImageCapabilities::default(),
-                8,
-            );
+            let update = presentation.render(&mut transcript, options);
             assert!(update.history.is_empty());
         }
 

@@ -17,7 +17,9 @@ use crate::transcript::{
 };
 
 use super::entry::RetryStatusData;
-use super::presentation::{FinalizedBlock, TranscriptPresentation, TranscriptTerminalUpdate};
+use super::presentation::{
+    FinalizedBlock, TranscriptPresentation, TranscriptRenderOptions, TranscriptTerminalUpdate,
+};
 use super::store::TranscriptViewport;
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
@@ -808,12 +810,14 @@ impl TranscriptPane {
         let content_width = super::chrome_render::frame_content_width(width);
         self.presentation.render(
             &mut self.transcript,
-            content_width,
-            &self.theme,
-            self.activity_frame,
-            self.image_render_policy,
-            self.image_capabilities,
-            height.saturating_sub(self.live_chrome_height),
+            TranscriptRenderOptions::new(
+                content_width,
+                &self.theme,
+                self.activity_frame,
+                self.image_render_policy,
+                self.image_capabilities,
+                height.saturating_sub(self.live_chrome_height),
+            ),
         )
     }
 

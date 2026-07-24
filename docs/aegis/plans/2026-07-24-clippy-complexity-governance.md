@@ -212,14 +212,15 @@ Files:
 
 Steps:
 
-1. Add a native CI `git grep` guard for the two exact local attributes. Keep the
-   existing workspace lint command unchanged; the current `-A clippy::pedantic`
-   intentionally leaves historical long functions outside this focused cleanup.
+1. Add a native CI `git grep` guard for both lint tokens, including attributes
+   split across multiple lines. Keep the existing workspace lint command
+   unchanged; the current `-A clippy::pedantic` intentionally leaves historical
+   long functions outside this focused cleanup.
 2. Confirm all four crates inherit workspace lints.
 3. Verify no matching attributes remain:
 
    ```bash
-   rtk rg -n '#\[allow\(clippy::(too_many_lines|too_many_arguments)' crates
+   rtk rg -n 'clippy::(too_many_lines|too_many_arguments)' crates
    ```
 
    Expected result: exit 1 with no matches.

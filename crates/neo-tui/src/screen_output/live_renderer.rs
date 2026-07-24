@@ -47,10 +47,6 @@ impl LiveRenderer {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the renderer validates, diffs, and commits one transactional live frame"
-    )]
     pub fn render_to(
         &mut self,
         output: &mut dyn Write,
@@ -58,39 +54,7 @@ impl LiveRenderer {
         lines: Vec<String>,
         cursor: Option<CursorPos>,
     ) -> std::io::Result<()> {
-        if lines.len() > usize::from(self.height) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "live frame has {} rows but terminal height is {}",
-                    lines.len(),
-                    self.height
-                ),
-            ));
-        }
-        if let Some((index, line_width)) = lines.iter().enumerate().find_map(|(index, line)| {
-            let line_width = visible_width(line);
-            (line_width > usize::from(self.width)).then_some((index, line_width))
-        }) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "live row {index} width {line_width} exceeds terminal width {}",
-                    self.width
-                ),
-            ));
-        }
-        let origin = usize::from(origin_row);
-        if origin.saturating_add(lines.len()) > usize::from(self.height) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "live frame origin {origin_row} with {} rows exceeds terminal height {}",
-                    lines.len(),
-                    self.height
-                ),
-            ));
-        }
+        let origin = self.validate_frame(origin_row, &lines)?;
         if !self.full_redraw_pending
             && self.previous_lines == lines
             && self.previous_cursor == cursor
@@ -174,6 +138,43 @@ impl LiveRenderer {
         self.previous_kitty_image_ids = kitty_image_ids;
         self.full_redraw_pending = false;
         Ok(())
+    }
+
+    fn validate_frame(&self, origin_row: u16, lines: &[String]) -> std::io::Result<usize> {
+        if lines.len() > usize::from(self.height) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "live frame has {} rows but terminal height is {}",
+                    lines.len(),
+                    self.height
+                ),
+            ));
+        }
+        if let Some((index, line_width)) = lines.iter().enumerate().find_map(|(index, line)| {
+            let line_width = visible_width(line);
+            (line_width > usize::from(self.width)).then_some((index, line_width))
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "live row {index} width {line_width} exceeds terminal width {}",
+                    self.width
+                ),
+            ));
+        }
+        let origin = usize::from(origin_row);
+        if origin.saturating_add(lines.len()) > usize::from(self.height) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "live frame origin {origin_row} with {} rows exceeds terminal height {}",
+                    lines.len(),
+                    self.height
+                ),
+            ));
+        }
+        Ok(origin)
     }
 
     /// Emit absolute clears for the previously drawn live rows at `origin_row`.
