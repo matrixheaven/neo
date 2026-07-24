@@ -48,4 +48,3 @@ earlier staged replacements were committed.
 3. A later same-file mismatch identifies staged comparison state while the
    underlying file remains unchanged.
 4. Existing strict exact-match and zero-write behavior remains intact.
-

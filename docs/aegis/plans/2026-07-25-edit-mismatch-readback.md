@@ -42,4 +42,3 @@ git diff --check
 
 Stop after the focused contract is proven. Do not widen into Read UI or Edit
 card redesign.
-
