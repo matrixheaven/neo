@@ -1357,10 +1357,8 @@ async fn delegate_emits_foreground_events() {
     )));
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
-    let harness = FakeHarness::from_turns([
+fn foreground_delegate_harness() -> FakeHarness {
+    FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
                 id: "parent_msg".to_owned(),
@@ -1406,27 +1404,32 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
                 }),
             },
         ],
-    ]);
-    let tools = ToolRegistry::with_builtin_tools();
+    ])
+}
+
+async fn run_harness_turn(harness: &FakeHarness, prompt: &str) -> Vec<AgentEvent> {
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
             .with_tool_execution_mode(ToolExecutionMode::Sequential)
             .with_permission_mode(PermissionMode::Yolo),
         harness.client(),
-        tools,
+        ToolRegistry::with_builtin_tools(),
     );
     let mut context = AgentContext::new();
 
-    let events = runtime
-        .run_turn(
-            &mut context,
-            AgentMessage::user_text("delegate a real task"),
-        )
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text(prompt))
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("turn should succeed");
+        .expect("turn should succeed")
+}
+
+#[tokio::test]
+async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
+    let harness = foreground_delegate_harness();
+    let events = run_harness_turn(&harness, "delegate a real task").await;
 
     let requests = harness.requests();
     assert!(
@@ -1488,10 +1491,8 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
     );
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn delegate_streams_child_activity_updates_before_finish() {
-    let harness = FakeHarness::from_turns([
+fn delegate_activity_harness() -> FakeHarness {
+    FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
                 id: "parent_msg".to_owned(),
@@ -1543,26 +1544,13 @@ async fn delegate_streams_child_activity_updates_before_finish() {
                 }),
             },
         ],
-    ]);
-    let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model())
-            .with_tool_execution_mode(ToolExecutionMode::Sequential)
-            .with_permission_mode(PermissionMode::Yolo),
-        harness.client(),
-        ToolRegistry::with_builtin_tools(),
-    );
-    let mut context = AgentContext::new();
+    ])
+}
 
-    let events = runtime
-        .run_turn(
-            &mut context,
-            AgentMessage::user_text("delegate with tool activity"),
-        )
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("turn should succeed");
+#[tokio::test]
+async fn delegate_streams_child_activity_updates_before_finish() {
+    let harness = delegate_activity_harness();
+    let events = run_harness_turn(&harness, "delegate with tool activity").await;
 
     let updates = events
         .iter()
@@ -2039,10 +2027,8 @@ fn latest_tool_output(
         })
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
-    let harness = FakeHarness::from_turns([vec![
+fn named_swarm_harness() -> FakeHarness {
+    FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
             id: "parent_msg".to_owned(),
         },
@@ -2104,25 +2090,10 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
-    ]]);
-    let tools = ToolRegistry::with_builtin_tools();
-    let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model())
-            .with_tool_execution_mode(ToolExecutionMode::Sequential)
-            .with_permission_mode(PermissionMode::Yolo),
-        harness.client(),
-        tools,
-    );
-    let mut context = AgentContext::new();
+    ]])
+}
 
-    let events = runtime
-        .run_turn(&mut context, AgentMessage::user_text("run swarm"))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("turn should succeed");
-
+fn assert_named_swarm_lifecycle(events: &[AgentEvent], harness: &FakeHarness) {
     assert!(
         harness.requests().len() >= 4,
         "parent plus three child turns should run"
@@ -2187,7 +2158,9 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
         .collect::<Vec<_>>();
     assert_eq!(names, expected_names);
     assert!(!names.iter().any(|name| name.starts_with("child-")));
+}
 
+fn assert_named_swarm_result(events: &[AgentEvent]) {
     let delegate_result = events
         .iter()
         .find_map(|event| match event {
@@ -2206,6 +2179,15 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
     assert!(items.iter().any(|item| item["summary"] == "api ok"));
     assert!(items.iter().any(|item| item["summary"] == "tui ok"));
     assert!(items.iter().any(|item| item["summary"] == "runtime ok"));
+}
+
+#[tokio::test]
+async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
+    let harness = named_swarm_harness();
+    let events = run_harness_turn(&harness, "run swarm").await;
+
+    assert_named_swarm_lifecycle(&events, &harness);
+    assert_named_swarm_result(&events);
 }
 
 #[tokio::test]
@@ -2885,125 +2867,64 @@ async fn wait_delegate_timeout_preserves_completed_partial_results() {
     assert!(!result.content.contains("ListDelegates"));
 }
 
-#[test]
-fn multi_agent_tool_descriptions_explain_contract_without_docs() {
-    let registry = ToolRegistry::with_builtin_tools_and_todos(Arc::new(Mutex::new(Vec::new())));
-    let specs = registry.specs();
+fn assert_delegate_description(description: &str) {
+    assert!(
+        description.contains("Default mode is foreground"),
+        "{}",
+        description
+    );
+    assert!(description.contains("resume"), "{}", description);
+    assert!(
+        description.contains("role must be omitted"),
+        "{}",
+        description
+    );
+    assert!(description.contains("context"), "{}", description);
+}
 
-    let spec = |name: &str| {
-        specs
-            .iter()
-            .find(|spec| spec.name == name)
-            .unwrap_or_else(|| panic!("{name} spec registered"))
-    };
+fn assert_message_delegate_description(description: &str) {
+    assert!(description.contains("live"), "{}", description);
+    assert!(description.contains("agent or swarm"), "{}", description);
+    assert!(description.contains("running children"), "{}", description);
+    assert!(
+        description.contains("Delegate with resume"),
+        "{}",
+        description
+    );
+}
 
-    let delegate = spec("Delegate");
+fn assert_list_delegates_description(description: &str) {
+    assert!(description.contains("active-only"), "{}", description);
+    assert!(description.contains("meta-only"), "{}", description);
     assert!(
-        delegate.description.contains("Default mode is foreground"),
+        description.contains("include_completed=true"),
         "{}",
-        delegate.description
+        description
     );
+    assert!(description.contains("same query"), "{}", description);
+    assert!(description.contains("does not wait"), "{}", description);
     assert!(
-        delegate.description.contains("resume"),
+        description.contains("Never poll it with Sleep"),
         "{}",
-        delegate.description
+        description
     );
-    assert!(
-        delegate.description.contains("role must be omitted"),
-        "{}",
-        delegate.description
-    );
-    assert!(
-        delegate.description.contains("context"),
-        "{}",
-        delegate.description
-    );
+    assert!(description.contains("WaitDelegate"), "{}", description);
+}
 
-    let message = spec("MessageDelegate");
+fn assert_wait_delegate_contract(description: &str, input_schema: &serde_json::Value) {
     assert!(
-        message.description.contains("live"),
+        description.contains("Canonical blocking wait"),
         "{}",
-        message.description
+        description
     );
+    assert!(description.contains("wait_timed_out"), "{}", description);
     assert!(
-        message.description.contains("agent or swarm"),
+        description.contains("delegate itself reached timed_out"),
         "{}",
-        message.description
+        description
     );
-    assert!(
-        message.description.contains("running children"),
-        "{}",
-        message.description
-    );
-    assert!(
-        message.description.contains("Delegate with resume"),
-        "{}",
-        message.description
-    );
-
-    let list = spec("ListDelegates");
-    assert!(
-        list.description.contains("active-only"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("meta-only"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("include_completed=true"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("same query"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("does not wait"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("Never poll it with Sleep"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.description.contains("WaitDelegate"),
-        "{}",
-        list.description
-    );
-
-    let wait = spec("WaitDelegate");
-    assert!(
-        wait.description.contains("Canonical blocking wait"),
-        "{}",
-        wait.description
-    );
-    assert!(
-        wait.description.contains("wait_timed_out"),
-        "{}",
-        wait.description
-    );
-    assert!(
-        wait.description
-            .contains("delegate itself reached timed_out"),
-        "{}",
-        wait.description
-    );
-    assert!(
-        wait.description.contains("one global"),
-        "{}",
-        wait.description
-    );
-    let wait_schema = wait
-        .input_schema
-        .get("schema")
-        .unwrap_or(&wait.input_schema);
+    assert!(description.contains("one global"), "{}", description);
+    let wait_schema = input_schema.get("schema").unwrap_or(input_schema);
     let required = wait_schema["required"].as_array().expect("required fields");
     assert!(required.iter().any(|field| field == "ids"), "{wait_schema}");
     assert!(
@@ -3014,23 +2935,31 @@ fn multi_agent_tool_descriptions_explain_contract_without_docs() {
         wait_schema["properties"].get("id").is_none(),
         "{wait_schema}"
     );
+}
 
-    let swarm = spec("DelegateSwarm");
-    assert!(
-        swarm.description.contains("foreground"),
-        "{}",
-        swarm.description
-    );
-    assert!(
-        swarm.description.contains("WaitDelegate"),
-        "{}",
-        swarm.description
-    );
-    assert!(
-        swarm.description.contains("TaskOutput"),
-        "{}",
-        swarm.description
-    );
+fn assert_delegate_swarm_description(description: &str) {
+    assert!(description.contains("foreground"), "{}", description);
+    assert!(description.contains("WaitDelegate"), "{}", description);
+    assert!(description.contains("TaskOutput"), "{}", description);
+}
+
+#[test]
+fn multi_agent_tool_descriptions_explain_contract_without_docs() {
+    let registry = ToolRegistry::with_builtin_tools_and_todos(Arc::new(Mutex::new(Vec::new())));
+    let specs = registry.specs();
+    let spec = |name: &str| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("{name} spec registered"))
+    };
+
+    assert_delegate_description(&spec("Delegate").description);
+    assert_message_delegate_description(&spec("MessageDelegate").description);
+    assert_list_delegates_description(&spec("ListDelegates").description);
+    let wait = spec("WaitDelegate");
+    assert_wait_delegate_contract(&wait.description, &wait.input_schema);
+    assert_delegate_swarm_description(&spec("DelegateSwarm").description);
 }
 
 #[test]
@@ -3373,20 +3302,16 @@ fn instruction_message_text(context: &AgentContext) -> String {
         .collect()
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn child_runtime_shares_registry_but_not_parent_visibility() {
-    use neo_agent_core::instructions::{
-        AgentInstructionState, InstructionBudget, InstructionEpochOutcome, InstructionInheritance,
-        InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
-        InstructionRegistry, InstructionRegistryConfig,
-    };
-    use neo_agent_core::multi_agent::{
-        ChildRuntimeDeps, DelegateContext, DelegateRequest, seed_child_instruction_baseline,
-    };
-    use neo_agent_core::session::{
-        JsonlSessionReader, SessionState, SessionStateStore, agent_wire_path,
-    };
+struct InstructionFixture {
+    _temp: tempfile::TempDir,
+    workspace: std::path::PathBuf,
+    nested: std::path::PathBuf,
+    registry: Arc<neo_agent_core::instructions::InstructionRegistry>,
+    budget: neo_agent_core::instructions::InstructionBudget,
+}
+
+fn instruction_fixture() -> InstructionFixture {
+    use neo_agent_core::instructions::{InstructionRegistry, InstructionRegistryConfig};
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp
@@ -3398,7 +3323,6 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
     std::fs::create_dir_all(&nested).expect("nested dir");
     std::fs::write(workspace.join("AGENTS.md"), "root rules\n").expect("root agents");
     std::fs::write(nested.join("AGENTS.md"), "nested rules\n").expect("nested agents");
-
     let registry = Arc::new(
         InstructionRegistry::new(InstructionRegistryConfig {
             primary_workspace: workspace.clone(),
@@ -3407,29 +3331,45 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         })
         .expect("registry"),
     );
-    let budget = InstructionBudget {
-        nominal: 65_536,
-        actual: 65_536,
-    };
 
-    // Seed parent with a visible nested revision.
+    InstructionFixture {
+        _temp: temp,
+        workspace,
+        nested,
+        registry,
+        budget: neo_agent_core::instructions::InstructionBudget {
+            nominal: 65_536,
+            actual: 65_536,
+        },
+    }
+}
+
+async fn seed_parent_and_assert_compaction(
+    fixture: &InstructionFixture,
+) -> (neo_agent_core::instructions::AgentInstructionState, String) {
+    use neo_agent_core::instructions::{
+        AgentInstructionState, InstructionInheritance, InstructionPreflightDecision,
+        InstructionReconcileKind, InstructionReconcileRequest,
+    };
+    use neo_agent_core::multi_agent::seed_child_instruction_baseline;
+
     let mut parent = AgentInstructionState::default();
     let parent_request = InstructionReconcileRequest {
         agent_id: "main".to_owned(),
         kind: InstructionReconcileKind::Baseline,
-        target_directories: vec![nested.clone()],
-        budget,
+        target_directories: vec![fixture.nested.clone()],
+        budget: fixture.budget,
         deferred_tool_ids: Vec::new(),
     };
     let InstructionPreflightDecision::Defer { epoch, fingerprint } =
-        registry.reconcile(parent_request, &parent).await
+        fixture.registry.reconcile(parent_request, &parent).await
     else {
         panic!("parent baseline should defer with an epoch");
     };
     parent.apply_epoch(&epoch, &fingerprint);
     let nested_revision = parent
         .visible_revisions
-        .get(&nested)
+        .get(&fixture.nested)
         .cloned()
         .expect("parent sees the nested revision");
 
@@ -3440,7 +3380,7 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         &fingerprint,
     );
     neo_agent_core::runtime::InstructionContextBridge::rehydrate_after_compaction(
-        &registry,
+        &fixture.registry,
         &mut compacted_parent,
     )
     .await
@@ -3450,76 +3390,107 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
             .instruction_state()
             .most_recent_scope
             .as_deref(),
-        Some(nested.as_path())
+        Some(fixture.nested.as_path())
     );
     assert!(
         !compacted_parent
             .instruction_state()
             .active_scopes
-            .contains(&nested)
+            .contains(&fixture.nested)
     );
 
-    let mut compacted_inherit_config =
-        AgentConfig::for_model(neo_agent_core::harness::fake_model());
-    compacted_inherit_config.instruction_registry = Some(Arc::clone(&registry));
-    compacted_inherit_config.instruction_inheritance = InstructionInheritance::FullContext;
-    let mut compacted_inherit_child = AgentContext::new();
+    let mut child_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
+    child_config.instruction_registry = Some(Arc::clone(&fixture.registry));
+    child_config.instruction_inheritance = InstructionInheritance::FullContext;
+    let mut child = AgentContext::new();
     seed_child_instruction_baseline(
-        &mut compacted_inherit_child,
-        &compacted_inherit_config,
+        &mut child,
+        &child_config,
         Some(compacted_parent.instruction_state()),
         "agent_after_parent_compaction",
     )
     .await
     .expect("compacted-parent inherit baseline");
     assert!(
-        compacted_inherit_child
+        child
             .instruction_state()
             .visible_revisions
-            .contains_key(&nested),
+            .contains_key(&fixture.nested),
         "full-context child must inherit the parent's most-recent pinned nested scope"
     );
 
-    // Build an inherit child and a summary child.
+    (parent, nested_revision)
+}
+
+async fn assert_summary_rehydration(
+    fixture: &InstructionFixture,
+    summary_child: &mut AgentContext,
+) {
+    neo_agent_core::runtime::InstructionContextBridge::rehydrate_after_compaction(
+        &fixture.registry,
+        summary_child,
+    )
+    .await
+    .expect("summary child rehydration");
+    assert!(
+        !summary_child
+            .instruction_state()
+            .visible_revisions
+            .contains_key(&fixture.nested),
+        "session-shared cache metadata must not become summary-child visibility"
+    );
+    assert!(
+        !summary_child
+            .instruction_state()
+            .visited_revisions
+            .contains_key(&fixture.nested),
+        "session-shared cache metadata must not become summary-child visited history"
+    );
+}
+
+async fn assert_child_instruction_modes(
+    fixture: &InstructionFixture,
+    parent: &neo_agent_core::instructions::AgentInstructionState,
+    nested_revision: &str,
+) {
+    use neo_agent_core::instructions::{InstructionEpochOutcome, InstructionInheritance};
+    use neo_agent_core::multi_agent::seed_child_instruction_baseline;
+
     let mut inherit_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
-    inherit_config.instruction_registry = Some(Arc::clone(&registry));
+    inherit_config.instruction_registry = Some(Arc::clone(&fixture.registry));
     inherit_config.instruction_inheritance = InstructionInheritance::FullContext;
     let mut inherit_child = AgentContext::new();
     let inherit_epoch = seed_child_instruction_baseline(
         &mut inherit_child,
         &inherit_config,
-        Some(&parent),
+        Some(parent),
         "agent_inherit",
     )
     .await
     .expect("inherit baseline emits an epoch");
 
     let mut summary_config = AgentConfig::for_model(neo_agent_core::harness::fake_model());
-    summary_config.instruction_registry = Some(Arc::clone(&registry));
+    summary_config.instruction_registry = Some(Arc::clone(&fixture.registry));
     summary_config.instruction_inheritance = InstructionInheritance::Summary;
     let mut summary_child = AgentContext::new();
     let summary_epoch = seed_child_instruction_baseline(
         &mut summary_child,
         &summary_config,
-        Some(&parent),
+        Some(parent),
         "agent_summary",
     )
     .await
     .expect("summary baseline emits an epoch");
 
-    // Assert Arc::ptr_eq registry for both.
     let inherit_registry = inherit_child
         .instruction_registry()
         .expect("inherit child registry");
     let summary_registry = summary_child
         .instruction_registry()
         .expect("summary child registry");
-    assert!(Arc::ptr_eq(&inherit_registry, &registry));
-    assert!(Arc::ptr_eq(&summary_registry, &registry));
+    assert!(Arc::ptr_eq(&inherit_registry, &fixture.registry));
+    assert!(Arc::ptr_eq(&summary_registry, &fixture.registry));
     assert!(Arc::ptr_eq(&inherit_registry, &summary_registry));
-
-    // Assert inherit may seed explicit visible revisions, summary starts
-    // agent-local baseline.
     assert_eq!(inherit_epoch.agent_id, "agent_inherit");
     assert_eq!(summary_epoch.agent_id, "agent_summary");
     assert_eq!(inherit_epoch.outcome, InstructionEpochOutcome::Ready);
@@ -3528,23 +3499,23 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         inherit_child
             .instruction_state()
             .visible_revisions
-            .get(&nested)
+            .get(&fixture.nested)
             .map(String::as_str),
-        Some(nested_revision.as_str()),
+        Some(nested_revision),
         "full-context inheritance explicitly copies the parent's visible nested revision"
     );
     assert!(
         !summary_child
             .instruction_state()
             .visible_revisions
-            .contains_key(&nested),
+            .contains_key(&fixture.nested),
         "summary inheritance must not infer nested visibility from the parent"
     );
     assert!(
         summary_child
             .instruction_state()
             .visible_revisions
-            .contains_key(&workspace),
+            .contains_key(&fixture.workspace),
         "summary baseline still loads the workspace root scope"
     );
     let inherit_text = instruction_message_text(&inherit_child);
@@ -3553,30 +3524,18 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
     assert!(!summary_text.contains("nested rules"), "{summary_text}");
     assert!(summary_text.contains("root rules"), "{summary_text}");
 
-    neo_agent_core::runtime::InstructionContextBridge::rehydrate_after_compaction(
-        &registry,
-        &mut summary_child,
-    )
-    .await
-    .expect("summary child rehydration");
-    assert!(
-        !summary_child
-            .instruction_state()
-            .visible_revisions
-            .contains_key(&nested),
-        "session-shared cache metadata must not become summary-child visibility"
-    );
-    assert!(
-        !summary_child
-            .instruction_state()
-            .visited_revisions
-            .contains_key(&nested),
-        "session-shared cache metadata must not become summary-child visited history"
-    );
+    assert_summary_rehydration(fixture, &mut summary_child).await;
+}
 
-    // End to end: a foreground delegate child inherits through the runtime
-    // wiring, the pinned baseline reaches the child's first model request,
-    // and the epoch lands in the child's own wire JSONL.
+async fn assert_runtime_child_inherits_and_persists_epoch(
+    fixture: &InstructionFixture,
+    parent: neo_agent_core::instructions::AgentInstructionState,
+) {
+    use neo_agent_core::multi_agent::{ChildRuntimeDeps, DelegateContext, DelegateRequest};
+    use neo_agent_core::session::{
+        JsonlSessionReader, SessionState, SessionStateStore, agent_wire_path,
+    };
+
     let session_temp = tempfile::tempdir().expect("session tempdir");
     let session_dir = session_temp.path();
     let mut session_state = SessionState::new();
@@ -3588,7 +3547,7 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
     let harness = FakeHarness::from_turns([child_text_turn("inherit child done")]);
     let mut child_config = AgentConfig::for_model(harness.model());
-    child_config.instruction_registry = Some(Arc::clone(&registry));
+    child_config.instruction_registry = Some(Arc::clone(&fixture.registry));
     let deps = ChildRuntimeDeps::new(
         child_config,
         harness.client(),
@@ -3622,7 +3581,7 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         baseline
             .selected_bundles
             .iter()
-            .any(|bundle| bundle.display_path == nested),
+            .any(|bundle| bundle.display_path == fixture.nested),
         "inherit child baseline includes the nested scope: {baseline:#?}"
     );
 
@@ -3643,6 +3602,14 @@ async fn child_runtime_shares_registry_but_not_parent_visibility() {
         )),
         "child epochs go to the child's wire JSONL: {replayed:#?}"
     );
+}
+
+#[tokio::test]
+async fn child_runtime_shares_registry_but_not_parent_visibility() {
+    let fixture = instruction_fixture();
+    let (parent, nested_revision) = seed_parent_and_assert_compaction(&fixture).await;
+    assert_child_instruction_modes(&fixture, &parent, &nested_revision).await;
+    assert_runtime_child_inherits_and_persists_epoch(&fixture, parent).await;
 }
 
 #[tokio::test]

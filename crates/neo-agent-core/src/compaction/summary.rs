@@ -22,37 +22,33 @@ pub struct CompactionOutcome {
     pub projection_omitted_tokens: usize,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn run_full_compaction<F>(
+pub(crate) struct FullCompactionInput<'a> {
+    pub reason: CompactionReason,
+    pub snapshot: ContextBudgetSnapshot,
+    pub custom_instruction: Option<&'a str>,
+}
+
+pub(crate) async fn run_full_compaction<F>(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     context: &mut AgentContext,
-    reason: CompactionReason,
-    snapshot: ContextBudgetSnapshot,
-    custom_instruction: Option<&str>,
+    input: FullCompactionInput<'_>,
     cancel_token: &CancellationToken,
     mut emit: F,
 ) -> Result<CompactionOutcome, CompactionError>
 where
     F: FnMut(AgentEvent) + Send,
 {
+    let FullCompactionInput {
+        reason,
+        snapshot,
+        custom_instruction,
+    } = input;
     let Some(settings) = &config.compaction else {
-        return Ok(CompactionOutcome {
-            compacted_message_count: 0,
-            tokens_before: snapshot.projected_tokens,
-            tokens_after: snapshot.projected_tokens,
-            summary_tokens: 0,
-            projection_omitted_tokens: 0,
-        });
+        return Ok(unchanged_outcome(&snapshot));
     };
     if !settings.enabled {
-        return Ok(CompactionOutcome {
-            compacted_message_count: 0,
-            tokens_before: snapshot.projected_tokens,
-            tokens_after: snapshot.projected_tokens,
-            summary_tokens: 0,
-            projection_omitted_tokens: 0,
-        });
+        return Ok(unchanged_outcome(&snapshot));
     }
 
     let messages = context.messages().to_vec();
@@ -149,6 +145,16 @@ where
     })
 }
 
+fn unchanged_outcome(snapshot: &ContextBudgetSnapshot) -> CompactionOutcome {
+    CompactionOutcome {
+        compacted_message_count: 0,
+        tokens_before: snapshot.projected_tokens,
+        tokens_after: snapshot.projected_tokens,
+        summary_tokens: 0,
+        projection_omitted_tokens: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use neo_ai::AiStreamEvent;
@@ -223,9 +229,11 @@ mod tests {
             &model,
             &config,
             &mut context,
-            CompactionReason::Threshold,
-            snapshot,
-            None,
+            FullCompactionInput {
+                reason: CompactionReason::Threshold,
+                snapshot,
+                custom_instruction: None,
+            },
             &CancellationToken::new(),
             |_| {},
         )

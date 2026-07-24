@@ -244,7 +244,6 @@ impl LuaWorkflowRunner {
         );
     }
 
-    #[allow(clippy::too_many_lines)]
     fn install_neo_table(
         &self,
         lua: &Lua,

@@ -78,141 +78,19 @@ fn prepare_file_plan(
     plan: &EditFilePlan,
     seen_targets: &mut HashSet<std::ffi::OsString>,
 ) -> Result<PreparedEditFile, ToolResult> {
-    let absolute_candidate = if plan.path.is_absolute() {
-        plan.path.clone()
-    } else {
-        context.workspace_root().join(&plan.path)
-    };
-    match std::fs::symlink_metadata(&absolute_candidate) {
-        Ok(metadata) if is_reparse_or_symlink(&metadata) => {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!(
-                    "refusing symlink or reparse point target: {}",
-                    plan.path.display()
-                ),
-                "Edit only supports existing UTF-8 regular files.",
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!("target is not a regular file: {}", plan.path.display()),
-                "Edit only supports existing UTF-8 regular files.",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!("file does not exist: {}", plan.path.display()),
-                "Use Write to create new files, or re-read existing targets first.",
-            ));
-        }
-        Err(error) => {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!(
-                    "failed to read metadata for {}: {error}",
-                    plan.path.display()
-                ),
-                "Re-read the file and submit a fresh Edit call.",
-            ));
-        }
-    }
-
-    let resolved = context
-        .resolve_parent_for_write(&plan.path)
-        .map_err(|error| {
-            prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!("path resolution failed: {error}"),
-                "Re-read the path and submit a fresh Edit call.",
-            )
-        })?
-        .canonicalize()
-        .map_err(|error| {
-            prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!("failed to resolve existing target: {error}"),
-                "Re-read the path and submit a fresh Edit call.",
-            )
-        })?;
-
-    let identity = resolved.as_os_str().to_owned();
-    if !seen_targets.insert(identity) {
-        return Err(prepare_failed(
-            Some(file_index),
-            None,
-            Some(plan.path.display().to_string()),
-            &format!("duplicate effective target path: {}", resolved.display()),
-            "Use one consistent path spelling per target and submit a fresh Edit call.",
-        ));
-    }
-
-    let bytes = match read_regular_file_no_follow(&resolved) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                Some(plan.path.display().to_string()),
-                &format!("failed to read {}: {error}", resolved.display()),
-                "Edit only supports existing UTF-8 regular files. Re-read the file and submit a fresh Edit call.",
-            ));
-        }
-    };
-    let Ok(original) = String::from_utf8(bytes.clone()) else {
-        return Err(prepare_failed(
+    validate_edit_candidate(context, file_index, &plan.path)?;
+    let resolved = resolve_edit_target(context, file_index, &plan.path, seen_targets)?;
+    let bytes = read_edit_bytes(file_index, &plan.path, &resolved)?;
+    let original = String::from_utf8(bytes.clone()).map_err(|_| {
+        prepare_failed(
             Some(file_index),
             None,
             Some(plan.path.display().to_string()),
             &format!("file is not valid UTF-8: {}", resolved.display()),
             "Edit only supports existing UTF-8 regular files.",
-        ));
-    };
-
-    let mut staged = original.clone();
-    for (edit_index, edit) in &plan.edits {
-        let actual = count_non_overlapping(&staged, &edit.old);
-        if actual != edit.expected_matches {
-            let lines = match_line_numbers(&staged, &edit.old);
-            let line_list = if lines.is_empty() {
-                "none".to_owned()
-            } else {
-                lines
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            return Err(prepare_failed(
-                None,
-                Some(*edit_index),
-                Some(plan.path.display().to_string()),
-                &format!(
-                    "expected {} exact matches · found {actual}; matches at lines {line_list}",
-                    edit.expected_matches
-                ),
-                &format!(
-                    "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
-                ),
-            ));
-        }
-        staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
-    }
+        )
+    })?;
+    let staged = apply_edit_plan(file_index, plan, &original)?;
 
     if staged == original {
         return Err(prepare_failed(
@@ -246,6 +124,150 @@ fn prepare_file_plan(
         removed,
         diff,
     })
+}
+
+fn validate_edit_candidate(
+    context: &ToolContext,
+    file_index: usize,
+    path: &Path,
+) -> Result<(), ToolResult> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        context.workspace_root().join(path)
+    };
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if is_reparse_or_symlink(&metadata) => Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(path.display().to_string()),
+            &format!(
+                "refusing symlink or reparse point target: {}",
+                path.display()
+            ),
+            "Edit only supports existing UTF-8 regular files.",
+        )),
+        Ok(metadata) if !metadata.is_file() => Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(path.display().to_string()),
+            &format!("target is not a regular file: {}", path.display()),
+            "Edit only supports existing UTF-8 regular files.",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(path.display().to_string()),
+            &format!("file does not exist: {}", path.display()),
+            "Use Write to create new files, or re-read existing targets first.",
+        )),
+        Err(error) => Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(path.display().to_string()),
+            &format!("failed to read metadata for {}: {error}", path.display()),
+            "Re-read the file and submit a fresh Edit call.",
+        )),
+    }
+}
+
+fn resolve_edit_target(
+    context: &ToolContext,
+    file_index: usize,
+    path: &Path,
+    seen_targets: &mut HashSet<std::ffi::OsString>,
+) -> Result<PathBuf, ToolResult> {
+    let resolved = context
+        .resolve_parent_for_write(path)
+        .map_err(|error| {
+            prepare_failed(
+                Some(file_index),
+                None,
+                Some(path.display().to_string()),
+                &format!("path resolution failed: {error}"),
+                "Re-read the path and submit a fresh Edit call.",
+            )
+        })?
+        .canonicalize()
+        .map_err(|error| {
+            prepare_failed(
+                Some(file_index),
+                None,
+                Some(path.display().to_string()),
+                &format!("failed to resolve existing target: {error}"),
+                "Re-read the path and submit a fresh Edit call.",
+            )
+        })?;
+    if !seen_targets.insert(resolved.as_os_str().to_owned()) {
+        return Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(path.display().to_string()),
+            &format!("duplicate effective target path: {}", resolved.display()),
+            "Use one consistent path spelling per target and submit a fresh Edit call.",
+        ));
+    }
+    Ok(resolved)
+}
+
+fn read_edit_bytes(file_index: usize, path: &Path, resolved: &Path) -> Result<Vec<u8>, ToolResult> {
+    read_regular_file_no_follow(resolved).map_err(|error| {
+        prepare_failed(
+            Some(file_index), None, Some(path.display().to_string()),
+            &format!("failed to read {}: {error}", resolved.display()),
+            "Edit only supports existing UTF-8 regular files. Re-read the file and submit a fresh Edit call.",
+        )
+    })
+}
+
+fn apply_edit_plan(
+    file_index: usize,
+    plan: &EditFilePlan,
+    original: &str,
+) -> Result<String, ToolResult> {
+    let mut staged = original.to_owned();
+    for (edit_index, edit) in &plan.edits {
+        let actual = count_non_overlapping(&staged, &edit.old);
+        if actual != edit.expected_matches {
+            let lines = match_line_numbers(&staged, &edit.old);
+            let line_list = if lines.is_empty() {
+                "none".to_owned()
+            } else {
+                lines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(prepare_failed(
+                None,
+                Some(*edit_index),
+                Some(plan.path.display().to_string()),
+                &format!(
+                    "expected {} exact matches · found {actual}; matches at lines {line_list}",
+                    edit.expected_matches
+                ),
+                &format!(
+                    "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
+                ),
+            ));
+        }
+        staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
+    }
+    if staged == original {
+        return Err(prepare_failed(
+            Some(file_index),
+            None,
+            Some(plan.path.display().to_string()),
+            &format!(
+                "file is unchanged after replacements: {}",
+                plan.path.display()
+            ),
+            "Remove no-op replacements and submit a fresh Edit call.",
+        ));
+    }
+    Ok(staged)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

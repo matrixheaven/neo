@@ -815,7 +815,6 @@ impl McpConnectionManager {
     }
 
     /// Poll any finished connect/reconnect tasks and update entry state.
-    #[allow(clippy::too_many_lines)]
     async fn poll_finished_connections(&self) {
         let mut completed_connects = Vec::new();
         let mut completed_reconnects = Vec::new();
@@ -859,118 +858,33 @@ impl McpConnectionManager {
             }
         }
 
-        let mut need_reconnect = Vec::new();
-        let mut cleanup_handles = Vec::new();
+        let mut need_reconnect: Vec<String> = Vec::new();
+        let mut cleanup_handles: Vec<String> = Vec::new();
         let supervisor = self.inner.read().await.supervisor.clone();
 
-        // Process finished connect tasks.
         for (id, task) in completed_connects {
-            let attempt_id = task.attempt_id;
-            let expected_status = task.expected_status;
-            let cleanup_handle = task.cleanup_handle;
-            match task.handle.await {
-                Ok(Ok(outcome)) => {
-                    let mut state = self.inner.write().await;
-                    let accepted = install_connect_outcome(
-                        state.entries.get_mut(&id),
-                        attempt_id,
-                        expected_status,
-                        &outcome,
-                    );
-                    drop(state);
-                    if !accepted {
-                        retire_rejected_outcome(&id, outcome, cleanup_handle, &supervisor).await;
-                    }
-                }
-                Ok(Err(err)) => {
-                    cleanup_handles.extend(cleanup_handle);
-                    let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id || entry.status != expected_status {
-                        continue;
-                    }
-                    if apply_connect_error(entry, &err) {
-                        need_reconnect.push(id.clone());
-                    }
-                }
-                Err(join_err) => {
-                    cleanup_handles.extend(cleanup_handle);
-                    let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id || entry.status != expected_status {
-                        continue;
-                    }
-                    let diagnostic = McpDiagnostic {
-                        server_id: entry.config.id.clone(),
-                        transport: entry.config.transport.label().to_owned(),
-                        message: format!("connect task panicked: {join_err}"),
-                        hint: None,
-                        stderr_tail: None,
-                    };
-                    if set_failed(entry, diagnostic) {
-                        need_reconnect.push(id.clone());
-                    }
-                }
-            }
+            process_finished_connection(
+                self,
+                id,
+                task,
+                false,
+                &supervisor,
+                &mut need_reconnect,
+                &mut cleanup_handles,
+            )
+            .await;
         }
-
-        // Process finished reconnect tasks.
         for (id, task) in completed_reconnects {
-            let attempt_id = task.attempt_id;
-            let expected_status = task.expected_status;
-            let cleanup_handle = task.cleanup_handle;
-            match task.handle.await {
-                Ok(Ok(outcome)) => {
-                    let mut state = self.inner.write().await;
-                    let accepted = install_connect_outcome(
-                        state.entries.get_mut(&id),
-                        attempt_id,
-                        expected_status,
-                        &outcome,
-                    );
-                    drop(state);
-                    if !accepted {
-                        retire_rejected_outcome(&id, outcome, cleanup_handle, &supervisor).await;
-                    }
-                }
-                Ok(Err(err)) => {
-                    cleanup_handles.extend(cleanup_handle);
-                    let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id || entry.status != expected_status {
-                        continue;
-                    }
-                    if apply_connect_error(entry, &err) {
-                        need_reconnect.push(id.clone());
-                    }
-                }
-                Err(join_err) => {
-                    cleanup_handles.extend(cleanup_handle);
-                    let mut state = self.inner.write().await;
-                    let Some(entry) = state.entries.get_mut(&id) else {
-                        continue;
-                    };
-                    if entry.attempt_id != attempt_id || entry.status != expected_status {
-                        continue;
-                    }
-                    let diagnostic = McpDiagnostic {
-                        server_id: entry.config.id.clone(),
-                        transport: entry.config.transport.label().to_owned(),
-                        message: format!("reconnect task panicked: {join_err}"),
-                        hint: None,
-                        stderr_tail: None,
-                    };
-                    if set_failed(entry, diagnostic) {
-                        need_reconnect.push(id.clone());
-                    }
-                }
-            }
+            process_finished_connection(
+                self,
+                id,
+                task,
+                true,
+                &supervisor,
+                &mut need_reconnect,
+                &mut cleanup_handles,
+            )
+            .await;
         }
 
         for handle in cleanup_handles {
@@ -980,6 +894,71 @@ impl McpConnectionManager {
         // Schedule reconnect tasks for entries that need them.
         for id in &need_reconnect {
             self.schedule_reconnect(id).await;
+        }
+    }
+}
+
+async fn process_finished_connection(
+    manager: &McpConnectionManager,
+    id: String,
+    task: ManagedConnectTask,
+    reconnect: bool,
+    supervisor: &ProcessSupervisor,
+    need_reconnect: &mut Vec<String>,
+    cleanup_handles: &mut Vec<String>,
+) {
+    let attempt_id = task.attempt_id;
+    let expected_status = task.expected_status;
+    let cleanup_handle = task.cleanup_handle;
+    match task.handle.await {
+        Ok(Ok(outcome)) => {
+            let mut state = manager.inner.write().await;
+            let accepted = install_connect_outcome(
+                state.entries.get_mut(&id),
+                attempt_id,
+                expected_status,
+                &outcome,
+            );
+            drop(state);
+            if !accepted {
+                retire_rejected_outcome(&id, outcome, cleanup_handle, supervisor).await;
+            }
+        }
+        Ok(Err(err)) => {
+            cleanup_handles.extend(cleanup_handle);
+            let mut state = manager.inner.write().await;
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            if entry.attempt_id != attempt_id || entry.status != expected_status {
+                return;
+            }
+            if apply_connect_error(entry, &err) {
+                need_reconnect.push(id);
+            }
+        }
+        Err(join_err) => {
+            cleanup_handles.extend(cleanup_handle);
+            let mut state = manager.inner.write().await;
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            if entry.attempt_id != attempt_id || entry.status != expected_status {
+                return;
+            }
+            let diagnostic = McpDiagnostic {
+                server_id: entry.config.id.clone(),
+                transport: entry.config.transport.label().to_owned(),
+                message: format!(
+                    "{}connect task panicked: {join_err}",
+                    if reconnect { "re" } else { "" }
+                ),
+                hint: None,
+                stderr_tail: None,
+            };
+            if set_failed(entry, diagnostic) {
+                need_reconnect.push(id);
+            }
         }
     }
 }

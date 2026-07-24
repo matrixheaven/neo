@@ -13,7 +13,7 @@ pub(crate) use runtime::{
 };
 
 // Re-export CLI functions called from `main.rs` via `modes::run::*`.
-pub(crate) use mcp_cli::{add_mcp_server, auth_mcp_server, list_mcp};
+pub(crate) use mcp_cli::{AddMcpServerInput, add_mcp_server, auth_mcp_server, list_mcp};
 pub(crate) use models_cli::list_configured_models;
 
 // Re-export session helpers used within this module.
@@ -26,7 +26,7 @@ use std::{
     collections::HashMap,
     io::IsTerminal as _,
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
@@ -35,9 +35,8 @@ use neo_agent_core::goal::GoalManager;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEventPersistence};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalRequest, ApprovalResponse,
-    AskUserTool, Content, CreateSkillTool, ListSkillsTool, McpConnectionManager, MessageOrigin,
-    MoveSkillTool, PendingQuestion, SteerInputHandle, SummarizeSessionsTool, WorkflowNotification,
-    instructions::InstructionRegistry, mode::PlanMode, skills::SkillStoreHandle,
+    AskUserTool, Content, CreateSkillTool, ListSkillsTool, MessageOrigin, MoveSkillTool,
+    SteerInputHandle, SummarizeSessionsTool, WorkflowNotification, skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -45,7 +44,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cli::RunOutput,
     config::{AppConfig, neo_home},
-    modes::sessions,
+    modes::{
+        interactive::{TurnChannels, TurnRequest},
+        sessions,
+    },
     resources,
 };
 
@@ -90,19 +92,8 @@ async fn prepare_recovered_workflow_dispatch(
     session_dir: &std::path::Path,
     replayed_events: &[AgentEvent],
 ) -> anyhow::Result<()> {
-    let dispatch_runtime = runtime_for_config(
-        config,
-        Some(session_dir.to_path_buf()),
-        None,
-        None,
-        None,
-        false,
-        SteerInputHandle::new(),
-        None,
-        Arc::new(Mutex::new(None)),
-        None,
-    )
-    .await?;
+    let dispatch_runtime =
+        runtime_for_config(config, Some(session_dir.to_path_buf()), None, None).await?;
     let context = AgentContext::from_replay(replayed_events.iter());
     dispatch_runtime.refresh_workflow_dispatch(&context)?;
     Ok(())
@@ -290,12 +281,6 @@ async fn run_prompt_with_retry_notices(
         Some(session_root_from_wire_path(&session_path)?),
         None,
         None,
-        None,
-        false,
-        SteerInputHandle::new(),
-        None,
-        Arc::new(Mutex::new(None)),
-        None,
     )
     .await
     {
@@ -336,19 +321,7 @@ async fn run_prompt_ephemeral(
     let content = vec![Content::text(prompt_text.as_str())];
     let mut writer = SessionEventWriter::memory();
     let user_message = user_message(content, MessageOrigin::User, None);
-    let runtime = runtime_for_config(
-        config,
-        None,
-        None,
-        None,
-        None,
-        false,
-        SteerInputHandle::new(),
-        None,
-        Arc::new(Mutex::new(None)),
-        None,
-    )
-    .await?;
+    let runtime = runtime_for_config(config, None, None, None).await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -382,19 +355,7 @@ async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let user_message = user_message(user_content, MessageOrigin::User, None);
     record_session_activity(config, session_id, &prompt_text);
-    let runtime = runtime_for_config(
-        config,
-        Some(session_dir),
-        None,
-        None,
-        None,
-        false,
-        SteerInputHandle::new(),
-        None,
-        Arc::new(Mutex::new(None)),
-        None,
-    )
-    .await?;
+    let runtime = runtime_for_config(config, Some(session_dir), None, None).await?;
     runtime.restore_plan_mode(&context);
     let turn = finish_prompt_turn(
         user_message,
@@ -413,102 +374,72 @@ async fn run_prompt_in_session(
     Ok(turn)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_streaming(
-    prompt: &[Content],
-    prompt_origin: MessageOrigin,
-    prompt_display_text: Option<String>,
+    request: TurnRequest,
+    channels: TurnChannels,
     config: &AppConfig,
-    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    approval_tx: mpsc::UnboundedSender<PendingApproval>,
-    session_id_tx: Option<mpsc::UnboundedSender<String>>,
-    cancel_token: CancellationToken,
-    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
-    skill_context: Option<String>,
-    plan_mode: Option<Arc<RwLock<PlanMode>>>,
-    goal_mode_authoring: bool,
-    steer_input: SteerInputHandle,
-    mcp_manager: Option<McpConnectionManager>,
-    manual_compact_request: Arc<Mutex<Option<String>>>,
-    instruction_registry: Option<Arc<InstructionRegistry>>,
-    compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(
-        prompt,
-        prompt_origin,
-        prompt_display_text,
+        &request.prompt,
+        request.prompt_origin.clone(),
+        request.prompt_display_text.clone(),
         config,
-        session_id_tx,
-        skill_context,
+        Some(channels.session_ids.clone()),
+        request.skill_context.clone(),
     )
     .await?;
     let prompt = prepared.prompt.clone();
     let runtime = runtime_for_config(
         config,
         Some(prepared.session_directory.clone()),
-        Some(approval_tx),
-        question_tx,
-        plan_mode.clone(),
-        goal_mode_authoring,
-        steer_input,
-        mcp_manager,
-        manual_compact_request,
-        instruction_registry,
+        Some(&request),
+        Some(&channels),
     )
     .await?;
-    let turn =
-        run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token, compaction_only)
-            .await?;
+    let turn = run_prepared_streaming_turn(
+        prepared,
+        runtime,
+        channels.events,
+        channels.cancel_token,
+        request.compaction_only,
+    )
+    .await?;
     record_initial_session_title(config, &turn, &prompt).await;
     Ok(turn)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_in_session_streaming(
     session_id: &str,
-    prompt: &[Content],
-    prompt_origin: MessageOrigin,
-    prompt_display_text: Option<String>,
+    request: TurnRequest,
+    channels: TurnChannels,
     config: &AppConfig,
-    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    approval_tx: mpsc::UnboundedSender<PendingApproval>,
-    session_id_tx: Option<mpsc::UnboundedSender<String>>,
-    cancel_token: CancellationToken,
-    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
-    skill_context: Option<String>,
-    plan_mode: Option<Arc<RwLock<PlanMode>>>,
-    goal_mode_authoring: bool,
-    steer_input: SteerInputHandle,
-    mcp_manager: Option<McpConnectionManager>,
-    manual_compact_request: Arc<Mutex<Option<String>>>,
-    instruction_registry: Option<Arc<InstructionRegistry>>,
-    compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_existing_streaming_turn(
         session_id,
-        prompt,
-        prompt_origin,
-        prompt_display_text,
+        &request.prompt,
+        request.prompt_origin.clone(),
+        request.prompt_display_text.clone(),
         config,
-        session_id_tx,
-        skill_context,
+        Some(channels.session_ids.clone()),
+        request.skill_context.clone(),
     )
     .await?;
     let runtime = runtime_for_config(
         config,
         Some(prepared.session_directory.clone()),
-        Some(approval_tx),
-        question_tx,
-        plan_mode.clone(),
-        goal_mode_authoring,
-        steer_input,
-        mcp_manager,
-        manual_compact_request,
-        instruction_registry,
+        Some(&request),
+        Some(&channels),
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
-    run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token, compaction_only).await
+    run_prepared_streaming_turn(
+        prepared,
+        runtime,
+        channels.events,
+        channels.cancel_token,
+        request.compaction_only,
+    )
+    .await
 }
 
 async fn prepare_new_streaming_turn(
@@ -640,18 +571,11 @@ async fn run_prepared_streaming_turn(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn runtime_for_config(
     config: &AppConfig,
     session_directory: Option<PathBuf>,
-    approval_tx: Option<mpsc::UnboundedSender<PendingApproval>>,
-    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
-    plan_mode: Option<Arc<RwLock<PlanMode>>>,
-    goal_mode_authoring: bool,
-    steer_input: SteerInputHandle,
-    mcp_manager: Option<McpConnectionManager>,
-    manual_compact_request: Arc<Mutex<Option<String>>>,
-    instruction_registry: Option<Arc<InstructionRegistry>>,
+    request: Option<&TurnRequest>,
+    channels: Option<&TurnChannels>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = runtime::resolve_model(config)?;
     let client = runtime::resolve_model_client(config, &model)?;
@@ -661,26 +585,33 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let skill_store_handle = SkillStoreHandle::new(skill_store.clone());
-    let mut agent_config =
-        runtime::agent_config_for_app(model, config, approval_tx, instruction_registry)?;
+    let mut agent_config = runtime::agent_config_for_app(
+        model,
+        config,
+        channels.map(|channels| channels.approvals.clone()),
+        request.and_then(|request| request.instruction_registry.clone()),
+    )?;
     if let Some(session_directory) = &session_directory {
         agent_config = agent_config.with_session_directory(session_directory.clone());
     }
-    agent_config.manual_compact_request = manual_compact_request;
-    if let Some(plan_mode) = plan_mode {
-        agent_config = agent_config.with_plan_mode(plan_mode);
+    agent_config.manual_compact_request = request.map_or_else(
+        || Arc::new(Mutex::new(None)),
+        |request| Arc::clone(&request.manual_compact_request),
+    );
+    if let Some(request) = request {
+        agent_config = agent_config.with_plan_mode(Arc::clone(&request.plan_mode));
     }
-    if goal_mode_authoring {
+    if request.is_some_and(|request| request.goal_mode_authoring) {
         agent_config = agent_config.with_goal_mode_authoring(true);
     }
     let mut tools = runtime::tool_registry_for_config(
         config,
         std::sync::Arc::clone(&agent_config.todos),
-        mcp_manager.as_ref(),
+        request.and_then(|request| request.mcp_manager.as_ref()),
     )
     .await?;
-    if let Some(question_tx) = question_tx {
-        tools.register(AskUserTool::new(question_tx));
+    if let Some(channels) = channels {
+        tools.register(AskUserTool::new(channels.questions.clone()));
     }
     tools.register(ListSkillsTool::new(skill_store_handle.clone()));
     if let Some(home) = neo_home() {
@@ -699,7 +630,9 @@ async fn runtime_for_config(
     }
     let mut runtime =
         AgentRuntime::with_tools_and_skill_handle(agent_config, client, tools, skill_store_handle);
-    runtime = runtime.with_steer_input(steer_input);
+    runtime = runtime.with_steer_input(channels.map_or_else(SteerInputHandle::new, |channels| {
+        channels.steer_input.clone()
+    }));
     if let Some(session_dir) = session_directory {
         let goal_manager = Arc::new(GoalManager::load(session_dir).await?);
         if let Some(tools) = runtime.tools_mut() {
@@ -1091,8 +1024,8 @@ mod tests {
         AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
         ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
         CompactionSettings, Content, McpConnectionManager, MessageOrigin, PermissionMode,
-        PermissionOperation, ProcessSupervisor, QueueMode, StopReason as AgentStopReason,
-        ToolExecutionMode, ToolRegistry,
+        PermissionOperation, ProcessSupervisor, QueueMode, SteerInputHandle,
+        StopReason as AgentStopReason, ToolExecutionMode, ToolRegistry,
         harness::FakeHarness,
         session::{JsonlSessionReader, JsonlSessionWriter},
     };
@@ -1112,7 +1045,10 @@ mod tests {
     use super::session_mgmt::{
         latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
-    use super::{PendingApproval, run_prompt_with_runtime, runtime_for_config, user_message};
+    use super::{
+        PendingApproval, TurnChannels, TurnRequest, run_prompt_with_runtime, runtime_for_config,
+        user_message,
+    };
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, RuntimeRetryConfig, TuiConfig,
@@ -1770,20 +1706,21 @@ mod tests {
             },
         );
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = runtime_for_config(
-            &config,
-            None,
-            Some(approval_tx),
-            None,
-            None,
-            false,
-            neo_agent_core::SteerInputHandle::new(),
-            None,
-            Arc::new(std::sync::Mutex::new(None)),
-            None,
-        )
-        .await
-        .expect("runtime");
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (session_ids, _) = tokio::sync::mpsc::unbounded_channel();
+        let (questions, _) = tokio::sync::mpsc::unbounded_channel();
+        let request = TurnRequest::new(Vec::new(), None, None, neo_ai::ReasoningSelection::Off);
+        let channels = TurnChannels {
+            events,
+            approvals: approval_tx,
+            session_ids,
+            cancel_token: CancellationToken::new(),
+            questions,
+            steer_input: SteerInputHandle::new(),
+        };
+        let runtime = runtime_for_config(&config, None, Some(&request), Some(&channels))
+            .await
+            .expect("runtime");
         let handler = runtime
             .config()
             .async_approval_handler

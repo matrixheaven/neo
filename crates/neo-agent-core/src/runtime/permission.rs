@@ -84,13 +84,15 @@ pub(super) async fn resolve_permission_preparation(
         } => {
             match resolve_approval(
                 config,
-                turn,
-                tool_call,
-                prepared_call,
-                operation,
-                subject,
-                session_scope,
-                prefix_rule,
+                ApprovalInput {
+                    turn,
+                    tool_call,
+                    prepared_call,
+                    operation,
+                    subject,
+                    session_scope,
+                    prefix_rule,
+                },
                 emitter,
                 cancel_token,
             )
@@ -1058,47 +1060,66 @@ fn emit_approval_resolved(
     });
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn resolve_approval(
-    config: &AgentConfig,
+struct ApprovalInput<'a> {
     turn: u32,
-    tool_call: &AgentToolCall,
-    prepared_call: &PreparedToolCall,
+    tool_call: &'a AgentToolCall,
+    prepared_call: &'a PreparedToolCall,
     operation: PermissionOperation,
     subject: String,
     session_scope: Option<SessionApprovalScope>,
     prefix_rule: Option<PrefixApprovalRule>,
+}
+
+fn approval_request(
+    config: &AgentConfig,
+    input: &ApprovalInput<'_>,
+) -> Result<ApprovalRequest, ToolResult> {
+    let arguments = &input.prepared_call.arguments;
+    match input.operation {
+        PermissionOperation::PlanTransition => Ok(build_plan_approval_request(
+            config,
+            input.turn,
+            input.tool_call,
+            arguments,
+        )),
+        PermissionOperation::GoalTransition => Ok(build_goal_approval_request(
+            input.turn,
+            input.tool_call,
+            arguments,
+        )),
+        PermissionOperation::WorkflowLaunch => {
+            build_workflow_approval_request(input.turn, input.tool_call, arguments)
+                .map_err(crate::tools::workflow::invalid_input_result)
+        }
+        _ => Ok(build_ordinary_approval_request(
+            input.turn,
+            input.tool_call,
+            input.prepared_call,
+            input.operation,
+            &input.subject,
+            input.session_scope.clone(),
+            input.prefix_rule.clone(),
+        )),
+    }
+}
+
+async fn resolve_approval(
+    config: &AgentConfig,
+    input: ApprovalInput<'_>,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> AppliedApproval {
-    let arguments = &prepared_call.arguments;
-    let request = match operation {
-        PermissionOperation::PlanTransition => {
-            build_plan_approval_request(config, turn, tool_call, arguments)
+    let prepared_call = input.prepared_call;
+    let operation = input.operation;
+    let subject = &input.subject;
+    let request = match approval_request(config, &input) {
+        Ok(request) => request,
+        Err(result) => {
+            return AppliedApproval::Terminal {
+                result,
+                permission_decision: None,
+            };
         }
-        PermissionOperation::GoalTransition => {
-            build_goal_approval_request(turn, tool_call, arguments)
-        }
-        PermissionOperation::WorkflowLaunch => {
-            match build_workflow_approval_request(turn, tool_call, arguments) {
-                Ok(request) => request,
-                Err(error) => {
-                    return AppliedApproval::Terminal {
-                        result: crate::tools::workflow::invalid_input_result(error),
-                        permission_decision: None,
-                    };
-                }
-            }
-        }
-        _ => build_ordinary_approval_request(
-            turn,
-            tool_call,
-            prepared_call,
-            operation,
-            &subject,
-            session_scope,
-            prefix_rule,
-        ),
     };
     emitter.emit(AgentEvent::ApprovalRequested {
         request: request.clone(),
@@ -1149,7 +1170,7 @@ async fn resolve_approval(
         return AppliedApproval::Terminal {
             result: permission_error(
                 operation,
-                &subject,
+                subject,
                 PermissionTerminalDecision::Required,
                 "approval required",
             ),
@@ -1182,7 +1203,7 @@ async fn resolve_approval(
         }
     };
     emit_approval_resolved(emitter, request.turn, &request.id, resolution.clone());
-    apply_approval_resolution(config, operation, &subject, resolution)
+    apply_approval_resolution(config, operation, subject, resolution)
 }
 
 fn permission_error(

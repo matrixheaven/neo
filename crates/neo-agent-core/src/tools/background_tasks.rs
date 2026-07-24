@@ -759,7 +759,6 @@ impl BackgroundTaskManager {
         .await
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn stop_with_actor(
         &self,
         task_id: &str,

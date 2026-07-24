@@ -29,7 +29,7 @@ use super::tool_dispatch::{
 };
 use crate::compaction::CompactionError;
 use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
-use crate::compaction::summary::run_full_compaction;
+use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
 use crate::goal::GoalManager;
 use crate::instructions::{
     InstructionEpochData, InstructionFingerprint, InstructionPreflightDecision,
@@ -184,9 +184,11 @@ async fn recover_from_overflow(
         model,
         config,
         &mut emitter.context,
-        crate::CompactionReason::Threshold,
-        snapshot,
-        None,
+        FullCompactionInput {
+            reason: crate::CompactionReason::Threshold,
+            snapshot,
+            custom_instruction: None,
+        },
         cancel_token,
         |event| compaction_events.push(event),
     )
@@ -211,18 +213,99 @@ async fn recover_from_overflow(
     .await
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(super) async fn run_agent_turn(
-    model: Arc<dyn ModelClient>,
-    config: AgentConfig,
-    tools: Option<Arc<ToolRegistry>>,
-    skills: Option<SkillStoreHandle>,
-    goal_manager: Option<Arc<GoalManager>>,
-    steer_input: SteerInputHandle,
+pub(super) struct AgentTurnRuntime {
+    pub model: Arc<dyn ModelClient>,
+    pub config: AgentConfig,
+    pub tools: Option<Arc<ToolRegistry>>,
+    pub skills: Option<SkillStoreHandle>,
+    pub goal_manager: Option<Arc<GoalManager>>,
+    pub steer_input: SteerInputHandle,
+    pub cancel_token: CancellationToken,
+    pub process_supervisor: ProcessSupervisor,
+}
+
+enum ModelTurnOutcome {
+    Assistant {
+        turn: u32,
+        message: Option<AgentMessage>,
+    },
+    Stop {
+        turn: u32,
+        reason: StopReason,
+    },
+}
+
+async fn run_next_model_turn(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
     emitter: &mut EventEmitter,
-    cancel_token: CancellationToken,
-    process_supervisor: ProcessSupervisor,
+    cancel_token: &CancellationToken,
+    pending_debt: Option<DeferredCompaction>,
+) -> Result<ModelTurnOutcome, AgentRuntimeError> {
+    if let Some((turn, reason)) = terminal_pre_model_stop(emitter, cancel_token) {
+        return Ok(ModelTurnOutcome::Stop { turn, reason });
+    }
+    let turn = emitter.context.turns.saturating_add(1);
+    config
+        .workflow_dispatch_resolver
+        .update_event_route_turn(config.session_directory.as_deref(), turn)
+        .map_err(std::io::Error::other)?;
+    let projection =
+        prepare_model_request(model, config, emitter, cancel_token, pending_debt).await?;
+    let request = chat_request(config, &emitter.context, &projection).await;
+    validate_model_capabilities(&request)?;
+    match run_model_turn_with_recovery(model, config, request, turn, emitter, cancel_token).await {
+        Ok(message) => Ok(ModelTurnOutcome::Assistant { turn, message }),
+        Err(AgentRuntimeError::Model(AiError::Cancelled)) => {
+            emitter.emit(AgentEvent::TurnFinished {
+                turn,
+                stop_reason: StopReason::Cancelled,
+            });
+            Ok(ModelTurnOutcome::Stop {
+                turn,
+                reason: StopReason::Cancelled,
+            })
+        }
+        Err(AgentRuntimeError::Model(error)) => {
+            let retry_after = match &error {
+                AiError::RateLimit { retry_after, .. } | AiError::Server { retry_after, .. } => {
+                    retry_after.as_ref().map(std::time::Duration::as_secs)
+                }
+                _ => None,
+            };
+            emitter.emit(AgentEvent::Error {
+                turn,
+                message: error.to_string(),
+                code: Some(error.code().to_owned()),
+                retry_after,
+            });
+            emitter.emit(AgentEvent::TurnFinished {
+                turn,
+                stop_reason: StopReason::Error,
+            });
+            Ok(ModelTurnOutcome::Stop {
+                turn,
+                reason: StopReason::Error,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) async fn run_agent_turn(
+    runtime: AgentTurnRuntime,
+    emitter: &mut EventEmitter,
 ) -> Result<(), AgentRuntimeError> {
+    let AgentTurnRuntime {
+        model,
+        config,
+        tools,
+        skills,
+        goal_manager,
+        steer_input,
+        cancel_token,
+        process_supervisor,
+    } = runtime;
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
     let mut pending_compaction_debt: Option<DeferredCompaction> = None;
@@ -246,67 +329,19 @@ pub(super) async fn run_agent_turn(
         append_runtime_reminders(&config, emitter);
         rehydrate_instruction_context_after_compaction(emitter, false).await;
 
-        if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
-            final_turn = turn;
-            final_stop_reason = stop_reason;
-            break;
-        }
-
-        let turn = emitter.context.turns.saturating_add(1);
-        config
-            .workflow_dispatch_resolver
-            .update_event_route_turn(config.session_directory.as_deref(), turn)
-            .map_err(std::io::Error::other)?;
-        let projection_plan = prepare_model_request(
+        let (turn, assistant) = match run_next_model_turn(
             &model,
             &config,
             emitter,
             &cancel_token,
             pending_compaction_debt.take(),
         )
-        .await?;
-        let request = chat_request(&config, &emitter.context, &projection_plan).await;
-        validate_model_capabilities(&request)?;
-        let assistant = match run_model_turn_with_recovery(
-            &model,
-            &config,
-            request,
-            turn,
-            emitter,
-            &cancel_token,
-        )
         .await
         {
-            Ok(assistant) => assistant,
-            Err(AgentRuntimeError::Model(AiError::Cancelled)) => {
-                emitter.emit(AgentEvent::TurnFinished {
-                    turn,
-                    stop_reason: StopReason::Cancelled,
-                });
+            Ok(ModelTurnOutcome::Assistant { turn, message }) => (turn, message),
+            Ok(ModelTurnOutcome::Stop { turn, reason }) => {
                 final_turn = turn;
-                final_stop_reason = StopReason::Cancelled;
-                break;
-            }
-            Err(AgentRuntimeError::Model(error)) => {
-                let retry_after = match &error {
-                    AiError::RateLimit { retry_after, .. }
-                    | AiError::Server { retry_after, .. } => {
-                        retry_after.as_ref().map(std::time::Duration::as_secs)
-                    }
-                    _ => None,
-                };
-                emitter.emit(AgentEvent::Error {
-                    turn,
-                    message: error.to_string(),
-                    code: Some(error.code().to_owned()),
-                    retry_after,
-                });
-                emitter.emit(AgentEvent::TurnFinished {
-                    turn,
-                    stop_reason: StopReason::Error,
-                });
-                final_turn = turn;
-                final_stop_reason = StopReason::Error;
+                final_stop_reason = reason;
                 break;
             }
             Err(error) => return Err(error),
@@ -353,15 +388,17 @@ pub(super) async fn run_agent_turn(
             break;
         };
         let outcome = execute_tool_calls(
-            &config,
-            Arc::clone(&model),
-            Arc::clone(registry),
-            skills.as_ref(),
+            super::tool_dispatch::ToolExecutionDeps {
+                config: &config,
+                model: Arc::clone(&model),
+                registry: Arc::clone(registry),
+                skills: skills.as_ref(),
+                cancel_token: &cancel_token,
+                process_supervisor: &process_supervisor,
+            },
             turn,
             &tool_calls,
             emitter,
-            &cancel_token,
-            &process_supervisor,
         )
         .await;
         let outcome = outcome?;
@@ -651,9 +688,11 @@ async fn admit_pending_epoch_compact_first(
             model,
             config,
             &mut emitter.context,
-            crate::CompactionReason::Threshold,
-            snapshot,
-            None,
+            FullCompactionInput {
+                reason: crate::CompactionReason::Threshold,
+                snapshot,
+                custom_instruction: None,
+            },
             cancel_token,
             |event| compaction_events.push(event),
         )
@@ -969,11 +1008,7 @@ async fn prepare_model_request(
 ) -> Result<ProjectionPlan, AgentRuntimeError> {
     let manual_requested = take_manual_compact_request(config).is_some();
     let request_projection = request_projection_plan(config, &emitter.context);
-    let mut snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-        config,
-        &emitter.context,
-        request_projection,
-    );
+    let mut snapshot = context_budget_snapshot(config, &emitter.context, request_projection);
 
     let projection_plan = match CompactionController::decide_before_model_call(
         snapshot.clone(),
@@ -1001,9 +1036,11 @@ async fn prepare_model_request(
                 model,
                 config,
                 &mut emitter.context,
-                reason,
-                decided,
-                None,
+                FullCompactionInput {
+                    reason,
+                    snapshot: decided,
+                    custom_instruction: None,
+                },
                 cancel_token,
                 |event| compaction_events.push(event),
             )
@@ -1011,7 +1048,7 @@ async fn prepare_model_request(
             if matches!(compaction_result, Err(CompactionError::NoBoundary))
                 && reason == crate::CompactionReason::Threshold
             {
-                snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+                snapshot = context_budget_snapshot(
                     config,
                     &emitter.context,
                     request_projection_plan(config, &emitter.context),
@@ -1023,7 +1060,7 @@ async fn prepare_model_request(
                     emitter.emit(event);
                 }
                 rehydrate_instruction_context_after_compaction(emitter, true).await;
-                snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+                snapshot = context_budget_snapshot(
                     config,
                     &emitter.context,
                     request_projection_plan(config, &emitter.context),
@@ -1039,9 +1076,11 @@ async fn prepare_model_request(
                 model,
                 config,
                 &mut emitter.context,
-                crate::CompactionReason::Threshold,
-                decided,
-                None,
+                FullCompactionInput {
+                    reason: crate::CompactionReason::Threshold,
+                    snapshot: decided,
+                    custom_instruction: None,
+                },
                 cancel_token,
                 |event| compaction_events.push(event),
             )
@@ -1050,7 +1089,7 @@ async fn prepare_model_request(
                 emitter.emit(event);
             }
             rehydrate_instruction_context_after_compaction(emitter, true).await;
-            snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
+            snapshot = context_budget_snapshot(
                 config,
                 &emitter.context,
                 request_projection_plan(config, &emitter.context),
@@ -1066,6 +1105,14 @@ async fn prepare_model_request(
 
     emit_context_window_snapshot(emitter, &snapshot);
     Ok(projection_plan)
+}
+
+fn context_budget_snapshot(
+    config: &AgentConfig,
+    context: &super::context::AgentContext,
+    projection: ProjectionPlan,
+) -> super::context_budget::ContextBudgetSnapshot {
+    super::context_budget::ContextBudgetEstimator::snapshot(config, context, projection)
 }
 
 fn observe_tool_group_debt(

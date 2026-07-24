@@ -165,6 +165,19 @@ type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send +
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
 type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send>>;
 type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Send + Sync>;
+
+pub(crate) struct ControllerCallbacks {
+    pub(crate) run_turn: TurnDriver,
+    pub(crate) load_session: SessionLoader,
+    pub(crate) fork_session: SessionForker,
+}
+
+#[cfg(test)]
+struct EventDriverCallbacks<RunTurn, LoadSession, ForkSession> {
+    run_turn: RunTurn,
+    load_session: LoadSession,
+    fork_session: ForkSession,
+}
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
@@ -461,15 +474,15 @@ pub(crate) struct InteractiveController {
 }
 
 pub(crate) struct TurnChannels {
-    events: mpsc::UnboundedSender<Result<AgentEvent>>,
-    approvals: mpsc::UnboundedSender<crate::modes::run::PendingApproval>,
-    session_ids: mpsc::UnboundedSender<String>,
-    cancel_token: CancellationToken,
+    pub(crate) events: mpsc::UnboundedSender<Result<AgentEvent>>,
+    pub(crate) approvals: mpsc::UnboundedSender<crate::modes::run::PendingApproval>,
+    pub(crate) session_ids: mpsc::UnboundedSender<String>,
+    pub(crate) cancel_token: CancellationToken,
     /// Channel sender for `AskUserTool`'s reverse-RPC questions.
-    questions: mpsc::UnboundedSender<PendingQuestion>,
+    pub(crate) questions: mpsc::UnboundedSender<PendingQuestion>,
     /// Shared handle for pushing live steer/follow-up input into the running
     /// turn. The controller writes; the runtime drains at step boundaries.
-    steer_input: neo_agent_core::SteerInputHandle,
+    pub(crate) steer_input: neo_agent_core::SteerInputHandle,
 }
 
 struct SessionWorkflowApproval {
@@ -704,18 +717,101 @@ impl ForkedSessionTranscript {
 /// Produce a short display text for a mixed content vector. Used for prompt
 /// history and transcript summaries.
 /// Best-effort dimension extraction from image data for display purposes.
+fn default_shell_driver() -> ShellDriver {
+    Arc::new(|request| {
+        Box::pin(async move {
+            let id = request.id.clone();
+            let event_tx = request.event_tx.clone();
+            let stream_update: neo_agent_core::tools::ToolUpdateCallback = {
+                let event_tx = event_tx.clone();
+                let id = id.clone();
+                Arc::new(move |partial: &str| {
+                    let _ = event_tx.send(AgentEvent::ToolExecutionUpdate {
+                        turn: 0,
+                        id: id.clone(),
+                        name: "Bash".to_owned(),
+                        partial_result: neo_agent_core::ToolResult {
+                            content: partial.to_owned(),
+                            is_error: false,
+                            details: None,
+                            terminate: false,
+                        },
+                    });
+                })
+            };
+            let admission_callback: neo_agent_core::tools::ShellAdmissionCallback = {
+                let event_tx = event_tx.clone();
+                let id = id.clone();
+                let command = request.command.clone();
+                let cwd = request.cwd.clone();
+                Arc::new(move |event| match event {
+                    neo_agent_core::tools::ShellAdmissionEvent::Queued => {
+                        let _ = event_tx.send(AgentEvent::ShellCommandQueued {
+                            turn: 0,
+                            id: id.clone(),
+                            command: command.clone(),
+                            cwd: cwd.clone(),
+                            origin: ShellCommandOrigin::UserShellMode,
+                        });
+                    }
+                    neo_agent_core::tools::ShellAdmissionEvent::Position { position, waiting } => {
+                        let _ = event_tx.send(AgentEvent::ShellCommandQueueUpdated {
+                            turn: 0,
+                            id: id.clone(),
+                            position,
+                            waiting_ms: u64::try_from(waiting.as_millis()).unwrap_or(u64::MAX),
+                        });
+                    }
+                    neo_agent_core::tools::ShellAdmissionEvent::Started => {
+                        let _ = event_tx.send(AgentEvent::ShellCommandStarted {
+                            turn: 0,
+                            id: id.clone(),
+                            command: command.clone(),
+                            cwd: cwd.clone(),
+                            origin: ShellCommandOrigin::UserShellMode,
+                        });
+                    }
+                })
+            };
+            neo_agent_core::tools::execute_shell_command(
+                neo_agent_core::tools::ShellExecutionRequest {
+                    id: request.id,
+                    command: request.command,
+                    cwd: request.cwd,
+                    origin: ShellCommandOrigin::UserShellMode,
+                    timeout: request.timeout,
+                    max_output_bytes: request.max_output_bytes,
+                    cancel_token: request.cancel_token,
+                    stream_update: Some(stream_update),
+                    background_tasks: Some(request.background_tasks),
+                    shell_runtime: request.shell_runtime,
+                    admission: neo_agent_core::tools::ShellAdmissionRequest {
+                        owner: "user".to_owned(),
+                        class: neo_agent_core::tools::ShellAdmissionClass::User,
+                    },
+                    admission_callback: Some(admission_callback),
+                },
+            )
+            .await
+            .map_err(ShellDriverError::from)
+        })
+    })
+}
+
 impl InteractiveController {
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn new(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        run_turn: TurnDriver,
         catalogs: PickerCatalogs,
-        load_session: SessionLoader,
-        fork_session: SessionForker,
+        callbacks: ControllerCallbacks,
     ) -> Self {
+        let ControllerCallbacks {
+            run_turn,
+            load_session,
+            fork_session,
+        } = callbacks;
         let (_workflow_events_tx, workflow_events) = mpsc::unbounded_channel();
         let (workflow_approval_ingress, workflow_approvals) = mpsc::unbounded_channel();
         let workspace_root = workspace_root.into();
@@ -723,87 +819,7 @@ impl InteractiveController {
         let mut chrome =
             NeoChromeState::new(title, session_label, model_label, workspace_root.clone());
         chrome.set_git_status_label(git_status_provider(&workspace_root));
-        let shell_driver: ShellDriver = Arc::new(|request| {
-            Box::pin(async move {
-                let id = request.id.clone();
-                let event_tx = request.event_tx.clone();
-                let stream_update: neo_agent_core::tools::ToolUpdateCallback = {
-                    let event_tx = event_tx.clone();
-                    let id = id.clone();
-                    Arc::new(move |partial: &str| {
-                        let _ = event_tx.send(AgentEvent::ToolExecutionUpdate {
-                            turn: 0,
-                            id: id.clone(),
-                            name: "Bash".to_owned(),
-                            partial_result: neo_agent_core::ToolResult {
-                                content: partial.to_owned(),
-                                is_error: false,
-                                details: None,
-                                terminate: false,
-                            },
-                        });
-                    })
-                };
-                let admission_callback: neo_agent_core::tools::ShellAdmissionCallback = {
-                    let event_tx = event_tx.clone();
-                    let id = id.clone();
-                    let command = request.command.clone();
-                    let cwd = request.cwd.clone();
-                    Arc::new(move |event| match event {
-                        neo_agent_core::tools::ShellAdmissionEvent::Queued => {
-                            let _ = event_tx.send(AgentEvent::ShellCommandQueued {
-                                turn: 0,
-                                id: id.clone(),
-                                command: command.clone(),
-                                cwd: cwd.clone(),
-                                origin: ShellCommandOrigin::UserShellMode,
-                            });
-                        }
-                        neo_agent_core::tools::ShellAdmissionEvent::Position {
-                            position,
-                            waiting,
-                        } => {
-                            let _ = event_tx.send(AgentEvent::ShellCommandQueueUpdated {
-                                turn: 0,
-                                id: id.clone(),
-                                position,
-                                waiting_ms: u64::try_from(waiting.as_millis()).unwrap_or(u64::MAX),
-                            });
-                        }
-                        neo_agent_core::tools::ShellAdmissionEvent::Started => {
-                            let _ = event_tx.send(AgentEvent::ShellCommandStarted {
-                                turn: 0,
-                                id: id.clone(),
-                                command: command.clone(),
-                                cwd: cwd.clone(),
-                                origin: ShellCommandOrigin::UserShellMode,
-                            });
-                        }
-                    })
-                };
-                neo_agent_core::tools::execute_shell_command(
-                    neo_agent_core::tools::ShellExecutionRequest {
-                        id: request.id,
-                        command: request.command,
-                        cwd: request.cwd,
-                        origin: ShellCommandOrigin::UserShellMode,
-                        timeout: request.timeout,
-                        max_output_bytes: request.max_output_bytes,
-                        cancel_token: request.cancel_token,
-                        stream_update: Some(stream_update),
-                        background_tasks: Some(request.background_tasks),
-                        shell_runtime: request.shell_runtime,
-                        admission: neo_agent_core::tools::ShellAdmissionRequest {
-                            owner: "user".to_owned(),
-                            class: neo_agent_core::tools::ShellAdmissionClass::User,
-                        },
-                        admission_callback: Some(admission_callback),
-                    },
-                )
-                .await
-                .map_err(ShellDriverError::from)
-            })
-        });
+        let shell_driver = default_shell_driver();
         Self {
             tui: neo_tui::NeoTui::with_welcome_banner(
                 chrome,
@@ -942,15 +958,16 @@ impl InteractiveController {
             session_label,
             model_label,
             workspace_root,
-            run_turn,
             catalogs,
-            load_session,
-            empty_session_forker,
+            EventDriverCallbacks {
+                run_turn,
+                load_session,
+                fork_session: empty_session_forker,
+            },
         )
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     fn new_with_event_driver_and_forker<
         RunTurn,
         TurnFut,
@@ -963,10 +980,8 @@ impl InteractiveController {
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        run_turn: RunTurn,
         catalogs: PickerCatalogs,
-        load_session: LoadSession,
-        fork_session: ForkSession,
+        callbacks: EventDriverCallbacks<RunTurn, LoadSession, ForkSession>,
     ) -> Self
     where
         RunTurn: Fn(TurnRequest) -> TurnFut + Send + Sync + 'static,
@@ -976,6 +991,11 @@ impl InteractiveController {
         ForkSession: Fn(String) -> ForkFut + Send + Sync + 'static,
         ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send + 'static,
     {
+        let EventDriverCallbacks {
+            run_turn,
+            load_session,
+            fork_session,
+        } = callbacks;
         let run_turn = Arc::new(run_turn);
         let driver: TurnDriver = Arc::new(move |request, channels| {
             let run_turn = Arc::clone(&run_turn);
@@ -987,18 +1007,19 @@ impl InteractiveController {
                 Ok(TurnOutcome::default())
             })
         });
-        let controller = Self::new(
+        let mut controller = Self::new(
             title,
             session_label,
             model_label,
             workspace_root,
-            driver,
             catalogs,
-            Arc::new(move |session_id| Box::pin(load_session(session_id))),
-            Arc::new(move |session_id| Box::pin(fork_session(session_id))),
+            ControllerCallbacks {
+                run_turn: driver,
+                load_session: Arc::new(move |session_id| Box::pin(load_session(session_id))),
+                fork_session: Arc::new(move |session_id| Box::pin(fork_session(session_id))),
+            },
         );
         // Tests must not ring bells or spawn desktop notifications.
-        let mut controller = controller;
         controller.completion_notification = neo_tui::notify::NotificationMode::None;
         controller.question_notification = neo_tui::notify::NotificationMode::None;
         controller
@@ -1491,7 +1512,77 @@ impl InteractiveController {
             .is_none_or(|config| config.project_trusted)
     }
 
-    #[allow(clippy::too_many_lines)]
+    async fn submit_shell_prompt_if_needed(&mut self, prompt: &str) -> Result<bool> {
+        if !self.tui.chrome().shell_mode_active()
+            && let Some(command) = prompt.strip_prefix('!')
+        {
+            self.tui.chrome_mut().enter_shell_mode();
+            if command.trim().is_empty() {
+                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+            } else {
+                self.submit_shell_command(command.to_owned()).await?;
+            }
+            return Ok(true);
+        }
+        if !self.tui.chrome().shell_mode_active() {
+            return Ok(false);
+        }
+        if prompt.trim() == "/tasks" {
+            self.clear_submitted_prompt();
+            let _ = self.handle_slash_command("/tasks").await;
+        } else {
+            self.submit_shell_command(prompt.to_owned()).await?;
+        }
+        Ok(true)
+    }
+
+    async fn submit_skill_directives(&mut self, directives: InlineSkillDirectives) -> Result<()> {
+        match interactive_preflight::skill_preflight_decision(&directives, self.permission_mode) {
+            interactive_preflight::SkillPreflightDecision::Ready => {}
+            interactive_preflight::SkillPreflightDecision::InvalidUsage => {
+                self.push_status("Usage: /skill:<name> [args]");
+                return Ok(());
+            }
+            interactive_preflight::SkillPreflightDecision::Open {
+                spec,
+                generated_prompt,
+            } => {
+                self.clear_submitted_prompt();
+                self.open_interactive_preflight(
+                    *spec,
+                    PendingInteractiveWorkflow::Skill {
+                        directives,
+                        generated_prompt,
+                    },
+                );
+                return Ok(());
+            }
+            interactive_preflight::SkillPreflightDecision::Blocked(message) => {
+                self.clear_submitted_prompt();
+                self.push_status(message);
+                return Ok(());
+            }
+        }
+        let (stripped_prompt, display_body) = match self.activate_skill_directives(directives) {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.push_status(format!("Skill error: {err}"));
+                return Ok(());
+            }
+        };
+        if stripped_prompt.trim().is_empty() {
+            self.clear_submitted_prompt();
+            return Ok(());
+        }
+        self.pending_skill_user_message_to_suppress = Some(display_body);
+        let Some(prompt) = self.submit_prompt_text(stripped_prompt) else {
+            return Ok(());
+        };
+        self.start_turn_from_submitted_prompt(prompt, false)?;
+        self.drain_active_turn().await?;
+        self.start_pending_background_question_followups().await
+    }
+
     async fn submit_current_prompt(&mut self) -> Result<()> {
         // If the `/btw` sidecar panel is open, the composer is connected to the
         // sidecar. Route Enter to the sidecar instead of the main turn path.
@@ -1500,23 +1591,8 @@ impl InteractiveController {
         }
 
         let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
-        if !self.tui.chrome().shell_mode_active()
-            && let Some(command) = prompt.strip_prefix('!')
-        {
-            self.tui.chrome_mut().enter_shell_mode();
-            if command.trim().is_empty() {
-                self.tui.chrome_mut().prompt_mut().clear_after_submit();
-                return Ok(());
-            }
-            return self.submit_shell_command(command.to_owned()).await;
-        }
-        if self.tui.chrome().shell_mode_active() {
-            if prompt.trim() == "/tasks" {
-                self.clear_submitted_prompt();
-                let _ = self.handle_slash_command("/tasks").await;
-                return Ok(());
-            }
-            return self.submit_shell_command(prompt).await;
+        if self.submit_shell_prompt_if_needed(&prompt).await? {
+            return Ok(());
         }
         if prompt.trim().is_empty() {
             return Ok(());
@@ -1592,51 +1668,7 @@ impl InteractiveController {
         }
 
         if let Some(directives) = parse_inline_skill_directives(&prompt) {
-            match interactive_preflight::skill_preflight_decision(&directives, self.permission_mode)
-            {
-                interactive_preflight::SkillPreflightDecision::Ready => {}
-                interactive_preflight::SkillPreflightDecision::InvalidUsage => {
-                    self.push_status("Usage: /skill:<name> [args]");
-                    return Ok(());
-                }
-                interactive_preflight::SkillPreflightDecision::Open {
-                    spec,
-                    generated_prompt,
-                } => {
-                    self.clear_submitted_prompt();
-                    self.open_interactive_preflight(
-                        *spec,
-                        PendingInteractiveWorkflow::Skill {
-                            directives,
-                            generated_prompt,
-                        },
-                    );
-                    return Ok(());
-                }
-                interactive_preflight::SkillPreflightDecision::Blocked(message) => {
-                    self.clear_submitted_prompt();
-                    self.push_status(message);
-                    return Ok(());
-                }
-            }
-            let (stripped_prompt, display_body) = match self.activate_skill_directives(directives) {
-                Ok(pair) => pair,
-                Err(err) => {
-                    self.push_status(format!("Skill error: {err}"));
-                    return Ok(());
-                }
-            };
-            if stripped_prompt.trim().is_empty() {
-                self.clear_submitted_prompt();
-                return Ok(());
-            }
-            self.pending_skill_user_message_to_suppress = Some(display_body);
-            let Some(prompt) = self.submit_prompt_text(stripped_prompt) else {
-                return Ok(());
-            };
-            self.start_turn_from_submitted_prompt(prompt, false)?;
-            self.drain_active_turn().await?;
-            return self.start_pending_background_question_followups().await;
+            return self.submit_skill_directives(directives).await;
         }
 
         // Slash commands: handle without submitting a turn or entering streaming mode.

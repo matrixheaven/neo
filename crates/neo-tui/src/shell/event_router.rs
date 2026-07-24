@@ -38,64 +38,11 @@ impl NeoChromeState {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
+        if self.apply_agent_event_mode(&event) {
+            return;
+        }
         match event {
-            AgentEvent::MessageStarted { .. }
-            | AgentEvent::TextDelta { .. }
-            | AgentEvent::ThinkingStarted { .. }
-            | AgentEvent::ThinkingDelta { .. }
-            | AgentEvent::ThinkingFinished { .. }
-            | AgentEvent::ToolCallStarted { .. }
-            | AgentEvent::ToolCallArgumentsDelta { .. }
-            | AgentEvent::ToolCallFinished { .. }
-            | AgentEvent::ToolExecutionStarted { .. }
-            | AgentEvent::ToolExecutionQueued { .. }
-            | AgentEvent::ToolExecutionQueueUpdated { .. }
-            | AgentEvent::ToolExecutionUpdate { .. }
-            | AgentEvent::ToolExecutionFinished { .. }
-            | AgentEvent::ShellCommandStarted { .. }
-            | AgentEvent::ShellCommandQueued { .. }
-            | AgentEvent::ShellCommandQueueUpdated { .. }
-            | AgentEvent::ShellCommandFinished { .. }
-            | AgentEvent::DelegateStarted { .. }
-            | AgentEvent::DelegateUpdated { .. }
-            | AgentEvent::DelegateProgressUpdated { .. }
-            | AgentEvent::DelegateFinished { .. }
-            | AgentEvent::DelegateSwarmStarted { .. }
-            | AgentEvent::DelegateSwarmUpdated { .. }
-            | AgentEvent::DelegateSwarmProgressUpdated { .. }
-            | AgentEvent::DelegateSwarmFinished { .. }
-            | AgentEvent::WorkflowStarted { .. }
-            | AgentEvent::WorkflowUpdated { .. }
-            | AgentEvent::WorkflowFinished { .. }
-            | AgentEvent::InstructionEpoch { .. }
-            | AgentEvent::RetryScheduled { .. }
-            | AgentEvent::RetryStarted { .. }
-            | AgentEvent::RetryResumed { .. }
-            | AgentEvent::RetrySucceeded { .. } => {
-                self.mode = ChromeMode::Streaming;
-            }
-            AgentEvent::RetryExhausted { turn, .. } => {
-                self.retry_exhausted_error_turn = Some(turn);
-                self.mode = ChromeMode::Streaming;
-            }
-            // Live modal is opened by the interactive controller via
-            // `push_approval` from the PendingApproval channel — not from this
-            // observable event. Passive status only.
-            AgentEvent::ApprovalRequested { .. }
-            | AgentEvent::ApprovalResolved { .. }
-            | AgentEvent::CompactionStarted { .. }
-            | AgentEvent::CompactionProgress { .. }
-            | AgentEvent::CompactionApplied { .. }
-            | AgentEvent::MessageAppended { .. }
-            | AgentEvent::RunStarted { .. }
-            | AgentEvent::TurnStarted { .. }
-            | AgentEvent::MessageFinished { .. }
-            | AgentEvent::TerminalSessionStarted { .. }
-            | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::SkillInvocation { .. } => {}
             AgentEvent::ContextWindowUpdated {
                 used_tokens,
                 projected_tokens,
@@ -134,12 +81,8 @@ impl NeoChromeState {
                 self.pending_input
                     .queue_follow_up(message.presentation_text());
             }
-            AgentEvent::QueueDrained { kind, count } => {
-                self.pending_input.drain(kind, count);
-            }
-            AgentEvent::TokenUsage { usage, .. } => {
-                self.add_main_agent_token_usage(usage);
-            }
+            AgentEvent::QueueDrained { kind, count } => self.pending_input.drain(kind, count),
+            AgentEvent::TokenUsage { usage, .. } => self.add_main_agent_token_usage(usage),
             AgentEvent::GoalStarted { .. } | AgentEvent::GoalResumed { .. } => {
                 self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Active));
             }
@@ -153,45 +96,112 @@ impl NeoChromeState {
                 self.set_development_mode(DevelopmentMode::Normal);
             }
             AgentEvent::PlanModeEntered { .. } => self.set_plan_mode(true),
-            AgentEvent::PlanModeExited { .. } => {
-                self.set_plan_mode(false);
-            }
+            AgentEvent::PlanModeExited { .. } => self.set_plan_mode(false),
             AgentEvent::PlanUpdated { enabled, .. } => self.set_plan_mode(enabled),
-            AgentEvent::TodoUpdated { todos, .. } => {
-                let display: Vec<TodoDisplayItem> = todos
-                    .iter()
-                    .map(|t| TodoDisplayItem {
-                        title: t.title.clone(),
-                        status: match t.status.as_str() {
-                            "in_progress" => TodoDisplayStatus::InProgress,
-                            "done" => TodoDisplayStatus::Done,
-                            _ => TodoDisplayStatus::Pending,
-                        },
-                    })
-                    .collect();
-                self.apply_todo_items(display);
-            }
+            AgentEvent::TodoUpdated { todos, .. } => self.apply_todos(&todos),
             AgentEvent::QuestionRequested { id, questions, .. } => {
-                let display: Vec<QuestionDisplayData> = questions
-                    .iter()
-                    .map(|q| QuestionDisplayData {
-                        question: q.question.clone(),
-                        header: q.header.clone(),
-                        body: q.body.clone(),
-                        options: q
-                            .options
-                            .iter()
-                            .map(|o| QuestionDisplayOption {
-                                label: o.label.clone(),
-                                description: o.description.clone(),
-                            })
-                            .collect(),
-                        multi_select: q.multi_select,
-                    })
-                    .collect();
-                self.push_question_overlay(id, display);
+                self.apply_questions(id, &questions);
             }
+            _ => {}
         }
+    }
+
+    fn apply_agent_event_mode(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::MessageStarted { .. }
+            | AgentEvent::TextDelta { .. }
+            | AgentEvent::ThinkingStarted { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::ThinkingFinished { .. }
+            | AgentEvent::ToolCallStarted { .. }
+            | AgentEvent::ToolCallArgumentsDelta { .. }
+            | AgentEvent::ToolCallFinished { .. }
+            | AgentEvent::ToolExecutionStarted { .. }
+            | AgentEvent::ToolExecutionQueued { .. }
+            | AgentEvent::ToolExecutionQueueUpdated { .. }
+            | AgentEvent::ToolExecutionUpdate { .. }
+            | AgentEvent::ToolExecutionFinished { .. }
+            | AgentEvent::ShellCommandStarted { .. }
+            | AgentEvent::ShellCommandQueued { .. }
+            | AgentEvent::ShellCommandQueueUpdated { .. }
+            | AgentEvent::ShellCommandFinished { .. }
+            | AgentEvent::DelegateStarted { .. }
+            | AgentEvent::DelegateUpdated { .. }
+            | AgentEvent::DelegateProgressUpdated { .. }
+            | AgentEvent::DelegateFinished { .. }
+            | AgentEvent::DelegateSwarmStarted { .. }
+            | AgentEvent::DelegateSwarmUpdated { .. }
+            | AgentEvent::DelegateSwarmProgressUpdated { .. }
+            | AgentEvent::DelegateSwarmFinished { .. }
+            | AgentEvent::WorkflowStarted { .. }
+            | AgentEvent::WorkflowUpdated { .. }
+            | AgentEvent::WorkflowFinished { .. }
+            | AgentEvent::InstructionEpoch { .. }
+            | AgentEvent::RetryScheduled { .. }
+            | AgentEvent::RetryStarted { .. }
+            | AgentEvent::RetryResumed { .. }
+            | AgentEvent::RetrySucceeded { .. } => {
+                self.mode = ChromeMode::Streaming;
+            }
+            AgentEvent::RetryExhausted { turn, .. } => {
+                self.retry_exhausted_error_turn = Some(*turn);
+                self.mode = ChromeMode::Streaming;
+            }
+            // Live modal is opened by the interactive controller via
+            // `push_approval` from the PendingApproval channel — not from this
+            // observable event. Passive status only.
+            AgentEvent::ApprovalRequested { .. }
+            | AgentEvent::ApprovalResolved { .. }
+            | AgentEvent::CompactionStarted { .. }
+            | AgentEvent::CompactionProgress { .. }
+            | AgentEvent::CompactionApplied { .. }
+            | AgentEvent::MessageAppended { .. }
+            | AgentEvent::RunStarted { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::MessageFinished { .. }
+            | AgentEvent::TerminalSessionStarted { .. }
+            | AgentEvent::TerminalSessionOutput { .. }
+            | AgentEvent::TerminalSessionFinished { .. }
+            | AgentEvent::SkillInvocation { .. } => {}
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_todos(&mut self, todos: &[neo_agent_core::TodoEventData]) {
+        let display = todos
+            .iter()
+            .map(|todo| TodoDisplayItem {
+                title: todo.title.clone(),
+                status: match todo.status.as_str() {
+                    "in_progress" => TodoDisplayStatus::InProgress,
+                    "done" => TodoDisplayStatus::Done,
+                    _ => TodoDisplayStatus::Pending,
+                },
+            })
+            .collect();
+        self.apply_todo_items(display);
+    }
+
+    fn apply_questions(&mut self, id: String, questions: &[neo_agent_core::QuestionEventData]) {
+        let display = questions
+            .iter()
+            .map(|question| QuestionDisplayData {
+                question: question.question.clone(),
+                header: question.header.clone(),
+                body: question.body.clone(),
+                options: question
+                    .options
+                    .iter()
+                    .map(|option| QuestionDisplayOption {
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                multi_select: question.multi_select,
+            })
+            .collect();
+        self.push_question_overlay(id, display);
     }
 
     fn apply_todo_items(&mut self, todos: Vec<TodoDisplayItem>) {

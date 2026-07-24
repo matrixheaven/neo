@@ -19,11 +19,11 @@ use super::plan_orchestration::*;
 use super::queue::*;
 use super::skill_dispatch::*;
 use super::turn_loop::{
-    append_available_skills_snapshot, emit_run_finished, establish_instruction_baseline,
-    run_agent_turn,
+    AgentTurnRuntime, append_available_skills_snapshot, emit_run_finished,
+    establish_instruction_baseline, run_agent_turn,
 };
 use crate::compaction::projection::ProjectionPlan;
-use crate::compaction::summary::run_full_compaction;
+use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
 use crate::goal::GoalManager;
 use crate::skills::{SkillStore, SkillStoreHandle};
 use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistry};
@@ -31,6 +31,23 @@ use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistr
 pub struct AgentEventStream<'a> {
     inner: stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>,
     _workflow_event_drain_lease: Option<super::workflow_dispatch::WorkflowDispatchEventDrainLease>,
+}
+
+struct SpawnedTurn {
+    sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+    live_context: AgentContext,
+    workflow_event_lease: Option<super::workflow_dispatch::WorkflowDispatchEventLease>,
+    model: Arc<dyn ModelClient>,
+    config: AgentConfig,
+    tools: Option<Arc<ToolRegistry>>,
+    skills: Option<SkillStoreHandle>,
+    goal_manager: Option<Arc<GoalManager>>,
+    steer_input: SteerInputHandle,
+    message: AgentMessage,
+    natural_user_turn: bool,
+    process_supervisor: ProcessSupervisor,
+    cancel_token: CancellationToken,
+    final_sender: oneshot::Sender<AgentContext>,
 }
 
 impl Stream for AgentEventStream<'_> {
@@ -261,7 +278,7 @@ impl AgentRuntime {
         let (workflow_event_lease, workflow_event_drain_lease) =
             workflow_event_leases.map_or((None, None), |(lease, drain)| (Some(lease), Some(drain)));
 
-        tokio::spawn(Self::run_turn_spawned(
+        tokio::spawn(Self::run_turn_spawned(SpawnedTurn {
             sender,
             live_context,
             workflow_event_lease,
@@ -276,7 +293,7 @@ impl AgentRuntime {
             process_supervisor,
             cancel_token,
             final_sender,
-        ));
+        }));
 
         let inner = stream::unfold(
             SpawnedRun {
@@ -306,23 +323,23 @@ impl AgentRuntime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn run_turn_spawned(
-        sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
-        live_context: AgentContext,
-        workflow_event_lease: Option<super::workflow_dispatch::WorkflowDispatchEventLease>,
-        model: Arc<dyn ModelClient>,
-        config: AgentConfig,
-        tools: Option<Arc<ToolRegistry>>,
-        skills: Option<SkillStoreHandle>,
-        goal_manager: Option<Arc<GoalManager>>,
-        steer_input: SteerInputHandle,
-        message: AgentMessage,
-        natural_user_turn: bool,
-        process_supervisor: ProcessSupervisor,
-        cancel_token: CancellationToken,
-        final_sender: oneshot::Sender<AgentContext>,
-    ) {
+    async fn run_turn_spawned(turn: SpawnedTurn) {
+        let SpawnedTurn {
+            sender,
+            live_context,
+            workflow_event_lease,
+            model,
+            config,
+            tools,
+            skills,
+            goal_manager,
+            steer_input,
+            message,
+            natural_user_turn,
+            process_supervisor,
+            cancel_token,
+            final_sender,
+        } = turn;
         let mut emitter = EventEmitter::new(sender, live_context);
         let _workflow_event_lease = workflow_event_lease;
         emitter.emit(AgentEvent::RunStarted {
@@ -355,15 +372,17 @@ impl AgentRuntime {
             append_pending_workflow_notifications(&config, &mut emitter);
         }
         if let Err(err) = run_agent_turn(
-            model,
-            config,
-            tools,
-            skills,
-            goal_manager,
-            steer_input,
+            AgentTurnRuntime {
+                model,
+                config,
+                tools,
+                skills,
+                goal_manager,
+                steer_input,
+                cancel_token,
+                process_supervisor: process_supervisor.clone(),
+            },
             &mut emitter,
-            cancel_token,
-            process_supervisor.clone(),
         )
         .await
         {
@@ -419,9 +438,11 @@ impl AgentRuntime {
                 &model,
                 &config,
                 &mut emitter.context,
-                crate::CompactionReason::Manual,
-                snapshot,
-                instruction.as_deref(),
+                FullCompactionInput {
+                    reason: crate::CompactionReason::Manual,
+                    snapshot,
+                    custom_instruction: instruction.as_deref(),
+                },
                 &cancel_token,
                 |event| compaction_events.push(event),
             )

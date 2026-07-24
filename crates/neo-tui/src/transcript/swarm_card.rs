@@ -115,14 +115,28 @@ impl SwarmCardComponent {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let muted = Style::default().fg(theme.text_muted);
+        let child_progress = self.child_progresses();
+        let progress = self.weighted_progress();
+        let mut lines = vec![self.render_header(width, theme, progress)];
+        lines.push(
+            Line::styled(format!("│ {}", self.snapshot.swarm_id), muted).truncate_to_width(width),
+        );
+        lines.extend(self.render_child_rows(width, theme, &child_progress));
+        lines.push(render_scheduling_summary(&self.snapshot, theme).truncate_to_width(width));
+        lines.push(Line::raw(""));
+        lines.push(self.render_progress_status(width, theme, progress));
+        if self.expanded {
+            lines.extend(self.render_expanded_children(width, theme));
+        }
+        lines
+    }
+
+    fn render_header(&self, width: usize, theme: &TuiTheme, progress: f32) -> Line {
         let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
-        let child_progress = self.child_progresses();
-        let progress = self.weighted_progress();
-        let mut lines = Vec::new();
         let total = self.snapshot.children.len();
         let running = self
             .snapshot
@@ -142,20 +156,7 @@ impl SwarmCardComponent {
             .iter()
             .filter(|child| matches!(child.agent.state, AgentLifecycleState::Queued))
             .count();
-        let all_terminal = self
-            .snapshot
-            .children
-            .iter()
-            .all(|child| child.agent.state.is_terminal());
-        let waiting = self
-            .snapshot
-            .children
-            .iter()
-            .filter(|child| child_is_waiting(&child.agent, self.now_ms))
-            .count();
-
-        lines.push(
-            Line::from_spans(vec![
+        Line::from_spans(vec![
                 Span::styled(marker(self.snapshot.state), brand),
                 Span::styled(" DelegateSwarm · ", brand),
                 Span::styled(state_label(self.snapshot.state), brand),
@@ -178,12 +179,17 @@ impl SwarmCardComponent {
                     muted,
                 ),
             ])
-            .truncate_to_width(width),
-        );
-        lines.push(
-            Line::styled(format!("│ {}", self.snapshot.swarm_id), muted).truncate_to_width(width),
-        );
+            .truncate_to_width(width)
+    }
 
+    fn render_child_rows(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        child_progress: &[f32],
+    ) -> Vec<Line> {
+        let muted = Style::default().fg(theme.text_muted);
+        let primary = Style::default().fg(theme.text_primary);
         let mut children = self
             .snapshot
             .children
@@ -192,7 +198,7 @@ impl SwarmCardComponent {
             .collect::<Vec<_>>();
         children.sort_by_key(|(child, _)| child.item_index);
         let last_child_index = children.len().saturating_sub(1);
-
+        let mut lines = Vec::with_capacity(children.len());
         for (index, (child, progress)) in children.into_iter().enumerate() {
             let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
             let elapsed = display_elapsed(&child.agent, self.now_ms);
@@ -244,9 +250,27 @@ impl SwarmCardComponent {
                 .truncate_to_width(width),
             );
         }
+        lines
+    }
 
-        lines.push(render_scheduling_summary(&self.snapshot, theme).truncate_to_width(width));
-
+    fn render_progress_status(&self, width: usize, theme: &TuiTheme, progress: f32) -> Line {
+        let running = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| matches!(child.agent.state, AgentLifecycleState::Running))
+            .count();
+        let waiting = self
+            .snapshot
+            .children
+            .iter()
+            .filter(|child| child_is_waiting(&child.agent, self.now_ms))
+            .count();
+        let all_terminal = self
+            .snapshot
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal());
         let all_queued = self
             .snapshot
             .children
@@ -257,129 +281,117 @@ impl SwarmCardComponent {
             .children
             .iter()
             .any(|child| child.agent.latest_text.as_deref() == Some("suspended"));
-
-        lines.push(Line::raw(""));
         if all_queued {
-            lines.push(Line::styled(
-                "● Orchestrating...",
-                Style::default().fg(theme.status_warn),
-            ));
+            Line::styled("● Orchestrating...", Style::default().fg(theme.status_warn))
         } else if any_suspended {
-            lines.push(
-                Line::from_spans(vec![
-                    Span::styled(
-                        "● Suspended (rate-limit) ",
-                        Style::default().fg(theme.status_warn),
-                    ),
-                    Span::styled("━".repeat(10), Style::default().fg(theme.status_warn)),
-                ])
-                .truncate_to_width(width),
-            );
+            Line::from_spans(vec![
+                Span::styled(
+                    "● Suspended (rate-limit) ",
+                    Style::default().fg(theme.status_warn),
+                ),
+                Span::styled("━".repeat(10), Style::default().fg(theme.status_warn)),
+            ])
+            .truncate_to_width(width)
         } else if all_terminal {
-            lines.push(
-                Line::from_spans(vec![
-                    Span::styled(
-                        format!("✓ Done... {:.0}% ", progress * 100.0),
-                        Style::default().fg(theme.status_ok),
-                    ),
-                    progress_meter(progress, theme),
-                ])
-                .truncate_to_width(width),
-            );
+            Line::from_spans(vec![
+                Span::styled(
+                    format!("✓ Done... {:.0}% ", progress * 100.0),
+                    Style::default().fg(theme.status_ok),
+                ),
+                progress_meter(progress, theme),
+            ])
+            .truncate_to_width(width)
         } else if running > 0 && waiting == running {
-            lines.push(
-                Line::from_spans(vec![
-                    Span::styled(
-                        format!("● Waiting... {:.0}% ", progress * 100.0),
-                        Style::default().fg(theme.status_warn),
-                    ),
-                    progress_meter(progress, theme),
-                ])
-                .truncate_to_width(width),
-            );
+            Line::from_spans(vec![
+                Span::styled(
+                    format!("● Waiting... {:.0}% ", progress * 100.0),
+                    Style::default().fg(theme.status_warn),
+                ),
+                progress_meter(progress, theme),
+            ])
+            .truncate_to_width(width)
         } else {
+            Line::from_spans(vec![
+                Span::styled(
+                    format!("● Working... {:.0}% ", progress * 100.0),
+                    Style::default().fg(theme.status_warn),
+                ),
+                progress_meter(progress, theme),
+            ])
+            .truncate_to_width(width)
+        }
+    }
+
+    fn render_expanded_children(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let primary = Style::default().fg(theme.text_primary);
+        let mut lines = Vec::new();
+        for (index, child) in self.snapshot.children.iter().enumerate() {
+            let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
+            let elapsed = display_elapsed(&child.agent, self.now_ms);
+            let branch = if index + 1 == self.snapshot.children.len() {
+                "└─"
+            } else {
+                "├─"
+            };
+            let continuation = if index + 1 == self.snapshot.children.len() {
+                "   "
+            } else {
+                "│  "
+            };
             lines.push(
                 Line::from_spans(vec![
+                    Span::raw(format!("  {branch} ")),
+                    Span::styled(child.agent.display_name.as_str(), state_style),
+                    Span::raw("  "),
                     Span::styled(
-                        format!("● Working... {:.0}% ", progress * 100.0),
-                        Style::default().fg(theme.status_warn),
+                        format!("[{}]", role_label(child.agent.role)),
+                        role_badge_style(child.agent.role, theme),
                     ),
-                    progress_meter(progress, theme),
+                    Span::styled(
+                        format!(
+                            "  {} · {} · {} tools · {}",
+                            state_label(child.agent.state),
+                            format_elapsed(elapsed.as_secs()),
+                            child.agent.tool_count,
+                            child_token_stats(&child.agent),
+                        ),
+                        primary,
+                    ),
                 ])
                 .truncate_to_width(width),
             );
-        }
 
-        if self.expanded {
-            for (index, child) in self.snapshot.children.iter().enumerate() {
-                let state_style = Style::default().fg(agent_status_color(child.agent.state, theme));
-                let elapsed = display_elapsed(&child.agent, self.now_ms);
-                let branch = if index + 1 == self.snapshot.children.len() {
-                    "└─"
-                } else {
-                    "├─"
-                };
-                let continuation = if index + 1 == self.snapshot.children.len() {
-                    "   "
-                } else {
-                    "│  "
-                };
-                lines.push(
-                    Line::from_spans(vec![
-                        Span::raw(format!("  {branch} ")),
-                        Span::styled(child.agent.display_name.as_str(), state_style),
-                        Span::raw("  "),
-                        Span::styled(
-                            format!("[{}]", role_label(child.agent.role)),
-                            role_badge_style(child.agent.role, theme),
-                        ),
-                        Span::styled(
-                            format!(
-                                "  {} · {} · {} tools · {}",
-                                state_label(child.agent.state),
-                                format_elapsed(elapsed.as_secs()),
-                                child.agent.tool_count,
-                                child_token_stats(&child.agent),
-                            ),
-                            primary,
-                        ),
-                    ])
-                    .truncate_to_width(width),
-                );
-
-                let indent = format!("  {continuation} ");
-                let view = child_activity_view(&child.agent, MAX_CHILD_TOOL_ROWS);
-                for tool in &view.tools {
-                    lines.extend(render_child_tool_row(
-                        tool,
-                        width,
-                        &indent,
-                        theme,
-                        self.now_ms,
-                    ));
-                }
-                if let Some(thinking) = view.thinking.as_deref() {
-                    lines.extend(render_child_thinking(thinking, width, &indent, theme));
-                }
-                if let Some(body) = view
-                    .body_text
-                    .as_deref()
-                    .and_then(|text| render_child_body(text, width, &indent, theme))
-                {
-                    lines.push(body);
-                }
-                if let Some(final_text) = view.final_text.as_deref() {
-                    lines.push(render_child_final(
-                        final_text,
-                        view.final_is_error,
-                        width,
-                        &indent,
-                        theme,
-                    ));
-                }
+            let indent = format!("  {continuation} ");
+            let view = child_activity_view(&child.agent, MAX_CHILD_TOOL_ROWS);
+            for tool in &view.tools {
+                lines.extend(render_child_tool_row(
+                    tool,
+                    width,
+                    &indent,
+                    theme,
+                    self.now_ms,
+                ));
+            }
+            if let Some(thinking) = view.thinking.as_deref() {
+                lines.extend(render_child_thinking(thinking, width, &indent, theme));
+            }
+            if let Some(body) = view
+                .body_text
+                .as_deref()
+                .and_then(|text| render_child_body(text, width, &indent, theme))
+            {
+                lines.push(body);
+            }
+            if let Some(final_text) = view.final_text.as_deref() {
+                lines.push(render_child_final(
+                    final_text,
+                    view.final_is_error,
+                    width,
+                    &indent,
+                    theme,
+                ));
             }
         }
-
         lines
     }
 

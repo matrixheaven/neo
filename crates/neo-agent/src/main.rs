@@ -409,19 +409,21 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
         } => {
             let enabled = enable && !disable;
             Ok(modes::run::add_mcp_server(
-                mcp_name,
-                r#type,
-                command,
-                args,
-                url,
-                env,
-                headers,
-                cwd,
-                enabled_tools,
-                disabled_tools,
-                startup_timeout_ms,
-                tool_timeout_ms,
-                enabled,
+                modes::run::AddMcpServerInput {
+                    mcp_name,
+                    r#type,
+                    command,
+                    args,
+                    url,
+                    env,
+                    headers,
+                    cwd,
+                    enabled_tools,
+                    disabled_tools,
+                    startup_timeout_ms,
+                    tool_timeout_ms,
+                    enabled,
+                },
                 config,
             )
             .await?)

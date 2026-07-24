@@ -190,7 +190,6 @@ impl Tool for AskUserTool {
         super::schema::<AskUserInput>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(
         &'a self,
         ctx: &'a ToolContext,
@@ -206,24 +205,7 @@ impl Tool for AskUserTool {
             validate_ask_user_input(&input)?;
 
             // Convert model-facing input to event data.
-            let questions: Vec<QuestionEventData> = input
-                .questions
-                .iter()
-                .map(|q| QuestionEventData {
-                    question: q.question.clone(),
-                    header: q.header.clone(),
-                    body: q.body.clone(),
-                    options: q
-                        .options
-                        .iter()
-                        .map(|o| QuestionOptionData {
-                            label: o.label.clone(),
-                            description: o.description.clone(),
-                        })
-                        .collect(),
-                    multi_select: q.multi_select,
-                })
-                .collect();
+            let questions = question_event_data(&input);
 
             let id = Uuid::new_v4().to_string();
             let (response_tx, response_rx) = oneshot::channel::<QuestionResponse>();
@@ -295,16 +277,7 @@ impl Tool for AskUserTool {
 
             // Format answers for the model.
             let answers = response.answers;
-            let formatted = if answers.len() == 1 {
-                answers[0].clone()
-            } else {
-                answers
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| format!("{}. {}", i + 1, a))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
+            let formatted = format_answers(&answers);
 
             Ok(ToolResult::ok(formatted).with_details(json!({
                 "answers": answers,
@@ -312,6 +285,39 @@ impl Tool for AskUserTool {
             })))
         })
     }
+}
+
+fn question_event_data(input: &AskUserInput) -> Vec<QuestionEventData> {
+    input
+        .questions
+        .iter()
+        .map(|question| QuestionEventData {
+            question: question.question.clone(),
+            header: question.header.clone(),
+            body: question.body.clone(),
+            options: question
+                .options
+                .iter()
+                .map(|option| QuestionOptionData {
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                })
+                .collect(),
+            multi_select: question.multi_select,
+        })
+        .collect()
+}
+
+fn format_answers(answers: &[String]) -> String {
+    if let [answer] = answers {
+        return answer.clone();
+    }
+    answers
+        .iter()
+        .enumerate()
+        .map(|(index, answer)| format!("{}. {answer}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

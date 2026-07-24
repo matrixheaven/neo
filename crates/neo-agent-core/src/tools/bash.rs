@@ -6,7 +6,7 @@ use std::{path::PathBuf, sync::LazyLock, time::Duration};
 
 use super::shell_env::{self, ShellEnv};
 use super::shell_guard::{
-    GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionCallback,
+    BashStart, GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionCallback,
     ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest, ShellCommandPermit,
 };
 use super::{
@@ -435,17 +435,17 @@ async fn execute_shell_command_with_permit(
         .limits()
         .clamp_output_bytes(Some(request.max_output_bytes));
     emit_admission_started(request.admission_callback.as_ref());
-    let client = GuardianClient::start_bash(
-        &request.shell_runtime,
-        BackgroundTaskManager::next_bash_task_id(),
-        request.command,
-        &request.cwd,
-        request.shell_runtime.runtime_root(),
-        request.timeout,
+    let client = GuardianClient::start_bash(BashStart {
+        runtime: &request.shell_runtime,
+        task_id: BackgroundTaskManager::next_bash_task_id(),
+        command_text: request.command,
+        cwd: &request.cwd,
+        status_dir: request.shell_runtime.runtime_root(),
+        timeout: request.timeout,
         max_output_bytes,
-        request.stream_update,
+        stream_update: request.stream_update,
         permit,
-    )
+    })
     .await?;
     let result = tokio::select! {
         result = client.wait() => result,
@@ -473,19 +473,19 @@ async fn execute_manager_owned_shell_command(
         .limits()
         .clamp_output_bytes(Some(request.max_output_bytes));
     emit_admission_started(request.admission_callback.as_ref());
-    let client = GuardianClient::start_bash(
-        &request.shell_runtime,
-        task_id.clone(),
-        request.command.clone(),
-        &request.cwd,
-        manager
+    let client = GuardianClient::start_bash(BashStart {
+        runtime: &request.shell_runtime,
+        task_id: task_id.clone(),
+        command_text: request.command.clone(),
+        cwd: &request.cwd,
+        status_dir: manager
             .persistence_dir()
             .map_or(request.shell_runtime.runtime_root(), PathBuf::as_path),
-        request.timeout,
+        timeout: request.timeout,
         max_output_bytes,
-        request.stream_update.clone(),
+        stream_update: request.stream_update.clone(),
         permit,
-    )
+    })
     .await?;
     manager
         .start_bash_foreground_with_task_id(
@@ -670,19 +670,20 @@ async fn start_background_command(
         .shell_runtime
         .limits()
         .clamp_output_bytes(Some(max_output_bytes));
-    let client = GuardianClient::start_bash(
-        &ctx.shell_runtime,
-        task_id.clone(),
-        command.to_owned(),
-        &cwd,
-        ctx.background_tasks
+    let client = GuardianClient::start_bash(BashStart {
+        runtime: &ctx.shell_runtime,
+        task_id: task_id.clone(),
+        command_text: command.to_owned(),
+        cwd: &cwd,
+        status_dir: ctx
+            .background_tasks
             .persistence_dir()
             .map_or(ctx.shell_runtime.runtime_root(), PathBuf::as_path),
         timeout,
         max_output_bytes,
-        ctx.tool_update.clone(),
+        stream_update: ctx.tool_update.clone(),
         permit,
-    )
+    })
     .await?;
 
     ctx.background_tasks

@@ -261,7 +261,6 @@ impl PromptState {
         self.apply_edit_with_width(edit, 0)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn apply_edit_with_width(
         &mut self,
         edit: PromptEdit<'_>,
@@ -271,70 +270,19 @@ impl PromptState {
 
         let result = match edit {
             PromptEdit::Insert(text) => {
-                let inserted = text.to_string();
-                if inserted.is_empty() {
+                if text.is_empty() {
                     return None;
                 }
-                self.stop_history_navigation();
-                self.selected_marker = None;
-                let before = self.snapshot();
-                let index = self.byte_index(self.cursor);
-                self.text.insert_str(index, &inserted);
-                self.cursor += inserted.chars().count();
-                self.push_undo(before);
-                Some(inserted)
+                Some(self.insert_text(text))
             }
             PromptEdit::Clear => {
                 if self.text.is_empty() {
                     return None;
                 }
-                self.stop_history_navigation();
-                self.selected_marker = None;
-                let before = self.snapshot();
-                let cleared = std::mem::take(&mut self.text);
-                self.cursor = 0;
-                self.scroll_offset = 0;
-                self.push_undo(before);
-                Some(cleared)
+                Some(self.clear_text())
             }
-            PromptEdit::Backspace => {
-                if let Some(range) = self.marker_before_cursor() {
-                    if self.selected_marker == Some(range) {
-                        self.selected_marker = None;
-                        self.delete_byte_range(range.0, range.1, DeleteDirection::Backward)
-                    } else {
-                        self.selected_marker = Some(range);
-                        None
-                    }
-                } else {
-                    self.selected_marker = None;
-                    self.apply_delete(
-                        self.cursor.saturating_sub(1),
-                        self.cursor,
-                        DeleteDirection::Backward,
-                        false,
-                    )
-                }
-            }
-            PromptEdit::Delete => {
-                if let Some(range) = self.marker_after_cursor() {
-                    if self.selected_marker == Some(range) {
-                        self.selected_marker = None;
-                        self.delete_byte_range(range.0, range.1, DeleteDirection::Forward)
-                    } else {
-                        self.selected_marker = Some(range);
-                        None
-                    }
-                } else {
-                    self.selected_marker = None;
-                    self.apply_delete(
-                        self.cursor,
-                        self.cursor + 1,
-                        DeleteDirection::Forward,
-                        false,
-                    )
-                }
-            }
+            PromptEdit::Backspace => self.delete_marker_or_char(true),
+            PromptEdit::Delete => self.delete_marker_or_char(false),
             PromptEdit::MoveLeft => {
                 self.cursor = self.cursor.saturating_sub(1);
                 self.selected_marker = None;
@@ -394,26 +342,8 @@ impl PromptState {
                     self.apply_delete(self.cursor, line_end, DeleteDirection::Forward, true)
                 }
             }
-            PromptEdit::Yank => {
-                let yanked = self.kill_ring.last().cloned()?;
-                self.stop_history_navigation();
-                self.selected_marker = None;
-                let before = self.snapshot();
-                let index = self.byte_index(self.cursor);
-                self.text.insert_str(index, &yanked);
-                self.cursor += yanked.chars().count();
-                self.push_undo(before);
-                Some(yanked)
-            }
-            PromptEdit::Undo => {
-                self.stop_history_navigation();
-                self.selected_marker = None;
-                if let Some(snapshot) = self.undo_stack.pop() {
-                    self.text = snapshot.text;
-                    self.cursor = snapshot.cursor.min(self.char_len());
-                }
-                None
-            }
+            PromptEdit::Yank => self.yank(),
+            PromptEdit::Undo => self.undo(),
             PromptEdit::MoveUp(width) => {
                 self.move_cursor_vertical(width, -1);
                 self.selected_marker = None;
@@ -429,6 +359,85 @@ impl PromptState {
             self.clamp_scroll_offset(body_width);
         }
         result
+    }
+
+    fn insert_text(&mut self, text: &str) -> String {
+        self.stop_history_navigation();
+        self.selected_marker = None;
+        let before = self.snapshot();
+        let index = self.byte_index(self.cursor);
+        self.text.insert_str(index, text);
+        self.cursor += text.chars().count();
+        self.push_undo(before);
+        text.to_owned()
+    }
+
+    fn clear_text(&mut self) -> String {
+        self.stop_history_navigation();
+        self.selected_marker = None;
+        let before = self.snapshot();
+        let cleared = std::mem::take(&mut self.text);
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.push_undo(before);
+        cleared
+    }
+
+    fn delete_marker_or_char(&mut self, backward: bool) -> Option<String> {
+        let marker = if backward {
+            self.marker_before_cursor()
+        } else {
+            self.marker_after_cursor()
+        };
+        let direction = if backward {
+            DeleteDirection::Backward
+        } else {
+            DeleteDirection::Forward
+        };
+        if let Some(range) = marker {
+            if self.selected_marker == Some(range) {
+                self.selected_marker = None;
+                self.delete_byte_range(range.0, range.1, direction)
+            } else {
+                self.selected_marker = Some(range);
+                None
+            }
+        } else {
+            self.selected_marker = None;
+            let start = if backward {
+                self.cursor.saturating_sub(1)
+            } else {
+                self.cursor
+            };
+            let end = if backward {
+                self.cursor
+            } else {
+                self.cursor + 1
+            };
+            self.apply_delete(start, end, direction, false)
+        }
+    }
+
+    fn yank(&mut self) -> Option<String> {
+        let yanked = self.kill_ring.last().cloned()?;
+        self.stop_history_navigation();
+        self.selected_marker = None;
+        let before = self.snapshot();
+        let index = self.byte_index(self.cursor);
+        self.text.insert_str(index, &yanked);
+        self.cursor += yanked.chars().count();
+        self.push_undo(before);
+        Some(yanked)
+    }
+
+    fn undo(&mut self) -> Option<String> {
+        self.stop_history_navigation();
+        self.selected_marker = None;
+        if let Some(snapshot) = self.undo_stack.pop() {
+            self.text = snapshot.text;
+            self.cursor = snapshot.cursor.min(self.char_len());
+        }
+        None
     }
 
     /// Move the cursor up/down by one wrapped logical line, preserving the

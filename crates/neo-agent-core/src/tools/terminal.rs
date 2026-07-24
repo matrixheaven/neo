@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::shell_guard::{
     GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionClass,
     ShellAdmissionEvent, ShellAdmissionRequest, TerminalClientSession, TerminalClientState,
+    TerminalStart,
 };
 use super::{
     ShellRuntime, Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code,
@@ -274,17 +275,17 @@ async fn start_terminal(
     if let Some(callback) = &ctx.shell_admission_callback {
         callback(ShellAdmissionEvent::Started);
     }
-    let client = GuardianClient::start_terminal(
-        &ctx.shell_runtime,
+    let client = GuardianClient::start_terminal(TerminalStart {
+        runtime: &ctx.shell_runtime,
         task_id,
-        command.to_owned(),
-        &cwd,
+        command_text: command.to_owned(),
+        cwd: &cwd,
         status_dir,
         cols,
         rows,
         timeout,
         permit,
-    )
+    })
     .await?;
     let guardian_pid = client.guardian_pid;
     let command_pid = client.command_pid;

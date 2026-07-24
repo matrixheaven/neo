@@ -30,7 +30,11 @@ both lint exemptions impossible to reintroduce.
    whose only purpose is moving lines elsewhere.
 5. Keep scenario tests readable by extracting repeated setup or named phases,
    not by scattering one scenario across unrelated fixtures.
-6. After all attributes are gone, set both workspace lints to `forbid`.
+6. After all attributes are gone, enforce the source-level prohibition with a
+   native CI `git grep` guard. Keep the existing workspace Clippy policy and
+   pedantic relaxation unchanged: promoting every historical long function to
+   a new workspace deny would turn this cleanup into an unrelated behavior-risk
+   refactor, and Clap derive expansion also emits group-level allow attributes.
 7. Keep the remaining pedantic CI policy unchanged; this task does not expand
    into a whole-pedantic cleanup.
 
@@ -85,11 +89,11 @@ its single-use probe rather than restoring the old contract.
 ## Acceptance
 
 - Zero matching local attributes remain under `crates/`.
-- Both lints are workspace `forbid` rules inherited by all four crates.
+- CI rejects any reintroduced local attribute while preserving the existing
+  Clippy command and generated-code compatibility.
 - The two timeout tests complete without weakening the session lock contract.
 - Goal reject/revise behavior emits the expected terminal result text.
 - Obsolete workflow test/probe are absent and current routing regressions pass.
 - Target-specific Clippy, formatting, binary build, and focused regressions pass.
 - No unrelated cleanup, dependency addition, public contract change, or test
   timeout increase is introduced.
-

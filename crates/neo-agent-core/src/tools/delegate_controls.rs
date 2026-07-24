@@ -309,6 +309,105 @@ fn encode_list_cursor(
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+fn collect_delegate_list_rows(
+    ctx: &ToolContext,
+    input: &ListDelegatesInput,
+    include_completed: bool,
+    include_task: bool,
+    include_summary: bool,
+    include_activity: bool,
+) -> Vec<DelegateListRow> {
+    let show_agents = matches!(input.kind, DelegateListKind::Agent | DelegateListKind::All);
+    let show_swarms = matches!(input.kind, DelegateListKind::Swarm | DelegateListKind::All);
+    let mut rows = Vec::new();
+    if show_agents {
+        let agents = ctx.multi_agent.list_agents(include_completed);
+        for agent in &agents {
+            if let Some(filter_state) = input.state
+                && !agent_matches_state(agent, filter_state, input.state_scope)
+            {
+                continue;
+            }
+            let detail = format!(
+                "\n- agent_id: {} ({}) state: {} title: {}",
+                agent.id.as_str(),
+                agent.display_name.as_str(),
+                agent.state.as_str(),
+                agent.task_title,
+            );
+            let mut row = super::multi_agent_format::agent_details(
+                "agent",
+                agent,
+                None,
+                super::multi_agent_format::SummaryScope::None,
+                include_task,
+                include_summary,
+                include_activity,
+            );
+            row["kind"] = json!("agent");
+            row["current_status"] = json!(agent.state.as_str());
+            row["terminal_status_history"] = json!(
+                agent
+                    .terminal_status_history
+                    .iter()
+                    .map(|state| state.as_str())
+                    .collect::<Vec<_>>()
+            );
+            rows.push(DelegateListRow {
+                created_index: ctx
+                    .multi_agent
+                    .agent_created_index(agent.id.as_str())
+                    .unwrap_or_default(),
+                id: agent.id.as_str().to_owned(),
+                detail,
+                json: row,
+            });
+        }
+    }
+    if show_swarms {
+        let swarms = ctx.multi_agent.list_swarms();
+        for swarm in &swarms {
+            if !include_completed && swarm.state.is_terminal() {
+                continue;
+            }
+            if let Some(filter_state) = input.state
+                && swarm.state != filter_state
+            {
+                continue;
+            }
+            let detail = format!(
+                "\n- swarm_id: {}\n  kind: swarm\n  status: {}\n  description: {}\n  aggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
+                swarm.swarm_id,
+                swarm.state.as_str(),
+                swarm.description,
+                swarm.aggregate.total,
+                swarm.aggregate.queued,
+                swarm.aggregate.running,
+                swarm.aggregate.completed,
+                swarm.aggregate.failed,
+                swarm.aggregate.cancelled,
+                swarm.aggregate.timed_out,
+            );
+            rows.push(DelegateListRow {
+                created_index: ctx
+                    .multi_agent
+                    .swarm_created_index(&swarm.swarm_id)
+                    .unwrap_or_default(),
+                id: swarm.swarm_id.clone(),
+                detail,
+                json: json!({
+                    "kind": "swarm",
+                    "id": swarm.swarm_id,
+                    "status": swarm.state.as_str(),
+                    "description": swarm.description,
+                    "aggregate": swarm.aggregate,
+                }),
+            });
+        }
+    }
+    rows
+}
+
 pub struct ListDelegatesTool;
 
 impl Tool for ListDelegatesTool {
@@ -329,7 +428,6 @@ impl Tool for ListDelegatesTool {
         schema::<ListDelegatesInput>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: ListDelegatesInput = parse_input(self.name(), input)?;
@@ -351,97 +449,14 @@ impl Tool for ListDelegatesTool {
             let include_summary = input.include.contains(&DelegateListInclude::Summary);
             let include_activity = input.include.contains(&DelegateListInclude::Activity);
 
-            let show_agents = matches!(input.kind, DelegateListKind::Agent | DelegateListKind::All);
-            let show_swarms = matches!(input.kind, DelegateListKind::Swarm | DelegateListKind::All);
-
-            let mut all_rows: Vec<DelegateListRow> = Vec::new();
-
-            if show_agents {
-                let agents = ctx.multi_agent.list_agents(include_completed);
-                for agent in &agents {
-                    if let Some(filter_state) = input.state
-                        && !agent_matches_state(agent, filter_state, input.state_scope)
-                    {
-                        continue;
-                    }
-                    let detail = format!(
-                        "\n- agent_id: {} ({}) state: {} title: {}",
-                        agent.id.as_str(),
-                        agent.display_name.as_str(),
-                        agent.state.as_str(),
-                        agent.task_title,
-                    );
-                    let mut row = super::multi_agent_format::agent_details(
-                        "agent",
-                        agent,
-                        None,
-                        super::multi_agent_format::SummaryScope::None,
-                        include_task,
-                        include_summary,
-                        include_activity,
-                    );
-                    row["kind"] = json!("agent");
-                    row["current_status"] = json!(agent.state.as_str());
-                    row["terminal_status_history"] = json!(
-                        agent
-                            .terminal_status_history
-                            .iter()
-                            .map(|state| state.as_str())
-                            .collect::<Vec<_>>()
-                    );
-                    all_rows.push(DelegateListRow {
-                        created_index: ctx
-                            .multi_agent
-                            .agent_created_index(agent.id.as_str())
-                            .unwrap_or_default(),
-                        id: agent.id.as_str().to_owned(),
-                        detail,
-                        json: row,
-                    });
-                }
-            }
-
-            if show_swarms {
-                let swarms = ctx.multi_agent.list_swarms();
-                for swarm in &swarms {
-                    if !include_completed && swarm.state.is_terminal() {
-                        continue;
-                    }
-                    if let Some(filter_state) = input.state
-                        && swarm.state != filter_state
-                    {
-                        continue;
-                    }
-                    let detail = format!(
-                        "\n- swarm_id: {}\n  kind: swarm\n  status: {}\n  description: {}\n  aggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
-                        swarm.swarm_id,
-                        swarm.state.as_str(),
-                        swarm.description,
-                        swarm.aggregate.total,
-                        swarm.aggregate.queued,
-                        swarm.aggregate.running,
-                        swarm.aggregate.completed,
-                        swarm.aggregate.failed,
-                        swarm.aggregate.cancelled,
-                        swarm.aggregate.timed_out,
-                    );
-                    all_rows.push(DelegateListRow {
-                        created_index: ctx
-                            .multi_agent
-                            .swarm_created_index(&swarm.swarm_id)
-                            .unwrap_or_default(),
-                        id: swarm.swarm_id.clone(),
-                        detail,
-                        json: json!({
-                            "kind": "swarm",
-                            "id": swarm.swarm_id,
-                            "status": swarm.state.as_str(),
-                            "description": swarm.description,
-                            "aggregate": swarm.aggregate,
-                        }),
-                    });
-                }
-            }
+            let mut all_rows = collect_delegate_list_rows(
+                ctx,
+                &input,
+                include_completed,
+                include_task,
+                include_summary,
+                include_activity,
+            );
 
             match input.order {
                 DelegateListOrder::Newest => {

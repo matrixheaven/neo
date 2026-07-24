@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::primitive::Color;
 use crate::primitive::theme::TuiTheme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,12 +146,9 @@ impl SessionPickerState {
 
     /// Render the picker as ANSI-styled lines matching the Neo card layout.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
         let brand = theme.brand;
         let text_muted = theme.text_muted;
-        let status_ok = theme.status_ok;
-        let text_color = theme.text_primary;
         let border = crate::primitive::paint(
             &"─".repeat(width),
             crate::primitive::Style::default().fg(brand),
@@ -160,92 +156,7 @@ impl SessionPickerState {
         .clone();
 
         let mut lines = vec![border.clone()];
-
-        let title = match self.scope {
-            SessionPickerScope::Workspace => "Sessions",
-            SessionPickerScope::All => "All sessions",
-        };
-        let title_suffix = if self.filter.is_empty() {
-            format!(
-                "  {}",
-                crate::primitive::paint(
-                    "(type to search)",
-                    crate::primitive::Style::default().fg(text_muted)
-                )
-            )
-        } else {
-            String::new()
-        };
-        let title_line = format!(
-            "{}{}",
-            crate::primitive::paint(title, crate::primitive::Style::default().fg(brand).bold()),
-            title_suffix
-        );
-        lines.push(truncate_styled_to_width(&title_line, width));
-
-        // Hint line. When the terminal is too narrow to hold the full hint,
-        // drop the lower-priority segments (keep navigate/Enter/Esc) so the
-        // line never overflows the renderer's hard width check.
-        let scope_hint = match self.scope {
-            SessionPickerScope::Workspace => "Ctrl+A all",
-            SessionPickerScope::All => "Ctrl+A current cwd",
-        };
-        let hint_parts: Vec<&str> = if self.filter.is_empty() {
-            vec![
-                "\u{2191}\u{2193} navigate",
-                scope_hint,
-                "Enter select",
-                "Esc cancel",
-            ]
-        } else {
-            vec![
-                "Backspace clear",
-                "\u{2191}\u{2193} navigate",
-                scope_hint,
-                "Enter select",
-                "Esc cancel",
-            ]
-        };
-        let hint_full = crate::primitive::paint(
-            &hint_parts.join(" \u{00b7} "),
-            crate::primitive::Style::default().fg(text_muted),
-        );
-        let hint_line = if crate::primitive::visible_width(&hint_full) <= width {
-            hint_full
-        } else {
-            // Narrow terminal: keep only the essential segments, in priority
-            // order, until the budget is exhausted.
-            let essential = ["\u{2191}\u{2193} navigate", "Enter select", "Esc cancel"];
-            let mut joined = String::new();
-            for part in essential {
-                let candidate = if joined.is_empty() {
-                    part.to_owned()
-                } else {
-                    format!("{joined} \u{00b7} {part}")
-                };
-                if crate::primitive::visible_width(&candidate) <= width {
-                    joined = candidate;
-                } else {
-                    break;
-                }
-            }
-            crate::primitive::paint(&joined, crate::primitive::Style::default().fg(text_muted))
-        };
-        lines.push(hint_line);
-
-        lines.push(String::new());
-
-        if !self.filter.is_empty() {
-            let search_line = format!(
-                "{}{}",
-                crate::primitive::paint("Search: ", crate::primitive::Style::default().fg(brand)),
-                crate::primitive::paint(
-                    &self.filter,
-                    crate::primitive::Style::default().fg(text_color)
-                )
-            );
-            lines.push(truncate_styled_to_width(&search_line, width));
-        }
+        lines.extend(self.render_header(width, theme));
 
         let filtered = self.filtered_items();
         if filtered.is_empty() {
@@ -271,15 +182,7 @@ impl SessionPickerState {
             .skip(visible_start)
         {
             let is_selected = vi == self.selected;
-            for card_line in Self::render_card(
-                item,
-                is_selected,
-                width,
-                brand,
-                text_muted,
-                status_ok,
-                text_color,
-            ) {
+            for card_line in Self::render_card(item, is_selected, width, theme) {
                 lines.push(card_line);
             }
             if vi < visible_end - 1 {
@@ -311,16 +214,107 @@ impl SessionPickerState {
         lines
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn render_header(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
+        let title = match self.scope {
+            SessionPickerScope::Workspace => "Sessions",
+            SessionPickerScope::All => "All sessions",
+        };
+        let title_suffix = if self.filter.is_empty() {
+            format!(
+                "  {}",
+                crate::primitive::paint(
+                    "(type to search)",
+                    crate::primitive::Style::default().fg(theme.text_muted)
+                )
+            )
+        } else {
+            String::new()
+        };
+        let title_line = format!(
+            "{}{}",
+            crate::primitive::paint(
+                title,
+                crate::primitive::Style::default().fg(theme.brand).bold()
+            ),
+            title_suffix
+        );
+        let mut lines = vec![truncate_styled_to_width(&title_line, width)];
+        lines.push(self.render_hint(width, theme));
+        lines.push(String::new());
+        if !self.filter.is_empty() {
+            let search_line = format!(
+                "{}{}",
+                crate::primitive::paint(
+                    "Search: ",
+                    crate::primitive::Style::default().fg(theme.brand)
+                ),
+                crate::primitive::paint(
+                    &self.filter,
+                    crate::primitive::Style::default().fg(theme.text_primary)
+                )
+            );
+            lines.push(truncate_styled_to_width(&search_line, width));
+        }
+        lines
+    }
+
+    fn render_hint(&self, width: usize, theme: &TuiTheme) -> String {
+        let scope_hint = match self.scope {
+            SessionPickerScope::Workspace => "Ctrl+A all",
+            SessionPickerScope::All => "Ctrl+A current cwd",
+        };
+        let hint_parts: Vec<&str> = if self.filter.is_empty() {
+            vec![
+                "\u{2191}\u{2193} navigate",
+                scope_hint,
+                "Enter select",
+                "Esc cancel",
+            ]
+        } else {
+            vec![
+                "Backspace clear",
+                "\u{2191}\u{2193} navigate",
+                scope_hint,
+                "Enter select",
+                "Esc cancel",
+            ]
+        };
+        let hint_full = crate::primitive::paint(
+            &hint_parts.join(" \u{00b7} "),
+            crate::primitive::Style::default().fg(theme.text_muted),
+        );
+        if crate::primitive::visible_width(&hint_full) <= width {
+            return hint_full;
+        }
+        let essential = ["\u{2191}\u{2193} navigate", "Enter select", "Esc cancel"];
+        let mut joined = String::new();
+        for part in essential {
+            let candidate = if joined.is_empty() {
+                part.to_owned()
+            } else {
+                format!("{joined} \u{00b7} {part}")
+            };
+            if crate::primitive::visible_width(&candidate) > width {
+                break;
+            }
+            joined = candidate;
+        }
+        crate::primitive::paint(
+            &joined,
+            crate::primitive::Style::default().fg(theme.text_muted),
+        )
+    }
+
     fn render_card(
         item: &SessionPickerItem,
         is_selected: bool,
         width: usize,
-        brand: Color,
-        text_muted: Color,
-        status_ok: Color,
-        text_color: Color,
+        theme: &TuiTheme,
     ) -> Vec<String> {
+        let brand = theme.brand;
+        let text_muted = theme.text_muted;
+        let status_ok = theme.status_ok;
+        let text_color = theme.text_primary;
         let pointer = if is_selected { "\u{276f} " } else { "  " };
         let pointer_style = if is_selected {
             crate::primitive::Style::default().fg(brand)
@@ -416,35 +410,33 @@ impl SessionPickerState {
             ));
         }
 
-        // Last prompt preview
-        if let Some(prompt) = &item.last_prompt {
-            let trimmed = single_line(prompt);
-            if !trimmed.is_empty() {
-                let marker = "\u{203a} ";
-                // Budget in *display columns*, not character count: wide glyphs
-                // (CJK, emoji, full-width punctuation) take 2 columns each, so
-                // counting chars under-counts and can overflow the renderer's
-                // hard width check.
-                let prefix_width = indent.len() + marker.len();
-                let budget = width.saturating_sub(prefix_width);
-                let truncated = truncate_plain_to_width(&trimmed, budget);
-                card.push(format!(
-                    "{}{}{}",
-                    indent,
-                    crate::primitive::paint(
-                        marker,
-                        crate::primitive::Style::default().fg(text_muted)
-                    ),
-                    crate::primitive::paint(
-                        &truncated,
-                        crate::primitive::Style::default().fg(text_muted)
-                    )
-                ));
-            }
+        if let Some(preview) = render_prompt_preview(item, width, theme) {
+            card.push(preview);
         }
 
         card
     }
+}
+
+fn render_prompt_preview(
+    item: &SessionPickerItem,
+    width: usize,
+    theme: &TuiTheme,
+) -> Option<String> {
+    let trimmed = single_line(item.last_prompt.as_deref()?);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let indent = "  ";
+    let marker = "\u{203a} ";
+    let budget = width.saturating_sub(indent.len() + marker.len());
+    let style = crate::primitive::Style::default().fg(theme.text_muted);
+    Some(format!(
+        "{}{}{}",
+        indent,
+        crate::primitive::paint(marker, style),
+        crate::primitive::paint(&truncate_plain_to_width(&trimmed, budget), style)
+    ))
 }
 
 fn format_relative_time(time: SystemTime) -> String {

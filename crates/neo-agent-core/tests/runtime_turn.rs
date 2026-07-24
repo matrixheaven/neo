@@ -1334,47 +1334,80 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
     assert_eq!(context.compaction_summary(), compactions.last());
 }
 
+fn text_turn_events(id: &str, text: &str) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart { id: id.to_owned() },
+        AiStreamEvent::TextDelta {
+            text: text.to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
+}
+
+fn compaction_lifecycle(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::CompactionStarted {
+                reason,
+                tokens_before,
+                message_count,
+            } => Some(format!("start:{reason:?}:{tokens_before}:{message_count}")),
+            AgentEvent::CompactionProgress { phase, percent } => {
+                Some(format!("progress:{phase:?}:{percent}"))
+            }
+            AgentEvent::CompactionApplied { summary } => Some(format!(
+                "applied:{}:{}",
+                summary.first_kept_message_index, summary.tokens_before
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_compaction_lifecycle(lifecycle: &[String]) {
+    assert_eq!(lifecycle.first(), Some(&"start:Threshold:29:3".to_owned()));
+    assert!(lifecycle.contains(&"progress:Estimating:0".to_owned()));
+    assert!(lifecycle.contains(&"progress:SelectingBoundary:15".to_owned()));
+    assert!(lifecycle.contains(&"progress:Summarizing:15".to_owned()));
+    assert!(
+        lifecycle
+            .iter()
+            .any(|e| e.starts_with("progress:Summarizing:") && e != "progress:Summarizing:15"),
+        "Summarizing should make progress beyond its starting percent: {lifecycle:?}"
+    );
+    assert_eq!(
+        lifecycle.iter().rfind(|e| e.starts_with("progress:")),
+        Some(&"progress:Applying:100".to_owned()),
+        "last progress should reach 100%: {lifecycle:?}"
+    );
+    assert!(lifecycle.contains(&"applied:2:29".to_owned()));
+
+    let percents: Vec<u8> = lifecycle
+        .iter()
+        .filter_map(|e| {
+            e.strip_prefix("progress:")
+                .and_then(|rest| rest.split(':').next_back().and_then(|p| p.parse().ok()))
+        })
+        .collect();
+    assert!(
+        percents.windows(2).all(|w| w[0] <= w[1]),
+        "progress percents should be monotonic: {percents:?}"
+    );
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
     let harness = FakeHarness::from_turns([
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_1".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "first answer".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-        // Compaction summary call (no tools, returns structured summary text)
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_compact".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "## Current Focus\nWorking on compaction test.".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_2".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "second answer".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
+        text_turn_events("msg_1", "first answer"),
+        text_turn_events(
+            "msg_compact",
+            "## Current Focus\nWorking on compaction test.",
+        ),
+        text_turn_events("msg_2", "second answer"),
     ]);
     let runtime = AgentRuntime::new(
         AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(4, 1)),
@@ -1404,58 +1437,9 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
         .collect::<Result<Vec<_>, _>>()
         .expect("second turn should succeed");
 
-    let lifecycle = events
-        .iter()
-        .filter_map(|event| match event {
-            AgentEvent::CompactionStarted {
-                reason,
-                tokens_before,
-                message_count,
-            } => Some(format!("start:{reason:?}:{tokens_before}:{message_count}")),
-            AgentEvent::CompactionProgress { phase, percent } => {
-                Some(format!("progress:{phase:?}:{percent}"))
-            }
-            AgentEvent::CompactionApplied { summary } => Some(format!(
-                "applied:{}:{}",
-                summary.first_kept_message_index, summary.tokens_before
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
     // Verify the lifecycle starts at 0%, goes through the visible phases, and
     // finishes smoothly at 100% instead of jumping from ~80% to done.
-    assert_eq!(lifecycle.first(), Some(&"start:Threshold:29:3".to_owned()));
-    assert!(lifecycle.contains(&"progress:Estimating:0".to_owned()));
-    assert!(lifecycle.contains(&"progress:SelectingBoundary:15".to_owned()));
-    assert!(lifecycle.contains(&"progress:Summarizing:15".to_owned()));
-    assert!(
-        lifecycle
-            .iter()
-            .any(|e| e.starts_with("progress:Summarizing:") && e != "progress:Summarizing:15"),
-        "Summarizing should make progress beyond its starting percent: {lifecycle:?}"
-    );
-    assert_eq!(
-        lifecycle.iter().rfind(|e| e.starts_with("progress:")),
-        Some(&"progress:Applying:100".to_owned()),
-        "last progress should reach 100%: {lifecycle:?}"
-    );
-    assert!(lifecycle.contains(&"applied:2:29".to_owned()));
-
-    // Percentages must be non-decreasing across CompactionProgress events.
-    let percents: Vec<u8> = lifecycle
-        .iter()
-        .filter_map(|e| {
-            e.strip_prefix("progress:").and_then(|rest| {
-                let parts: Vec<&str> = rest.split(':').collect();
-                parts.last().and_then(|p| p.parse().ok())
-            })
-        })
-        .collect();
-    assert!(
-        percents.windows(2).all(|w| w[0] <= w[1]),
-        "progress percents should be monotonic: {percents:?}"
-    );
+    assert_compaction_lifecycle(&compaction_lifecycle(&events));
 }
 
 #[tokio::test]
@@ -3947,61 +3931,21 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
     );
 }
 
+fn two_echo_tool_turns() -> FakeHarness {
+    FakeHarness::from_turns([
+        tool_call_turn(&[("tool_1", "echo", json!({ "text": "first" }))]),
+        tool_call_turn(&[("tool_2", "echo", json!({ "text": "second" }))]),
+        text_turn_events("msg_3", "done"),
+    ])
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
     // One turn with two model ToolUse round-trips. The first echo requires
     // approval in Ask mode. The approval handler switches the shared live mode
     // to Auto while granting this first call; the second echo must therefore
     // run WITHOUT a second ApprovalRequested event.
-    let harness = FakeHarness::from_turns([
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_1".to_owned(),
-            },
-            AiStreamEvent::ToolCallStart {
-                id: "tool_1".to_owned(),
-                name: "echo".to_owned(),
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "tool_1".to_owned(),
-                raw_arguments: json!({ "text": "first" }).to_string(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::ToolUse,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_2".to_owned(),
-            },
-            AiStreamEvent::ToolCallStart {
-                id: "tool_2".to_owned(),
-                name: "echo".to_owned(),
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "tool_2".to_owned(),
-                raw_arguments: json!({ "text": "second" }).to_string(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::ToolUse,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_3".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "done".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-    ]);
+    let harness = two_echo_tool_turns();
     let executed = Arc::new(Mutex::new(Vec::new()));
     let mut tools = ToolRegistry::new();
     tools.register(RecordingEchoTool {
@@ -4062,59 +4006,11 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() {
     // Inverse of the above: start Auto (no approval), flip live mode to Ask
     // mid-turn via the async after-tool hook, and the second generic tool call
     // must request approval.
-    let harness = FakeHarness::from_turns([
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_1".to_owned(),
-            },
-            AiStreamEvent::ToolCallStart {
-                id: "tool_1".to_owned(),
-                name: "echo".to_owned(),
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "tool_1".to_owned(),
-                raw_arguments: json!({ "text": "first" }).to_string(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::ToolUse,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_2".to_owned(),
-            },
-            AiStreamEvent::ToolCallStart {
-                id: "tool_2".to_owned(),
-                name: "echo".to_owned(),
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "tool_2".to_owned(),
-                raw_arguments: json!({ "text": "second" }).to_string(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::ToolUse,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_3".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "done".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-    ]);
+    let harness = two_echo_tool_turns();
     let executed = Arc::new(Mutex::new(Vec::new()));
     let mut tools = ToolRegistry::new();
     tools.register(RecordingEchoTool {
@@ -10784,8 +10680,49 @@ async fn first_read_write_and_nested_cwd_shell_each_defer_before_execution() {
     }
 }
 
+fn assert_stale_approval_deferred(events: &[AgentEvent], new_file: &std::path::Path) {
+    assert!(
+        !new_file.exists(),
+        "an approval taken against stale instructions must defer, not execute"
+    );
+    assert!(
+        !has_tool_started(events),
+        "the deferred write must not start: {events:?}"
+    );
+    let write_results = finished_tool_results(events, "write_1");
+    assert_eq!(write_results.len(), 1, "write_1");
+    assert!(
+        !write_results[0].is_error,
+        "the recheck defer is a non-error result"
+    );
+    assert_eq!(
+        write_results[0].details.as_ref().expect("details")["status"],
+        "deferred"
+    );
+    let epochs = instruction_epochs(events);
+    assert_eq!(
+        epochs.len(),
+        1,
+        "exactly one Updated epoch after the approval: {events:?}"
+    );
+    assert_eq!(epochs[0].outcome, InstructionEpochOutcome::Updated);
+    assert_eq!(epochs[0].deferred_tool_ids, vec!["write_1".to_owned()]);
+
+    let approval_index = event_index(events, |event| {
+        matches!(event, AgentEvent::ApprovalRequested { .. })
+    })
+    .expect("approval event");
+    let epoch_index = event_index(events, |event| {
+        matches!(event, AgentEvent::InstructionEpoch { .. })
+    })
+    .expect("epoch event");
+    assert!(
+        approval_index < epoch_index,
+        "preflight approved first, the changed source rechecked to defer: {events:?}"
+    );
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
     let fixture = preflight_fixture(&[("nested", "nested rules v1\n")], "root rules\n");
     std::fs::write(fixture.workspace.join("nested").join("data.txt"), "body").expect("data");
@@ -10865,45 +10802,8 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
         events.push(event.expect("event ok"));
     }
 
-    assert!(
-        !new_file.exists(),
-        "an approval taken against stale instructions must defer, not execute"
-    );
-    assert!(
-        !has_tool_started(&events),
-        "the deferred write must not start: {events:?}"
-    );
-    let write_results = finished_tool_results(&events, "write_1");
-    assert_eq!(write_results.len(), 1, "write_1");
-    assert!(
-        !write_results[0].is_error,
-        "the recheck defer is a non-error result"
-    );
-    assert_eq!(
-        write_results[0].details.as_ref().expect("details")["status"],
-        "deferred"
-    );
-    let epochs = instruction_epochs(&events);
-    assert_eq!(
-        epochs.len(),
-        1,
-        "exactly one Updated epoch after the approval: {events:?}"
-    );
-    assert_eq!(epochs[0].outcome, InstructionEpochOutcome::Updated);
-    assert_eq!(epochs[0].deferred_tool_ids, vec!["write_1".to_owned()]);
     // The epoch lands after the approval resolution, before the next request.
-    let approval_index = event_index(&events, |event| {
-        matches!(event, AgentEvent::ApprovalRequested { .. })
-    })
-    .expect("approval event");
-    let epoch_index = event_index(&events, |event| {
-        matches!(event, AgentEvent::InstructionEpoch { .. })
-    })
-    .expect("epoch event");
-    assert!(
-        approval_index < epoch_index,
-        "preflight approved first, the changed source rechecked to defer: {events:?}"
-    );
+    assert_stale_approval_deferred(&events, &new_file);
 }
 
 #[tokio::test]
@@ -11114,8 +11014,140 @@ async fn baseline_epoch_precedes_first_user_message_for_new_and_legacy_sessions(
     );
 }
 
+fn assert_pending_epoch_events<'a>(
+    events: &'a [AgentEvent],
+    target: &std::path::Path,
+    nested_sentinel: &str,
+) -> (&'a str, &'a str, u64) {
+    let epochs = instruction_epochs(events);
+    assert_eq!(
+        epochs.len(),
+        2,
+        "baseline plus nested activation: {events:?}"
+    );
+    assert_eq!(epochs[0].outcome, InstructionEpochOutcome::Ready);
+    assert_eq!(epochs[1].outcome, InstructionEpochOutcome::Activated);
+    assert_eq!(epochs[1].deferred_tool_ids, vec!["call_1".to_owned()]);
+    let baseline_model_content = epochs[0]
+        .model_content
+        .as_deref()
+        .expect("baseline epoch carries model content");
+    let nested_model_content = epochs[1]
+        .model_content
+        .as_deref()
+        .expect("activated epoch carries model content");
+    assert!(nested_model_content.contains(nested_sentinel));
+
+    let compacted_index = event_index(events, |event| {
+        matches!(event, AgentEvent::CompactionApplied { .. })
+    })
+    .expect("one compaction");
+    let epoch_index = event_index(events, |event| {
+        matches!(event, AgentEvent::InstructionEpoch { epoch } if epoch.outcome == InstructionEpochOutcome::Activated)
+    })
+    .expect("activated epoch index");
+    assert!(
+        compacted_index < epoch_index,
+        "compaction must precede the pending epoch admission: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::CompactionStarted { .. }))
+            .count(),
+        1,
+        "no summarize-after-inject: exactly one compaction: {events:?}"
+    );
+
+    let deferred = finished_tool_results(events, "call_1");
+    assert_eq!(deferred.len(), 1, "call_1");
+    assert!(!deferred[0].is_error, "deferred result must be non-error");
+    assert_eq!(
+        deferred[0].details.as_ref().expect("deferred details")["status"],
+        "deferred"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target).expect("read target"),
+        "beta"
+    );
+
+    (
+        baseline_model_content,
+        nested_model_content,
+        epochs[1].generation,
+    )
+}
+
+fn assert_compaction_request_inputs(
+    harness: &FakeHarness,
+    nested_rules: &str,
+    root_sentinel: &str,
+    nested_sentinel: &str,
+    ordinary_sentinel: &str,
+) {
+    let requests = harness.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "turn, summary, post-admission, final: {requests:?}"
+    );
+    let summary_input = chat_request_text(&requests[1]);
+    assert!(
+        summary_input.contains(ordinary_sentinel),
+        "ordinary history is summarized: {summary_input}"
+    );
+    assert!(
+        !summary_input.contains(nested_sentinel),
+        "pending epoch bytes must never enter the summary input: {summary_input}"
+    );
+    assert!(
+        !summary_input.contains(root_sentinel),
+        "pinned baseline bodies stay out of the summary input: {summary_input}"
+    );
+
+    let post_admission = chat_request_text(&requests[2]);
+    assert_eq!(
+        post_admission.matches(nested_sentinel).count(),
+        1,
+        "nested instruction bytes appear exactly once: {post_admission}"
+    );
+    assert!(
+        post_admission.contains(nested_rules),
+        "the nested AGENTS.md body is preserved byte-for-byte: {post_admission}"
+    );
+}
+
+fn assert_rehydrated_instruction_context(
+    context: &AgentContext,
+    baseline_model_content: &str,
+    nested_model_content: &str,
+    nested_generation: u64,
+) {
+    let pinned: Vec<(u64, String)> = context
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Instruction {
+                generation,
+                content,
+            } => Some((
+                *generation,
+                content.iter().filter_map(Content::as_text).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pinned,
+        vec![
+            (1, baseline_model_content.to_owned()),
+            (nested_generation, nested_model_content.to_owned()),
+        ],
+        "rehydrate-then-admit must preserve instruction bytes exactly"
+    );
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn context_pressure_compacts_before_pending_epoch_admission() {
     const ROOT_SENTINEL: &str = "ROOT-SENTINEL-c4d9e1-rules";
     const NESTED_SENTINEL: &str = "NESTED-SENTINEL-77aa10-rules";
@@ -11172,122 +11204,20 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
 
     let events = run_turn_collect(&runtime, &mut context, "edit the nested file").await;
 
-    // Two epochs: the Ready baseline, then the nested Activated epoch admitted
-    // after compaction.
-    let epochs = instruction_epochs(&events);
-    assert_eq!(
-        epochs.len(),
-        2,
-        "baseline plus nested activation: {events:?}"
+    let (baseline_model_content, nested_model_content, nested_generation) =
+        assert_pending_epoch_events(&events, &target, NESTED_SENTINEL);
+    assert_compaction_request_inputs(
+        &harness,
+        &nested_rules,
+        ROOT_SENTINEL,
+        NESTED_SENTINEL,
+        ORDINARY_SENTINEL,
     );
-    assert_eq!(epochs[0].outcome, InstructionEpochOutcome::Ready);
-    assert_eq!(epochs[1].outcome, InstructionEpochOutcome::Activated);
-    assert_eq!(epochs[1].deferred_tool_ids, vec!["call_1".to_owned()]);
-    let baseline_model_content = epochs[0]
-        .model_content
-        .as_deref()
-        .expect("baseline epoch carries model content");
-    let nested_model_content = epochs[1]
-        .model_content
-        .as_deref()
-        .expect("activated epoch carries model content");
-    assert!(nested_model_content.contains(NESTED_SENTINEL));
-
-    // Order proof: compaction ran BEFORE the pending epoch was admitted, and
-    // nothing re-compacted afterwards (no inject-then-summarize).
-    let compacted_index = event_index(&events, |event| {
-        matches!(event, AgentEvent::CompactionApplied { .. })
-    })
-    .expect("one compaction: {events:?}");
-    let epoch_index = event_index(&events, |event| {
-        matches!(event, AgentEvent::InstructionEpoch { epoch } if epoch.outcome == InstructionEpochOutcome::Activated)
-    })
-    .expect("activated epoch index");
-    assert!(
-        compacted_index < epoch_index,
-        "compaction must precede the pending epoch admission: {events:?}"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, AgentEvent::CompactionStarted { .. }))
-            .count(),
-        1,
-        "no summarize-after-inject: exactly one compaction: {events:?}"
-    );
-
-    // The deferred call never executed; the retried call edited exactly once.
-    let deferred = finished_tool_results(&events, "call_1");
-    assert_eq!(deferred.len(), 1, "call_1");
-    assert!(!deferred[0].is_error, "deferred result must be non-error");
-    assert_eq!(
-        deferred[0].details.as_ref().expect("deferred details")["status"],
-        "deferred"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("read target"),
-        "beta"
-    );
-
-    // The compaction summary input contains ordinary history but neither the
-    // baseline body nor the pending epoch body (no summarize-after-inject).
-    let requests = harness.requests();
-    assert_eq!(
-        requests.len(),
-        4,
-        "turn, summary, post-admission, final: {requests:?}"
-    );
-    let summary_input = chat_request_text(&requests[1]);
-    assert!(
-        summary_input.contains(ORDINARY_SENTINEL),
-        "ordinary history is summarized: {summary_input}"
-    );
-    assert!(
-        !summary_input.contains(NESTED_SENTINEL),
-        "pending epoch bytes must never enter the summary input: {summary_input}"
-    );
-    assert!(
-        !summary_input.contains(ROOT_SENTINEL),
-        "pinned baseline bodies stay out of the summary input: {summary_input}"
-    );
-
-    // Post-compaction rehydration restored the exact baseline bytes BEFORE the
-    // pending bundle was admitted: the rehydrated baseline (generation 1) sits
-    // ahead of the admitted epoch (generation 2), both byte-identical.
-    let pinned: Vec<(u64, String)> = context
-        .messages()
-        .iter()
-        .filter_map(|message| match message {
-            AgentMessage::Instruction {
-                generation,
-                content,
-            } => Some((
-                *generation,
-                content.iter().filter_map(Content::as_text).collect(),
-            )),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        pinned,
-        vec![
-            (1, baseline_model_content.to_owned()),
-            (epochs[1].generation, nested_model_content.to_owned()),
-        ],
-        "rehydrate-then-admit must preserve instruction bytes exactly"
-    );
-
-    // The post-admission provider request carries the nested AGENTS.md body
-    // byte-for-byte exactly once.
-    let post_admission = chat_request_text(&requests[2]);
-    assert_eq!(
-        post_admission.matches(NESTED_SENTINEL).count(),
-        1,
-        "nested instruction bytes appear exactly once: {post_admission}"
-    );
-    assert!(
-        post_admission.contains(&nested_rules),
-        "the nested AGENTS.md body is preserved byte-for-byte: {post_admission}"
+    assert_rehydrated_instruction_context(
+        &context,
+        baseline_model_content,
+        nested_model_content,
+        nested_generation,
     );
 }
 

@@ -794,38 +794,16 @@ impl TranscriptEntry {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ShellRun { component } => component.render(inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
-            Self::Image {
-                id,
-                mime_type,
-                metadata,
-                payload,
-                ..
-            } => render_image_entry(
-                id,
-                mime_type,
-                metadata,
-                payload.as_deref(),
+            Self::Image { .. } => render_image_entry(
+                self,
                 inner_width,
                 theme,
                 image_render_policy,
                 image_capabilities,
             ),
-            Self::Compaction {
-                phase,
-                percent,
-                compacted_message_count,
-                tokens_before,
-                tokens_after,
-            } => render_status::render_compaction(
-                *phase,
-                *percent,
-                *compacted_message_count,
-                *tokens_before,
-                *tokens_after,
-                inner_width,
-                theme,
-                activity_frame,
-            ),
+            Self::Compaction { .. } => {
+                render_status::render_compaction(self, inner_width, theme, activity_frame)
+            }
             Self::GoalCard {
                 kind,
                 objective,
@@ -1022,7 +1000,6 @@ pub(super) fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
         .collect()
 }
 
-#[allow(clippy::too_many_lines)]
 fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let border = Style::default().fg(theme.status_warn);
     let title = Style::default().fg(theme.status_warn).bold();
@@ -1050,6 +1027,41 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         title,
     ));
     rows.push(Line::raw(""));
+    render_approval_body(data, width, theme, body, &mut rows);
+    render_approval_options(data, width, body, muted, selected, &mut rows);
+    if data.queued_count > 0 {
+        let suffix = if data.queued_count == 1 {
+            "approval"
+        } else {
+            "approvals"
+        };
+        rows.extend(styled_wrap_with_indent(
+            &format!("queued: {} {suffix} waiting", data.queued_count),
+            width,
+            2,
+            2,
+            muted,
+        ));
+        rows.push(Line::raw(""));
+    }
+    rows.extend(styled_wrap_with_indent(
+        "  ↑/↓ select · number keys choose · ↵ confirm",
+        width,
+        0,
+        2,
+        muted,
+    ));
+    rows.push(Line::styled(line, border));
+    rows
+}
+
+fn render_approval_body(
+    data: &ApprovalPromptData,
+    width: usize,
+    theme: &TuiTheme,
+    body: Style,
+    rows: &mut Vec<Line>,
+) {
     if let ApprovalPresentation::Edit { edit, .. } = &data.request.presentation {
         rows.extend(super::edit_tool_presentation::render_edit_approval(
             edit,
@@ -1083,7 +1095,16 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.extend(PlanBoxComponent::source(workflow.source.clone(), "lua").render(width, theme));
         rows.push(Line::raw(""));
     }
+}
 
+fn render_approval_options(
+    data: &ApprovalPromptData,
+    width: usize,
+    body: Style,
+    muted: Style,
+    selected: Style,
+    rows: &mut Vec<Line>,
+) {
     for (index, option) in data.request.options.iter().enumerate() {
         let prefix = if data.selected == index {
             "  ▶ "
@@ -1128,30 +1149,6 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.extend(styled_wrap_with_indent(&feedback, width, 2, 4, selected));
         rows.push(Line::raw(""));
     }
-    if data.queued_count > 0 {
-        let suffix = if data.queued_count == 1 {
-            "approval"
-        } else {
-            "approvals"
-        };
-        rows.extend(styled_wrap_with_indent(
-            &format!("queued: {} {suffix} waiting", data.queued_count),
-            width,
-            2,
-            2,
-            muted,
-        ));
-        rows.push(Line::raw(""));
-    }
-    rows.extend(styled_wrap_with_indent(
-        "  ↑/↓ select · number keys choose · ↵ confirm",
-        width,
-        0,
-        2,
-        muted,
-    ));
-    rows.push(Line::styled(line, border));
-    rows
 }
 
 fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String> {
@@ -1273,17 +1270,24 @@ fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme
     component.render_with_theme(width, theme)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_image_entry(
-    id: &str,
-    mime_type: &str,
-    metadata: &str,
-    payload: Option<&[u8]>,
+    entry: &TranscriptEntry,
     width: usize,
     theme: &TuiTheme,
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
 ) -> Vec<Line> {
+    let TranscriptEntry::Image {
+        id,
+        mime_type,
+        metadata,
+        payload,
+        ..
+    } = entry
+    else {
+        return Vec::new();
+    };
+    let payload = payload.as_deref();
     let Some(payload) = payload else {
         return styled_wrap(metadata, width, render_status::status_style(theme));
     };

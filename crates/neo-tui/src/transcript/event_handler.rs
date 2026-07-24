@@ -282,8 +282,10 @@ impl TranscriptPane {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
+        if self.apply_approval_event(event) || self.apply_shell_event(event) {
+            return true;
+        }
         match event {
             AgentEvent::ToolCallStarted { turn, id, name } => {
                 self.transcript.begin_live_model_attempt(*turn);
@@ -336,24 +338,6 @@ impl TranscriptPane {
                 }
                 true
             }
-            AgentEvent::ApprovalRequested { request, .. } => {
-                // Upsert the request exactly — never reconstruct options from
-                // raw arguments or append session/prefix choices. Live chrome
-                // is opened only by the PendingApproval channel, never here.
-                self.upsert_approval(request.clone());
-                self.mark_dirty();
-                true
-            }
-            AgentEvent::ApprovalResolved {
-                request_id,
-                resolution,
-                ..
-            } => {
-                // Resolve the matching card by request id. Canonical label and
-                // action come from the event; interactive feedback is cleared.
-                self.resolve_approval(request_id, resolution);
-                true
-            }
             AgentEvent::ToolExecutionUpdate {
                 turn,
                 id,
@@ -377,6 +361,31 @@ impl TranscriptPane {
                 self.finish_tool_execution(*turn, id.clone(), name.clone(), result.clone());
                 true
             }
+            _ => false,
+        }
+    }
+
+    fn apply_approval_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::ApprovalRequested { request, .. } => {
+                self.upsert_approval(request.clone());
+                self.mark_dirty();
+                true
+            }
+            AgentEvent::ApprovalResolved {
+                request_id,
+                resolution,
+                ..
+            } => {
+                self.resolve_approval(request_id, resolution);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_shell_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
             AgentEvent::ShellCommandStarted {
                 id,
                 command,
@@ -395,12 +404,8 @@ impl TranscriptPane {
                 origin,
                 ..
             } => {
-                match origin {
-                    ShellCommandOrigin::UserShellMode => {
-                        self.queue_user_shell_command(id, command);
-                    }
-                    // Model bash/terminal queue through ToolExecutionQueued.
-                    ShellCommandOrigin::ModelBashTool => {}
+                if matches!(origin, ShellCommandOrigin::UserShellMode) {
+                    self.queue_user_shell_command(id, command);
                 }
                 true
             }
@@ -417,40 +422,10 @@ impl TranscriptPane {
                 }
                 true
             }
-            AgentEvent::ShellCommandFinished {
-                id,
-                exit_code,
-                signal,
-                stdout,
-                stderr,
-                truncated,
-                origin,
-                outcome,
-                ..
-            } => {
+            AgentEvent::ShellCommandFinished { origin, .. } => {
                 match origin {
-                    ShellCommandOrigin::ModelBashTool => {
-                        self.finish_shell_command(
-                            id.clone(),
-                            *exit_code,
-                            *signal,
-                            stdout,
-                            stderr,
-                            *truncated,
-                            outcome,
-                        );
-                    }
-                    ShellCommandOrigin::UserShellMode => {
-                        self.finish_user_shell_command(
-                            id,
-                            *exit_code,
-                            *signal,
-                            stdout,
-                            stderr,
-                            *truncated,
-                            outcome.clone(),
-                        );
-                    }
+                    ShellCommandOrigin::ModelBashTool => self.finish_shell_command(event),
+                    ShellCommandOrigin::UserShellMode => self.finish_user_shell_command(event),
                 }
                 true
             }
@@ -830,61 +805,75 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn finish_shell_command(
-        &mut self,
-        id: String,
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-        stdout: &str,
-        stderr: &str,
-        truncated: bool,
-        outcome: &ShellCommandOutcome,
-    ) {
-        let detail = shell_finished_detail(exit_code, signal, stdout, stderr, truncated, outcome);
-        self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
-        let changed = self.transcript.mutate_tool(&id, |tool| {
-            let is_error = exit_code != Some(0)
+    fn finish_shell_command(&mut self, event: &AgentEvent) {
+        let AgentEvent::ShellCommandFinished {
+            id,
+            exit_code,
+            signal,
+            stdout,
+            stderr,
+            truncated,
+            outcome,
+            ..
+        } = event
+        else {
+            return;
+        };
+        let detail =
+            shell_finished_detail(*exit_code, *signal, stdout, stderr, *truncated, outcome);
+        self.upsert_tool(id, "Bash".to_owned(), None, ToolStatusKind::Running);
+        let changed = self.transcript.mutate_tool(id, |tool| {
+            let is_error = *exit_code != Some(0)
                 || !matches!(
                     outcome,
                     ShellCommandOutcome::Completed | ShellCommandOutcome::Backgrounded { .. }
                 );
-            tool.set_result(Some(detail), None, is_error, exit_code)
+            tool.set_result(Some(detail), None, is_error, *exit_code)
         });
-        self.completed_tool_result_ids.push(id);
+        self.completed_tool_result_ids.push(id.clone());
         if changed {
             self.mark_dirty();
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn finish_user_shell_command(
-        &mut self,
-        id: &str,
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-        stdout: &str,
-        stderr: &str,
-        truncated: bool,
-        outcome: ShellCommandOutcome,
-    ) {
+    fn finish_user_shell_command(&mut self, event: &AgentEvent) {
+        let AgentEvent::ShellCommandFinished {
+            id,
+            exit_code,
+            signal,
+            stdout,
+            stderr,
+            truncated,
+            outcome,
+            ..
+        } = event
+        else {
+            return;
+        };
         let exists = self.transcript.has_shell_run(id);
         let updated_outcome = outcome.clone();
         if self.transcript.mutate_shell_run(id, move |shell_run| {
             shell_run.finish(
                 stdout,
                 stderr,
-                exit_code,
-                signal,
+                *exit_code,
+                *signal,
                 updated_outcome,
-                truncated,
+                *truncated,
             )
         }) {
             self.mark_dirty();
         } else if !exists {
-            self.transcript.push_shell_run(ShellRunComponent::finished(
-                id, "", stdout, stderr, exit_code, signal, outcome, truncated,
-            ));
+            let mut shell_run = ShellRunComponent::running(id, "");
+            shell_run.finish(
+                stdout,
+                stderr,
+                *exit_code,
+                *signal,
+                outcome.clone(),
+                *truncated,
+            );
+            self.transcript.push_shell_run(shell_run);
             self.mark_dirty();
         }
     }

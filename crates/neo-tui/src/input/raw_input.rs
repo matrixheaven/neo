@@ -1166,7 +1166,6 @@ pub fn is_key_repeat(data: &str) -> bool {
 ///
 /// Returns a normalized key id like `"ctrl+c"`, `"shift+enter"`, `"up"`, etc.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn parse_key(data: &str) -> Option<String> {
     // Kitty CSI-u sequences
     if let Some(kitty) = parse_kitty_sequence(data) {
@@ -1188,66 +1187,8 @@ pub fn parse_key(data: &str) -> Option<String> {
         return Some(id.to_owned());
     }
 
-    // Individual legacy sequences
-    if data == "\x1b" {
-        return Some("escape".to_owned());
-    }
-    if data == "\x1c" {
-        return Some("ctrl+\\".to_owned());
-    }
-    if data == "\x1d" {
-        return Some("ctrl+]".to_owned());
-    }
-    if data == "\x1f" {
-        return Some("ctrl+-".to_owned());
-    }
-    if data == "\x1b\x1b" {
-        return Some("ctrl+alt+[".to_owned());
-    }
-    if data == "\x1b\x1c" {
-        return Some("ctrl+alt+\\".to_owned());
-    }
-    if data == "\x1b\x1d" {
-        return Some("ctrl+alt+]".to_owned());
-    }
-    if data == "\x1b\x1f" {
-        return Some("ctrl+alt+-".to_owned());
-    }
-    if data == "\t" {
-        return Some("tab".to_owned());
-    }
-    if data == "\r" || (!is_kitty_protocol_active() && data == "\n") || data == "\x1bOM" {
-        return Some("enter".to_owned());
-    }
-    if data == "\x00" {
-        return Some("ctrl+space".to_owned());
-    }
-    if data == " " {
-        return Some("space".to_owned());
-    }
-    if data == "\x7f" {
-        return Some("backspace".to_owned());
-    }
-    if data == "\x08" {
-        return Some("backspace".to_owned());
-    }
-    if data == "\x1b[Z" {
-        return Some("shift+tab".to_owned());
-    }
-    if !is_kitty_protocol_active() && data == "\x1b\r" {
-        return Some("alt+enter".to_owned());
-    }
-    if !is_kitty_protocol_active() && data == "\x1b " {
-        return Some("alt+space".to_owned());
-    }
-    if data == "\x1b\x7f" || data == "\x1b\x08" {
-        return Some("alt+backspace".to_owned());
-    }
-    if !is_kitty_protocol_active() && data == "\x1bB" {
-        return Some("alt+left".to_owned());
-    }
-    if !is_kitty_protocol_active() && data == "\x1bF" {
-        return Some("alt+right".to_owned());
+    if let Some(id) = individual_legacy_key_id(data) {
+        return Some(id.to_owned());
     }
 
     // ESC + single char (2 bytes)
@@ -1259,35 +1200,6 @@ pub fn parse_key(data: &str) -> Option<String> {
         if code.is_ascii_alphabetic() || (48..=57).contains(&code) {
             return Some(format!("alt+{}", char::from(code.to_ascii_lowercase())));
         }
-    }
-
-    // Additional legacy sequences
-    if data == "\x1b[A" {
-        return Some("up".to_owned());
-    }
-    if data == "\x1b[B" {
-        return Some("down".to_owned());
-    }
-    if data == "\x1b[C" {
-        return Some("right".to_owned());
-    }
-    if data == "\x1b[D" {
-        return Some("left".to_owned());
-    }
-    if data == "\x1b[H" || data == "\x1bOH" {
-        return Some("home".to_owned());
-    }
-    if data == "\x1b[F" || data == "\x1bOF" {
-        return Some("end".to_owned());
-    }
-    if data == "\x1b[3~" {
-        return Some("delete".to_owned());
-    }
-    if data == "\x1b[5~" {
-        return Some("pageUp".to_owned());
-    }
-    if data == "\x1b[6~" {
-        return Some("pageDown".to_owned());
     }
 
     // Raw Ctrl+letter
@@ -1314,6 +1226,41 @@ pub fn parse_key(data: &str) -> Option<String> {
     None
 }
 
+fn individual_legacy_key_id(data: &str) -> Option<&'static str> {
+    match data {
+        "\x1b" => Some("escape"),
+        "\x1c" => Some("ctrl+\\"),
+        "\x1d" => Some("ctrl+]"),
+        "\x1f" => Some("ctrl+-"),
+        "\x1b\x1b" => Some("ctrl+alt+["),
+        "\x1b\x1c" => Some("ctrl+alt+\\"),
+        "\x1b\x1d" => Some("ctrl+alt+]"),
+        "\x1b\x1f" => Some("ctrl+alt+-"),
+        "\t" => Some("tab"),
+        "\r" | "\x1bOM" => Some("enter"),
+        "\n" if !is_kitty_protocol_active() => Some("enter"),
+        "\x00" => Some("ctrl+space"),
+        " " => Some("space"),
+        "\x7f" | "\x08" => Some("backspace"),
+        "\x1b[Z" => Some("shift+tab"),
+        "\x1b\r" if !is_kitty_protocol_active() => Some("alt+enter"),
+        "\x1b " if !is_kitty_protocol_active() => Some("alt+space"),
+        "\x1b\x7f" | "\x1b\x08" => Some("alt+backspace"),
+        "\x1bB" if !is_kitty_protocol_active() => Some("alt+left"),
+        "\x1bF" if !is_kitty_protocol_active() => Some("alt+right"),
+        "\x1b[A" => Some("up"),
+        "\x1b[B" => Some("down"),
+        "\x1b[C" => Some("right"),
+        "\x1b[D" => Some("left"),
+        "\x1b[H" | "\x1bOH" => Some("home"),
+        "\x1b[F" | "\x1bOF" => Some("end"),
+        "\x1b[3~" => Some("delete"),
+        "\x1b[5~" => Some("pageUp"),
+        "\x1b[6~" => Some("pageDown"),
+        _ => None,
+    }
+}
+
 // ===========================================================================
 // matches_key — port of matchesKey()
 // ===========================================================================
@@ -1334,7 +1281,6 @@ fn parse_key_id(key_id: &str) -> Option<(String, bool, bool, bool, bool)> {
 
 /// Check if input data matches a key identifier string.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn matches_key(data: &str, key_id: &str) -> bool {
     let Some((key, ctrl, shift, alt, super_mod)) = parse_key_id(key_id) else {
         return false;
@@ -1355,6 +1301,22 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
     }
 
     match key.as_str() {
+        "escape" | "esc" | "space" | "tab" => matches_basic_key(data, &key, modifier),
+        "enter" | "return" => matches_enter_key(data, modifier),
+        "backspace" => matches_backspace_key(data, modifier),
+        "insert" | "delete" | "clear" | "home" | "end" | "pageup" | "pagedown" => {
+            matches_navigation_key(data, &key, modifier)
+        }
+        "up" | "down" | "left" | "right" => matches_arrow_key(data, &key, modifier),
+        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
+            modifier == 0 && matches_legacy_sequence(data, legacy_key_sequences(&key))
+        }
+        _ => matches_printable_key(data, &key, modifier),
+    }
+}
+
+fn matches_basic_key(data: &str, key: &str, modifier: u32) -> bool {
+    match key {
         "escape" | "esc" => {
             if modifier != 0 {
                 return false;
@@ -1395,69 +1357,77 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
                 || matches_modify_other_keys(data, CP_TAB, modifier)
         }
 
-        "enter" | "return" => match modifier {
-            MOD_SHIFT => {
-                if matches_kitty_sequence(data, CP_ENTER, MOD_SHIFT)
-                    || matches_kitty_sequence(data, CP_KP_ENTER, MOD_SHIFT)
-                    || matches_modify_other_keys(data, CP_ENTER, MOD_SHIFT)
-                {
-                    return true;
-                }
-                if is_kitty_protocol_active() {
-                    return data == "\x1b\r" || data == "\n";
-                }
-                false
-            }
-            MOD_ALT => {
-                if matches_kitty_sequence(data, CP_ENTER, MOD_ALT)
-                    || matches_kitty_sequence(data, CP_KP_ENTER, MOD_ALT)
-                    || matches_modify_other_keys(data, CP_ENTER, MOD_ALT)
-                {
-                    return true;
-                }
-                if !is_kitty_protocol_active() {
-                    return data == "\x1b\r";
-                }
-                false
-            }
-            0 => {
-                data == "\r"
-                    || (!is_kitty_protocol_active() && data == "\n")
-                    || data == "\x1bOM"
-                    || matches_kitty_sequence(data, CP_ENTER, 0)
-                    || matches_kitty_sequence(data, CP_KP_ENTER, 0)
-            }
-            _ => {
-                matches_kitty_sequence(data, CP_ENTER, modifier)
-                    || matches_kitty_sequence(data, CP_KP_ENTER, modifier)
-                    || matches_modify_other_keys(data, CP_ENTER, modifier)
-            }
-        },
+        _ => false,
+    }
+}
 
-        "backspace" => {
-            if modifier == MOD_ALT {
-                if data == "\x1b\x7f" || data == "\x1b\x08" {
-                    return true;
-                }
-                return matches_kitty_sequence(data, CP_BACKSPACE, MOD_ALT)
-                    || matches_modify_other_keys(data, CP_BACKSPACE, MOD_ALT);
+fn matches_enter_key(data: &str, modifier: u32) -> bool {
+    match modifier {
+        MOD_SHIFT => {
+            if matches_kitty_sequence(data, CP_ENTER, MOD_SHIFT)
+                || matches_kitty_sequence(data, CP_KP_ENTER, MOD_SHIFT)
+                || matches_modify_other_keys(data, CP_ENTER, MOD_SHIFT)
+            {
+                return true;
             }
-            if modifier == MOD_CTRL {
-                if matches_raw_backspace(data, MOD_CTRL) {
-                    return true;
-                }
-                return matches_kitty_sequence(data, CP_BACKSPACE, MOD_CTRL)
-                    || matches_modify_other_keys(data, CP_BACKSPACE, MOD_CTRL);
+            if is_kitty_protocol_active() {
+                return data == "\x1b\r" || data == "\n";
             }
-            if modifier == 0 {
-                return matches_raw_backspace(data, 0)
-                    || matches_kitty_sequence(data, CP_BACKSPACE, 0)
-                    || matches_modify_other_keys(data, CP_BACKSPACE, 0);
-            }
-            matches_kitty_sequence(data, CP_BACKSPACE, modifier)
-                || matches_modify_other_keys(data, CP_BACKSPACE, modifier)
+            false
         }
+        MOD_ALT => {
+            if matches_kitty_sequence(data, CP_ENTER, MOD_ALT)
+                || matches_kitty_sequence(data, CP_KP_ENTER, MOD_ALT)
+                || matches_modify_other_keys(data, CP_ENTER, MOD_ALT)
+            {
+                return true;
+            }
+            if !is_kitty_protocol_active() {
+                return data == "\x1b\r";
+            }
+            false
+        }
+        0 => {
+            data == "\r"
+                || (!is_kitty_protocol_active() && data == "\n")
+                || data == "\x1bOM"
+                || matches_kitty_sequence(data, CP_ENTER, 0)
+                || matches_kitty_sequence(data, CP_KP_ENTER, 0)
+        }
+        _ => {
+            matches_kitty_sequence(data, CP_ENTER, modifier)
+                || matches_kitty_sequence(data, CP_KP_ENTER, modifier)
+                || matches_modify_other_keys(data, CP_ENTER, modifier)
+        }
+    }
+}
 
+fn matches_backspace_key(data: &str, modifier: u32) -> bool {
+    if modifier == MOD_ALT {
+        if data == "\x1b\x7f" || data == "\x1b\x08" {
+            return true;
+        }
+        return matches_kitty_sequence(data, CP_BACKSPACE, MOD_ALT)
+            || matches_modify_other_keys(data, CP_BACKSPACE, MOD_ALT);
+    }
+    if modifier == MOD_CTRL {
+        if matches_raw_backspace(data, MOD_CTRL) {
+            return true;
+        }
+        return matches_kitty_sequence(data, CP_BACKSPACE, MOD_CTRL)
+            || matches_modify_other_keys(data, CP_BACKSPACE, MOD_CTRL);
+    }
+    if modifier == 0 {
+        return matches_raw_backspace(data, 0)
+            || matches_kitty_sequence(data, CP_BACKSPACE, 0)
+            || matches_modify_other_keys(data, CP_BACKSPACE, 0);
+    }
+    matches_kitty_sequence(data, CP_BACKSPACE, modifier)
+        || matches_modify_other_keys(data, CP_BACKSPACE, modifier)
+}
+
+fn matches_navigation_key(data: &str, key: &str, modifier: u32) -> bool {
+    match key {
         "insert" => {
             if modifier == 0 {
                 return matches_legacy_sequence(data, legacy_key_sequences("insert"))
@@ -1518,7 +1488,12 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
             matches_legacy_modifier_sequence(data, "pageDown", modifier)
                 || matches_kitty_sequence(data, CP_PAGE_DOWN, modifier)
         }
+        _ => false,
+    }
+}
 
+fn matches_arrow_key(data: &str, key: &str, modifier: u32) -> bool {
+    match key {
         "up" => {
             if modifier == MOD_ALT {
                 return data == "\x1bp"
@@ -1592,82 +1567,62 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
             matches_legacy_modifier_sequence(data, "right", modifier)
                 || matches_kitty_sequence(data, CP_RIGHT, modifier)
         }
-
-        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
-            if modifier != 0 {
-                return false;
-            }
-            matches_legacy_sequence(data, legacy_key_sequences(&key))
-        }
-
-        _ => {
-            // Handle single letter/digit keys and symbols
-            let Some(c) = key.chars().next() else {
-                return false;
-            };
-            let codepoint = c as i32;
-            let is_letter = c.is_ascii_lowercase();
-            let is_digit = c.is_ascii_digit();
-
-            if !(is_letter || is_digit || is_symbol_key(c)) {
-                return false;
-            }
-
-            let raw_ctrl = raw_ctrl_char(&key);
-
-            // Legacy: ctrl+alt+key = ESC + control character
-            if modifier == MOD_CTRL + MOD_ALT
-                && !is_kitty_protocol_active()
-                && let Some(rc) = raw_ctrl
-            {
-                let expected = format!("\x1b{rc}");
-                if data == expected {
-                    return true;
-                }
-            }
-
-            // Legacy: alt+letter/digit = ESC + key
-            if modifier == MOD_ALT && !is_kitty_protocol_active() && (is_letter || is_digit) {
-                let expected = format!("\x1b{c}");
-                if data == expected {
-                    return true;
-                }
-            }
-
-            if modifier == MOD_CTRL {
-                if let Some(rc) = raw_ctrl
-                    && data == rc.to_string()
-                {
-                    return true;
-                }
-                return matches_kitty_sequence(data, codepoint, MOD_CTRL)
-                    || matches_printable_modify_other_keys(data, codepoint, MOD_CTRL);
-            }
-
-            if modifier == MOD_SHIFT + MOD_CTRL {
-                return matches_kitty_sequence(data, codepoint, MOD_SHIFT + MOD_CTRL)
-                    || matches_printable_modify_other_keys(data, codepoint, MOD_SHIFT + MOD_CTRL);
-            }
-
-            if modifier == MOD_SHIFT {
-                if is_letter {
-                    let upper = c.to_ascii_uppercase();
-                    if data == upper.to_string() {
-                        return true;
-                    }
-                }
-                return matches_kitty_sequence(data, codepoint, MOD_SHIFT)
-                    || matches_printable_modify_other_keys(data, codepoint, MOD_SHIFT);
-            }
-
-            if modifier != 0 {
-                return matches_kitty_sequence(data, codepoint, modifier)
-                    || matches_printable_modify_other_keys(data, codepoint, modifier);
-            }
-
-            data == key || matches_kitty_sequence(data, codepoint, 0)
-        }
+        _ => false,
     }
+}
+
+fn matches_printable_key(data: &str, key: &str, modifier: u32) -> bool {
+    let Some(c) = key.chars().next() else {
+        return false;
+    };
+    let codepoint = c as i32;
+    let is_letter = c.is_ascii_lowercase();
+    let is_digit = c.is_ascii_digit();
+
+    if !(is_letter || is_digit || is_symbol_key(c)) {
+        return false;
+    }
+
+    let raw_ctrl = raw_ctrl_char(key);
+    if modifier == MOD_CTRL + MOD_ALT
+        && !is_kitty_protocol_active()
+        && let Some(rc) = raw_ctrl
+        && data == format!("\x1b{rc}")
+    {
+        return true;
+    }
+    if modifier == MOD_ALT
+        && !is_kitty_protocol_active()
+        && (is_letter || is_digit)
+        && data == format!("\x1b{c}")
+    {
+        return true;
+    }
+    if modifier == MOD_CTRL {
+        if let Some(rc) = raw_ctrl
+            && data == rc.to_string()
+        {
+            return true;
+        }
+        return matches_kitty_sequence(data, codepoint, MOD_CTRL)
+            || matches_printable_modify_other_keys(data, codepoint, MOD_CTRL);
+    }
+    if modifier == MOD_SHIFT + MOD_CTRL {
+        return matches_kitty_sequence(data, codepoint, MOD_SHIFT + MOD_CTRL)
+            || matches_printable_modify_other_keys(data, codepoint, MOD_SHIFT + MOD_CTRL);
+    }
+    if modifier == MOD_SHIFT {
+        if is_letter && data == c.to_ascii_uppercase().to_string() {
+            return true;
+        }
+        return matches_kitty_sequence(data, codepoint, MOD_SHIFT)
+            || matches_printable_modify_other_keys(data, codepoint, MOD_SHIFT);
+    }
+    if modifier != 0 {
+        return matches_kitty_sequence(data, codepoint, modifier)
+            || matches_printable_modify_other_keys(data, codepoint, modifier);
+    }
+    data == key || matches_kitty_sequence(data, codepoint, 0)
 }
 
 // ===========================================================================

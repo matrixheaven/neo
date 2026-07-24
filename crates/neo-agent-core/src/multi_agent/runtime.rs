@@ -216,15 +216,15 @@ impl MultiAgentRuntime {
         context: DelegateContext,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(
+        self.create_delegate(DelegateCreation {
             task,
             title,
             role,
             mode,
             context,
             path,
-            AgentLifecycleState::Running,
-        )
+            lifecycle_state: AgentLifecycleState::Running,
+        })
     }
 
     #[must_use]
@@ -237,28 +237,27 @@ impl MultiAgentRuntime {
         context: DelegateContext,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(
+        self.create_delegate(DelegateCreation {
             task,
             title,
             role,
             mode,
             context,
             path,
-            AgentLifecycleState::Queued,
-        )
+            lifecycle_state: AgentLifecycleState::Queued,
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn create_delegate(
-        &self,
-        task: &str,
-        title: Option<&str>,
-        role: AgentRole,
-        mode: AgentRunMode,
-        context: DelegateContext,
-        path: AgentPathKind<'_>,
-        lifecycle_state: AgentLifecycleState,
-    ) -> AgentSnapshot {
+    fn create_delegate(&self, creation: DelegateCreation<'_>) -> AgentSnapshot {
+        let DelegateCreation {
+            task,
+            title,
+            role,
+            mode,
+            context,
+            path,
+            lifecycle_state,
+        } = creation;
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let display_name: AgentDisplayName = state.names.next_name();
         let id = AgentId::new();
@@ -1136,6 +1135,183 @@ struct AgentSnapshotSeed<'a> {
     title: Option<&'a str>,
 }
 
+struct DelegateCreation<'a> {
+    task: &'a str,
+    title: Option<&'a str>,
+    role: AgentRole,
+    mode: AgentRunMode,
+    context: DelegateContext,
+    path: AgentPathKind<'a>,
+    lifecycle_state: AgentLifecycleState,
+}
+
+fn apply_child_progress_event(
+    snapshot: &mut AgentSnapshot,
+    attempt_start: &mut usize,
+    event: &AgentEvent,
+) -> bool {
+    match event {
+        AgentEvent::RetryScheduled { .. }
+        | AgentEvent::RetryStarted { .. }
+        | AgentEvent::RetryResumed { .. }
+        | AgentEvent::RetryExhausted { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::TurnFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        }
+        | AgentEvent::RunFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        } => apply_retry_activity(&mut snapshot.activity, attempt_start, event).is_some_and(
+            |(changed, latest_text)| {
+                if changed {
+                    snapshot.latest_text = latest_text;
+                }
+                changed
+            },
+        ),
+        AgentEvent::ToolExecutionQueued { .. }
+        | AgentEvent::ToolExecutionQueueUpdated { .. }
+        | AgentEvent::ToolExecutionStarted { .. }
+        | AgentEvent::ToolExecutionFinished { .. }
+        | AgentEvent::ToolExecutionUpdate { .. } => apply_live_tool_event(snapshot, event),
+        AgentEvent::TextDelta { text, .. } => {
+            push_text_activity(snapshot, *attempt_start, text, false);
+            true
+        }
+        AgentEvent::ThinkingDelta { text, .. } => {
+            push_text_activity(snapshot, *attempt_start, text, true);
+            true
+        }
+        AgentEvent::MessageAppended {
+            message: AgentMessage::Assistant { content, .. },
+        } => apply_assistant_message(snapshot, *attempt_start, content),
+        AgentEvent::TokenUsage { usage, .. } => {
+            snapshot.token_count = snapshot
+                .token_count
+                .saturating_add((usage.input_tokens + usage.output_tokens) as usize);
+            snapshot.cache_read_token_count = snapshot
+                .cache_read_token_count
+                .saturating_add(usage.input_cache_read_tokens as usize);
+            snapshot.cache_write_token_count = snapshot
+                .cache_write_token_count
+                .saturating_add(usage.input_cache_write_tokens as usize);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn apply_assistant_message(
+    snapshot: &mut AgentSnapshot,
+    attempt_start: usize,
+    content: &[Content],
+) -> bool {
+    let text = content_text(content);
+    if text.trim().is_empty() {
+        return false;
+    }
+    let canonical_text = bounded_latest_text(&text);
+    snapshot.latest_text = Some(canonical_text.clone());
+    if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
+        != Some(canonical_text.as_str())
+    {
+        push_text_activity(snapshot, attempt_start, &text, false);
+    }
+    true
+}
+
+fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bool {
+    match event {
+        AgentEvent::ToolExecutionQueued {
+            id,
+            name,
+            arguments,
+            ..
+        } => upsert_queued_tool_activity(
+            &mut snapshot.activity,
+            id,
+            name,
+            summarize_tool_arguments(name, arguments),
+            now_ms(),
+        ),
+        AgentEvent::ToolExecutionQueueUpdated {
+            id,
+            position,
+            waiting_ms,
+            ..
+        } => update_queued_tool_activity(
+            &mut snapshot.activity,
+            id,
+            *position,
+            now_ms().saturating_sub(*waiting_ms),
+        ),
+        AgentEvent::ToolExecutionStarted {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
+            upsert_tool_activity(
+                &mut snapshot.activity,
+                id,
+                name,
+                summarize_tool_arguments(name, arguments),
+                AgentToolActivityPhase::Ongoing,
+                None,
+            );
+            true
+        }
+        AgentEvent::ToolExecutionFinished {
+            id, name, result, ..
+        } => {
+            snapshot.tool_count = snapshot.tool_count.saturating_add(1);
+            let phase = if result.is_error {
+                AgentToolActivityPhase::Failed
+            } else {
+                AgentToolActivityPhase::Done
+            };
+            let summary = result
+                .details
+                .as_ref()
+                .and_then(summarize_batch_tool_details)
+                .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+            upsert_tool_activity(
+                &mut snapshot.activity,
+                id,
+                name,
+                summary,
+                phase,
+                tool_output_preview(name, result, false),
+            );
+            true
+        }
+        AgentEvent::ToolExecutionUpdate {
+            id,
+            name,
+            partial_result,
+            ..
+        } => {
+            let summary = partial_result
+                .details
+                .as_ref()
+                .and_then(summarize_batch_tool_details)
+                .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+            upsert_tool_activity(
+                &mut snapshot.activity,
+                id,
+                name,
+                summary,
+                AgentToolActivityPhase::Ongoing,
+                tool_output_preview(name, partial_result, true),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
     let now = now_ms();
     let terminal_reason = seed
@@ -1414,7 +1590,6 @@ impl MultiAgentRuntime {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn apply_child_event(
         &self,
         id: &AgentId,
@@ -1439,155 +1614,7 @@ impl MultiAgentRuntime {
         let attempt_start = retry_activity_starts
             .entry(id.as_str().to_owned())
             .or_insert(snapshot.activity.len());
-        let mut changed = false;
-        match event {
-            AgentEvent::RetryScheduled { .. }
-            | AgentEvent::RetryStarted { .. }
-            | AgentEvent::RetryResumed { .. }
-            | AgentEvent::RetryExhausted { .. }
-            | AgentEvent::Error { .. }
-            | AgentEvent::TurnFinished {
-                stop_reason: StopReason::Cancelled,
-                ..
-            }
-            | AgentEvent::RunFinished {
-                stop_reason: StopReason::Cancelled,
-                ..
-            } => {
-                if let Some((retry_changed, latest_text)) =
-                    apply_retry_activity(&mut snapshot.activity, attempt_start, event)
-                {
-                    changed = retry_changed;
-                    if retry_changed {
-                        snapshot.latest_text = latest_text;
-                    }
-                }
-            }
-            AgentEvent::ToolExecutionQueued {
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                changed = upsert_queued_tool_activity(
-                    &mut snapshot.activity,
-                    id,
-                    name,
-                    summarize_tool_arguments(name, arguments),
-                    now_ms(),
-                );
-            }
-            AgentEvent::ToolExecutionQueueUpdated {
-                id,
-                position,
-                waiting_ms,
-                ..
-            } => {
-                changed = update_queued_tool_activity(
-                    &mut snapshot.activity,
-                    id,
-                    *position,
-                    now_ms().saturating_sub(*waiting_ms),
-                );
-            }
-            AgentEvent::ToolExecutionStarted {
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                changed = true;
-                upsert_tool_activity(
-                    &mut snapshot.activity,
-                    id,
-                    name,
-                    summarize_tool_arguments(name, arguments),
-                    AgentToolActivityPhase::Ongoing,
-                    None,
-                );
-            }
-            AgentEvent::ToolExecutionFinished {
-                id, name, result, ..
-            } => {
-                changed = true;
-                snapshot.tool_count = snapshot.tool_count.saturating_add(1);
-                let phase = if result.is_error {
-                    AgentToolActivityPhase::Failed
-                } else {
-                    AgentToolActivityPhase::Done
-                };
-                let summary = result
-                    .details
-                    .as_ref()
-                    .and_then(summarize_batch_tool_details)
-                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
-                upsert_tool_activity(
-                    &mut snapshot.activity,
-                    id,
-                    name,
-                    summary,
-                    phase,
-                    tool_output_preview(name, result, false),
-                );
-            }
-            AgentEvent::ToolExecutionUpdate {
-                id,
-                name,
-                partial_result,
-                ..
-            } => {
-                changed = true;
-                let summary = partial_result
-                    .details
-                    .as_ref()
-                    .and_then(summarize_batch_tool_details)
-                    .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
-                upsert_tool_activity(
-                    &mut snapshot.activity,
-                    id,
-                    name,
-                    summary,
-                    AgentToolActivityPhase::Ongoing,
-                    tool_output_preview(name, partial_result, true),
-                );
-            }
-            AgentEvent::TextDelta { text, .. } => {
-                changed = true;
-                push_text_activity(snapshot, *attempt_start, text, false);
-            }
-            AgentEvent::ThinkingDelta { text, .. } => {
-                changed = true;
-                push_text_activity(snapshot, *attempt_start, text, true);
-            }
-            AgentEvent::MessageAppended {
-                message: AgentMessage::Assistant { content, .. },
-            } => {
-                let text = content_text(content);
-                if !text.trim().is_empty() {
-                    changed = true;
-                    let canonical_text = bounded_latest_text(&text);
-                    snapshot.latest_text = Some(canonical_text.clone());
-                    if latest_text_activity(snapshot.activity.as_slice(), false).as_deref()
-                        != Some(canonical_text.as_str())
-                    {
-                        push_text_activity(snapshot, *attempt_start, &text, false);
-                    }
-                }
-            }
-            AgentEvent::TokenUsage { usage, .. } => {
-                changed = true;
-                snapshot.token_count = snapshot
-                    .token_count
-                    .saturating_add((usage.input_tokens + usage.output_tokens) as usize);
-                snapshot.cache_read_token_count = snapshot
-                    .cache_read_token_count
-                    .saturating_add(usage.input_cache_read_tokens as usize);
-                snapshot.cache_write_token_count = snapshot
-                    .cache_write_token_count
-                    .saturating_add(usage.input_cache_write_tokens as usize);
-            }
-            _ => {}
-        }
+        let changed = apply_child_progress_event(snapshot, attempt_start, event);
         if matches!(
             event,
             AgentEvent::MessageAppended {

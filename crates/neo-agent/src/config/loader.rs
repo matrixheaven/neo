@@ -54,7 +54,6 @@ fn process_shell_runtime_root(runtime_dir: &Path) -> PathBuf {
 }
 
 impl AppConfig {
-    #[allow(clippy::too_many_lines)]
     pub fn load(overrides: ConfigOverrides) -> anyhow::Result<Self> {
         // There is exactly one config file: `~/.neo/config.toml` (or wherever
         // `NEO_HOME` points). There is no project-local config anymore —
@@ -119,16 +118,7 @@ impl AppConfig {
         validate_runtime_config(&runtime)?;
         let workflow_runtime =
             neo_agent_core::workflow::WorkflowRuntime::new(runtime.workflow.clone());
-        let runtime_dir = config_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", config_path.display()))?
-            .join("runtime");
-        let runtime_root = process_shell_runtime_root(&runtime_dir);
-        runtime.shell_runtime = ShellRuntime::new(
-            runtime.shell,
-            env::current_exe().context("failed to resolve Neo executable for shell guardian")?,
-            runtime_root,
-        );
+        configure_shell_runtime(&mut runtime, &config_path)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
         let theme = themes::resolve_theme()?;
@@ -171,6 +161,19 @@ impl AppConfig {
             config_path,
         })
     }
+}
+
+fn configure_shell_runtime(runtime: &mut RuntimeConfig, config_path: &Path) -> anyhow::Result<()> {
+    let runtime_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", config_path.display()))?
+        .join("runtime");
+    runtime.shell_runtime = ShellRuntime::new(
+        runtime.shell,
+        env::current_exe().context("failed to resolve Neo executable for shell guardian")?,
+        process_shell_runtime_root(&runtime_dir),
+    );
+    Ok(())
 }
 
 fn resolve_project_trust_state(

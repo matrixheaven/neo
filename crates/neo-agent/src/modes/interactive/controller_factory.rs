@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::{
-    AppConfig, ContextWindow, InputResult, InteractiveController, KeybindingsManager,
-    SelectedModel, SessionForker, SessionLoader, TurnDriver, TurnOutcome,
+    AppConfig, ContextWindow, ControllerCallbacks, InputResult, InteractiveController,
+    KeybindingsManager, SelectedModel, SessionForker, SessionLoader, TurnDriver, TurnOutcome,
     context_window_from_picker_item, fork_session_transcript, load_session_transcript, neo_home,
     picker_catalogs_for_config, resources, workspace_sessions_dir,
 };
@@ -16,7 +16,56 @@ use super::{ForkedSessionTranscript, LoadedSessionTranscript};
 #[cfg(test)]
 use std::future::{Ready, ready};
 
-#[allow(clippy::too_many_lines)]
+fn controller_callbacks(config: &AppConfig) -> ControllerCallbacks {
+    let run_config = config.clone();
+    let run_turn: TurnDriver = Arc::new(move |mut request, channels| {
+        // Prefer the live config snapshot from the dispatching controller so
+        // providers/models added at runtime resolve without rebuilding it.
+        let mut effective_config = request
+            .base_config
+            .take()
+            .unwrap_or_else(|| run_config.clone());
+        Box::pin(async move {
+            if let Some(model) = request.model.take() {
+                effective_config.default_provider = model.provider;
+                effective_config.default_model = model.alias;
+            }
+            effective_config.runtime.reasoning = request.reasoning.clone();
+            effective_config.permission_mode = request.permission_mode;
+            effective_config.live_permission_mode = Arc::clone(&request.live_permission_mode);
+            effective_config.workspace_policy = Arc::clone(&request.workspace_policy);
+            let turn = if let Some(session_id) = request.session_id.clone() {
+                crate::modes::run::run_prompt_in_session_streaming(
+                    &session_id,
+                    request,
+                    channels,
+                    &effective_config,
+                )
+                .await?
+            } else {
+                crate::modes::run::run_prompt_streaming(request, channels, &effective_config)
+                    .await?
+            };
+            Ok(TurnOutcome::session(turn.session_id))
+        })
+    });
+    let load_config = config.clone();
+    let load_session: SessionLoader = Arc::new(move |session_id| {
+        let config = load_config.clone();
+        Box::pin(async move { load_session_transcript(session_id, &config).await })
+    });
+    let fork_config = config.clone();
+    let fork_session: SessionForker = Arc::new(move |session_id| {
+        let config = fork_config.clone();
+        Box::pin(async move { fork_session_transcript(session_id, &config).await })
+    });
+    ControllerCallbacks {
+        run_turn,
+        load_session,
+        fork_session,
+    }
+}
+
 pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let catalogs = picker_catalogs_for_config(config);
     let registry = crate::modes::run::model_registry_for_config(config).ok();
@@ -39,89 +88,13 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         config.default_provider.clone_from(&model.provider.0);
         config.default_model.clone_from(&model.model);
     }
-    let run_config = config.clone();
-    let run_turn: TurnDriver = Arc::new(move |request, channels| {
-        // Prefer the live config snapshot from the dispatching controller so
-        // providers/models added at runtime (e.g. via `/provider`) resolve;
-        // fall back to the startup snapshot for safety.
-        let mut effective_config = request.base_config.unwrap_or_else(|| run_config.clone());
-        Box::pin(async move {
-            if let Some(model) = request.model {
-                effective_config.default_provider = model.provider;
-                effective_config.default_model = model.alias;
-            }
-            effective_config.runtime.reasoning = request.reasoning;
-            effective_config.permission_mode = request.permission_mode;
-            effective_config.live_permission_mode = Arc::clone(&request.live_permission_mode);
-            effective_config.workspace_policy = Arc::clone(&request.workspace_policy);
-            if let Some(session_id) = request.session_id {
-                let turn = crate::modes::run::run_prompt_in_session_streaming(
-                    &session_id,
-                    &request.prompt,
-                    request.prompt_origin.clone(),
-                    request.prompt_display_text.clone(),
-                    &effective_config,
-                    channels.events,
-                    channels.approvals,
-                    Some(channels.session_ids),
-                    channels.cancel_token,
-                    Some(channels.questions),
-                    request.skill_context.clone(),
-                    Some(Arc::clone(&request.plan_mode)),
-                    request.goal_mode_authoring,
-                    channels.steer_input,
-                    request.mcp_manager.clone(),
-                    Arc::clone(&request.manual_compact_request),
-                    request.instruction_registry,
-                    request.compaction_only,
-                )
-                .await?;
-                Ok(TurnOutcome::session(turn.session_id))
-            } else {
-                let turn = crate::modes::run::run_prompt_streaming(
-                    &request.prompt,
-                    request.prompt_origin.clone(),
-                    request.prompt_display_text.clone(),
-                    &effective_config,
-                    channels.events,
-                    channels.approvals,
-                    Some(channels.session_ids),
-                    channels.cancel_token,
-                    Some(channels.questions),
-                    request.skill_context.clone(),
-                    Some(Arc::clone(&request.plan_mode)),
-                    request.goal_mode_authoring,
-                    channels.steer_input,
-                    request.mcp_manager.clone(),
-                    Arc::clone(&request.manual_compact_request),
-                    request.instruction_registry,
-                    request.compaction_only,
-                )
-                .await?;
-                Ok(TurnOutcome::session(turn.session_id))
-            }
-        })
-    });
-    let load_config = config.clone();
-    let load_session: SessionLoader = Arc::new(move |session_id| {
-        let config = load_config.clone();
-        Box::pin(async move { load_session_transcript(session_id, &config).await })
-    });
-    let fork_config = config.clone();
-    let fork_session: SessionForker = Arc::new(move |session_id| {
-        let config = fork_config.clone();
-        Box::pin(async move { fork_session_transcript(session_id, &config).await })
-    });
-
     let mut controller = InteractiveController::new(
         "neo",
         "new",
         config.default_model_label(),
         config.project_dir.clone(),
-        run_turn,
         catalogs,
-        load_session,
-        fork_session,
+        controller_callbacks(&config),
     );
     let mut keybindings = KeybindingsManager::default();
     keybindings.set_user_bindings(

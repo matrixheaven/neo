@@ -72,35 +72,6 @@ impl ShellRunComponent {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn finished(
-        id: impl Into<String>,
-        command: impl Into<String>,
-        stdout: impl Into<String>,
-        stderr: impl Into<String>,
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-        outcome: ShellCommandOutcome,
-        truncated: bool,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            command: command.into(),
-            state: ShellRunState::Finished {
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-                exit_code,
-                signal,
-                outcome,
-                truncated,
-            },
-            live_output: Vec::new(),
-            dropped_live_output_lines: 0,
-            live_output_chars: 0,
-        }
-    }
-
-    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -261,21 +232,9 @@ impl ShellRunComponent {
                 rows.extend(wrap_output_lines(&self.live_output, width, muted_style));
                 rows.push(Line::styled("  ctrl+b to background", muted_style));
             }
-            ShellRunState::Finished {
-                stdout,
-                stderr,
-                exit_code,
-                signal,
-                outcome,
-                truncated,
-            } => {
+            state @ ShellRunState::Finished { .. } => {
                 rows.extend(render_finished_output(
-                    stdout,
-                    stderr,
-                    *exit_code,
-                    *signal,
-                    outcome,
-                    *truncated,
+                    state,
                     width,
                     body_style,
                     error_style,
@@ -350,27 +309,32 @@ impl ShellRunComponent {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_finished_output(
-    stdout: &str,
-    stderr: &str,
-    exit_code: Option<i32>,
-    signal: Option<i32>,
-    outcome: &ShellCommandOutcome,
-    truncated: bool,
+    state: &ShellRunState,
     width: usize,
     body_style: Style,
     error_style: Style,
     muted_style: Style,
 ) -> Vec<Line> {
+    let ShellRunState::Finished {
+        stdout,
+        stderr,
+        exit_code,
+        signal,
+        outcome,
+        truncated,
+    } = state
+    else {
+        return Vec::new();
+    };
     let style = if matches!(outcome, ShellCommandOutcome::ResourceLimited) {
         muted_style
-    } else if exit_code == Some(0) && matches!(outcome, ShellCommandOutcome::Completed) {
+    } else if *exit_code == Some(0) && matches!(outcome, ShellCommandOutcome::Completed) {
         body_style
     } else {
         error_style
     };
-    let lines = finished_plain_lines(stdout, stderr, exit_code, signal, outcome, truncated);
+    let lines = finished_plain_lines(stdout, stderr, *exit_code, *signal, outcome, *truncated);
     if lines.is_empty() {
         return Vec::new();
     }
@@ -465,9 +429,8 @@ mod tests {
             ),
             ["Resource limit exceeded."]
         );
-        let component = ShellRunComponent::finished(
-            "shell-1",
-            "cargo nextest --workspace",
+        let mut component = ShellRunComponent::running("shell-1", "cargo nextest --workspace");
+        component.finish(
             "",
             "",
             None,
@@ -478,17 +441,16 @@ mod tests {
         assert_eq!(component.finalization(), Finalization::Finalized);
 
         let theme = TuiTheme::default();
-        let rows = ShellRunComponent::finished(
-            "shell-2",
-            "cargo nextest --workspace",
+        let mut component = ShellRunComponent::running("shell-2", "cargo nextest --workspace");
+        component.finish(
             "partial output",
             "",
             None,
             None,
             ShellCommandOutcome::ResourceLimited,
             false,
-        )
-        .render(80, &theme);
+        );
+        let rows = component.render(80, &theme);
         assert!(rows[1..].iter().all(|line| {
             line.spans()
                 .iter()

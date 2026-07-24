@@ -526,25 +526,28 @@ mod tests {
         assert!(item.detail_lines.iter().any(|l| l.contains("children:")));
     }
 
-    #[allow(clippy::too_many_lines)] // Shared test fixture assembles many children inline; clearer than splitting into helpers.
-    fn delegate_swarm_snapshot_with_completed_children() -> BackgroundTaskSnapshot {
+    fn completed_swarm_agent(
+        name: &str,
+        id: &str,
+        task: &str,
+        title: &str,
+        summary: &str,
+    ) -> neo_agent_core::multi_agent::AgentSnapshot {
         use neo_agent_core::multi_agent::{
             AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-            AgentSnapshot, AgentTerminalOutcome, DelegateContext, SwarmAggregate,
-            SwarmChildSnapshot, SwarmSnapshot,
+            AgentSnapshot, AgentTerminalOutcome, DelegateContext,
         };
-        let name_a = AgentDisplayName::new("Alpha");
-        let name_b = AgentDisplayName::new("Beta");
-        let child_a = AgentSnapshot {
-            id: AgentId::from_suffix_for_test("sw-comp-a"),
-            display_name: name_a.clone(),
-            path: AgentPath::swarm_child("swarm_comp", &name_a),
+        let display_name = AgentDisplayName::new(name);
+        AgentSnapshot {
+            id: AgentId::from_suffix_for_test(id),
+            display_name: display_name.clone(),
+            path: AgentPath::swarm_child("swarm_comp", &display_name),
             role: AgentRole::Coder,
             mode: AgentRunMode::Background,
             context: DelegateContext::Inherit,
             state: AgentLifecycleState::Completed,
-            task: "child A prompt".to_owned(),
-            task_title: "Child A".to_owned(),
+            task: task.to_owned(),
+            task_title: title.to_owned(),
             created_at_ms: 1,
             updated_at_ms: 11,
             started_at_ms: Some(1),
@@ -565,44 +568,26 @@ mod tests {
             activity: Vec::new(),
             prior_messages: Vec::new(),
             outcome: Some(AgentTerminalOutcome {
-                summary: "All good".to_owned(),
+                summary: summary.to_owned(),
                 is_error: false,
             }),
+        }
+    }
+
+    fn delegate_swarm_snapshot_with_completed_children() -> BackgroundTaskSnapshot {
+        use neo_agent_core::multi_agent::{
+            AgentLifecycleState, AgentRole, AgentRunMode, SwarmAggregate, SwarmChildSnapshot,
+            SwarmSnapshot,
         };
-        let child_b = AgentSnapshot {
-            id: AgentId::from_suffix_for_test("sw-comp-b"),
-            display_name: name_b.clone(),
-            path: AgentPath::swarm_child("swarm_comp", &name_b),
-            role: AgentRole::Coder,
-            mode: AgentRunMode::Background,
-            context: DelegateContext::Inherit,
-            state: AgentLifecycleState::Completed,
-            task: "child B prompt".to_owned(),
-            task_title: "Child B".to_owned(),
-            created_at_ms: 2,
-            updated_at_ms: 10,
-            started_at_ms: Some(2),
-            terminal_at_ms: Some(10),
-            detached_from_foreground: true,
-            terminal_reason: None,
-            run_count: 1,
-            live_messages_received: 0,
-            previous_status: None,
-            terminal_status_history: Vec::new(),
-            resumed_from: None,
-            tool_count: 1,
-            token_count: 300,
-            cache_read_token_count: 0,
-            cache_write_token_count: 0,
-            elapsed: Duration::from_secs(8),
-            latest_text: None,
-            activity: Vec::new(),
-            prior_messages: Vec::new(),
-            outcome: Some(AgentTerminalOutcome {
-                summary: "Done too".to_owned(),
-                is_error: false,
-            }),
-        };
+        let child_a = completed_swarm_agent(
+            "Alpha",
+            "sw-comp-a",
+            "child A prompt",
+            "Child A",
+            "All good",
+        );
+        let child_b =
+            completed_swarm_agent("Beta", "sw-comp-b", "child B prompt", "Child B", "Done too");
         let children = vec![
             SwarmChildSnapshot {
                 item_index: 0,

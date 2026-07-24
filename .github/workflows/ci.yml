@@ -28,6 +28,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Reject complexity lint exemptions
+        run: |
+          if git grep -n -E '#\[allow\(clippy::(too_many_lines|too_many_arguments)' -- crates; then
+            echo "Local complexity lint exemptions are not allowed"
+            exit 1
+          fi
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D clippy::all -A clippy::pedantic
 

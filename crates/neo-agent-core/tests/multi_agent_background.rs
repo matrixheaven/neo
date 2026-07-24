@@ -296,18 +296,20 @@ async fn delegate_background_registers_task() {
     assert_eq!(details["mode"], "background");
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn task_output_reports_delegate_context_mode_from_current_run() {
-    let (registry, ctx) = registry_with_multi_agent();
+async fn task_output_for_background_delegate(
+    registry: &ToolRegistry,
+    ctx: &ToolContext,
+    task: &str,
+    context: &str,
+) -> ToolResult {
     let delegate = registry
         .run(
             "Delegate",
-            &ctx,
+            ctx,
             serde_json::json!({
-                "task": "summarize visible context",
+                "task": task,
                 "mode": "background",
-                "context": "summary"
+                "context": context
             }),
         )
         .await
@@ -320,17 +322,21 @@ async fn task_output_reports_delegate_context_mode_from_current_run() {
         .expect("delegate result should include agent_id")
         .to_owned();
 
-    let output = registry
+    registry
         .run(
             "TaskOutput",
-            &ctx,
+            ctx,
             serde_json::json!({ "task_id": agent_id }),
         )
         .await
-        .expect("TaskOutput should return delegate output");
+        .expect("TaskOutput should return delegate output")
+}
 
+fn assert_task_output_context(output: &ToolResult, expected: &str) {
     assert!(
-        output.content.contains("context_mode: summary"),
+        output
+            .content
+            .contains(&format!("context_mode: {expected}")),
         "{}",
         output.content
     );
@@ -340,51 +346,26 @@ async fn task_output_reports_delegate_context_mode_from_current_run() {
             .as_ref()
             .and_then(|details| details.get("context_mode"))
             .and_then(serde_json::Value::as_str),
-        Some("summary")
+        Some(expected)
     );
+}
 
-    let none_delegate = registry
-        .run(
-            "Delegate",
-            &ctx,
-            serde_json::json!({
-                "task": "run without parent context",
-                "mode": "background",
-                "context": "none"
-            }),
-        )
-        .await
-        .expect("background delegate should start");
-    let none_agent_id = none_delegate
-        .details
-        .as_ref()
-        .and_then(|details| details.get("agent_id"))
-        .and_then(serde_json::Value::as_str)
-        .expect("delegate result should include agent_id")
-        .to_owned();
+#[tokio::test]
+async fn task_output_reports_delegate_context_mode_from_current_run() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let summary_output = task_output_for_background_delegate(
+        &registry,
+        &ctx,
+        "summarize visible context",
+        "summary",
+    )
+    .await;
+    assert_task_output_context(&summary_output, "summary");
 
-    let none_output = registry
-        .run(
-            "TaskOutput",
-            &ctx,
-            serde_json::json!({ "task_id": none_agent_id }),
-        )
-        .await
-        .expect("TaskOutput should return delegate output");
-
-    assert!(
-        none_output.content.contains("context_mode: none"),
-        "{}",
-        none_output.content
-    );
-    assert_eq!(
-        none_output
-            .details
-            .as_ref()
-            .and_then(|details| details.get("context_mode"))
-            .and_then(serde_json::Value::as_str),
-        Some("none")
-    );
+    let none_output =
+        task_output_for_background_delegate(&registry, &ctx, "run without parent context", "none")
+            .await;
+    assert_task_output_context(&none_output, "none");
 
     let resume_dir = tempfile::tempdir().unwrap();
     let resume_ctx = ToolContext::new(resume_dir.path()).unwrap();
@@ -421,19 +402,7 @@ async fn task_output_reports_delegate_context_mode_from_current_run() {
         .await
         .expect("TaskOutput should return resumed delegate output");
 
-    assert!(
-        resumed_output.content.contains("context_mode: summary"),
-        "{}",
-        resumed_output.content
-    );
-    assert_eq!(
-        resumed_output
-            .details
-            .as_ref()
-            .and_then(|details| details.get("context_mode"))
-            .and_then(serde_json::Value::as_str),
-        Some("summary")
-    );
+    assert_task_output_context(&resumed_output, "summary");
 }
 
 #[tokio::test]

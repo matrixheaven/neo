@@ -1945,10 +1945,7 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
     assert!(text.contains("DelegateSwarm · running"), "{text}");
 }
 
-#[test]
-#[allow(clippy::too_many_lines)]
-fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children() {
-    let mut pane = TranscriptPane::new(160, 30);
+fn out_of_order_swarm_updates() -> [SwarmSnapshot; 3] {
     let first = AgentSnapshot {
         display_name: AgentDisplayName::new("Zeno"),
         path: AgentPath::root_child(&AgentDisplayName::new("Zeno")),
@@ -2031,6 +2028,14 @@ fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children
         ],
         ..started.clone()
     };
+
+    [started, newer, stale]
+}
+
+#[test]
+fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let [started, newer, stale] = out_of_order_swarm_updates();
 
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 1,

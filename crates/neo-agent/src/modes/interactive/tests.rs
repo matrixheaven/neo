@@ -41,6 +41,24 @@ const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000602";
 const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000603";
 const SESSION_NEW: &str = "session_00000000-0000-4000-8000-000000000604";
 
+struct OptionalScriptedEvents {
+    events: VecDeque<Option<InputEvent>>,
+}
+
+impl TerminalEvents for OptionalScriptedEvents {
+    fn next_input_event(&mut self) -> Result<InputEvent> {
+        self.poll_input_event(Duration::from_millis(0))?
+            .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+    }
+
+    fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        Ok(self
+            .events
+            .pop_front()
+            .unwrap_or(Some(InputEvent::Interrupt)))
+    }
+}
+
 fn test_workspace_root() -> PathBuf {
     let dir = std::env::temp_dir().join("neo-test-workspace");
     let _ = std::fs::create_dir_all(&dir);
@@ -1649,10 +1667,12 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     let content = (1..=12)
         .map(|line| format!("live-line-{line}"))
@@ -2310,10 +2330,12 @@ async fn event_loop_ctrl_c_key_cancels_active_turn_instead_of_confirming_exit() 
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("cancel me");
@@ -2873,10 +2895,12 @@ async fn event_loop_escape_cancels_active_turn() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("cancel me");
@@ -3359,10 +3383,12 @@ async fn automatic_skill_invocation_renders_one_semantic_card() {
         "test-session",
         "fake/model",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("use refactor skill");
@@ -5585,10 +5611,12 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller
         .transcript_mut()
@@ -6184,26 +6212,6 @@ async fn command_palette_export_html_without_active_session_shows_local_error() 
 
 #[tokio::test]
 async fn event_loop_confirms_approval_choice_to_running_turn() {
-    use std::collections::VecDeque;
-
-    struct ScriptedEvents {
-        events: VecDeque<Option<InputEvent>>,
-    }
-
-    impl TerminalEvents for ScriptedEvents {
-        fn next_input_event(&mut self) -> Result<InputEvent> {
-            self.poll_input_event(Duration::from_millis(0))?
-                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
-        }
-
-        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-            Ok(self
-                .events
-                .pop_front()
-                .unwrap_or(Some(InputEvent::Interrupt)))
-        }
-    }
-
     let responses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_responses = std::sync::Arc::clone(&responses);
     let run_turn: TurnDriver = Arc::new(move |_request, channels| {
@@ -6242,17 +6250,19 @@ async fn event_loop_confirms_approval_choice_to_running_turn() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("write file");
     controller
         .run_terminal_loop(
             |_app| Ok(()),
-            ScriptedEvents {
+            OptionalScriptedEvents {
                 events: VecDeque::from([
                     Some(InputEvent::Submit),
                     None,
@@ -6279,33 +6289,12 @@ async fn event_loop_confirms_approval_choice_to_running_turn() {
     assert!(controller.render_snapshot().contains("approved"));
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
-    use std::collections::VecDeque;
-
-    struct ScriptedEvents {
-        events: VecDeque<Option<InputEvent>>,
-    }
-
-    impl TerminalEvents for ScriptedEvents {
-        fn next_input_event(&mut self) -> Result<InputEvent> {
-            self.poll_input_event(Duration::from_millis(0))?
-                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
-        }
-
-        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-            Ok(self
-                .events
-                .pop_front()
-                .unwrap_or(Some(InputEvent::Interrupt)))
-        }
-    }
-
+fn controller_with_pending_math_question() -> (
+    InteractiveController,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
     let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_answers = std::sync::Arc::clone(&answers);
-    let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let captured_frames = std::sync::Arc::clone(&frames);
     let run_turn: TurnDriver = Arc::new(move |_request, channels| {
         let captured_answers = std::sync::Arc::clone(&captured_answers);
         Box::pin(async move {
@@ -6349,16 +6338,26 @@ async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
             Ok(TurnOutcome::default())
         })
     });
-    let mut controller = InteractiveController::new(
+    let controller = InteractiveController::new(
         "neo",
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
+    (controller, answers)
+}
+
+#[tokio::test]
+async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
+    let (mut controller, answers) = controller_with_pending_math_question();
+    let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_frames = std::sync::Arc::clone(&frames);
 
     controller.type_text("ask me");
     controller
@@ -6370,7 +6369,7 @@ async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
                     .push(render_overlay_snapshot(app, 80).join("\n"));
                 Ok(())
             },
-            ScriptedEvents {
+            OptionalScriptedEvents {
                 events: VecDeque::from([
                     Some(InputEvent::Submit),
                     None,
@@ -6488,9 +6487,7 @@ async fn prefix_approval_choice_dispatches_prefix_decision() {
     );
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn question_dialog_consumes_keyboard_before_prompt_editing() {
+fn controller_with_keyboard_routing_question() -> InteractiveController {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -6538,6 +6535,12 @@ async fn question_dialog_consumes_keyboard_before_prompt_editing() {
         ],
         response_tx,
     });
+    controller
+}
+
+#[tokio::test]
+async fn question_dialog_consumes_keyboard_before_prompt_editing() {
+    let mut controller = controller_with_keyboard_routing_question();
 
     controller
         .handle_input_event(InputEvent::Insert('2'))
@@ -7093,10 +7096,12 @@ async fn event_loop_interrupt_cancels_active_turn_token() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("cancel me");
@@ -7186,10 +7191,12 @@ async fn event_loop_interrupt_drains_cancelled_barriers_before_exit() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("cancel me");
@@ -8034,23 +8041,8 @@ async fn load_session_transcript_preserves_delegate_events_for_replay() {
     );
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn load_session_replay_preserves_interleaved_visible_entry_order() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let sessions_dir = temp.path().join(".neo/sessions");
-    let config = test_config(temp.path(), sessions_dir);
-    let bucket_dir = workspace_sessions_dir(&config);
-    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
-    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
-        .await
-        .expect("create session");
-    let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
-    let running = runtime.start_foreground_delegate_for_test("restored delegate card");
-    let delegate_id = running.id.clone();
-    let completed = runtime.complete_delegate_for_test(&delegate_id, "done");
-    let tool_calls = vec![
+fn interleaved_replay_tool_calls() -> Vec<neo_agent_core::AgentToolCall> {
+    vec![
         neo_agent_core::AgentToolCall {
             id: "first-tool".into(),
             name: "Read".into(),
@@ -8066,17 +8058,16 @@ async fn load_session_replay_preserves_interleaved_visible_entry_order() {
             name: "Bash".into(),
             raw_arguments: r#"{"command":"later-order-command"}"#.into(),
         },
-    ];
-    let assistant_message = AgentMessage::assistant(
-        [
-            Content::thinking("resume-thinking", None, false),
-            Content::text("resume-output"),
-            Content::text("resume-summary"),
-        ],
-        tool_calls.clone(),
-        StopReason::ToolUse,
-    );
-    let events = vec![
+    ]
+}
+
+fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
+    let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
+    let running = runtime.start_foreground_delegate_for_test("restored delegate card");
+    let delegate_id = running.id.clone();
+    let completed = runtime.complete_delegate_for_test(&delegate_id, "done");
+
+    vec![
         AgentEvent::MessageAppended {
             message: AgentMessage::user_text("resume-user"),
         },
@@ -8114,6 +8105,11 @@ async fn load_session_replay_preserves_interleaved_visible_entry_order() {
             turn: 1,
             agent: completed,
         },
+    ]
+}
+
+fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
+    vec![
         AgentEvent::ToolExecutionStarted {
             turn: 2,
             id: "first-tool".to_owned(),
@@ -8150,6 +8146,23 @@ async fn load_session_replay_preserves_interleaved_visible_entry_order() {
             name: "Bash".to_owned(),
             result: neo_agent_core::ToolResult::ok("later result"),
         },
+    ]
+}
+
+fn interleaved_replay_message_events(
+    tool_calls: Vec<neo_agent_core::AgentToolCall>,
+) -> Vec<AgentEvent> {
+    let assistant_message = AgentMessage::assistant(
+        [
+            Content::thinking("resume-thinking", None, false),
+            Content::text("resume-output"),
+            Content::text("resume-summary"),
+        ],
+        tool_calls,
+        StopReason::ToolUse,
+    );
+
+    vec![
         AgentEvent::TextDelta {
             turn: 2,
             text: "resume-summary".to_owned(),
@@ -8185,11 +8198,33 @@ async fn load_session_replay_preserves_interleaved_visible_entry_order() {
                 false,
             ),
         },
-    ];
+    ]
+}
+
+async fn write_interleaved_replay_session(config: &AppConfig) {
+    let bucket_dir = workspace_sessions_dir(config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    let mut events = interleaved_replay_prelude_events();
+    events.extend(interleaved_replay_execution_events());
+    events.extend(interleaved_replay_message_events(
+        interleaved_replay_tool_calls(),
+    ));
     for event in &events {
         writer.append(event).await.expect("append replay event");
     }
     writer.flush().await.expect("flush session");
+}
+
+#[tokio::test]
+async fn load_session_replay_preserves_interleaved_visible_entry_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    write_interleaved_replay_session(&config).await;
 
     let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
         .await
@@ -8315,12 +8350,13 @@ async fn load_session_at_startup_sets_terminal_title_from_loaded_title() {
     assert_eq!(controller.chrome().terminal_title(), "Resume Title");
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
+fn session_picker_continuation_controller() -> (
+    InteractiveController,
+    std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+) {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
-    let mut controller = InteractiveController::new_with_event_driver(
+    let controller = InteractiveController::new_with_event_driver(
         "neo",
         "new",
         "openai/gpt-4.1",
@@ -8374,6 +8410,12 @@ async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
             ))
         },
     );
+    (controller, requests)
+}
+
+#[tokio::test]
+async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
+    let (mut controller, requests) = session_picker_continuation_controller();
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
@@ -8461,10 +8503,12 @@ async fn event_loop_keeps_new_session_active_for_followup_prompt() {
         "new",
         "openai/gpt-4.1",
         workspace_root.clone(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller.local_config = Some(test_config(
         &workspace_root,
@@ -8557,10 +8601,12 @@ async fn event_loop_keeps_started_session_active_after_failed_turn() {
         "new",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("read project");
@@ -8607,29 +8653,6 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
         "new",
         "openai/gpt-4.1",
         test_workspace_root(),
-        move |request| {
-            let captured_requests = std::sync::Arc::clone(&captured_requests);
-            async move {
-                captured_requests
-                    .lock()
-                    .expect("record request")
-                    .push(request);
-                Ok(vec![
-                    AgentEvent::MessageStarted {
-                        turn: 3,
-                        id: "assistant-3".to_owned(),
-                    },
-                    AgentEvent::TextDelta {
-                        turn: 3,
-                        text: "continued on fork".to_owned(),
-                    },
-                    AgentEvent::TurnFinished {
-                        turn: 3,
-                        stop_reason: StopReason::EndTurn,
-                    },
-                ])
-            }
-        },
         PickerCatalogs {
             session_items: vec![test_session_summary(
                 SESSION_A,
@@ -8640,28 +8663,53 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
             session_error: None,
             model_items: Vec::new(),
         },
-        |_session_id| async move {
-            panic!("fork action should not use the plain session loader");
-            #[allow(unreachable_code)]
-            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
-        },
-        |parent_id| async move {
-            assert_eq!(parent_id, SESSION_A);
-            Ok(ForkedSessionTranscript::new(
-                SESSION_CHILD,
-                LoadedSessionTranscript::new(
+        EventDriverCallbacks {
+            run_turn: move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 3,
+                            id: "assistant-3".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 3,
+                            text: "continued on fork".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 3,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            load_session: |_session_id| async move {
+                panic!("fork action should not use the plain session loader");
+                #[allow(unreachable_code)]
+                Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+            },
+            fork_session: |parent_id| async move {
+                assert_eq!(parent_id, SESSION_A);
+                Ok(ForkedSessionTranscript::new(
                     SESSION_CHILD,
-                    [],
-                    [
-                        AgentMessage::user_text("hello"),
-                        AgentMessage::assistant(
-                            [Content::text("hi back")],
-                            Vec::new(),
-                            StopReason::EndTurn,
-                        ),
-                    ],
-                ),
-            ))
+                    LoadedSessionTranscript::new(
+                        SESSION_CHILD,
+                        [],
+                        [
+                            AgentMessage::user_text("hello"),
+                            AgentMessage::assistant(
+                                [Content::text("hi back")],
+                                Vec::new(),
+                                StopReason::EndTurn,
+                            ),
+                        ],
+                    ),
+                ))
+            },
         },
     );
 
@@ -8704,9 +8752,38 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
     assert_eq!(requests[0].model, None);
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
+fn selected_model_local_config() -> AppConfig {
+    test_config_with_models(
+        &test_workspace_root(),
+        test_workspace_root().join(".neo/sessions"),
+        BTreeMap::from([
+            (
+                "openai/gpt-4.1".to_owned(),
+                ModelConfig {
+                    provider: "openai".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    display_name: Some("Responses".into()),
+                    ..ModelConfig::default()
+                },
+            ),
+            (
+                "anthropic/claude-sonnet-4-5".to_owned(),
+                ModelConfig {
+                    provider: "anthropic".to_owned(),
+                    model: "claude-sonnet-4-5".to_owned(),
+                    display_name: Some("Messages · ctx 200000".into()),
+                    max_context_tokens: Some(200_000),
+                    ..ModelConfig::default()
+                },
+            ),
+        ]),
+    )
+}
+
+fn model_picker_submission_controller() -> (
+    InteractiveController,
+    std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+) {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_with_event_driver(
@@ -8758,31 +8835,14 @@ async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
         },
     );
 
-    controller.local_config = Some(test_config_with_models(
-        &test_workspace_root(),
-        test_workspace_root().join(".neo/sessions"),
-        BTreeMap::from([
-            (
-                "openai/gpt-4.1".to_owned(),
-                ModelConfig {
-                    provider: "openai".to_owned(),
-                    model: "gpt-4.1".to_owned(),
-                    display_name: Some("Responses".into()),
-                    ..ModelConfig::default()
-                },
-            ),
-            (
-                "anthropic/claude-sonnet-4-5".to_owned(),
-                ModelConfig {
-                    provider: "anthropic".to_owned(),
-                    model: "claude-sonnet-4-5".to_owned(),
-                    display_name: Some("Messages · ctx 200000".into()),
-                    max_context_tokens: Some(200_000),
-                    ..ModelConfig::default()
-                },
-            ),
-        ]),
-    ));
+    controller.local_config = Some(selected_model_local_config());
+    (controller, requests)
+}
+
+#[tokio::test]
+async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
+    let (mut controller, requests) = model_picker_submission_controller();
+
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
         .await
@@ -9500,69 +9560,52 @@ async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
     );
 }
 
+fn add_indexed_session_fixture(
+    sessions_dir: &Path,
+    project: &Path,
+    session_id: &str,
+    prompt: &str,
+    timestamp: &str,
+) -> AppConfig {
+    fs::create_dir_all(project).expect("create project");
+    let config = test_config(project, sessions_dir.to_path_buf());
+    let bucket = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket).expect("create session bucket");
+    write_main_wire(
+        &bucket,
+        session_id,
+        r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
+    );
+    SessionMetadataStore::new(&bucket)
+        .record_activity(
+            session_id,
+            Some(project.display().to_string()),
+            Some(prompt.to_owned()),
+            timestamp.to_owned(),
+        )
+        .expect("record session metadata");
+    neo_agent_core::session::SessionIndex::new(sessions_dir.parent().expect("neo home"))
+        .append(&neo_agent_core::session::SessionIndexEntry {
+            session_id: session_id.to_owned(),
+            session_dir: bucket,
+            workdir: project.to_path_buf(),
+        })
+        .expect("index session");
+    config
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn session_picker_ctrl_a_toggles_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-    let neo_home = sessions_dir.parent().expect("neo home");
 
     let project_a = temp.path().join("project_a");
-    fs::create_dir_all(&project_a).expect("create project_a");
-    let config_a = test_config(&project_a, sessions_dir.clone());
-    let bucket_a = workspace_sessions_dir(&config_a);
-    fs::create_dir_all(&bucket_a).expect("create bucket_a");
-    write_main_wire(
-        &bucket_a,
-        SESSION_A,
-        r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
-    );
-    let store_a = SessionMetadataStore::new(&bucket_a);
-    store_a
-        .record_activity(
-            SESSION_A,
-            Some(project_a.display().to_string()),
-            Some("alpha prompt".into()),
-            "200".to_owned(),
-        )
-        .expect("record alpha");
+    let config_a =
+        add_indexed_session_fixture(&sessions_dir, &project_a, SESSION_A, "alpha prompt", "200");
 
     let project_b = temp.path().join("project_b");
-    fs::create_dir_all(&project_b).expect("create project_b");
-    let config_b = test_config(&project_b, sessions_dir.clone());
-    let bucket_b = workspace_sessions_dir(&config_b);
-    fs::create_dir_all(&bucket_b).expect("create bucket_b");
-    write_main_wire(
-        &bucket_b,
-        SESSION_B,
-        r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
-    );
-    let store_b = SessionMetadataStore::new(&bucket_b);
-    store_b
-        .record_activity(
-            SESSION_B,
-            Some(project_b.display().to_string()),
-            Some("beta prompt".into()),
-            "100".to_owned(),
-        )
-        .expect("record beta");
-
-    let index = neo_agent_core::session::SessionIndex::new(neo_home);
-    index
-        .append(&neo_agent_core::session::SessionIndexEntry {
-            session_id: SESSION_A.to_owned(),
-            session_dir: bucket_a.clone(),
-            workdir: project_a.clone(),
-        })
-        .expect("index alpha");
-    index
-        .append(&neo_agent_core::session::SessionIndexEntry {
-            session_id: SESSION_B.to_owned(),
-            session_dir: bucket_b.clone(),
-            workdir: project_b.clone(),
-        })
-        .expect("index beta");
+    add_indexed_session_fixture(&sessions_dir, &project_b, SESSION_B, "beta prompt", "100");
 
     let mut controller = controller_for_config(&config_a);
 
@@ -11428,10 +11471,12 @@ async fn slash_new_is_blocked_while_turn_is_running_and_preserves_prompt() {
         SESSION_A,
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
 
@@ -11484,10 +11529,12 @@ async fn running_turn_controller() -> InteractiveController {
         SESSION_A,
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
     controller.type_text("long running");
@@ -11657,7 +11704,6 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
         SESSION_A,
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs {
             session_items: vec![test_session_summary(
                 SESSION_A,
@@ -11668,8 +11714,11 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
             session_error: None,
             model_items: Vec::new(),
         },
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
 
@@ -13482,10 +13531,12 @@ async fn active_turn_enter_enqueues_follow_up_instead_of_rejecting() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -13529,10 +13580,12 @@ async fn mcp_startup_queues_prompt_then_starts_it_when_settled() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     controller.tui.chrome_mut().set_mcp_startup_active(true);
 
@@ -13598,10 +13651,12 @@ async fn active_turn_enter_updates_pending_preview_immediately() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -13713,15 +13768,17 @@ async fn idle_submit_renders_user_prompt_immediately_without_duplicate_runtime_a
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        Arc::new(|_request, channels| {
-            Box::pin(async move {
-                channels.cancel_token.cancelled().await;
-                Ok(TurnOutcome::default())
-            })
-        }),
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn: Arc::new(|_request, channels| {
+                Box::pin(async move {
+                    channels.cancel_token.cancelled().await;
+                    Ok(TurnOutcome::default())
+                })
+            }),
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("wait for runtime append");
@@ -13782,10 +13839,12 @@ async fn active_turn_ctrl_s_steers_running_turn() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -13827,10 +13886,12 @@ async fn active_turn_ctrl_s_updates_pending_preview_before_transcript_append() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -13898,15 +13959,17 @@ async fn steer_preview_is_cleared_when_turn_is_cancelled() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        Arc::new(|_request, channels| {
-            Box::pin(async move {
-                channels.cancel_token.cancelled().await;
-                Ok(TurnOutcome::default())
-            })
-        }),
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn: Arc::new(|_request, channels| {
+                Box::pin(async move {
+                    channels.cancel_token.cancelled().await;
+                    Ok(TurnOutcome::default())
+                })
+            }),
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -13944,9 +14007,8 @@ async fn steer_preview_is_cleared_when_turn_is_cancelled() {
     );
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prompt() {
+async fn controller_with_queued_follow_ups()
+-> (InteractiveController, neo_agent_core::SteerInputHandle) {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
     ));
@@ -13964,12 +14026,13 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
-
     controller.type_text("first prompt");
     controller
         .handle_input_event(InputEvent::Submit)
@@ -13981,14 +14044,19 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
     controller.apply_turn_event(AgentEvent::FollowUpQueued {
         message: AgentMessage::user_text("queued two"),
     });
+    let steer_handle = captured_steer.lock().expect("steer lock").clone();
+    (controller, steer_handle)
+}
 
-    controller.type_text("current steer");
+async fn assert_oldest_follow_up_promoted_before_composer(
+    controller: &mut InteractiveController,
+    steer_handle: &neo_agent_core::SteerInputHandle,
+) {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
         .expect("first ctrl+s promotes oldest queued follow-up");
 
-    let steer_handle = captured_steer.lock().expect("steer lock").clone();
     assert_eq!(steer_handle.pending(), 1);
     assert_eq!(
         controller
@@ -14016,7 +14084,12 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         "current steer",
         "composer text should wait until queued follow-ups have been promoted"
     );
+}
 
+async fn assert_remaining_follow_ups_promoted_before_composer(
+    controller: &mut InteractiveController,
+    steer_handle: &neo_agent_core::SteerInputHandle,
+) {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
@@ -14067,7 +14140,12 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         vec!["queued one", "queued two", "queued D"]
     );
     assert_eq!(controller.chrome().prompt().text, "current steer");
+}
 
+async fn assert_composer_promoted_after_follow_ups(
+    controller: &mut InteractiveController,
+    steer_handle: &neo_agent_core::SteerInputHandle,
+) {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
@@ -14084,8 +14162,10 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
         vec!["queued one", "queued two", "queued D", "current steer"]
     );
     assert_eq!(controller.chrome().prompt().text, "");
+}
 
-    let steered_user_messages = transcript_entries(&controller)
+fn assert_steers_render_after_runtime_append(controller: &mut InteractiveController) {
+    let steered_user_messages = transcript_entries(controller)
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::UserMessage { content, .. }
@@ -14110,7 +14190,7 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
             message: AgentMessage::user_text(text),
         });
     }
-    let steered_user_messages = transcript_entries(&controller)
+    let steered_user_messages = transcript_entries(controller)
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::UserMessage { content, .. }
@@ -14132,49 +14212,24 @@ async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prom
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Large scenario test asserts on full steer/follow-up ordering; splitting hurts readability.
-async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication() {
-    let captured_steer = Arc::new(std::sync::Mutex::new(
-        neo_agent_core::SteerInputHandle::new(),
-    ));
-    let observed_steer = Arc::clone(&captured_steer);
-    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
-        let observed_steer = Arc::clone(&observed_steer);
-        *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
-        Box::pin(async move {
-            channels.cancel_token.cancelled().await;
-            Ok(TurnOutcome::default())
-        })
-    });
-    let mut controller = InteractiveController::new(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        run_turn,
-        PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
-    );
+async fn active_turn_ctrl_s_promotes_one_follow_up_per_press_before_current_prompt() {
+    let (mut controller, steer_handle) = controller_with_queued_follow_ups().await;
+    controller.type_text("current steer");
+    assert_oldest_follow_up_promoted_before_composer(&mut controller, &steer_handle).await;
+    assert_remaining_follow_ups_promoted_before_composer(&mut controller, &steer_handle).await;
+    assert_composer_promoted_after_follow_ups(&mut controller, &steer_handle).await;
+    assert_steers_render_after_runtime_append(&mut controller);
+}
 
-    controller.type_text("first prompt");
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("first prompt starts turn");
-    controller.apply_turn_event(AgentEvent::FollowUpQueued {
-        message: AgentMessage::user_text("queued one"),
-    });
-    controller.apply_turn_event(AgentEvent::FollowUpQueued {
-        message: AgentMessage::user_text("queued two"),
-    });
-
+async fn assert_first_empty_follow_up_promotion(
+    controller: &mut InteractiveController,
+    steer_handle: &neo_agent_core::SteerInputHandle,
+) {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
         .expect("empty ctrl+s promotes oldest queued follow-up");
 
-    let steer_handle = captured_steer.lock().expect("steer lock").clone();
     assert_eq!(
         steer_handle.pending(),
         1,
@@ -14232,7 +14287,12 @@ async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication
         vec!["queued one"],
         "runtime steer ack must not duplicate the promoted preview"
     );
+}
 
+async fn assert_second_empty_follow_up_promotion(
+    controller: &mut InteractiveController,
+    steer_handle: &neo_agent_core::SteerInputHandle,
+) {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
         .await
@@ -14289,6 +14349,13 @@ async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication
 }
 
 #[tokio::test]
+async fn empty_ctrl_s_promotes_one_follow_up_per_press_without_local_duplication() {
+    let (mut controller, steer_handle) = controller_with_queued_follow_ups().await;
+    assert_first_empty_follow_up_promotion(&mut controller, &steer_handle).await;
+    assert_second_empty_follow_up_promotion(&mut controller, &steer_handle).await;
+}
+
+#[tokio::test]
 async fn alt_up_dequeues_oldest_follow_up_into_multiline_composer() {
     let captured_steer = Arc::new(std::sync::Mutex::new(
         neo_agent_core::SteerInputHandle::new(),
@@ -14307,10 +14374,12 @@ async fn alt_up_dequeues_oldest_follow_up_into_multiline_composer() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("first prompt");
@@ -14411,10 +14480,12 @@ async fn idle_ctrl_s_falls_back_to_normal_submit() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
 
     controller.type_text("submit via ctrl+s");
@@ -15668,10 +15739,12 @@ async fn shell_mode_queued_during_active_turn_runs_after_turn_finishes() {
         "test-session",
         "openai/gpt-4.1",
         test_workspace_root(),
-        run_turn,
         PickerCatalogs::default(),
-        Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-        Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
     );
     let (turn_tx, turn_rx) = tokio::sync::oneshot::channel::<()>();
     *release_turn.lock().expect("turn release lock") = Some(turn_rx);
@@ -16709,28 +16782,34 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         SESSION_A,
         "openai/gpt-4.1",
         test_workspace_root(),
-        move |_request| async move {
-            Ok(vec![AgentEvent::TurnFinished {
-                turn: 1,
-                stop_reason: StopReason::EndTurn,
-            }])
-        },
         PickerCatalogs {
             session_items: Vec::new(),
             session_error: None,
             model_items: Vec::new(),
         },
-        |_session_id| async move {
-            panic!("fork should not use the load_session callback");
-            #[allow(unreachable_code)]
-            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
-        },
-        |parent_id| async move {
-            assert_eq!(parent_id, SESSION_A);
-            Ok(ForkedSessionTranscript::new(
-                SESSION_CHILD,
-                LoadedSessionTranscript::new(SESSION_CHILD, [], [AgentMessage::user_text("hello")]),
-            ))
+        EventDriverCallbacks {
+            run_turn: move |_request| async move {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            },
+            load_session: |_session_id| async move {
+                panic!("fork should not use the load_session callback");
+                #[allow(unreachable_code)]
+                Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+            },
+            fork_session: |parent_id| async move {
+                assert_eq!(parent_id, SESSION_A);
+                Ok(ForkedSessionTranscript::new(
+                    SESSION_CHILD,
+                    LoadedSessionTranscript::new(
+                        SESSION_CHILD,
+                        [],
+                        [AgentMessage::user_text("hello")],
+                    ),
+                ))
+            },
         },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
@@ -16766,28 +16845,34 @@ async fn ctrl_n_forks_current_session_and_enters_child() {
         SESSION_A,
         "openai/gpt-4.1",
         test_workspace_root(),
-        move |_request| async move {
-            Ok(vec![AgentEvent::TurnFinished {
-                turn: 1,
-                stop_reason: StopReason::EndTurn,
-            }])
-        },
         PickerCatalogs {
             session_items: Vec::new(),
             session_error: None,
             model_items: Vec::new(),
         },
-        |_session_id| async move {
-            panic!("fork should not use the load_session callback");
-            #[allow(unreachable_code)]
-            Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
-        },
-        |parent_id| async move {
-            assert_eq!(parent_id, SESSION_A);
-            Ok(ForkedSessionTranscript::new(
-                SESSION_CHILD,
-                LoadedSessionTranscript::new(SESSION_CHILD, [], [AgentMessage::user_text("hello")]),
-            ))
+        EventDriverCallbacks {
+            run_turn: move |_request| async move {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            },
+            load_session: |_session_id| async move {
+                panic!("fork should not use the load_session callback");
+                #[allow(unreachable_code)]
+                Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+            },
+            fork_session: |parent_id| async move {
+                assert_eq!(parent_id, SESSION_A);
+                Ok(ForkedSessionTranscript::new(
+                    SESSION_CHILD,
+                    LoadedSessionTranscript::new(
+                        SESSION_CHILD,
+                        [],
+                        [AgentMessage::user_text("hello")],
+                    ),
+                ))
+            },
         },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());

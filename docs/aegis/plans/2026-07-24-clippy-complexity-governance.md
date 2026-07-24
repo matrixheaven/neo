@@ -5,7 +5,7 @@
 Implement the approved
 `docs/aegis/specs/2026-07-24-clippy-complexity-governance-design.md`: repair the
 four known CI failures, remove all 68 local complexity-lint attributes, and
-forbid both exemptions workspace-wide.
+remove both local exemptions and enforce the source-level policy in CI.
 
 ## Architecture
 
@@ -67,7 +67,7 @@ workflow test is not a compatibility boundary.
 - Review gates: spec compliance, then code quality, then final integrated review.
 - Drift rule: any public contract change, fallback, new dependency, or unrelated
   failure stops the slice for replanning.
-- Completion evidence: zero-hit search, workspace forbid, format, Clippy, build,
+- Completion evidence: zero-hit search, CI guard, format, Clippy, build,
   and focused tests.
 
 ## Task 1: Repair The Four Known Failures
@@ -212,8 +212,9 @@ Files:
 
 Steps:
 
-1. Add workspace `forbid` entries for `too_many_lines` and
-   `too_many_arguments`.
+1. Add a native CI `git grep` guard for the two exact local attributes. Keep the
+   existing workspace lint command unchanged; the current `-A clippy::pedantic`
+   intentionally leaves historical long functions outside this focused cleanup.
 2. Confirm all four crates inherit workspace lints.
 3. Verify no matching attributes remain:
 
@@ -233,7 +234,7 @@ Steps:
    ```
 
 5. Re-run Task 1 focused regressions and commit
-   `chore(clippy): forbid complexity lint exemptions`.
+   `chore(clippy): guard complexity lint exemptions`.
 
 ## Risks And Stop Conditions
 
@@ -251,4 +252,3 @@ Steps:
 All 68 local attributes retire. The obsolete synchronous workflow test/probe
 retire. No old path, alias, lint threshold increase, `expect` replacement, or
 custom grep enforcement is retained.
-

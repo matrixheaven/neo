@@ -677,14 +677,16 @@ impl WorkflowDispatchHandle {
             raw_arguments: Arc::from(raw_arguments),
         };
         let (batch, context, events) = execute_workflow_tool_call(
-            &snapshot.config,
-            snapshot.model_client,
-            snapshot.registry,
-            snapshot.skills.as_ref(),
+            super::tool_dispatch::ToolExecutionDeps {
+                config: &snapshot.config,
+                model: snapshot.model_client,
+                registry: snapshot.registry,
+                skills: snapshot.skills.as_ref(),
+                cancel_token: &invocation.cancel_token,
+                process_supervisor: &snapshot.process_supervisor,
+            },
             &call,
             snapshot.context,
-            &invocation.cancel_token,
-            &snapshot.process_supervisor,
             turn,
             event_handler,
         )

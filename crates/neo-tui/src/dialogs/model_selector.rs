@@ -463,80 +463,19 @@ impl ModelSelectorState {
         styled
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
         }
         match input {
             InputEvent::Submit | InputEvent::Action(KeybindingAction::SelectConfirm) => {
-                if let Some(entry) = self.selected_entry().cloned() {
-                    let reasoning = self.effective_reasoning(&entry);
-                    if let Some(draft) = self.selected_draft()
-                        && self.budget_error(&entry, draft).is_some()
-                    {
-                        return InputResult::Handled;
-                    }
-                    self.result = Some(ModelSelectorResult::Selected(ModelSelection {
-                        alias: entry.alias.clone(),
-                        thinking: reasoning.is_enabled(),
-                        reasoning,
-                    }));
-                    InputResult::Submitted
-                } else {
-                    InputResult::Ignored
-                }
+                self.submit_selection()
             }
             InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {
-                if self
-                    .selected_draft()
-                    .is_some_and(|draft| draft.editing_budget)
-                {
-                    if let Some(draft) = self.selected_draft_mut() {
-                        draft.editing_budget = false;
-                    }
-                    InputResult::Handled
-                } else if self.list.clear_query() {
-                    InputResult::Handled
-                } else {
-                    self.result = Some(ModelSelectorResult::Cancelled);
-                    InputResult::Cancelled
-                }
+                self.cancel()
             }
-            InputEvent::Backspace => {
-                if self
-                    .selected_draft()
-                    .is_some_and(|draft| draft.editing_budget)
-                {
-                    if let Some(draft) = self.selected_draft_mut() {
-                        draft.budget_input.pop();
-                        draft.sync_budget_selection();
-                    }
-                } else {
-                    self.list.handle_key("backspace");
-                }
-                InputResult::Handled
-            }
-            InputEvent::Insert(ch) => {
-                if self
-                    .selected_draft()
-                    .is_some_and(|draft| draft.editing_budget)
-                {
-                    if ch.is_ascii_digit()
-                        && let Some(draft) = self.selected_draft_mut()
-                    {
-                        draft.budget_input.push(*ch);
-                        draft.sync_budget_selection();
-                    }
-                } else if *ch == ' ' {
-                    self.toggle_reasoning_off();
-                } else if *ch == 'e' {
-                    self.begin_budget_edit();
-                } else {
-                    self.list.handle_key(&ch.to_string());
-                }
-                InputResult::Handled
-            }
+            InputEvent::Backspace => self.backspace(),
+            InputEvent::Insert(ch) => self.insert(*ch),
             InputEvent::ScrollUp(1)
             | InputEvent::MoveLeft
             | InputEvent::ScrollDown(1)
@@ -547,22 +486,7 @@ impl ModelSelectorState {
                 ));
                 InputResult::Handled
             }
-            InputEvent::Paste(text) => {
-                if self
-                    .selected_draft()
-                    .is_some_and(|draft| draft.editing_budget)
-                {
-                    if let Some(draft) = self.selected_draft_mut() {
-                        draft
-                            .budget_input
-                            .extend(text.chars().filter(char::is_ascii_digit));
-                        draft.sync_budget_selection();
-                    }
-                } else {
-                    self.list.handle_key(text);
-                }
-                InputResult::Handled
-            }
+            InputEvent::Paste(text) => self.paste(text),
             // Arrow up/down from keybindings
             InputEvent::Action(KeybindingAction::SelectUp) => {
                 self.list.move_up();
@@ -582,6 +506,88 @@ impl ModelSelectorState {
             }
             _ => InputResult::Ignored,
         }
+    }
+
+    fn submit_selection(&mut self) -> InputResult {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return InputResult::Ignored;
+        };
+        let reasoning = self.effective_reasoning(&entry);
+        if let Some(draft) = self.selected_draft()
+            && self.budget_error(&entry, draft).is_some()
+        {
+            return InputResult::Handled;
+        }
+        self.result = Some(ModelSelectorResult::Selected(ModelSelection {
+            alias: entry.alias,
+            thinking: reasoning.is_enabled(),
+            reasoning,
+        }));
+        InputResult::Submitted
+    }
+
+    fn cancel(&mut self) -> InputResult {
+        if self
+            .selected_draft()
+            .is_some_and(|draft| draft.editing_budget)
+        {
+            if let Some(draft) = self.selected_draft_mut() {
+                draft.editing_budget = false;
+            }
+            InputResult::Handled
+        } else if self.list.clear_query() {
+            InputResult::Handled
+        } else {
+            self.result = Some(ModelSelectorResult::Cancelled);
+            InputResult::Cancelled
+        }
+    }
+
+    fn backspace(&mut self) -> InputResult {
+        if let Some(draft) = self
+            .selected_draft_mut()
+            .filter(|draft| draft.editing_budget)
+        {
+            draft.budget_input.pop();
+            draft.sync_budget_selection();
+        } else {
+            self.list.handle_key("backspace");
+        }
+        InputResult::Handled
+    }
+
+    fn insert(&mut self, ch: char) -> InputResult {
+        if let Some(draft) = self
+            .selected_draft_mut()
+            .filter(|draft| draft.editing_budget)
+        {
+            if ch.is_ascii_digit() {
+                draft.budget_input.push(ch);
+                draft.sync_budget_selection();
+            }
+        } else if ch == ' ' {
+            self.toggle_reasoning_off();
+        } else if ch == 'e' {
+            self.begin_budget_edit();
+        } else {
+            self.list.handle_key(&ch.to_string());
+        }
+        InputResult::Handled
+    }
+
+    fn paste(&mut self, text: &str) -> InputResult {
+        if let Some(draft) = self
+            .selected_draft_mut()
+            .filter(|draft| draft.editing_budget)
+        {
+            draft
+                .budget_input
+                .extend(text.chars().filter(char::is_ascii_digit));
+            draft.sync_budget_selection();
+        } else {
+            self.list.handle_key(text);
+        }
+        InputResult::Handled
     }
 
     #[must_use]

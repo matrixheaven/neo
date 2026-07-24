@@ -106,135 +106,147 @@ impl Tool for DelegateTool {
         schema_with_role_guide::<DelegateRequest>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let request: DelegateRequest = parse_input(self.name(), input)?;
-            if let Err(err) = validate_delegate_request(self.name(), &request) {
-                return Ok(ToolResult::error(err.to_string()));
-            }
-            let mut deps = child_runtime_deps(ctx)?;
-            // Set the subagent role for tool filtering and profile enforcement.
-            // For resumed agents, keep their original role from the snapshot.
-            deps.role = request.actual_role();
-            let turn = ctx.current_turn.unwrap_or_default();
-
-            let snapshot = if let Some(agent_id) = request.resume.as_deref() {
-                match ctx.multi_agent.start_resume_delegate(agent_id, &request) {
-                    Ok(snapshot) => {
-                        deps.role = snapshot.role;
-                        snapshot
-                    }
-                    Err(message) => return Ok(ToolResult::error(message)),
-                }
-            } else {
-                ctx.multi_agent.start_delegate(
-                    &request.task,
-                    request.title.as_deref(),
-                    request.actual_role(),
-                    request.mode,
-                    request.context,
-                    crate::multi_agent::AgentPathKind::Root,
-                )
-            };
-
-            // Background mode: register the agent in the background task manager
-            // and return immediately.
-            if request.mode == AgentRunMode::Background {
-                deps = deps.with_cancel_token(CancellationToken::new());
-                ctx.emit_event(AgentEvent::DelegateStarted {
-                    turn,
-                    agent: snapshot.clone(),
-                });
-                let task_id = ctx.background_tasks.start_delegate(snapshot.clone()).await;
-                let runtime = ctx.multi_agent.clone();
-                let background_tasks = ctx.background_tasks.clone();
-                let request_for_worker = request.clone();
-                let task_id_for_worker = task_id.clone();
-                let snapshot_for_worker = snapshot.clone();
-                let event_callback = ctx.tool_event.clone();
-                tokio::spawn(async move {
-                    let callback = event_callback.clone();
-                    let output = runtime
-                        .run_started_child_turn(
-                            deps,
-                            snapshot_for_worker,
-                            request_for_worker.context,
-                            move |agent| {
-                                if let Some(callback) = &callback {
-                                    callback(AgentEvent::DelegateUpdated { turn, agent });
-                                }
-                            },
-                        )
-                        .await;
-                    if let Some(callback) = &event_callback {
-                        callback(AgentEvent::DelegateFinished {
-                            turn,
-                            agent: output.snapshot.clone(),
-                        });
-                    }
-                    background_tasks
-                        .finish_delegate(&task_id_for_worker, output.snapshot)
-                        .await;
-                });
-                return Ok(ToolResult::ok(format!(
-                    "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\nrun_index: {}\ncontext_mode: {}\nnext_step: Call WaitDelegate with this agent_id to wait for completion.",
-                    snapshot.id.as_str(),
-                    snapshot.display_name.as_str(),
-                    snapshot.run_count,
-                    context_mode_label(request.context),
-                ))
-                .with_details({
-                    let mut details = agent_details(
-                        "delegate",
-                        &snapshot,
-                        Some(request.context),
-                        SummaryScope::CurrentRun,
-                        true,
-                        false,
-                        false,
-                    );
-                    details["mode"] = json!("background");
-                    details["task_id"] = json!(task_id);
-                    details
-                }));
-            }
-
-            // Foreground mode: run synchronously and return the result.
-            ctx.emit_event(AgentEvent::DelegateStarted {
-                turn,
-                agent: snapshot.clone(),
-            });
-            let output = ctx
-                .multi_agent
-                .run_started_child_turn(deps, snapshot, request.context, |agent| {
-                    ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
-                })
-                .await;
-            let actual_usage = accumulate_actual_usage(None, &output.events);
-            let completed = output.snapshot;
-            ctx.emit_event(AgentEvent::DelegateFinished {
-                turn,
-                agent: completed.clone(),
-            });
-            let mut details = agent_details(
-                "delegate",
-                &completed,
-                Some(request.context),
-                SummaryScope::CurrentRun,
-                true,
-                true,
-                false,
-            );
-            if let Some(usage) = actual_usage {
-                details["actual_usage"] = json!(usage);
-            }
-            Ok(
-                ToolResult::ok(delegate_result_content(&completed, request.context))
-                    .with_details(details),
-            )
-        })
+        Box::pin(execute_delegate(self.name(), ctx, input))
     }
+}
+
+async fn execute_delegate(
+    tool: &str,
+    ctx: &ToolContext,
+    input: serde_json::Value,
+) -> Result<ToolResult, ToolError> {
+    let request: DelegateRequest = parse_input(tool, input)?;
+    if let Err(err) = validate_delegate_request(tool, &request) {
+        return Ok(ToolResult::error(err.to_string()));
+    }
+    let mut deps = child_runtime_deps(ctx)?;
+    // Set the subagent role for tool filtering and profile enforcement.
+    // For resumed agents, keep their original role from the snapshot.
+    deps.role = request.actual_role();
+    let turn = ctx.current_turn.unwrap_or_default();
+
+    let snapshot = if let Some(agent_id) = request.resume.as_deref() {
+        match ctx.multi_agent.start_resume_delegate(agent_id, &request) {
+            Ok(snapshot) => {
+                deps.role = snapshot.role;
+                snapshot
+            }
+            Err(message) => return Ok(ToolResult::error(message)),
+        }
+    } else {
+        ctx.multi_agent.start_delegate(
+            &request.task,
+            request.title.as_deref(),
+            request.actual_role(),
+            request.mode,
+            request.context,
+            crate::multi_agent::AgentPathKind::Root,
+        )
+    };
+
+    // Background mode: register the agent in the background task manager
+    // and return immediately.
+    if request.mode == AgentRunMode::Background {
+        return Ok(start_background_delegate(ctx, deps, &request, &snapshot, turn).await);
+    }
+
+    // Foreground mode: run synchronously and return the result.
+    ctx.emit_event(AgentEvent::DelegateStarted {
+        turn,
+        agent: snapshot.clone(),
+    });
+    let output = ctx
+        .multi_agent
+        .run_started_child_turn(deps, snapshot, request.context, |agent| {
+            ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
+        })
+        .await;
+    let actual_usage = accumulate_actual_usage(None, &output.events);
+    let completed = output.snapshot;
+    ctx.emit_event(AgentEvent::DelegateFinished {
+        turn,
+        agent: completed.clone(),
+    });
+    let mut details = agent_details(
+        "delegate",
+        &completed,
+        Some(request.context),
+        SummaryScope::CurrentRun,
+        true,
+        true,
+        false,
+    );
+    if let Some(usage) = actual_usage {
+        details["actual_usage"] = json!(usage);
+    }
+    Ok(ToolResult::ok(delegate_result_content(&completed, request.context)).with_details(details))
+}
+
+async fn start_background_delegate(
+    ctx: &ToolContext,
+    deps: ChildRuntimeDeps,
+    request: &DelegateRequest,
+    snapshot: &crate::multi_agent::AgentSnapshot,
+    turn: u32,
+) -> ToolResult {
+    let deps = deps.with_cancel_token(CancellationToken::new());
+    ctx.emit_event(AgentEvent::DelegateStarted {
+        turn,
+        agent: snapshot.clone(),
+    });
+    let task_id = ctx.background_tasks.start_delegate(snapshot.clone()).await;
+    let runtime = ctx.multi_agent.clone();
+    let background_tasks = ctx.background_tasks.clone();
+    let request_for_worker = request.clone();
+    let task_id_for_worker = task_id.clone();
+    let snapshot_for_worker = snapshot.clone();
+    let event_callback = ctx.tool_event.clone();
+    tokio::spawn(async move {
+        let callback = event_callback.clone();
+        let output = runtime
+            .run_started_child_turn(
+                deps,
+                snapshot_for_worker,
+                request_for_worker.context,
+                move |agent| {
+                    if let Some(callback) = &callback {
+                        callback(AgentEvent::DelegateUpdated { turn, agent });
+                    }
+                },
+            )
+            .await;
+        if let Some(callback) = &event_callback {
+            callback(AgentEvent::DelegateFinished {
+                turn,
+                agent: output.snapshot.clone(),
+            });
+        }
+        background_tasks
+            .finish_delegate(&task_id_for_worker, output.snapshot)
+            .await;
+    });
+    ToolResult::ok(format!(
+        "agent_id: {}\nname: {}\nkind: delegate\nstatus: running\nrun_index: {}\ncontext_mode: {}\nnext_step: Call WaitDelegate with this agent_id to wait for completion.",
+        snapshot.id.as_str(),
+        snapshot.display_name.as_str(),
+        snapshot.run_count,
+        context_mode_label(request.context),
+    ))
+    .with_details({
+        let mut details = agent_details(
+            "delegate",
+            snapshot,
+            Some(request.context),
+            SummaryScope::CurrentRun,
+            true,
+            false,
+            false,
+        );
+        details["mode"] = json!("background");
+        details["task_id"] = json!(task_id);
+        details
+    })
 }
 
 pub struct DelegateSwarmTool;
@@ -255,115 +267,77 @@ impl Tool for DelegateSwarmTool {
         schema_with_role_guide::<DelegateSwarmRequest>()
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let request = parse_delegate_swarm_input(self.name(), input)?;
-            validate_swarm_request(self.name(), &request)?;
-            let mut deps = child_runtime_deps(ctx)?;
-            deps.role = request.role;
-            let turn = ctx.current_turn.unwrap_or_default();
-            let swarm_id = ctx.multi_agent.new_swarm_id();
-            let total_children = request.items.len() + request.resume_agent_ids.len();
-            let max_concurrency = request
-                .max_concurrency
-                .unwrap_or(1)
-                .clamp(1, total_children);
-            // Build initial children from both new items and resumed agents.
-            let mut initial_children = Vec::new();
-            let mut item_index = 0usize;
-            for item in &request.items {
-                let template = request.prompt_template.as_deref().unwrap_or("");
-                let task =
-                    apply_swarm_template(template, item.value.as_str(), &request.description);
-                let snapshot = ctx.multi_agent.queue_delegate(
-                    &task,
-                    Some(item.title.as_str()),
-                    request.role,
-                    request.mode,
-                    DelegateContext::None,
-                    crate::multi_agent::AgentPathKind::SwarmChild(&swarm_id),
-                );
-                initial_children.push(SwarmChildSnapshot {
-                    item_index,
-                    item: item.value.clone(),
-                    agent: snapshot,
-                });
-                item_index += 1;
-            }
-            // Resume existing agents as swarm children.
-            for (agent_id, prompt) in &request.resume_agent_ids {
-                let resume_request = DelegateRequest {
-                    task: prompt.clone(),
-                    resume: Some(agent_id.clone()),
-                    title: None,
-                    role: None,
-                    mode: request.mode,
-                    context: DelegateContext::None,
-                };
-                let agent_snapshot = ctx
-                    .multi_agent
-                    .start_resume_delegate(agent_id, &resume_request)
-                    .map_err(|message| ToolError::InvalidInput {
-                        tool: "DelegateSwarm".to_owned(),
-                        message,
-                    })?;
-                initial_children.push(SwarmChildSnapshot {
-                    item_index,
-                    item: format!("resume:{agent_id}"),
-                    agent: agent_snapshot,
-                });
-                item_index += 1;
-            }
-            let initial_aggregate =
-                SwarmAggregate::from_states(initial_children.iter().map(|c| c.agent.state));
-            let initial_snapshot = SwarmSnapshot {
-                swarm_id: swarm_id.clone(),
-                description: request.description.clone(),
-                role: request.role,
-                mode: request.mode,
-                state: AgentLifecycleState::Queued,
-                max_concurrency,
-                aggregate: initial_aggregate,
-                children: initial_children,
-            };
+        Box::pin(execute_delegate_swarm(self.name(), ctx, input))
+    }
+}
 
-            // Background mode: register in background task manager, emit start,
-            // and return immediately.
-            ctx.multi_agent.register_swarm(initial_snapshot.clone());
-            if request.mode == AgentRunMode::Background {
-                deps = deps.with_cancel_token(CancellationToken::new());
-                ctx.emit_event(AgentEvent::DelegateSwarmStarted {
-                    turn,
-                    swarm: initial_snapshot.clone(),
-                });
-                let task_id = ctx
-                    .background_tasks
-                    .start_delegate_swarm(initial_snapshot.clone())
-                    .await;
-                let runtime = ctx.multi_agent.clone();
-                let background_tasks = ctx.background_tasks.clone();
-                let task_id_for_worker = task_id.clone();
-                let event_callback = ctx.tool_event.clone();
-                let initial_snapshot_for_worker = initial_snapshot.clone();
-                tokio::spawn(async move {
-                    let output = run_swarm_children(
-                        runtime.clone(),
-                        deps,
-                        initial_snapshot_for_worker,
-                        max_concurrency,
-                        turn,
-                        event_callback,
-                        Some((background_tasks.clone(), task_id_for_worker.clone())),
-                    )
-                    .await;
-                    let final_snapshot = output.snapshot;
-                    runtime.register_swarm(final_snapshot.clone());
-                    background_tasks
-                        .finish_delegate_swarm(&task_id_for_worker, final_snapshot)
-                        .await;
-                });
-                return Ok(ToolResult::ok(format!(
+async fn execute_delegate_swarm(
+    tool: &str,
+    ctx: &ToolContext,
+    input: serde_json::Value,
+) -> Result<ToolResult, ToolError> {
+    let request = parse_delegate_swarm_input(tool, input)?;
+    validate_swarm_request(tool, &request)?;
+    let mut deps = child_runtime_deps(ctx)?;
+    deps.role = request.role;
+    let turn = ctx.current_turn.unwrap_or_default();
+    let swarm_id = ctx.multi_agent.new_swarm_id();
+    let total_children = request.items.len() + request.resume_agent_ids.len();
+    let max_concurrency = request
+        .max_concurrency
+        .unwrap_or(1)
+        .clamp(1, total_children);
+    let initial_children = prepare_swarm_children(ctx, &request, &swarm_id)?;
+    let initial_aggregate =
+        SwarmAggregate::from_states(initial_children.iter().map(|c| c.agent.state));
+    let initial_snapshot = SwarmSnapshot {
+        swarm_id: swarm_id.clone(),
+        description: request.description.clone(),
+        role: request.role,
+        mode: request.mode,
+        state: AgentLifecycleState::Queued,
+        max_concurrency,
+        aggregate: initial_aggregate,
+        children: initial_children,
+    };
+
+    // Background mode: register in background task manager, emit start,
+    // and return immediately.
+    ctx.multi_agent.register_swarm(initial_snapshot.clone());
+    if request.mode == AgentRunMode::Background {
+        deps = deps.with_cancel_token(CancellationToken::new());
+        ctx.emit_event(AgentEvent::DelegateSwarmStarted {
+            turn,
+            swarm: initial_snapshot.clone(),
+        });
+        let task_id = ctx
+            .background_tasks
+            .start_delegate_swarm(initial_snapshot.clone())
+            .await;
+        let runtime = ctx.multi_agent.clone();
+        let background_tasks = ctx.background_tasks.clone();
+        let task_id_for_worker = task_id.clone();
+        let event_callback = ctx.tool_event.clone();
+        let initial_snapshot_for_worker = initial_snapshot.clone();
+        tokio::spawn(async move {
+            let output = run_swarm_children(
+                runtime.clone(),
+                deps,
+                initial_snapshot_for_worker,
+                max_concurrency,
+                turn,
+                event_callback,
+                Some((background_tasks.clone(), task_id_for_worker.clone())),
+            )
+            .await;
+            let final_snapshot = output.snapshot;
+            runtime.register_swarm(final_snapshot.clone());
+            background_tasks
+                .finish_delegate_swarm(&task_id_for_worker, final_snapshot)
+                .await;
+        });
+        return Ok(ToolResult::ok(format!(
                     "swarm_id: {swarm_id}\nkind: delegate-swarm\nstatus: running\nitems: {total_children}\nnext_step: Call WaitDelegate with this swarm_id to wait for completion."
                 ))
                 .with_details(json!({
@@ -372,34 +346,41 @@ impl Tool for DelegateSwarmTool {
                     "swarm": model_safe_swarm_snapshot(&initial_snapshot),
                     "task_id": task_id,
                 })));
-            }
+    }
 
-            ctx.emit_event(AgentEvent::DelegateSwarmStarted {
-                turn,
-                swarm: initial_snapshot.clone(),
-            });
+    ctx.emit_event(AgentEvent::DelegateSwarmStarted {
+        turn,
+        swarm: initial_snapshot.clone(),
+    });
 
-            let output = run_swarm_children(
-                ctx.multi_agent.clone(),
-                deps,
-                initial_snapshot,
-                max_concurrency,
-                turn,
-                ctx.tool_event.clone(),
-                None,
-            )
-            .await;
-            let final_snapshot = output.snapshot;
-            ctx.multi_agent.register_swarm(final_snapshot.clone());
-            ctx.emit_event(AgentEvent::DelegateSwarmFinished {
-                turn,
-                swarm: final_snapshot.clone(),
-            });
-            let mut details = swarm_details(&final_snapshot);
-            if let Some(usage) = output.actual_usage {
-                details["actual_usage"] = json!(usage);
-            }
-            Ok(ToolResult::ok(format!(
+    let output = run_swarm_children(
+        ctx.multi_agent.clone(),
+        deps,
+        initial_snapshot,
+        max_concurrency,
+        turn,
+        ctx.tool_event.clone(),
+        None,
+    )
+    .await;
+    let final_snapshot = output.snapshot;
+    ctx.multi_agent.register_swarm(final_snapshot.clone());
+    ctx.emit_event(AgentEvent::DelegateSwarmFinished {
+        turn,
+        swarm: final_snapshot.clone(),
+    });
+    Ok(swarm_run_result(final_snapshot, output.actual_usage))
+}
+
+fn swarm_run_result(
+    final_snapshot: SwarmSnapshot,
+    actual_usage: Option<crate::AgentTokenUsage>,
+) -> ToolResult {
+    let mut details = swarm_details(&final_snapshot);
+    if let Some(usage) = actual_usage {
+        details["actual_usage"] = json!(usage);
+    }
+    ToolResult::ok(format!(
                 "swarm_id: {}\nstatus: {}\nsummary_scope: swarm_items\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
                 final_snapshot.swarm_id,
                 final_snapshot.state.as_str(),
@@ -411,9 +392,59 @@ impl Tool for DelegateSwarmTool {
                 final_snapshot.aggregate.cancelled,
                 final_snapshot.aggregate.timed_out,
             ))
-            .with_details(details))
-        })
+            .with_details(details)
+}
+
+fn prepare_swarm_children(
+    ctx: &ToolContext,
+    request: &DelegateSwarmRequest,
+    swarm_id: &str,
+) -> Result<Vec<SwarmChildSnapshot>, ToolError> {
+    let mut children = Vec::with_capacity(request.items.len() + request.resume_agent_ids.len());
+    for (item_index, item) in request.items.iter().enumerate() {
+        let task = apply_swarm_template(
+            request.prompt_template.as_deref().unwrap_or(""),
+            item.value.as_str(),
+            &request.description,
+        );
+        let agent = ctx.multi_agent.queue_delegate(
+            &task,
+            Some(item.title.as_str()),
+            request.role,
+            request.mode,
+            DelegateContext::None,
+            crate::multi_agent::AgentPathKind::SwarmChild(swarm_id),
+        );
+        children.push(SwarmChildSnapshot {
+            item_index,
+            item: item.value.clone(),
+            agent,
+        });
     }
+    for (agent_id, prompt) in &request.resume_agent_ids {
+        let item_index = children.len();
+        let resume_request = DelegateRequest {
+            task: prompt.clone(),
+            resume: Some(agent_id.clone()),
+            title: None,
+            role: None,
+            mode: request.mode,
+            context: DelegateContext::None,
+        };
+        let agent = ctx
+            .multi_agent
+            .start_resume_delegate(agent_id, &resume_request)
+            .map_err(|message| ToolError::InvalidInput {
+                tool: "DelegateSwarm".to_owned(),
+                message,
+            })?;
+        children.push(SwarmChildSnapshot {
+            item_index,
+            item: format!("resume:{agent_id}"),
+            agent,
+        });
+    }
+    Ok(children)
 }
 
 fn parse_delegate_swarm_input(
@@ -435,7 +466,6 @@ fn parse_delegate_swarm_input(
     parse_input(tool, input)
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_swarm_children(
     runtime: crate::multi_agent::MultiAgentRuntime,
     deps: ChildRuntimeDeps,
@@ -452,89 +482,15 @@ async fn run_swarm_children(
         std::sync::Arc::new(std::sync::Mutex::new(initial_snapshot.children.clone()));
     let (progress_tx, mut progress_rx) = mpsc::channel(PROGRESS_QUEUE_CAPACITY);
     let overflow = Arc::new(Mutex::new(BTreeMap::<usize, SwarmProgressUpdate>::new()));
-    let mut stream = stream::iter(initial_snapshot.children.clone())
-        .map(|child| {
-            let runtime = runtime.clone();
-            let deps = deps.clone();
-            let initial_snapshot = initial_snapshot.clone();
-            let current_children = std::sync::Arc::clone(&current_children);
-            let progress_tx = progress_tx.clone();
-            let overflow = Arc::clone(&overflow);
-            async move {
-                let item_index = child.item_index;
-                let item = child.item.clone();
-                // Skip queued children that were cancelled by cancel_swarm
-                // before they were polled.
-                if let Some(current) = runtime.agent_snapshot(child.agent.id.as_str())
-                    && current.state.is_terminal()
-                {
-                    return (
-                        SwarmChildSnapshot {
-                            item_index,
-                            item,
-                            agent: current,
-                        },
-                        None,
-                    );
-                }
-                let output = runtime
-                    .run_started_swarm_child_turn(
-                        deps,
-                        child.agent,
-                        &initial_snapshot.swarm_id,
-                        &item,
-                        DelegateContext::None,
-                        |progress| {
-                            let (aggregate, state) = {
-                                let mut children = current_children
-                                    .lock()
-                                    .expect("swarm progress state poisoned");
-                                if let Some(child) = children.get_mut(item_index) {
-                                    let _ = apply_agent_progress(&mut child.agent, &progress);
-                                }
-                                let aggregate = SwarmAggregate::from_states(
-                                    children.iter().map(|c| c.agent.state),
-                                );
-                                (aggregate, aggregate.status())
-                            };
-                            let update = (
-                                SwarmChildProgress {
-                                    item_index,
-                                    progress,
-                                },
-                                aggregate,
-                                state,
-                            );
-                            match progress_tx.try_send(update) {
-                                Ok(()) => {
-                                    overflow
-                                        .lock()
-                                        .expect("swarm progress overflow poisoned")
-                                        .remove(&item_index);
-                                }
-                                Err(mpsc::error::TrySendError::Full(update)) => {
-                                    overflow
-                                        .lock()
-                                        .expect("swarm progress overflow poisoned")
-                                        .insert(item_index, update);
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {}
-                            }
-                        },
-                    )
-                    .await;
-                let actual_usage = accumulate_actual_usage(None, &output.events);
-                (
-                    SwarmChildSnapshot {
-                        item_index,
-                        item,
-                        agent: output.snapshot,
-                    },
-                    actual_usage,
-                )
-            }
-        })
-        .buffer_unordered(max_concurrency);
+    let mut stream = swarm_child_runs(
+        runtime.clone(),
+        deps,
+        &initial_snapshot,
+        Arc::clone(&current_children),
+        progress_tx.clone(),
+        Arc::clone(&overflow),
+        max_concurrency,
+    );
 
     let mut completed_count = 0;
     let mut actual_usage: Option<crate::AgentTokenUsage> = None;
@@ -548,27 +504,10 @@ async fn run_swarm_children(
                     &initial_snapshot.swarm_id,
                     (child_progress, aggregate, state),
                 ).await;
-                while let Ok(update) = progress_rx.try_recv() {
-                    publish_swarm_progress(
-                        event_callback.as_ref(),
-                        background.as_ref(),
-                        turn,
-                        &initial_snapshot.swarm_id,
-                        update,
-                    ).await;
-                }
-                let overflow_updates = std::mem::take(
-                    &mut *overflow.lock().expect("swarm progress overflow poisoned"),
-                );
-                for (_, update) in overflow_updates {
-                    publish_swarm_progress(
-                        event_callback.as_ref(),
-                        background.as_ref(),
-                        turn,
-                        &initial_snapshot.swarm_id,
-                        update,
-                    ).await;
-                }
+                drain_swarm_progress(
+                    &mut progress_rx, &overflow, event_callback.as_ref(), background.as_ref(),
+                    turn, &initial_snapshot.swarm_id,
+                ).await;
             }
             Some((completed_child, child_usage)) = stream.next() => {
         if let Some(child_usage) = child_usage {
@@ -576,27 +515,10 @@ async fn run_swarm_children(
                 total.saturating_add(child_usage)
             }));
         }
-        while let Ok(update) = progress_rx.try_recv() {
-            publish_swarm_progress(
-                event_callback.as_ref(),
-                background.as_ref(),
-                turn,
-                &initial_snapshot.swarm_id,
-                update,
-            ).await;
-        }
-        let overflow_updates = std::mem::take(
-            &mut *overflow.lock().expect("swarm progress overflow poisoned"),
-        );
-        for (_, update) in overflow_updates {
-            publish_swarm_progress(
-                event_callback.as_ref(),
-                background.as_ref(),
-                turn,
-                &initial_snapshot.swarm_id,
-                update,
-            ).await;
-        }
+        drain_swarm_progress(
+            &mut progress_rx, &overflow, event_callback.as_ref(), background.as_ref(),
+            turn, &initial_snapshot.swarm_id,
+        ).await;
         let index = completed_child.item_index;
         {
             let mut children = current_children
@@ -644,9 +566,15 @@ async fn run_swarm_children(
         }
     }
 
-    // Prefer the runtime's terminal swarm snapshot if the swarm was
-    // cancelled via InterruptDelegate. This prevents the worker's
-    // locally-tracked progress from regressing a cancelled swarm.
+    final_swarm_output(&runtime, &initial_snapshot, &ordered_children, actual_usage)
+}
+
+fn final_swarm_output(
+    runtime: &crate::multi_agent::MultiAgentRuntime,
+    initial_snapshot: &SwarmSnapshot,
+    ordered_children: &[Option<SwarmChildSnapshot>],
+    actual_usage: Option<crate::AgentTokenUsage>,
+) -> SwarmRunOutput {
     if let Some(current) = runtime.swarm_snapshot(&initial_snapshot.swarm_id)
         && current.state == crate::multi_agent::AgentLifecycleState::Cancelled
     {
@@ -657,11 +585,122 @@ async fn run_swarm_children(
     }
     SwarmRunOutput {
         snapshot: swarm_snapshot_from_progress(
-            &initial_snapshot,
-            &ordered_children,
+            initial_snapshot,
+            ordered_children,
             initial_snapshot.mode,
         ),
         actual_usage,
+    }
+}
+
+fn swarm_child_runs(
+    runtime: crate::multi_agent::MultiAgentRuntime,
+    deps: ChildRuntimeDeps,
+    initial_snapshot: &SwarmSnapshot,
+    current_children: Arc<std::sync::Mutex<Vec<SwarmChildSnapshot>>>,
+    progress_tx: mpsc::Sender<SwarmProgressUpdate>,
+    overflow: Arc<Mutex<BTreeMap<usize, SwarmProgressUpdate>>>,
+    max_concurrency: usize,
+) -> impl futures::Stream<Item = (SwarmChildSnapshot, Option<crate::AgentTokenUsage>)> {
+    let initial_snapshot = initial_snapshot.clone();
+    stream::iter(initial_snapshot.children.clone())
+        .map(move |child| {
+            let runtime = runtime.clone();
+            let deps = deps.clone();
+            let initial_snapshot = initial_snapshot.clone();
+            let current_children = Arc::clone(&current_children);
+            let progress_tx = progress_tx.clone();
+            let overflow = Arc::clone(&overflow);
+            async move {
+                let item_index = child.item_index;
+                let item = child.item.clone();
+                if let Some(current) = runtime.agent_snapshot(child.agent.id.as_str())
+                    && current.state.is_terminal()
+                {
+                    return (
+                        SwarmChildSnapshot {
+                            item_index,
+                            item,
+                            agent: current,
+                        },
+                        None,
+                    );
+                }
+                let output = runtime
+                    .run_started_swarm_child_turn(
+                        deps,
+                        child.agent,
+                        &initial_snapshot.swarm_id,
+                        &item,
+                        DelegateContext::None,
+                        |progress| {
+                            let (aggregate, state) = {
+                                let mut children = current_children
+                                    .lock()
+                                    .expect("swarm progress state poisoned");
+                                if let Some(child) = children.get_mut(item_index) {
+                                    let _ = apply_agent_progress(&mut child.agent, &progress);
+                                }
+                                let aggregate = SwarmAggregate::from_states(
+                                    children.iter().map(|child| child.agent.state),
+                                );
+                                (aggregate, aggregate.status())
+                            };
+                            let update = (
+                                SwarmChildProgress {
+                                    item_index,
+                                    progress,
+                                },
+                                aggregate,
+                                state,
+                            );
+                            match progress_tx.try_send(update) {
+                                Ok(()) => {
+                                    overflow
+                                        .lock()
+                                        .expect("swarm progress overflow poisoned")
+                                        .remove(&item_index);
+                                }
+                                Err(mpsc::error::TrySendError::Full(update)) => {
+                                    overflow
+                                        .lock()
+                                        .expect("swarm progress overflow poisoned")
+                                        .insert(item_index, update);
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {}
+                            }
+                        },
+                    )
+                    .await;
+                let actual_usage = accumulate_actual_usage(None, &output.events);
+                (
+                    SwarmChildSnapshot {
+                        item_index,
+                        item,
+                        agent: output.snapshot,
+                    },
+                    actual_usage,
+                )
+            }
+        })
+        .buffer_unordered(max_concurrency)
+}
+
+async fn drain_swarm_progress(
+    progress_rx: &mut mpsc::Receiver<SwarmProgressUpdate>,
+    overflow: &Mutex<BTreeMap<usize, SwarmProgressUpdate>>,
+    event_callback: Option<&ToolEventCallback>,
+    background: Option<&(crate::BackgroundTaskManager, String)>,
+    turn: u32,
+    swarm_id: &str,
+) {
+    while let Ok(update) = progress_rx.try_recv() {
+        publish_swarm_progress(event_callback, background, turn, swarm_id, update).await;
+    }
+    let overflow_updates =
+        std::mem::take(&mut *overflow.lock().expect("swarm progress overflow poisoned"));
+    for update in overflow_updates.into_values() {
+        publish_swarm_progress(event_callback, background, turn, swarm_id, update).await;
     }
 }
 
@@ -753,7 +792,6 @@ pub(crate) fn validate_delegate_request(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn validate_swarm_request(
     tool: &str,
     request: &DelegateSwarmRequest,
@@ -809,42 +847,8 @@ pub(crate) fn validate_swarm_request(
         }
         reject_unknown_placeholders(tool, template)?;
     }
-    for (index, item) in request.items.iter().enumerate() {
-        if item.title.trim().is_empty() {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!("items[{index}].title must not be empty"),
-            });
-        }
-        if item.value.trim().is_empty() {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!("items[{index}].value must not be empty"),
-            });
-        }
-        if item.title.chars().count() > MAX_SWARM_ITEM_TITLE_CHARS {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!(
-                    "items[{index}].title must not exceed {MAX_SWARM_ITEM_TITLE_CHARS} characters"
-                ),
-            });
-        }
-    }
-    for (agent_id, prompt) in &request.resume_agent_ids {
-        if !agent_id.starts_with("agent_") {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: "resume_agent_ids keys must be agent_id values".to_owned(),
-            });
-        }
-        if prompt.trim().is_empty() {
-            return Err(ToolError::InvalidInput {
-                tool: tool.to_owned(),
-                message: format!("resume_agent_ids[{agent_id}] must not be empty"),
-            });
-        }
-    }
+    validate_swarm_items(tool, &request.items, MAX_SWARM_ITEM_TITLE_CHARS)?;
+    validate_resume_agents(tool, &request.resume_agent_ids)?;
     if request.max_concurrency == Some(0) {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -868,6 +872,55 @@ pub(crate) fn validate_swarm_request(
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
                 message: format!("duplicate expanded child prompt: {prompt}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_swarm_items(
+    tool: &str,
+    items: &[crate::multi_agent::DelegateSwarmItem],
+    max_title_chars: usize,
+) -> Result<(), ToolError> {
+    for (index, item) in items.iter().enumerate() {
+        let message = if item.title.trim().is_empty() {
+            Some(format!("items[{index}].title must not be empty"))
+        } else if item.value.trim().is_empty() {
+            Some(format!("items[{index}].value must not be empty"))
+        } else if item.title.chars().count() > max_title_chars {
+            Some(format!(
+                "items[{index}].title must not exceed {max_title_chars} characters"
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_resume_agents(
+    tool: &str,
+    resume_agents: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ToolError> {
+    for (agent_id, prompt) in resume_agents {
+        let message = if !agent_id.starts_with("agent_") {
+            Some("resume_agent_ids keys must be agent_id values".to_owned())
+        } else if prompt.trim().is_empty() {
+            Some(format!("resume_agent_ids[{agent_id}] must not be empty"))
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message,
             });
         }
     }

@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(crate) use client::{
-    GuardedCommandResult, GuardianClient, TerminalClientSession, TerminalClientState,
-    TerminalSnapshot,
+    BashStart, GuardedCommandResult, GuardianClient, TerminalClientSession, TerminalClientState,
+    TerminalSnapshot, TerminalStart,
 };
 pub use guardian::run_process_guard;
 pub(crate) use output::TaggedOutput;

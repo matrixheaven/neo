@@ -110,17 +110,29 @@ fn compaction_pulse_char(activity_frame: usize) -> char {
     PULSE[activity_frame % PULSE.len()]
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_compaction(
-    phase: Option<neo_agent_core::CompactionPhase>,
-    percent: u8,
-    compacted_message_count: usize,
-    tokens_before: usize,
-    tokens_after: usize,
+    entry: &super::TranscriptEntry,
     width: usize,
     theme: &TuiTheme,
     activity_frame: usize,
 ) -> Vec<Line> {
+    let super::TranscriptEntry::Compaction {
+        phase,
+        percent,
+        compacted_message_count,
+        tokens_before,
+        tokens_after,
+    } = entry
+    else {
+        return Vec::new();
+    };
+    let (phase, percent, compacted_message_count, tokens_before, tokens_after) = (
+        *phase,
+        *percent,
+        *compacted_message_count,
+        *tokens_before,
+        *tokens_after,
+    );
     let is_complete = percent >= 100 && phase == Some(neo_agent_core::CompactionPhase::Applying);
     if is_complete {
         let text = format!(

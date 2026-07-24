@@ -455,16 +455,16 @@ impl TranscriptPane {
                 truncated,
             } => {
                 let id = format!("replay-shell-{}", self.transcript.entries().len());
-                self.push_transcript(TranscriptEntry::shell_run(ShellRunComponent::finished(
-                    id,
-                    command.to_string(),
+                let mut shell_run = ShellRunComponent::running(id, command.to_string());
+                shell_run.finish(
                     stdout.to_string(),
                     stderr.to_string(),
                     *exit_code,
                     None,
                     outcome.clone(),
                     *truncated,
-                )));
+                );
+                self.push_transcript(TranscriptEntry::shell_run(shell_run));
             }
         }
     }

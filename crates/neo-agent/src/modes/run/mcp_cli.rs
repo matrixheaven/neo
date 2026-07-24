@@ -54,23 +54,41 @@ async fn list_mcp_tools_for_server(server: &McpServerConfig) -> anyhow::Result<V
     Ok(tools)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct AddMcpServerInput {
+    pub mcp_name: String,
+    pub r#type: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    pub env: Vec<String>,
+    pub headers: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub enabled_tools: Vec<String>,
+    pub disabled_tools: Vec<String>,
+    pub startup_timeout_ms: Option<u64>,
+    pub tool_timeout_ms: Option<u64>,
+    pub enabled: bool,
+}
+
 pub(crate) async fn add_mcp_server(
-    mcp_name: String,
-    r#type: String,
-    command: Option<String>,
-    args: Vec<String>,
-    url: Option<String>,
-    env: Vec<String>,
-    headers: Vec<String>,
-    cwd: Option<PathBuf>,
-    enabled_tools: Vec<String>,
-    disabled_tools: Vec<String>,
-    startup_timeout_ms: Option<u64>,
-    tool_timeout_ms: Option<u64>,
-    enabled: bool,
+    input: AddMcpServerInput,
     config: &AppConfig,
 ) -> anyhow::Result<String> {
+    let AddMcpServerInput {
+        mcp_name,
+        r#type,
+        command,
+        args,
+        url,
+        env,
+        headers,
+        cwd,
+        enabled_tools,
+        disabled_tools,
+        startup_timeout_ms,
+        tool_timeout_ms,
+        enabled,
+    } = input;
     let transport = parse_mcp_kind(&r#type)?;
 
     let command = if transport == McpTransport::Stdio {

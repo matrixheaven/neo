@@ -40,6 +40,30 @@ pub(crate) struct GuardedCommandResult {
     pub(crate) output: TaggedOutput,
 }
 
+pub(crate) struct BashStart<'a> {
+    pub runtime: &'a ShellRuntime,
+    pub task_id: String,
+    pub command_text: String,
+    pub cwd: &'a Path,
+    pub status_dir: &'a Path,
+    pub timeout: Option<Duration>,
+    pub max_output_bytes: usize,
+    pub stream_update: Option<ToolUpdateCallback>,
+    pub permit: ShellCommandPermit,
+}
+
+pub(crate) struct TerminalStart<'a> {
+    pub runtime: &'a ShellRuntime,
+    pub task_id: String,
+    pub command_text: String,
+    pub cwd: &'a Path,
+    pub status_dir: &'a Path,
+    pub cols: u16,
+    pub rows: u16,
+    pub timeout: Option<Duration>,
+    pub permit: ShellCommandPermit,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalSnapshot {
     pub(crate) offset: u64,
@@ -109,96 +133,79 @@ pub(crate) struct TerminalClientState {
 }
 
 impl GuardianClient {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_bash(
-        runtime: &ShellRuntime,
-        task_id: String,
-        command_text: String,
-        cwd: &Path,
-        status_dir: &Path,
-        timeout: Option<Duration>,
-        max_output_bytes: usize,
-        stream_update: Option<ToolUpdateCallback>,
-        permit: ShellCommandPermit,
-    ) -> Result<Self, ToolError> {
-        Self::start(
+    pub(crate) async fn start_bash(input: BashStart<'_>) -> Result<Self, ToolError> {
+        let BashStart {
             runtime,
             task_id,
-            GuardTaskKind::Bash,
             command_text,
             cwd,
             status_dir,
             timeout,
             max_output_bytes,
-            None,
-            None,
             stream_update,
             permit,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn start_terminal(
-        runtime: &ShellRuntime,
-        task_id: String,
-        command_text: String,
-        cwd: &Path,
-        status_dir: &Path,
-        cols: u16,
-        rows: u16,
-        timeout: Option<Duration>,
-        permit: ShellCommandPermit,
-    ) -> Result<Self, ToolError> {
-        Self::start(
-            runtime,
-            task_id,
-            GuardTaskKind::Terminal,
-            command_text,
-            cwd,
-            status_dir,
-            timeout,
-            runtime.limits().max_output_bytes,
-            Some(cols),
-            Some(rows),
-            None,
-            permit,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn start(
-        runtime: &ShellRuntime,
-        task_id: String,
-        kind: GuardTaskKind,
-        command_text: String,
-        cwd: &Path,
-        status_dir: &Path,
-        timeout: Option<Duration>,
-        max_output_bytes: usize,
-        cols: Option<u16>,
-        rows: Option<u16>,
-        stream_update: Option<ToolUpdateCallback>,
-        permit: ShellCommandPermit,
-    ) -> Result<Self, ToolError> {
+        } = input;
         let stream_limit = max_output_bytes.min(runtime.limits().max_output_bytes);
-        let (control, response, child, permit, guardian_pid, command_pid, command_start_id) =
-            spawn_guardian_and_handshake(GuardianStartArgs {
+        Self::start(
+            GuardianStartArgs {
                 runtime,
                 task_id,
-                kind,
+                kind: GuardTaskKind::Bash,
                 command_text,
                 cwd,
                 status_dir,
                 timeout,
                 max_output_bytes,
-                cols,
-                rows,
+                cols: None,
+                rows: None,
                 stream_limit,
                 permit,
-            })
-            .await?;
+            },
+            stream_update,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_terminal(input: TerminalStart<'_>) -> Result<Self, ToolError> {
+        let TerminalStart {
+            runtime,
+            task_id,
+            command_text,
+            cwd,
+            status_dir,
+            cols,
+            rows,
+            timeout,
+            permit,
+        } = input;
+        let max_output_bytes = runtime.limits().max_output_bytes;
+        Self::start(
+            GuardianStartArgs {
+                runtime,
+                task_id,
+                kind: GuardTaskKind::Terminal,
+                command_text,
+                cwd,
+                status_dir,
+                timeout,
+                max_output_bytes,
+                cols: Some(cols),
+                rows: Some(rows),
+                stream_limit: max_output_bytes,
+                permit,
+            },
+            None,
+        )
+        .await
+    }
+
+    async fn start(
+        args: GuardianStartArgs<'_>,
+        stream_update: Option<ToolUpdateCallback>,
+    ) -> Result<Self, ToolError> {
+        let stream_limit = args.stream_limit;
+        let (control, response, child, permit, guardian_pid, command_pid, command_start_id) =
+            spawn_guardian_and_handshake(args).await?;
 
         let output = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(stream_limit)));
         let callback_tx = stream_update.map(build_callback_channel);
