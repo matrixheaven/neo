@@ -283,28 +283,19 @@ async fn execute_delegate_swarm(
     deps.role = request.role;
     let turn = ctx.current_turn.unwrap_or_default();
     let swarm_id = ctx.multi_agent.new_swarm_id();
-    let total_children = request.items.len() + request.resume_agent_ids.len();
-    let max_concurrency = request
-        .max_concurrency
-        .unwrap_or(1)
-        .clamp(1, total_children);
-    let initial_children = prepare_swarm_children(ctx, &request, &swarm_id)?;
-    let initial_aggregate =
-        SwarmAggregate::from_states(initial_children.iter().map(|c| c.agent.state));
-    let initial_snapshot = SwarmSnapshot {
-        swarm_id: swarm_id.clone(),
-        description: request.description.clone(),
-        role: request.role,
-        mode: request.mode,
-        state: AgentLifecycleState::Queued,
-        max_concurrency,
-        aggregate: initial_aggregate,
-        children: initial_children,
-    };
+    let initial_snapshot =
+        ctx.multi_agent
+            .prepare_swarm(&swarm_id, &request)
+            .map_err(|message| ToolError::InvalidInput {
+                tool: "DelegateSwarm".to_owned(),
+                message,
+            })?;
+    let total_children = initial_snapshot.children.len();
+    let max_concurrency = initial_snapshot.max_concurrency;
 
     // Background mode: register in background task manager, emit start,
     // and return immediately.
-    ctx.multi_agent.register_swarm(initial_snapshot.clone());
+
     if request.mode == AgentRunMode::Background {
         deps = deps.with_cancel_token(CancellationToken::new());
         ctx.emit_event(AgentEvent::DelegateSwarmStarted {
@@ -393,58 +384,6 @@ fn swarm_run_result(
                 final_snapshot.aggregate.timed_out,
             ))
             .with_details(details)
-}
-
-fn prepare_swarm_children(
-    ctx: &ToolContext,
-    request: &DelegateSwarmRequest,
-    swarm_id: &str,
-) -> Result<Vec<SwarmChildSnapshot>, ToolError> {
-    let mut children = Vec::with_capacity(request.items.len() + request.resume_agent_ids.len());
-    for (item_index, item) in request.items.iter().enumerate() {
-        let task = apply_swarm_template(
-            request.prompt_template.as_deref().unwrap_or(""),
-            item.value.as_str(),
-            &request.description,
-        );
-        let agent = ctx.multi_agent.queue_delegate(
-            &task,
-            Some(item.title.as_str()),
-            request.role,
-            request.mode,
-            DelegateContext::None,
-            crate::multi_agent::AgentPathKind::SwarmChild(swarm_id),
-        );
-        children.push(SwarmChildSnapshot {
-            item_index,
-            item: item.value.clone(),
-            agent,
-        });
-    }
-    for (agent_id, prompt) in &request.resume_agent_ids {
-        let item_index = children.len();
-        let resume_request = DelegateRequest {
-            task: prompt.clone(),
-            resume: Some(agent_id.clone()),
-            title: None,
-            role: None,
-            mode: request.mode,
-            context: DelegateContext::None,
-        };
-        let agent = ctx
-            .multi_agent
-            .start_resume_delegate(agent_id, &resume_request)
-            .map_err(|message| ToolError::InvalidInput {
-                tool: "DelegateSwarm".to_owned(),
-                message,
-            })?;
-        children.push(SwarmChildSnapshot {
-            item_index,
-            item: format!("resume:{agent_id}"),
-            agent,
-        });
-    }
-    Ok(children)
 }
 
 fn parse_delegate_swarm_input(

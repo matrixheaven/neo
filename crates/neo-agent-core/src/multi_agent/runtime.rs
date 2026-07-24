@@ -156,6 +156,81 @@ impl MultiAgentState {
         }
     }
 
+    fn create_agent(&mut self, creation: DelegateCreation<'_>) -> AgentSnapshot {
+        let DelegateCreation {
+            task,
+            title,
+            role,
+            mode,
+            context,
+            path,
+            lifecycle_state,
+        } = creation;
+        let display_name: AgentDisplayName = self.names.next_name();
+        let id = AgentId::new();
+        let agent_path = match path {
+            AgentPathKind::Root => AgentPath::root_child(&display_name),
+            AgentPathKind::SwarmChild(swarm_id) => AgentPath::swarm_child(swarm_id, &display_name),
+        };
+        let snapshot = new_agent_snapshot(AgentSnapshotSeed {
+            id: id.clone(),
+            display_name,
+            path: agent_path,
+            role,
+            mode,
+            context,
+            state: lifecycle_state,
+            task,
+            title,
+        });
+        self.register_agent_order(id.as_str());
+        self.agents.insert(id.as_str().to_owned(), snapshot.clone());
+        snapshot
+    }
+
+    fn start_resume_agent(
+        &mut self,
+        agent_id: &str,
+        request: &DelegateRequest,
+    ) -> Result<AgentSnapshot, String> {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return Err(format!("unknown delegate target `{agent_id}`"));
+        };
+        if matches!(
+            agent.state,
+            AgentLifecycleState::Queued | AgentLifecycleState::Running
+        ) {
+            return Err(
+                "agent is already running; use MessageDelegate for live follow-up".to_owned(),
+            );
+        }
+        let previous_status = agent.state;
+        if previous_status.is_terminal() {
+            agent.terminal_status_history.push(previous_status);
+        }
+        agent.state = AgentLifecycleState::Running;
+        agent.mode = request.mode;
+        agent.context = request.context;
+        agent.task.clone_from(&request.task);
+        agent.task_title = derive_title(&request.task, request.title.as_deref());
+        agent.run_count = agent.run_count.saturating_add(1);
+        agent.live_messages_received = 0;
+        agent.previous_status = Some(previous_status);
+        agent.resumed_from = Some(AgentId::from_existing(agent_id));
+        agent.elapsed = Duration::ZERO;
+        agent.latest_text = None;
+        agent.activity.clear();
+        agent.outcome = None;
+        let now = now_ms();
+        agent.started_at_ms = Some(now);
+        agent.terminal_at_ms = None;
+        agent.terminal_reason = None;
+        agent.updated_at_ms = now;
+        let agent = agent.clone();
+        self.retry_activity_starts.insert(agent_id.to_owned(), 0);
+        Ok(agent)
+    }
+
     fn next_live_generation(&mut self) -> u64 {
         let generation = self.next_live_generation;
         self.next_live_generation = self
@@ -188,25 +263,15 @@ impl MultiAgentRuntime {
     #[must_use]
     pub fn start_foreground_delegate_for_test(&self, task: &str) -> AgentSnapshot {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let display_name: AgentDisplayName = state.names.next_name();
-        let id = AgentId::new();
-        let path = AgentPath::root_child(&display_name);
-        let snapshot = new_agent_snapshot(AgentSnapshotSeed {
-            id: id.clone(),
-            display_name,
-            path,
+        state.create_agent(DelegateCreation {
+            task,
+            title: None,
             role: AgentRole::Coder,
             mode: AgentRunMode::Foreground,
             context: DelegateContext::Inherit,
-            state: AgentLifecycleState::Running,
-            task,
-            title: None,
-        });
-        state.register_agent_order(id.as_str());
-        state
-            .agents
-            .insert(id.as_str().to_owned(), snapshot.clone());
-        snapshot
+            path: AgentPathKind::Root,
+            lifecycle_state: AgentLifecycleState::Running,
+        })
     }
 
     #[must_use]
@@ -252,38 +317,8 @@ impl MultiAgentRuntime {
     }
 
     fn create_delegate(&self, creation: DelegateCreation<'_>) -> AgentSnapshot {
-        let DelegateCreation {
-            task,
-            title,
-            role,
-            mode,
-            context,
-            path,
-            lifecycle_state,
-        } = creation;
         let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let display_name: AgentDisplayName = state.names.next_name();
-        let id = AgentId::new();
-        let agent_path = match path {
-            AgentPathKind::Root => AgentPath::root_child(&display_name),
-            AgentPathKind::SwarmChild(swarm_id) => AgentPath::swarm_child(swarm_id, &display_name),
-        };
-        let snapshot = new_agent_snapshot(AgentSnapshotSeed {
-            id: id.clone(),
-            display_name,
-            path: agent_path,
-            role,
-            mode,
-            context,
-            state: lifecycle_state,
-            task,
-            title,
-        });
-        state.register_agent_order(id.as_str());
-        state
-            .agents
-            .insert(id.as_str().to_owned(), snapshot.clone());
-        snapshot
+        state.create_agent(creation)
     }
 
     #[must_use]
@@ -441,6 +476,104 @@ impl MultiAgentRuntime {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         state.register_swarm_order(&swarm_id);
         state.swarms.insert(swarm_id, snapshot);
+    }
+
+    /// Atomically validate and prepare a new swarm and its children.
+    ///
+    /// On success, creates new children as queued agents, transitions any
+    /// resumed agents to running, registers the initial swarm snapshot, and
+    /// returns it. On failure the runtime state is left unchanged.
+    pub(crate) fn prepare_swarm(
+        &self,
+        swarm_id: &str,
+        request: &DelegateSwarmRequest,
+    ) -> Result<super::SwarmSnapshot, String> {
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        if state.swarms.contains_key(swarm_id) {
+            return Err(format!("swarm id `{swarm_id}` already exists"));
+        }
+        let total_children = request.items.len() + request.resume_agent_ids.len();
+        if total_children == 0 {
+            return Err("swarm must contain at least one child".to_owned());
+        }
+        // Validate IDs and lifecycle for every resumed child before mutating
+        // state. Capacity and format validation are performed at the tool
+        // boundary, but the runtime owns the state-dependent checks.
+        for agent_id in request.resume_agent_ids.keys() {
+            if !agent_id.starts_with("agent_") {
+                return Err(format!(
+                    "resume_agent_ids keys must be agent_id values; got `{agent_id}`"
+                ));
+            }
+            let Some(agent) = state.agents.get(agent_id) else {
+                return Err(format!("unknown delegate target `{agent_id}`"));
+            };
+            if matches!(
+                agent.state,
+                AgentLifecycleState::Queued | AgentLifecycleState::Running
+            ) {
+                return Err(
+                    "agent is already running; use MessageDelegate for live follow-up".to_owned(),
+                );
+            }
+        }
+        let mut children = Vec::with_capacity(total_children);
+        for (item_index, item) in request.items.iter().enumerate() {
+            let task = apply_swarm_template(
+                request.prompt_template.as_deref().unwrap_or(""),
+                item.value.as_str(),
+                &request.description,
+            );
+            let agent = state.create_agent(DelegateCreation {
+                task: &task,
+                title: Some(item.title.as_str()),
+                role: request.role,
+                mode: request.mode,
+                context: DelegateContext::None,
+                path: AgentPathKind::SwarmChild(swarm_id),
+                lifecycle_state: AgentLifecycleState::Queued,
+            });
+            children.push(super::SwarmChildSnapshot {
+                item_index,
+                item: item.value.clone(),
+                agent,
+            });
+        }
+        for (agent_id, prompt) in &request.resume_agent_ids {
+            let item_index = children.len();
+            let resume_request = DelegateRequest {
+                task: prompt.clone(),
+                resume: Some(agent_id.clone()),
+                title: None,
+                role: None,
+                mode: request.mode,
+                context: DelegateContext::None,
+            };
+            let agent = state.start_resume_agent(agent_id, &resume_request)?;
+            children.push(super::SwarmChildSnapshot {
+                item_index,
+                item: format!("resume:{agent_id}"),
+                agent,
+            });
+        }
+        let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+        let max_concurrency = request
+            .max_concurrency
+            .unwrap_or(1)
+            .clamp(1, total_children);
+        let snapshot = super::SwarmSnapshot {
+            swarm_id: swarm_id.to_owned(),
+            description: request.description.clone(),
+            role: request.role,
+            mode: request.mode,
+            state: AgentLifecycleState::Queued,
+            max_concurrency,
+            aggregate,
+            children,
+        };
+        state.register_swarm_order(swarm_id);
+        state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
+        Ok(snapshot)
     }
 
     pub fn restore_from_replay<'a>(&self, events: impl IntoIterator<Item = &'a AgentEvent>) {
@@ -693,42 +826,7 @@ impl MultiAgentRuntime {
         request: &DelegateRequest,
     ) -> Result<AgentSnapshot, String> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
-        let Some(agent) = state.agents.get_mut(agent_id) else {
-            return Err(format!("unknown delegate target `{agent_id}`"));
-        };
-        if matches!(
-            agent.state,
-            AgentLifecycleState::Queued | AgentLifecycleState::Running
-        ) {
-            return Err(
-                "agent is already running; use MessageDelegate for live follow-up".to_owned(),
-            );
-        }
-        let previous_status = agent.state;
-        if previous_status.is_terminal() {
-            agent.terminal_status_history.push(previous_status);
-        }
-        agent.state = AgentLifecycleState::Running;
-        agent.mode = request.mode;
-        agent.context = request.context;
-        agent.task.clone_from(&request.task);
-        agent.task_title = derive_title(&request.task, request.title.as_deref());
-        agent.run_count = agent.run_count.saturating_add(1);
-        agent.live_messages_received = 0;
-        agent.previous_status = Some(previous_status);
-        agent.resumed_from = Some(AgentId::from_existing(agent_id));
-        agent.elapsed = Duration::ZERO;
-        agent.latest_text = None;
-        agent.activity.clear();
-        agent.outcome = None;
-        let now = now_ms();
-        agent.started_at_ms = Some(now);
-        agent.terminal_at_ms = None;
-        agent.terminal_reason = None;
-        agent.updated_at_ms = now;
-        let agent = agent.clone();
-        state.retry_activity_starts.insert(agent_id.to_owned(), 0);
-        Ok(agent)
+        state.start_resume_agent(agent_id, request)
     }
 
     pub fn deliver_live_agent_message(

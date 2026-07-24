@@ -3322,6 +3322,81 @@ async fn delegate_swarm_resume_agent_ids_restarts_existing_children() {
 }
 
 #[tokio::test]
+async fn delegate_swarm_invalid_late_resume_is_atomic() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let first = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "initial child",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+    let agent_id = first
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("agent_id")
+        .to_owned();
+
+    let before_agents = ctx.multi_agent.list_agents(true);
+    let before_swarms = ctx.multi_agent.list_swarms();
+    assert!(!before_agents.is_empty());
+
+    let mut resume_map = serde_json::Map::new();
+    resume_map.insert(
+        agent_id.clone(),
+        serde_json::Value::String("resume valid".to_owned()),
+    );
+    resume_map.insert(
+        "agent_unknown".to_owned(),
+        serde_json::Value::String("resume invalid".to_owned()),
+    );
+    let result = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "late invalid resume",
+                "items": [{"title": "new", "value": "new task"}],
+                "prompt_template": "Do {{item}}",
+                "resume_agent_ids": serde_json::Value::Object(resume_map),
+                "mode": "foreground"
+            }),
+        )
+        .await;
+
+    let result = result.unwrap_or_else(|err| ToolResult::error(err.to_string()));
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("unknown delegate target `agent_unknown`"),
+        "{}",
+        result.content
+    );
+
+    assert_eq!(
+        ctx.multi_agent.list_agents(true),
+        before_agents,
+        "agent list must not change after failed swarm preparation"
+    );
+    assert_eq!(
+        ctx.multi_agent.list_swarms(),
+        before_swarms,
+        "swarm list must not change after failed swarm preparation"
+    );
+    assert!(
+        ctx.multi_agent.list_swarms().is_empty(),
+        "no swarm should be registered"
+    );
+}
+
+#[tokio::test]
 async fn summary_context_does_not_leak_role_setup_boilerplate() {
     let (registry, ctx) = registry_with_multi_agent();
     let result = registry
