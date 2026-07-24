@@ -1302,7 +1302,7 @@ mod tests {
             &guard,
             &version,
             &bak,
-            |src| self_replace::self_replace(src),
+            |src| std::fs::copy(src, &tmp_exe).map(|_| ()),
         );
         assert!(
             result.is_ok(),
