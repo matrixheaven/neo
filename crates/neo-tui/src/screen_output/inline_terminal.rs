@@ -562,29 +562,14 @@ impl InlineTerminal {
     }
 
     fn clear_live_to(&mut self, output: &mut dyn Write, show_cursor: bool) -> std::io::Result<()> {
-        let previous_live_rows = u16::try_from(self.live.previous_line_count()).unwrap_or(u16::MAX);
         let mut next_live = self.live.clone();
         let mut transaction = next_live.clear_at_origin(self.geometry.live_top);
         // After clearing the live viewport, park the cursor on the first cleared
-        // row (immediately below finalized history). If the live zone reached
-        // the bottom of the screen, step one row past the last history line by
-        // emitting a final CRLF so the shell prompt lands below Neo output.
-        let mut cursor_row = self
+        // row, immediately below finalized history.
+        let cursor_row = self
             .geometry
             .live_top
             .min(self.geometry.height.saturating_sub(1));
-        if previous_live_rows > 0
-            && self.geometry.live_top.saturating_add(previous_live_rows) >= self.geometry.height
-        {
-            // Live occupied the bottom of the screen; scroll one line so the
-            // cursor rests below the last finalized Neo row.
-            let _ = write!(
-                transaction,
-                "\x1b[{};1H\r\n",
-                u32::from(self.geometry.height)
-            );
-            cursor_row = self.geometry.height.saturating_sub(1);
-        }
         // Reset margins first — some terminals (and the vt100 harness) home the
         // cursor when applying CSI r — then restore the absolute leave cursor.
         transaction.push_str(&String::from_utf8_lossy(RESET_SCROLL_REGION));

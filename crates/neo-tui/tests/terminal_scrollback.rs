@@ -371,7 +371,11 @@ fn leave_clears_obsolete_live_and_places_cursor_below_final_output() {
         .iter()
         .position(|row| row.contains("final-exit-output-sentinel"))
         .expect("final output remains visible");
-    assert!(usize::from(screen.screen().cursor_position().0) > final_row);
+    assert_eq!(
+        usize::from(screen.screen().cursor_position().0),
+        final_row + 1,
+        "exit cursor must sit directly below finalized output"
+    );
 }
 
 #[test]
