@@ -79,6 +79,24 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
+    /// Update Neo from GitHub Releases or restore the previous installation
+    Update {
+        /// Install the newest prerelease
+        #[arg(long, conflicts_with_all = ["stable", "rollback"])]
+        unstable: bool,
+        /// Return from a prerelease to the newest stable release
+        #[arg(long, conflicts_with_all = ["unstable", "rollback"])]
+        stable: bool,
+        /// Restore and consume the adjacent .bak without network access
+        #[arg(long, conflicts_with_all = ["unstable", "stable"])]
+        rollback: bool,
+    },
+    /// Remove this Neo binary and optionally its active data directory
+    Uninstall {
+        /// Answer yes to the data-deletion confirmation
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

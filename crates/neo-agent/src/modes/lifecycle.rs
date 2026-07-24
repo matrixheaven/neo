@@ -1434,4 +1434,57 @@ mod tests {
         std::fs::create_dir(&valid).unwrap();
         validate_neo_home(&valid, None).unwrap();
     }
+
+    // ── CLI contract test ───────────────────────────────────────────
+
+    #[test]
+    fn cli_lifecycle_contract_is_exact() {
+        use crate::cli::Cli;
+        use clap::Parser;
+
+        // All seven valid invocations parse successfully.
+        Cli::try_parse_from(["neo", "update"]).unwrap();
+        Cli::try_parse_from(["neo", "update", "--unstable"]).unwrap();
+        Cli::try_parse_from(["neo", "update", "--stable"]).unwrap();
+        Cli::try_parse_from(["neo", "update", "--rollback"]).unwrap();
+        Cli::try_parse_from(["neo", "uninstall"]).unwrap();
+        Cli::try_parse_from(["neo", "uninstall", "-y"]).unwrap();
+        Cli::try_parse_from(["neo", "uninstall", "--yes"]).unwrap();
+
+        // Pairwise update-flag conflicts.
+        assert!(Cli::try_parse_from(["neo", "update", "--unstable", "--stable"]).is_err());
+        assert!(Cli::try_parse_from(["neo", "update", "--unstable", "--rollback"]).is_err());
+        assert!(Cli::try_parse_from(["neo", "update", "--stable", "--rollback"]).is_err());
+
+        // All-three conflict.
+        assert!(Cli::try_parse_from(["neo", "update", "--unstable", "--stable", "--rollback"]).is_err());
+
+        // --rc is not a valid flag.
+        assert!(Cli::try_parse_from(["neo", "update", "--rc"]).is_err());
+
+        // -y and --yes produce the same yes = true semantic state.
+        let cli_y = Cli::try_parse_from(["neo", "uninstall", "-y"]).unwrap();
+        let cli_yes = Cli::try_parse_from(["neo", "uninstall", "--yes"]).unwrap();
+        match (&cli_y.command, &cli_yes.command) {
+            (Some(crate::cli::Command::Uninstall { yes: y1 }), Some(crate::cli::Command::Uninstall { yes: y2 })) => {
+                assert!(*y1);
+                assert!(*y2);
+            }
+            _ => panic!("expected Uninstall command"),
+        }
+
+        // Verify that Update and Uninstall produce correct variant names.
+        let cli = Cli::try_parse_from(["neo", "update"]).unwrap();
+        assert!(matches!(cli.command, Some(crate::cli::Command::Update { .. })));
+
+        let cli = Cli::try_parse_from(["neo", "update", "--unstable"]).unwrap();
+        match cli.command {
+            Some(crate::cli::Command::Update { unstable, stable, rollback }) => {
+                assert!(unstable);
+                assert!(!stable);
+                assert!(!rollback);
+            }
+            _ => panic!("expected Update command"),
+        }
+    }
 }

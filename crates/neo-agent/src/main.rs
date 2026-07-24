@@ -99,6 +99,22 @@ async fn dispatch(
     cli: Cli,
     log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
+    // Lifecycle commands (update/uninstall) are dispatched before
+    // AppConfig::load so that broken provider config cannot block them.
+    if let Some(ref cmd) = cli.command {
+        match cmd {
+            Command::Update { unstable, stable, rollback } => {
+                let result = modes::lifecycle::update(*unstable, *stable, *rollback).await?;
+                return Ok(result);
+            }
+            Command::Uninstall { yes } => {
+                let result = modes::lifecycle::uninstall(*yes)?;
+                return Ok(result);
+            }
+            _ => {}
+        }
+    }
+
     let mut overrides = ConfigOverrides::from_cli(&cli);
     if let Some(config_path) = &mut overrides.config_path
         && config_path.is_relative()
@@ -179,6 +195,9 @@ async fn dispatch_command(
     match command {
         Some(Command::ProcessGuard) => {
             anyhow::bail!("process guard must be dispatched before application startup")
+        }
+        Some(Command::Update { .. }) | Some(Command::Uninstall { .. }) => {
+            anyhow::bail!("lifecycle command must be dispatched before application startup")
         }
         Some(Command::Run { output, prompt }) => {
             dispatch_run_command(config, session_options, output, prompt).await
