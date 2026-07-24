@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-24 | spec | docs/aegis/specs/2026-07-24-self-update-and-uninstall-design.md | Neo Self-Update and Uninstall Design |
 | 2026-07-24 | spec | docs/aegis/specs/2026-07-24-clippy-complexity-governance-design.md | Clippy Complexity Governance Design |
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-clippy-complexity-governance.md | Clippy Complexity Governance Implementation Plan |
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-clippy-complexity-governance/10-intent.md | Clippy Complexity Governance intent |
