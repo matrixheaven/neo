@@ -26,7 +26,9 @@ pub(crate) struct RunWorkflowInput {
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RunWorkflowPhaseInput {
+    #[schemars(description = "Phase identifier.")]
     id: String,
+    #[schemars(description = "Human-readable phase summary.")]
     description: String,
 }
 

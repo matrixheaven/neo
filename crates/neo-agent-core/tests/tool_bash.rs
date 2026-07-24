@@ -70,6 +70,8 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
             "Sleep",
             "TaskList",
             "TaskOutput",
+            "TaskPause",
+            "TaskResume",
             "TaskStop",
             "Terminal",
             "TodoList",
