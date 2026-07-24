@@ -92,7 +92,6 @@ pub(super) struct RawStdinEvents {
     parser: InputParser,
     pending: VecDeque<InputEvent>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    disconnected: bool,
     last_size: Option<(u16, u16)>,
     geometry: GeometryObservation,
 }
@@ -118,7 +117,6 @@ impl RawStdinEvents {
             parser: InputParser::with_keybindings(keybindings),
             pending: VecDeque::new(),
             rx,
-            disconnected: false,
             last_size,
             geometry,
         }
@@ -172,7 +170,6 @@ impl RawStdinEvents {
                         anyhow::bail!("timed out waiting for cursor position report");
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        self.disconnected = true;
                         anyhow::bail!("stdin reader closed while waiting for cursor position");
                     }
                 }
@@ -219,19 +216,12 @@ impl TerminalEvents for RawStdinEvents {
             if let Some(input) = self.poll_input_event(Duration::from_millis(250))? {
                 return Ok(input);
             }
-            if self.disconnected {
-                anyhow::bail!("stdin reader closed");
-            }
         }
     }
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
         if let Some(input) = self.pending.pop_front() {
             return Ok(Some(input));
-        }
-
-        if self.disconnected {
-            return Ok(None);
         }
 
         let mut got_data = false;
@@ -247,7 +237,7 @@ impl TerminalEvents for RawStdinEvents {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.disconnected = true;
+                    anyhow::bail!("stdin reader closed");
                 }
             }
         }
@@ -479,6 +469,26 @@ mod tests {
         });
 
         assert_eq!(chunks, vec![b"hi".to_vec()]);
+    }
+
+    #[test]
+    fn poll_input_event_reports_stdin_reader_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        drop(tx);
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        let mut events = RawStdinEvents {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+            rx,
+            last_size: Some((80, 24)),
+            geometry,
+        };
+
+        let error = events
+            .poll_input_event(Duration::from_millis(1))
+            .expect_err("closed stdin channel must not look like an idle timeout");
+
+        assert_eq!(error.to_string(), "stdin reader closed");
     }
 
     #[test]
