@@ -179,7 +179,7 @@ async fn recover_from_overflow(
         &emitter.context,
         ProjectionPlan::disabled(),
     );
-    let mut compaction_events = Vec::new();
+    let compaction_sink = emitter.sink();
     run_full_compaction(
         model,
         config,
@@ -190,12 +190,9 @@ async fn recover_from_overflow(
             custom_instruction: None,
         },
         cancel_token,
-        |event| compaction_events.push(event),
+        move |event| compaction_sink.emit_event(event),
     )
     .await?;
-    for event in compaction_events {
-        emitter.emit(event);
-    }
 
     rehydrate_instruction_context_after_compaction(emitter, true).await;
 
@@ -683,7 +680,7 @@ async fn admit_pending_epoch_compact_first(
             &emitter.context,
             ProjectionPlan::disabled(),
         );
-        let mut compaction_events = Vec::new();
+        let compaction_sink = emitter.sink();
         match run_full_compaction(
             model,
             config,
@@ -694,17 +691,12 @@ async fn admit_pending_epoch_compact_first(
                 custom_instruction: None,
             },
             cancel_token,
-            |event| compaction_events.push(event),
+            move |event| compaction_sink.emit_event(event),
         )
         .await
         {
-            Ok(_) => {
-                for event in compaction_events {
-                    emitter.emit(event);
-                }
-            }
             // Nothing safe to compact: fall through to the capacity re-check.
-            Err(CompactionError::NoBoundary) => {}
+            Ok(_) | Err(CompactionError::NoBoundary) => {}
             Err(error) => return Err(error.into()),
         }
         // Post-compaction rehydrate, then admit: restore the exact current
@@ -1031,7 +1023,7 @@ async fn prepare_model_request(
             reason,
             ..
         } => {
-            let mut compaction_events = Vec::new();
+            let compaction_sink = emitter.sink();
             let compaction_result = run_full_compaction(
                 model,
                 config,
@@ -1042,7 +1034,7 @@ async fn prepare_model_request(
                     custom_instruction: None,
                 },
                 cancel_token,
-                |event| compaction_events.push(event),
+                move |event| compaction_sink.emit_event(event),
             )
             .await;
             if matches!(compaction_result, Err(CompactionError::NoBoundary))
@@ -1056,9 +1048,6 @@ async fn prepare_model_request(
                 snapshot.projection
             } else {
                 compaction_result?;
-                for event in compaction_events {
-                    emitter.emit(event);
-                }
                 rehydrate_instruction_context_after_compaction(emitter, true).await;
                 snapshot = context_budget_snapshot(
                     config,
@@ -1071,7 +1060,7 @@ async fn prepare_model_request(
         CompactionDecision::ForceAfterOverflow {
             snapshot: decided, ..
         } => {
-            let mut compaction_events = Vec::new();
+            let compaction_sink = emitter.sink();
             run_full_compaction(
                 model,
                 config,
@@ -1082,12 +1071,9 @@ async fn prepare_model_request(
                     custom_instruction: None,
                 },
                 cancel_token,
-                |event| compaction_events.push(event),
+                move |event| compaction_sink.emit_event(event),
             )
             .await?;
-            for event in compaction_events {
-                emitter.emit(event);
-            }
             rehydrate_instruction_context_after_compaction(emitter, true).await;
             snapshot = context_budget_snapshot(
                 config,

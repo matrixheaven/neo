@@ -433,7 +433,7 @@ impl AgentRuntime {
                 &emitter.context,
                 ProjectionPlan::disabled(),
             );
-            let mut compaction_events = Vec::new();
+            let compaction_sink = emitter.sink();
             let result = run_full_compaction(
                 &model,
                 &config,
@@ -444,12 +444,9 @@ impl AgentRuntime {
                     custom_instruction: instruction.as_deref(),
                 },
                 &cancel_token,
-                |event| compaction_events.push(event),
+                move |event| compaction_sink.emit_event(event),
             )
             .await;
-            for event in compaction_events {
-                emitter.emit(event);
-            }
             process_supervisor.cleanup_all().await;
             let stop_reason = if result.is_ok() {
                 StopReason::EndTurn

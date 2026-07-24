@@ -1443,6 +1443,59 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
 }
 
 #[tokio::test]
+async fn manual_compaction_streams_progress_before_summary_finishes() {
+    let harness = DelayedHarness::new(vec![
+        DelayedStep::Event(AiStreamEvent::MessageStart {
+            id: "summary".to_owned(),
+        }),
+        DelayedStep::Delay(Duration::from_secs(5)),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "summary".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        }),
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_compaction(CompactionSettings::new(usize::MAX, 1)),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("first"));
+    context.append_message(AgentMessage::assistant(
+        vec![Content::text("second")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+    context.append_message(AgentMessage::user_text("third"));
+    context.append_message(AgentMessage::assistant(
+        vec![Content::text("fourth")],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let mut stream = runtime.run_manual_compaction_turn(&mut context);
+    assert!(matches!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("run start should stream")
+            .expect("run start event")
+            .expect("run start should be ok"),
+        AgentEvent::RunStarted { .. }
+    ));
+    assert!(matches!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("compaction start should stream before the delayed summary")
+            .expect("compaction start event")
+            .expect("compaction start should be ok"),
+        AgentEvent::CompactionStarted { .. }
+    ));
+}
+
+#[tokio::test]
 async fn runtime_context_window_events_share_budget_snapshot() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
