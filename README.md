@@ -50,6 +50,10 @@ neo --version          # if installed to PATH
 neo models list        # inspect the resolved model catalog
 ```
 
+### Update, rollback, and uninstall
+
+To update, rollback, or uninstall Neo, see the [quickstart guide](docs/en/quickstart.md#update-rollback-and-uninstall).
+
 ## Configuration
 
 Neo reads a single config file at `~/.neo/config.toml` (or `$NEO_HOME/config.toml` if `NEO_HOME` is set). A minimal setup:

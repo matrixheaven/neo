@@ -167,6 +167,9 @@ neo run "Review this code @src/parser.rs"
 | List providers | `neo provider list` |
 | List MCP servers | `neo mcp list` |
 | Trust the current workspace | `neo trust approve` |
+| Update Neo | `neo update` |
+| Rollback to previous version | `neo update --rollback` |
+| Uninstall Neo | `neo uninstall` |
 
 ### Common launch flags
 
@@ -176,6 +179,67 @@ neo --yolo             # YOLO mode: auto-approve ordinary tools; Plan/Goal revie
 neo --verbose          # Print verbose startup diagnostics
 neo --config <path>    # Use a specific config file (overrides ~/.neo/config.toml)
 ```
+
+## Update, rollback, and uninstall
+
+### Update
+
+```bash
+neo update                # update to latest stable release
+neo update --unstable     # update to latest prerelease
+neo update --stable       # switch from prerelease back to latest stable
+neo update --rollback     # restore the previous installation (offline)
+```
+
+**Channel and downgrade policy:**
+
+| Invocation | Target | Downgrade |
+| --- | --- | --- |
+| `neo update` | Latest stable | Never |
+| `neo update --unstable` | Latest prerelease | Never |
+| `neo update --stable` | Latest stable | Only from prerelease |
+
+`neo update` downloads the platform-specific asset, verifies its GitHub
+SHA-256 digest and staged binary version, creates one adjacent `.bak`
+backup of the current installation, then atomically replaces the running
+binary. If replacement fails, the backup is automatically restored.
+
+The backup is stored next to the executable:
+
+- Unix/macOS: `neo.bak`
+- Windows: `neo.exe.bak`
+
+Only one backup slot exists. Each successful update overwrites the
+previous backup. `--rollback` restores and consumes the backup once,
+without contacting the network.
+
+After updating, restart Neo for the new version to take effect.
+
+### Uninstall
+
+```bash
+neo uninstall          # prompts before deleting Neo data
+neo uninstall -y       # skip the confirmation prompt
+neo uninstall --yes    # same as -y
+```
+
+`neo uninstall` removes the running Neo binary, then its `.bak` backup
+(if present), and optionally deletes the Neo home directory (`~/.neo`
+or `$NEO_HOME`). The data directory is only removed after explicit `y`
+or `yes` confirmation, or when `-y`/`--yes` is passed.
+
+**Safety guards:**
+
+- The data directory must be an existing, non-symlinked directory.
+- Filesystem roots and the user home directory itself are never deleted.
+- If binary removal fails, the data directory is not touched.
+
+**Platform notes:**
+
+- Unix/macOS: the running binary can be unlinked while Neo is running.
+- Windows: removing the running `.exe` fails with an access error. Close
+  Neo first, then remove the executable manually from another process. The
+  `.bak` and Neo home are left untouched.
 
 ## Next steps
 
