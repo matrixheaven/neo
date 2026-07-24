@@ -296,28 +296,14 @@ fn verify_binary_version(path: &Path, expected: &Version) -> anyhow::Result<()> 
 
 // ── Staged copy helper ─────────────────────────────────────────────
 
-/// Copy a binary to a sibling `NamedTempFile`, preserving permissions
-/// and flushing to disk. The temp file is created in `parent_dir` so
-/// that `persist()` can be atomic on the same filesystem.
+/// Copy a binary to a sibling temporary path, preserving permissions and
+/// flushing to disk. The file handle is closed before returning so Linux can
+/// execute the staged binary. The path remains auto-cleaned until persisted.
 fn stage_copy(
     source: &Path,
     parent_dir: &Path,
     #[cfg(windows)] suffix: &str,
-) -> anyhow::Result<tempfile::NamedTempFile> {
-    let mut builder = tempfile::Builder::new();
-    builder.prefix("neo-lifecycle-");
-    #[cfg(windows)]
-    {
-        builder.suffix(suffix);
-    }
-    let tmp = builder
-        .tempdir_in(parent_dir)
-        .with_context(|| format!("failed to create temp dir in {parent_dir:?}"))?;
-
-    // We need a file inside the temp dir, not the dir itself.
-    // Use NamedTempFile in the parent directly instead.
-    drop(tmp);
-
+) -> anyhow::Result<tempfile::TempPath> {
     let mut builder = tempfile::Builder::new();
     builder.prefix("neo-lifecycle-");
     #[cfg(windows)]
@@ -353,7 +339,7 @@ fn stage_copy(
         .sync_all()
         .with_context(|| "failed to sync temp file")?;
 
-    Ok(tmp_file)
+    Ok(tmp_file.into_temp_path())
 }
 
 // ── Backup promotion ───────────────────────────────────────────────
@@ -378,8 +364,7 @@ fn promote_backup(current_exe: &Path, running_version: &Version) -> anyhow::Resu
     let staged = stage_copy(current_exe, &parent)?;
 
     // Verify staged copy reports running version.
-    verify_binary_version(staged.path(), running_version)
-        .context("staged backup verification failed")?;
+    verify_binary_version(&staged, running_version).context("staged backup verification failed")?;
 
     // Atomically promote over .bak.
     staged
@@ -419,7 +404,7 @@ fn restore_from_backup(
     let staged = stage_copy(bak_path, &parent)?;
 
     // Verify staged recovery copy.
-    verify_binary_version(staged.path(), original_version)
+    verify_binary_version(&staged, original_version)
         .context("recovery staged binary verification failed")?;
 
     // Check if install_path already exists and reports original version.
@@ -615,7 +600,7 @@ async fn rollback_impl() -> anyhow::Result<String> {
     let staged_backup = stage_copy(&bak, bak.parent().unwrap())?;
 
     let backup_version = {
-        let output = std::process::Command::new(staged_backup.path())
+        let output = std::process::Command::new(staged_backup.as_os_str())
             .arg("--version")
             .output()
             .context("failed to execute backup binary --version")?;
@@ -641,17 +626,16 @@ async fn rollback_impl() -> anyhow::Result<String> {
     #[cfg(not(windows))]
     let guard = stage_copy(&current_exe, &guard_dir)?;
 
-    verify_binary_version(guard.path(), &running_version)
-        .context("guard copy verification failed")?;
+    verify_binary_version(&guard, &running_version).context("guard copy verification failed")?;
 
     // 4. Replace current exe with backup using recovery-aware helper.
     let install_path_saved = current_exe.clone();
     let bak_path_saved = bak.clone();
     replace_with_recovery(
         &install_path_saved,
-        staged_backup.path(),
+        &staged_backup,
         &backup_version,
-        guard.path(),
+        &guard,
         &running_version,
         &bak_path_saved,
         |src| self_replace::self_replace(src),
@@ -1308,14 +1292,14 @@ mod tests {
         let guard = stage_copy(&tmp_exe, tmp.path(), ".exe").unwrap();
         #[cfg(not(windows))]
         let guard = stage_copy(&tmp_exe, tmp.path()).unwrap();
-        verify_binary_version(guard.path(), &version).unwrap();
+        verify_binary_version(&guard, &version).unwrap();
 
         // 1. Successful replace: consumes .bak.
         let result = replace_with_recovery(
             &tmp_exe,
-            guard.path(), // Use guard as successor (it's a valid neo binary).
+            &guard, // Use guard as successor (it's a valid neo binary).
             &version,
-            guard.path(),
+            &guard,
             &version,
             &bak,
             |src| self_replace::self_replace(src),
@@ -1346,15 +1330,10 @@ mod tests {
         let bak = promote_backup(&tmp_exe, &version).unwrap();
         assert!(bak.exists());
 
-        let result = replace_with_recovery(
-            &tmp_exe,
-            guard.path(),
-            &version,
-            guard.path(),
-            &version,
-            &bak,
-            |_src| Err(std::io::Error::other("simulated replace failure")),
-        );
+        let result =
+            replace_with_recovery(&tmp_exe, &guard, &version, &guard, &version, &bak, |_src| {
+                Err(std::io::Error::other("simulated replace failure"))
+            });
         assert!(result.is_err(), "simulated failure should return error");
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(
@@ -1368,7 +1347,7 @@ mod tests {
         let missing_guard = tmp.path().join("missing-guard");
         let result = replace_with_recovery(
             &tmp_exe,
-            guard.path(),
+            &guard,
             &version,
             &missing_guard,
             &version,
