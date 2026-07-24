@@ -8,8 +8,8 @@ ArchitectureReviewRequired: `yes`
 
 Neo adds two lifecycle commands:
 
-- `neo update [--unstable | --stable]` updates the running installation from
-  GitHub Releases.
+- `neo update [--unstable | --stable | --rollback]` updates the running
+  installation from GitHub Releases or restores its one local backup.
 - `neo uninstall [-y | --yes]` removes the running Neo binary and optionally
   removes the active Neo home directory after explicit confirmation.
 
@@ -52,15 +52,19 @@ GitHub exposes a SHA-256 digest for every current `v0.1.0` and RC2 asset.
    macOS, and Windows for both supported architectures.
 6. Let `neo uninstall` remove the current executable and optionally remove Neo
    user state with a Y/N confirmation.
-7. Fail without changing the installed binary or user state when validation,
-   download, verification, extraction, replacement, or deletion fails.
+7. Leave the installed binary untouched for every pre-commit failure; after
+   replacement begins, restore from the verified backup or report exact
+   recoverable/partial state without touching user data.
+8. Preserve the version replaced by the latest successful update as one
+   adjacent `.bak`, automatically restore it if replacement fails, and let the
+   user consume it once with `neo update --rollback`.
 
 ## 4. Non-Goals
 
 - No background updater, automatic update check, daemon, scheduler, or TUI
   notification.
-- No arbitrary `--version`, nightly channel, channel persistence, rollback
-  cache, or update history.
+- No arbitrary `--version`, nightly channel, channel persistence, multiple
+  backups, backup manifest, or update history.
 - No package-manager integration for Cargo, Homebrew, winget, apt, or similar.
 - No privilege escalation, `sudo`, UAC prompt, shell script, PowerShell script,
   or detached cleanup helper.
@@ -77,15 +81,23 @@ GitHub exposes a SHA-256 digest for every current `v0.1.0` and RC2 asset.
 neo update
 neo update --unstable
 neo update --stable
+neo update --rollback
 ```
 
-`--unstable` and `--stable` conflict and clap rejects using them together.
+`--unstable`, `--stable`, and `--rollback` are mutually exclusive; clap rejects
+any combination of them.
 
 | Invocation | Target | Downgrade policy |
 | --- | --- | --- |
 | `neo update` | Newest non-draft stable SemVer release | Never downgrade |
 | `neo update --unstable` | Newest non-draft SemVer prerelease | Never downgrade |
 | `neo update --stable` | Newest non-draft stable SemVer release | May downgrade only when the running version is a prerelease |
+
+`neo update --rollback` is a separate offline operation. It does not select a
+release or apply channel/downgrade policy. It validates and installs the single
+adjacent backup created before the latest replacement attempt, then deletes
+that backup. If no backup exists, it exits non-zero without changing the
+current executable.
 
 Definitions:
 
@@ -113,6 +125,17 @@ Specific behavior:
 
 An already-current result exits successfully without downloading an asset.
 Update runs without an additional confirmation prompt.
+
+The backup path appends `.bak` to the complete executable filename using
+`OsString`/`PathBuf`, without assuming UTF-8 or a path separator:
+
+- Unix/macOS: `/path/to/neo` -> `/path/to/neo.bak`;
+- Windows: `C:\\path\\neo.exe` -> `C:\\path\\neo.exe.bak`.
+
+Only one backup slot exists. Each successful network update replaces the prior
+slot with the version that was current immediately before that update.
+Successful manual rollback consumes the slot instead of swapping the two
+versions, so repeated rollback cannot toggle versions.
 
 ### 5.2 Uninstall
 
@@ -150,6 +173,7 @@ data directory was resolved.
 | Neo home | Existing `config::neo_home()` (`NEO_HOME`, else platform home + `.neo`) |
 | CLI parsing | Existing `cli::Command` enum |
 | Lifecycle behavior | One new `modes::lifecycle` module |
+| Backup path and lifecycle | The same `modes::lifecycle` module |
 | Release artifacts | Existing GitHub Release workflow |
 
 There is no second version file, build-time Git query, version alias, update
@@ -239,7 +263,30 @@ binary asset with the same suffix and no extension. Windows continues to
 prefer its `.zip` asset. This is a bounded external compatibility exception;
 future packaging drift is an error rather than a new fallback.
 
-### 8.4 Verification and replacement pipeline
+### 8.4 Backup preparation
+
+Backup creation begins only after the downloaded successor has passed digest,
+archive-entry, and `--version` verification. Neo copies the current executable
+to a sibling staging path such as `<backup>.new`, preserves executable
+permissions where applicable, flushes the file, and verifies that the staged
+backup is a regular file whose reported version equals the running version.
+
+On Windows, a `.bak` filename is not directly executable. Verification copies
+the staged backup to an isolated temporary path ending in `.exe` and executes
+that copy with `--version`. The canonical stored backup remains `neo.exe.bak`.
+
+Only after the staged backup is complete and verified does Neo atomically
+promote it over the old `.bak` from the same directory. If the platform path
+cannot provide this replacement guarantee, implementation must stop for design
+review rather than delete the old backup first. If preparing or promoting the
+new backup fails, the network update stops before touching the current
+executable. Staging-path cleanup failure is reported rather than treated as
+update failure recovery.
+
+The backup is a byte copy, not a second version database. Neo stores no
+manifest, channel marker, timestamped copies, or mutable update history.
+
+### 8.5 Verification, replacement, and automatic recovery
 
 The mutation order is fixed:
 
@@ -250,15 +297,56 @@ The mutation order is fixed:
    `v0.1.0` binary.
 5. Execute the staged binary with `--version` and require the selected target
    version in its clap output.
-6. Atomically replace `current_exe()` using the dependency's cross-platform
+6. Prepare, verify, and promote the current executable into its one `.bak`
+   slot as described above.
+7. Atomically replace `current_exe()` using the dependency's cross-platform
    self-replacement path.
-7. Report the old version, new version, selected channel, and that Neo must be
-   restarted.
+8. Report the old version, new version, selected channel, backup path, and that
+   Neo must be restarted.
 
-Any failure before step 6 leaves the current executable untouched. A digest
-missing from the selected GitHub asset is a hard error. HTTPS plus the GitHub
-digest provides integrity, not independent publisher authenticity; signed
-release assets are deferred until Neo has a release-signing key contract.
+Any failure before step 7 leaves the current executable untouched. Once a
+verified `.bak` has been promoted, any replacement failure triggers one
+automatic restore attempt from that exact backup. Neo copies the backup to an
+isolated staging executable, validates that exact staged copy, and uses it with
+the same platform replacement mechanism.
+
+If automatic restoration succeeds, Neo removes the now-consumed `.bak` so a
+failed update does not create a false manual rollback point. The command still
+exits non-zero and reports both the update failure and successful restoration.
+If restoration fails, Neo must preserve `.bak`, exit non-zero, and report:
+
+- the original update/replacement error;
+- the restoration error;
+- the exact current executable and backup paths;
+- that manual recovery is required.
+
+Neo never reports update success unless replacement completed. A digest missing
+from the selected GitHub asset is a hard error. HTTPS plus the GitHub digest
+provides integrity, not independent publisher authenticity; signed release
+assets are deferred until Neo has a release-signing key contract.
+
+### 8.6 Manual rollback
+
+`neo update --rollback` performs no network request. It:
+
+1. resolves `current_exe()` and its exact adjacent `.bak`;
+2. rejects an absent backup, directory, symlink, or other non-regular file;
+3. copies the backup to an isolated staging executable, preserving executable
+   permissions where applicable;
+4. executes the staged file with `--version` and requires parseable Neo clap
+   version output;
+5. replaces `current_exe()` through the same cross-platform replacement path;
+6. deletes `.bak` only after replacement succeeds;
+7. reports the replaced and restored versions and that Neo must be restarted.
+
+There is intentionally no SemVer ordering restriction: rollback means restore
+the exact previous installation, whether its version is lower, higher, or on a
+different channel. The replacement primitive must leave the current executable
+unchanged on failure; `.bak` is not consumed until success. If that guarantee
+cannot be proven for a target platform, implementation must stop for design
+review. If replacement succeeds but deleting `.bak` fails, Neo reports the
+rollback as installed but incompletely consumed, includes the exact remaining
+path, and exits non-zero.
 
 The updater never changes `~/.neo`, project files, PATH, shell profiles, or
 package-manager metadata.
@@ -289,18 +377,24 @@ This guard applies even with `--yes`.
 2. If the Neo home exists and `--yes` is absent, collect the Y/N decision.
 3. Validate all selected deletion targets.
 4. Remove the exact current executable.
-5. Only after binary removal succeeds, remove the Neo home if the user chose
-   Yes.
-6. Report each removed or retained path.
+5. After current-executable removal succeeds, remove its adjacent `.bak` if it
+   exists.
+6. Only after both executable artifacts are absent, remove the Neo home if the
+   user chose Yes.
+7. Report each removed, absent, or retained path.
 
 If the executable path is already absent, it is treated as already removed and
-the confirmed data cleanup may proceed. Permission and sharing errors are not
-treated as absence.
+the confirmed data cleanup may proceed.
 
-If binary removal fails, Neo home deletion is not attempted. If binary removal
-succeeds but Neo home deletion fails, Neo reports the partial result precisely:
-the binary is gone and the data path remains. No rollback copy of the binary is
-created.
+Permission and sharing errors while removing either executable artifact are not
+treated as absence. If current-executable removal fails, neither `.bak` nor Neo
+home deletion is attempted. If current-executable removal succeeds but `.bak`
+removal fails, Neo home deletion is not attempted and the partial result names
+the removed current executable and retained backup/data paths. If both binary
+artifacts are absent but Neo home deletion fails, Neo reports that the binaries
+are gone and the data path remains. Uninstall never creates a new backup.
+The `.bak` deletion removes only the exact adjacent directory entry and never
+follows a symlink or junction to another target.
 
 ### 9.3 Platform behavior
 
@@ -309,8 +403,8 @@ The current process continues until it prints the result and exits.
 
 On Windows, direct removal of the running `.exe` normally fails with a sharing
 or access-denied error. Neo surfaces the exact path and underlying OS error,
-states that no Neo home data was removed, and exits non-zero. The user must
-close Neo and remove the shown executable from another process.
+states that neither `.bak` nor Neo home data was removed, and exits non-zero.
+The user must close Neo and remove the shown executable from another process.
 
 Update succeeds on Windows because it has a verified successor binary and uses
 the updater dependency's Windows-specific replacement algorithm. Uninstall has
@@ -319,11 +413,15 @@ scheduled task, reboot-time deletion, or shell script.
 
 ## 10. Errors and Output
 
-Expected success outputs are concise and script-readable as plain text:
+Expected result outputs are concise and script-readable as plain text:
 
 - already current: current version and selected channel;
-- updated: old version, new version, and restart notice;
-- uninstalled: removed executable plus removed/retained Neo home.
+- updated: old version, new version, backup path, and restart notice;
+- automatically restored: failed target plus restored version and backup
+  disposition;
+- rolled back: replaced version, restored version, consumed backup, and restart
+  notice;
+- uninstalled: removed/retained current executable, backup, and Neo home.
 
 Expected errors include the relevant exact path, release tag, asset name, or
 platform and retain the underlying source error:
@@ -335,7 +433,11 @@ platform and retain the underlying source error:
 - missing/mismatched digest;
 - archive entry mismatch;
 - staged binary reports the wrong version;
+- backup staging, validation, promotion, or cleanup failure;
 - executable replacement/removal denied;
+- replacement failure followed by automatic-restoration success or failure;
+- absent, unsafe, or invalid rollback backup;
+- rollback installed but backup consumption failed;
 - unsafe Neo home target;
 - recursive data deletion failure.
 
@@ -362,7 +464,7 @@ is required.
 
 One focused lifecycle test surface must cover:
 
-- clap accepts all valid commands and rejects both update flags together;
+- clap accepts all valid commands and rejects every pair of update mode flags;
 - stable, unstable, no-downgrade, and explicit prerelease-to-stable downgrade
   selection;
 - equal precedence/build-metadata behavior;
@@ -370,9 +472,17 @@ One focused lifecycle test surface must cover:
 - the bounded `v0.1.0` plain-binary compatibility path;
 - unsupported platform rejection;
 - digest or staged-version rejection before replacement;
+- verified backup promotion occurs only after successor verification;
+- replacement failure automatically restores from `.bak`, while dual failure
+  preserves `.bak` and reports both errors;
+- rollback is offline, rejects invalid/non-regular backups, replaces the current
+  executable, and consumes `.bak` once;
+- Windows backup validation uses a temporary `.exe` without changing the
+  canonical `neo.exe.bak` path;
 - Y/N parsing, EOF default No, and `--yes` behavior;
 - unsafe Neo home rejection;
 - binary-delete failure prevents data deletion;
+- backup-delete failure prevents data deletion and reports partial uninstall;
 - data-delete failure reports the binary/data partial result.
 
 Tests use temporary executables/directories and injected release metadata; they
@@ -391,7 +501,12 @@ Before completion is claimed:
 6. verify Unix uninstall against a copied disposable Neo binary and temporary
    `NEO_HOME`;
 7. verify Windows uninstall returns the expected occupied-executable error and
-   leaves the temporary Neo home untouched.
+   leaves `.bak` and the temporary Neo home untouched;
+8. on each OS, update a disposable installation, verify the old binary is the
+   adjacent `.bak`, then run one successful offline rollback and verify the
+   backup is consumed;
+9. inject a replacement failure on each OS and prove automatic restoration;
+   separately inject a restoration failure and prove `.bak` remains available.
 
 Parallels VMs used for acceptance must be shut down when no longer needed.
 
@@ -399,12 +514,15 @@ Parallels VMs used for acceptance must be shut down when no longer needed.
 
 Update both `docs/en` and `docs/zh` with:
 
-- `neo update`, `--unstable`, and `--stable` examples;
+- `neo update`, `--unstable`, `--stable`, and offline `--rollback` examples;
 - the channel and downgrade matrix;
 - supported OS/architecture pairs;
 - network, permission, and restart behavior;
+- one-slot `.bak` replacement, automatic recovery, one-time rollback, and
+  manual-recovery error behavior;
 - `neo uninstall`, its data prompt, `-y`/`--yes`, and exact Neo home behavior;
-- the Windows running-executable limitation and manual cleanup expectation.
+- uninstall cleanup of `.bak`, plus the Windows running-executable limitation
+  and manual cleanup expectation.
 
 The README installation section should link to the detailed quickstart rather
 than duplicate the full lifecycle contract.
@@ -434,14 +552,20 @@ considered and rejected because they introduce delayed hidden mutation and a
 second executable/shell owner. The explicit occupied-file error is the selected
 contract.
 
+For rollback, swapping the current version back into `.bak`, retaining multiple
+timestamped backups, and adding a backup manifest were rejected. One consumed
+slot satisfies recovery without turning Neo into a version-history manager.
+
 ## 15. Safety and Governance
 
 Anti-Entropy Declaration:
 
 - Deletion Class: executable installation plus optional persistent user state
-- Exact Targets: `current_exe()` and the exact guarded `config::neo_home()`
+- Exact Targets: `current_exe()`, its adjacent `.bak`, and the exact guarded
+  `config::neo_home()`
 - Expected Preserved Behavior: user data remains unless Y/Yes or `--yes`
-- Expected Retired Behavior: installed binary and explicitly confirmed Neo home
+- Expected Retired Behavior: installed binary, adjacent `.bak`, and explicitly
+  confirmed Neo home
 - External Boundary Touched: yes, GitHub Release assets and OS executable rules
 - Source-of-Truth Data Risk: confirmed for Neo home
 - User Confirmation Required: yes at runtime for Neo home, satisfied only by
@@ -464,14 +588,14 @@ Existence Check:
   installs releases or performs command-scoped uninstall
 - Creation proof: two explicit user-facing lifecycle commands require one
   cohesive implementation owner
-- Entropy / retirement impact: one module, no fallback owner, no persisted
-  channel state
+- Entropy / retirement impact: one module, one adjacent backup slot, no fallback
+  owner, no persisted channel state, manifest, or version history
 - Decision: `add-with-proof`
 
 Architecture Integrity Lens:
 
-- Invariant: one version owner, one Neo-home owner, exact asset selection, no
-  mutation before verification/confirmation
+- Invariant: one version owner, one Neo-home owner, exact asset selection, one
+  backup slot, no executable mutation before successor and backup verification
 - Canonical owner: Cargo manifests, `config::neo_home()`, release workflow, and
   `modes::lifecycle`
 - Responsibility overlap: none; main only wires early dispatch
@@ -496,15 +620,24 @@ following:
    stable release.
 6. All six current archive assets map exactly; the `v0.1.0` Unix plain assets
    remain usable for the stable downgrade.
-7. Digest and staged-version checks happen before replacement.
-8. Failed update leaves the installed executable unchanged.
-9. Unix uninstall removes a disposable running binary and honors the data
+7. Digest and staged-version checks happen before backup creation or
+   replacement.
+8. Every successful network update retains exactly the replaced executable as
+   the single adjacent `.bak`.
+9. Replacement failure attempts automatic restoration; successful restoration
+   returns the original version, while failed restoration preserves `.bak` and
+   reports both errors and exact paths.
+10. `--rollback` is offline, accepts no channel flag, installs the verified
+    `.bak` regardless of SemVer ordering, and consumes it once on success.
+11. Unix uninstall removes a disposable running binary and honors the data
    confirmation.
-10. Windows uninstall reports the occupied `.exe`, exits non-zero, and does not
-    remove Neo home.
-11. `-y` and `--yes` delete only the guarded active Neo home after binary
-    removal succeeds.
-12. English and Chinese documentation describe the same contract.
+12. Windows uninstall reports the occupied `.exe`, exits non-zero, and removes
+    neither `.bak` nor Neo home.
+13. Uninstall removes `.bak` after the current executable; a backup-removal
+    failure prevents Neo-home deletion and reports partial state.
+14. `-y` and `--yes` delete only the guarded active Neo home after both binary
+    artifacts are absent.
+15. English and Chinese documentation describe the same contract.
 
 ## 17. Working Artifacts
 
@@ -512,11 +645,12 @@ TaskIntentDraft:
 
 - Outcome: consistent release identity plus explicit cross-platform update and
   uninstall commands
-- Success evidence: acceptance criteria 1-12
+- Success evidence: acceptance criteria 1-15
 - Stop condition: spec approval, then a separate implementation plan
 - Non-goals: section 4
 - Main risks: wrong channel, unintended downgrade, wrong architecture,
-  unchecked executable, broad data deletion, Windows partial uninstall
+  unchecked executable, failed dual replacement/recovery, stale backup, broad
+  data deletion, Windows partial uninstall
 
 BaselineReadSetHint:
 
@@ -539,8 +673,9 @@ ImpactStatementDraft:
 - Affected layers: release workflow, CLI parsing/dispatch, one lifecycle mode,
   package metadata, documentation
 - Owners preserved: Cargo version, `config::neo_home()`, GitHub Releases
-- Invariants: verified-before-replace, confirmed-before-data-delete,
-  no-downgrade unless explicit stable switch from prerelease
+- Invariants: verified-before-replace, one verified backup slot,
+  confirmed-before-data-delete, no-downgrade unless explicit stable switch from
+  prerelease, one-time offline rollback
 - Compatibility: bounded `v0.1.0` asset support only
 - Non-goals: no daemon, package manager, helper script, or config schema
 
@@ -555,5 +690,6 @@ Baseline Role Alignment:
 - Next action: user review, then implementation planning
 
 ADR signal: yes. The accepted implementation should record the durable version
-source, release asset contract, and lifecycle owner after the implementation is
-verified; this proposed spec alone does not create an accepted ADR.
+source, release asset contract, lifecycle owner, and one-slot backup/rollback
+contract after the implementation is verified; this proposed spec alone does
+not create an accepted ADR.
