@@ -2,12 +2,13 @@ use std::time::Duration;
 
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentProfile, AgentRole,
-    AgentRunMode, AgentSnapshot, AgentToolActivityPhase, AgentToolOutputPreview,
+    AgentRunMode, AgentSnapshot, AgentToolActivityPhase, AgentToolFileChange,
+    AgentToolFileOperation, AgentToolFileStatus, AgentToolOutputPreview,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width};
+use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width, wrap_width};
 
 pub const MAX_CHILD_TOOL_ROWS: usize = 4;
 const THINKING_PREVIEW_LINES: usize = 2;
@@ -27,6 +28,7 @@ pub struct ChildToolRow<'a> {
     pub summary: Option<&'a str>,
     pub phase: AgentToolActivityPhase,
     pub output: Option<&'a AgentToolOutputPreview>,
+    pub files: &'a [AgentToolFileChange],
 }
 
 #[must_use]
@@ -288,10 +290,94 @@ pub fn render_child_tool_row(
         ])
         .truncate_to_width(width),
     ];
+    lines.extend(render_child_file_rows(row.files, width, indent, theme));
     if let Some(output) = row.output {
         lines.extend(render_output_preview(output, width, indent, theme));
     }
     lines
+}
+
+fn render_child_file_rows(
+    files: &[AgentToolFileChange],
+    width: usize,
+    indent: &str,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let first_prefix = format!("{indent}    ");
+    let continuation_prefix = format!("{first_prefix}  ");
+    let content_width = width
+        .saturating_sub(visible_width(&continuation_prefix))
+        .max(1);
+    let mut lines = Vec::new();
+    for file in files {
+        let text = child_file_text(file);
+        let color = match file.status {
+            AgentToolFileStatus::Failed => theme.status_error,
+            AgentToolFileStatus::CommittedUnsynced => theme.status_warn,
+            AgentToolFileStatus::Pending
+            | AgentToolFileStatus::Committed
+            | AgentToolFileStatus::NotAttempted => theme.text_muted,
+        };
+        for (index, chunk) in wrap_width(&text, content_width).into_iter().enumerate() {
+            let prefix = if index == 0 {
+                &first_prefix
+            } else {
+                &continuation_prefix
+            };
+            lines.push(
+                Line::from_spans(vec![
+                    Span::styled(prefix.clone(), Style::default().fg(theme.text_muted)),
+                    Span::styled(chunk, Style::default().fg(color)),
+                ])
+                .truncate_to_width(width),
+            );
+        }
+    }
+    lines
+}
+
+fn child_file_text(file: &AgentToolFileChange) -> String {
+    let operation = match file.operation {
+        Some(AgentToolFileOperation::Edited | AgentToolFileOperation::Overwritten) => "M",
+        Some(AgentToolFileOperation::Created) => "C",
+        None => "",
+    };
+    let marker = match file.status {
+        AgentToolFileStatus::Pending => "…",
+        AgentToolFileStatus::Committed => operation,
+        AgentToolFileStatus::CommittedUnsynced => "!",
+        AgentToolFileStatus::Failed => "✗",
+        AgentToolFileStatus::NotAttempted => "–",
+    };
+    let operation_suffix = matches!(
+        file.status,
+        AgentToolFileStatus::CommittedUnsynced
+            | AgentToolFileStatus::Failed
+            | AgentToolFileStatus::NotAttempted
+    )
+    .then_some(operation)
+    .filter(|operation| !operation.is_empty())
+    .map_or_else(String::new, |operation| format!(" {operation}"));
+    let stats = if file.status == AgentToolFileStatus::Pending {
+        String::new()
+    } else {
+        match file.operation {
+            Some(AgentToolFileOperation::Edited) => match (file.added, file.removed) {
+                (Some(added), Some(removed)) => format!("  +{added} -{removed}"),
+                _ => String::new(),
+            },
+            Some(AgentToolFileOperation::Created | AgentToolFileOperation::Overwritten) => file
+                .line_count
+                .map_or_else(String::new, |lines| format!("  {lines} lines")),
+            None => String::new(),
+        }
+    };
+    let message = file
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .map_or_else(String::new, |message| format!(" · {}", one_line(message)));
+    format!("{marker}{operation_suffix} {}{stats}{message}", file.path)
 }
 
 pub fn render_child_thinking(
@@ -428,12 +514,14 @@ fn tool_row(entry: &AgentActivityEntry) -> Option<ChildToolRow<'_>> {
             summary,
             phase,
             output,
+            files,
             ..
         } => Some(ChildToolRow {
             name,
             summary: summary.as_deref(),
             phase: *phase,
             output: output.as_ref(),
+            files,
         }),
         AgentActivityKind::Text { .. } => None,
     }

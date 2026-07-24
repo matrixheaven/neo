@@ -200,3 +200,20 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-self-update-and-uninstall.md | Neo Self-Update and Uninstall Implementation Plan |
 | 2026-07-24 | spec | docs/aegis/specs/2026-07-24-delegate-edit-write-file-activity-brief.md | Delegate Edit/Write File Activity Spec Brief |
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-delegate-edit-write-file-activity.md | Delegate Edit/Write File Activity Implementation Plan |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/10-intent.md | Delegate Edit/Write File Activity intent |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/20-checkpoint.md | Delegate Edit/Write File Activity checkpoint |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/90-evidence.md | Delegate Edit/Write File Activity evidence |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/99-reflection.md | Delegate Edit/Write File Activity reflection |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/task-intent-draft.json | Delegate Edit/Write File Activity task intent draft |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/baseline-read-set-hint.json | Delegate Edit/Write File Activity baseline read-set hint |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/baseline-usage-draft.json | Delegate Edit/Write File Activity baseline usage draft |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/impact-statement-draft.json | Delegate Edit/Write File Activity impact statement draft |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/todo-checkpoint-draft.json | Delegate Edit/Write File Activity todo checkpoint draft |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/drift-check-draft.json | Delegate Edit/Write File Activity drift check draft |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/resume-state-hint.json | 2026-07-24-delegate-edit-write-file-activity resume state hint |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/evidence-bundle-draft-core-file-activity-test.json | 2026-07-24-delegate-edit-write-file-activity evidence core-file-activity-test |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/evidence-bundle-draft-tui-file-activity-test.json | 2026-07-24-delegate-edit-write-file-activity evidence tui-file-activity-test |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/evidence-bundle-draft-replay-compatibility-test.json | 2026-07-24-delegate-edit-write-file-activity evidence replay-compatibility-test |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/evidence-bundle-draft-neo-agent-compile.json | 2026-07-24-delegate-edit-write-file-activity evidence neo-agent-compile |
+| 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/gate-input-pack.json | 2026-07-24-delegate-edit-write-file-activity gate input pack |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/proof-bundle.md | 2026-07-24-delegate-edit-write-file-activity proof bundle |

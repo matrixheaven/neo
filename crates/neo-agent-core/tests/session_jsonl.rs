@@ -5,8 +5,9 @@ use neo_agent_core::instructions::{
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
     AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot,
-    AgentToolActivityPhase, DelegateContext, DelegateToolProgress, SwarmAggregate,
-    SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
+    AgentToolActivityPhase, AgentToolFileChange, AgentToolFileOperation, AgentToolFileStatus,
+    DelegateContext, DelegateToolProgress, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
+    SwarmSnapshot,
 };
 use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, SessionEventPersistence,
@@ -365,6 +366,15 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
             summary: Some("crates/neo-agent-core/src/session/mod.rs".to_owned()),
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
+            files: vec![AgentToolFileChange {
+                path: "crates/neo-agent-core/src/session/mod.rs".to_owned(),
+                operation: Some(AgentToolFileOperation::Edited),
+                status: AgentToolFileStatus::Pending,
+                line_count: None,
+                added: None,
+                removed: None,
+                message: None,
+            }],
         }),
         outcome: None,
     };
@@ -376,6 +386,22 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
 
     let reparsed: AgentEvent = serde_json::from_str(&json).expect("deserialize compact event");
     assert_eq!(reparsed, event);
+
+    let mut legacy = serde_json::to_value(&event).expect("serialize legacy-shaped event");
+    legacy
+        .pointer_mut("/DelegateProgressUpdated/progress/last_tool")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("last tool object")
+        .remove("files");
+    let legacy_event: AgentEvent =
+        serde_json::from_value(legacy).expect("old progress event without files");
+    let AgentEvent::DelegateProgressUpdated { progress, .. } = legacy_event else {
+        panic!("expected delegate progress event");
+    };
+    assert!(
+        progress.last_tool.is_some_and(|tool| tool.files.is_empty()),
+        "old progress events must default to no file rows"
+    );
 
     let context = AgentContext::from_replay([reparsed].iter());
     assert!(context.messages().is_empty());
@@ -1647,6 +1673,7 @@ fn queued_shell_agent_snapshot(
                     queued_at_ms,
                 },
                 output: None,
+                files: Vec::new(),
             },
         }],
         prior_messages: Vec::new(),

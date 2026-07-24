@@ -2,9 +2,10 @@ use futures::{StreamExt, stream};
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, AgentPathKind, AgentRole, AgentRunMode,
-    AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DEFAULT_AGENT_NAMES,
-    DisplayNamePool, MultiAgentRuntime, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
-    SwarmSnapshot, apply_agent_progress,
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolFileChange, AgentToolFileOperation,
+    AgentToolFileStatus, AgentToolOutputPreview, DEFAULT_AGENT_NAMES, DisplayNamePool,
+    MultiAgentRuntime, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
+    apply_agent_progress,
 };
 use neo_agent_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use neo_agent_core::{
@@ -78,6 +79,7 @@ fn agent_tool_activity_uses_explicit_phase_and_output_preview() {
             truncated: false,
             tail: true,
         }),
+        files: Vec::new(),
     };
 
     let serialized = serde_json::to_value(&activity).expect("serialize activity");
@@ -1825,6 +1827,176 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
 }
 
 #[test]
+fn child_activity_projects_edit_write_file_rows() {
+    let runtime = MultiAgentRuntime::new();
+    let agent = runtime.start_foreground_delegate_for_test("edit files");
+    let started_at = std::time::Instant::now();
+
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "edit-1".to_owned(),
+                name: "Edit".to_owned(),
+                arguments: json!({
+                    "edits": [
+                        { "path": "src/a.rs", "old": "a", "new": "b" },
+                        { "path": "src/a.rs", "old": "c", "new": "d" },
+                        { "path": "src/b.rs", "old": "e", "new": "f" }
+                    ]
+                }),
+            },
+        )
+        .expect("Edit start update");
+    let running = runtime.snapshot(&agent.id).expect("running snapshot");
+    let running_files = latest_tool_files(&running, "edit-1");
+    assert_eq!(
+        running_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/a.rs", "src/b.rs"]
+    );
+    assert!(running_files.iter().all(|file| {
+        file.operation == Some(AgentToolFileOperation::Edited)
+            && file.status == AgentToolFileStatus::Pending
+    }));
+
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "edit-1".to_owned(),
+                name: "Edit".to_owned(),
+                result: ToolResult::ok("edited 2 files").with_details(json!({
+                    "kind": "edit",
+                    "status": "committed",
+                    "files": 2,
+                    "added": 7,
+                    "removed": 3,
+                    "changes": [
+                        { "path": "src/a.rs", "status": "committed", "added": 5, "removed": 1 },
+                        { "path": "src/b.rs", "status": "committed", "added": 2, "removed": 2 }
+                    ]
+                })),
+            },
+        )
+        .expect("Edit finish update");
+    let edited = runtime.snapshot(&agent.id).expect("edited snapshot");
+    let edited_files = latest_tool_files(&edited, "edit-1");
+    assert_eq!(edited_files[0].added, Some(5));
+    assert_eq!(edited_files[1].removed, Some(2));
+    assert!(
+        edited_files
+            .iter()
+            .all(|file| file.status == AgentToolFileStatus::Committed)
+    );
+
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                arguments: json!({
+                    "files": [
+                        { "path": "docs/new.md", "content": "new" },
+                        { "path": "docs/existing.md", "content": "changed" },
+                        { "path": "docs/skipped.md", "content": "skipped" }
+                    ]
+                }),
+            },
+        )
+        .expect("Write start update");
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionUpdate {
+                turn: 1,
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                partial_result: ToolResult::ok("prepared Write").with_details(json!({
+                    "kind": "write_prepared",
+                    "files": 3,
+                    "changes": [
+                        { "path": "docs/new.md", "operation": "created", "line_count": 4, "added": 4, "removed": 0 },
+                        { "path": "docs/existing.md", "operation": "overwritten", "line_count": 6, "added": 3, "removed": 2 },
+                        { "path": "docs/skipped.md", "operation": "created", "line_count": 1, "added": 1, "removed": 0 }
+                    ]
+                })),
+            },
+        )
+        .expect("Write prepared update");
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionUpdate {
+                turn: 1,
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                partial_result: ToolResult::ok("committed 1/3").with_details(json!({
+                    "kind": "write_progress",
+                    "committed": 1,
+                    "total": 3,
+                    "latest_path": "docs/new.md"
+                })),
+            },
+        )
+        .expect("Write progress update");
+    let progress = runtime
+        .snapshot(&agent.id)
+        .expect("prepared snapshot")
+        .progress_snapshot();
+    assert_eq!(
+        progress.last_tool.as_ref().map(|tool| tool.files.len()),
+        Some(3)
+    );
+
+    runtime
+        .apply_child_event(
+            &agent.id,
+            started_at,
+            &AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "write-1".to_owned(),
+                name: "Write".to_owned(),
+                result: ToolResult::error("Write partial commit").with_details(json!({
+                    "kind": "write",
+                    "status": "partial_commit",
+                    "files": 3,
+                    "changes": [
+                        { "path": "docs/new.md", "operation": "created", "status": "committed", "line_count": 4, "added": 4, "removed": 0 },
+                        { "path": "docs/existing.md", "operation": "overwritten", "status": "failed", "message": "permission denied" },
+                        { "path": "docs/skipped.md", "operation": "created", "status": "not_attempted" }
+                    ]
+                })),
+            },
+        )
+        .expect("Write finish update");
+    let written = runtime.snapshot(&agent.id).expect("written snapshot");
+    let files = latest_tool_files(&written, "write-1");
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[0].operation, Some(AgentToolFileOperation::Created));
+    assert_eq!(files[0].status, AgentToolFileStatus::Committed);
+    assert_eq!(files[0].line_count, Some(4));
+    assert_eq!(
+        files[1].operation,
+        Some(AgentToolFileOperation::Overwritten)
+    );
+    assert_eq!(files[1].status, AgentToolFileStatus::Failed);
+    assert_eq!(files[1].message.as_deref(), Some("permission denied"));
+    assert_eq!(files[2].status, AgentToolFileStatus::NotAttempted);
+}
+
+#[test]
 fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
     let runtime = MultiAgentRuntime::new();
     let snapshot = runtime.start_delegate(
@@ -2025,6 +2197,25 @@ fn latest_tool_output(
             } if entry_id == id => output.clone(),
             _ => None,
         })
+}
+
+fn latest_tool_files(
+    snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
+    id: &str,
+) -> Vec<AgentToolFileChange> {
+    snapshot
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                id: entry_id,
+                files,
+                ..
+            } if entry_id == id => Some(files.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn named_swarm_harness() -> FakeHarness {

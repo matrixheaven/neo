@@ -4,11 +4,12 @@ use neo_agent_core::AgentEvent;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
     AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
-    AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DelegateContext,
-    SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolFileChange, AgentToolFileOperation,
+    AgentToolFileStatus, AgentToolOutputPreview, DelegateContext, SwarmAggregate,
+    SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_tui::primitive::theme::TuiTheme;
-use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
+use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi, visible_width};
 use neo_tui::transcript::{
     DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent, TranscriptEntry,
     TranscriptPane,
@@ -51,6 +52,7 @@ fn running_delegate() -> AgentSnapshot {
                     summary: Some("crates/neo-tui/src/transcript/plan_box.rs".to_owned()),
                     phase: AgentToolActivityPhase::Done,
                     output: None,
+                    files: Vec::new(),
                 },
             },
             AgentActivityEntry {
@@ -60,6 +62,7 @@ fn running_delegate() -> AgentSnapshot {
                     summary: Some("from_spans|pub struct Span|pub struct Line".to_owned()),
                     phase: AgentToolActivityPhase::Failed,
                     output: None,
+                    files: Vec::new(),
                 },
             },
             AgentActivityEntry {
@@ -134,6 +137,7 @@ fn option_b_running_delegate() -> AgentSnapshot {
                 summary: Some("crates/neo-agent-core/src/tools/delegate.rs".to_owned()),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         },
         AgentActivityEntry {
@@ -148,6 +152,7 @@ fn option_b_running_delegate() -> AgentSnapshot {
                     truncated: true,
                     tail: true,
                 }),
+                files: Vec::new(),
             },
         },
         AgentActivityEntry {
@@ -404,6 +409,7 @@ fn compact_delegate_progress_replays_as_delegate_card() {
             summary: Some("crates/neo-agent-core/src/events.rs".to_owned()),
             phase: AgentToolActivityPhase::Done,
             output: None,
+            files: Vec::new(),
         },
     });
     pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
@@ -769,6 +775,7 @@ fn option_b_expanded_swarm_preserves_full_child_transcripts() {
             summary: Some("docs/aegis/plans/...".to_owned()),
             phase: AgentToolActivityPhase::Done,
             output: None,
+            files: Vec::new(),
         },
     }];
     iris.outcome = Some(AgentTerminalOutcome {
@@ -1023,6 +1030,7 @@ fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
                 summary: Some("crates/neo-tui/src/transcript/delegate_card.rs".to_owned()),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         },
         AgentActivityEntry {
@@ -1034,6 +1042,7 @@ fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
                 ),
                 phase: AgentToolActivityPhase::Ongoing,
                 output: None,
+                files: Vec::new(),
             },
         },
     ];
@@ -1221,6 +1230,7 @@ fn delegate_card_trims_activity_to_recent_kimi_style_window() {
                 summary: Some(format!("command-{index}")),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         })
         .collect();
@@ -2368,6 +2378,7 @@ fn swarm_card_freezes_stale_running_child_progress_and_marks_waiting() {
             summary: Some("icm recall-context \"concurrency thread safety\" --limit 5".to_owned()),
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
+            files: Vec::new(),
         },
     }];
     let children = vec![SwarmChildSnapshot {
@@ -2429,6 +2440,7 @@ fn delegate_and_swarm_render_same_bounded_shell_summary() {
                 queued_at_ms: 2_000,
             },
             output: None,
+            files: Vec::new(),
         },
     }];
 
@@ -2535,6 +2547,7 @@ fn delegate_and_swarm_render_same_bounded_shell_summary() {
             )),
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
+            files: Vec::new(),
         },
     }];
     let width = 160;
@@ -2846,6 +2859,7 @@ fn swarm_card_child_row_prefers_latest_activity_over_full_prompt() {
                 summary: Some("crates/neo-agent-core/src/lib.rs".to_owned()),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         });
 
@@ -2887,6 +2901,7 @@ fn delegate_card_renders_ongoing_tool_from_explicit_phase_with_output_preview() 
                 truncated: false,
                 tail: true,
             }),
+            files: Vec::new(),
         },
     }];
 
@@ -3015,6 +3030,7 @@ fn same_turn_root_delegates_render_as_one_live_group() {
             summary: Some("crates/neo-tui/src/markdown.rs".to_owned()),
             phase: AgentToolActivityPhase::Done,
             output: None,
+            files: Vec::new(),
         },
     }];
     second.tool_count = 1;
@@ -3104,6 +3120,7 @@ fn swarm_progress_starts_at_zero_then_moves_after_running_activity() {
             summary: Some("README.md".to_owned()),
             phase: AgentToolActivityPhase::Done,
             output: None,
+            files: Vec::new(),
         },
     });
     card.update(running);
@@ -3131,6 +3148,7 @@ fn expanded_swarm_child_uses_delegate_activity_rules() {
                     truncated: false,
                     tail: false,
                 }),
+                files: Vec::new(),
             },
         },
         AgentActivityEntry {
@@ -3332,6 +3350,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
                 summary: Some("src/main.rs".to_owned()),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         },
         AgentActivityEntry {
@@ -3341,6 +3360,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
                 summary: Some("wrote 3 files · 2 created · 1 overwritten · +120 -30".to_owned()),
                 phase: AgentToolActivityPhase::Done,
                 output: None,
+                files: Vec::new(),
             },
         },
     ];
@@ -3382,6 +3402,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
             summary: Some("committing 2/5 · src/lib.rs".to_owned()),
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
+            files: Vec::new(),
         },
     }];
 
@@ -3393,4 +3414,165 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
     // Ongoing tool uses "Using" marker.
     assert!(ongoing_text.contains("Using Write"), "{ongoing_text}");
     assert!(ongoing_text.contains("committing 2/5"), "{ongoing_text}");
+}
+
+#[test]
+fn delegate_family_renders_edit_write_file_rows() {
+    let edit_files = vec![
+        AgentToolFileChange {
+            path: "src/a.rs".to_owned(),
+            operation: Some(AgentToolFileOperation::Edited),
+            status: AgentToolFileStatus::Committed,
+            line_count: None,
+            added: Some(5),
+            removed: Some(1),
+            message: None,
+        },
+        AgentToolFileChange {
+            path: "src/b.rs".to_owned(),
+            operation: Some(AgentToolFileOperation::Edited),
+            status: AgentToolFileStatus::Committed,
+            line_count: None,
+            added: Some(2),
+            removed: Some(2),
+            message: None,
+        },
+    ];
+    let write_files = vec![
+        AgentToolFileChange {
+            path: "docs/new.md".to_owned(),
+            operation: Some(AgentToolFileOperation::Created),
+            status: AgentToolFileStatus::Committed,
+            line_count: Some(4),
+            added: Some(4),
+            removed: Some(0),
+            message: None,
+        },
+        AgentToolFileChange {
+            path: "docs/existing.md".to_owned(),
+            operation: Some(AgentToolFileOperation::Overwritten),
+            status: AgentToolFileStatus::Failed,
+            line_count: None,
+            added: None,
+            removed: None,
+            message: Some("permission denied".to_owned()),
+        },
+        AgentToolFileChange {
+            path: "docs/skipped.md".to_owned(),
+            operation: Some(AgentToolFileOperation::Created),
+            status: AgentToolFileStatus::NotAttempted,
+            line_count: None,
+            added: None,
+            removed: None,
+            message: None,
+        },
+    ];
+    let mut snapshot = running_delegate();
+    snapshot.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "edit-files".to_owned(),
+                name: "Edit".to_owned(),
+                summary: Some("edited 2 files · +7 -3".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: edit_files,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "write-files".to_owned(),
+                name: "Write".to_owned(),
+                summary: Some("partial 1/3 · +4 -0".to_owned()),
+                phase: AgentToolActivityPhase::Failed,
+                output: None,
+                files: write_files,
+            },
+        },
+    ];
+
+    let delegate_rows = plain(
+        DelegateCardComponent::new(snapshot.clone()).render_with_theme(120, &TuiTheme::default()),
+    );
+    let delegate = delegate_rows.join("\n");
+    for expected in [
+        "M src/a.rs  +5 -1",
+        "M src/b.rs  +2 -2",
+        "C docs/new.md  4 lines",
+        "✗ M docs/existing.md · permission denied",
+        "– C docs/skipped.md",
+    ] {
+        assert!(
+            delegate.contains(expected),
+            "missing {expected}: {delegate}"
+        );
+    }
+    let positions = ["src/a.rs", "src/b.rs", "docs/new.md", "docs/existing.md"]
+        .map(|path| delegate.find(path).expect("file path"));
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{delegate}"
+    );
+
+    let group = plain(
+        DelegateGroupComponent::new(1, vec![snapshot.clone()])
+            .render_with_theme(120, &TuiTheme::default()),
+    )
+    .join("\n");
+    assert!(group.contains("M src/a.rs  +5 -1"), "{group}");
+    assert!(
+        group.contains("✗ M docs/existing.md · permission denied"),
+        "{group}"
+    );
+
+    let mut swarm = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+    swarm.children[0].agent.activity = snapshot.activity.clone();
+    let mut swarm_card = SwarmCardComponent::new(swarm);
+    swarm_card.set_expanded(true);
+    let swarm_text = plain(swarm_card.render_with_theme(120, &TuiTheme::default())).join("\n");
+    assert!(swarm_text.contains("M src/a.rs  +5 -1"), "{swarm_text}");
+    assert!(swarm_text.contains("– C docs/skipped.md"), "{swarm_text}");
+
+    let long_path = format!("src/{}/file.rs", "nested".repeat(10));
+    let mut narrow = running_delegate();
+    narrow.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "edit-long".to_owned(),
+            name: "Edit".to_owned(),
+            summary: Some("3 files".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+            files: vec![AgentToolFileChange {
+                path: long_path.clone(),
+                operation: Some(AgentToolFileOperation::Edited),
+                status: AgentToolFileStatus::Pending,
+                line_count: None,
+                added: Some(99),
+                removed: Some(98),
+                message: None,
+            }],
+        },
+    }];
+    let narrow_rows =
+        plain(DelegateCardComponent::new(narrow).render_with_theme(32, &TuiTheme::default()));
+    let file_start = narrow_rows
+        .iter()
+        .position(|row| row.contains("… src/"))
+        .expect("first wrapped file row");
+    let file_end = narrow_rows[file_start..]
+        .iter()
+        .position(|row| row.starts_with("  │"))
+        .map_or(narrow_rows.len(), |offset| file_start + offset);
+    let file_rows = &narrow_rows[file_start..file_end];
+    assert!(
+        file_rows.iter().all(|row| visible_width(row) <= 32),
+        "{file_rows:#?}"
+    );
+    let compact = file_rows
+        .join("")
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains(&long_path), "{file_rows:#?}");
+    assert!(!compact.contains("+99"), "pending rows show paths only");
 }

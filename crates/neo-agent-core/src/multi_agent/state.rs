@@ -87,6 +87,40 @@ pub struct AgentToolOutputPreview {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentToolFileOperation {
+    Edited,
+    Created,
+    Overwritten,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolFileStatus {
+    Pending,
+    Committed,
+    CommittedUnsynced,
+    Failed,
+    NotAttempted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentToolFileChange {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<AgentToolFileOperation>,
+    pub status: AgentToolFileStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTerminalReason {
     Completed,
     Error,
@@ -106,6 +140,8 @@ pub enum AgentActivityKind {
         summary: Option<String>,
         phase: AgentToolActivityPhase,
         output: Option<AgentToolOutputPreview>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<AgentToolFileChange>,
     },
     Text {
         text: String,
@@ -212,6 +248,8 @@ pub struct DelegateToolProgress {
     pub phase: AgentToolActivityPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<AgentToolOutputPreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AgentToolFileChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -276,6 +314,7 @@ impl AgentProgressSnapshot {
                         summary,
                         phase,
                         output,
+                        files,
                     } => Some(DelegateToolProgress {
                         id: id.clone(),
                         name: name.clone(),
@@ -284,6 +323,7 @@ impl AgentProgressSnapshot {
                             .map(|text| truncate_progress_text(text, MAX_TOOL_SUMMARY_CHARS)),
                         phase: *phase,
                         output: output.clone(),
+                        files: files.clone(),
                     }),
                     AgentActivityKind::Text { .. } => None,
                 }),
@@ -482,6 +522,7 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             summary: tool.summary.clone(),
             phase: tool.phase,
             output: tool.output.clone(),
+            files: tool.files.clone(),
         };
         return;
     }
@@ -492,6 +533,7 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             summary: tool.summary.clone(),
             phase: tool.phase,
             output: tool.output.clone(),
+            files: tool.files.clone(),
         },
     });
 }

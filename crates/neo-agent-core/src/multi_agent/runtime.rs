@@ -29,7 +29,10 @@ use super::{
     AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
     DelegateContext, DisplayNamePool, SwarmAggregate,
 };
-use super::{AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview};
+use super::{
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolFileChange, AgentToolFileOperation,
+    AgentToolFileStatus, AgentToolOutputPreview,
+};
 use super::{apply_agent_progress, apply_swarm_child_progress};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1234,6 +1237,7 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
             id,
             name,
             summarize_tool_arguments(name, arguments),
+            tool_files_from_arguments(name, arguments),
             now_ms(),
         ),
         AgentEvent::ToolExecutionQueueUpdated {
@@ -1260,6 +1264,7 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 summarize_tool_arguments(name, arguments),
                 AgentToolActivityPhase::Ongoing,
                 None,
+                tool_files_from_arguments(name, arguments),
             );
             true
         }
@@ -1277,6 +1282,11 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 .as_ref()
                 .and_then(summarize_batch_tool_details)
                 .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+            let files = tool_files_from_result(
+                name,
+                result.details.as_ref(),
+                last_tool_files(snapshot.activity.as_slice(), id),
+            );
             upsert_tool_activity(
                 &mut snapshot.activity,
                 id,
@@ -1284,6 +1294,7 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 summary,
                 phase,
                 tool_output_preview(name, result, false),
+                files,
             );
             true
         }
@@ -1298,6 +1309,11 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 .as_ref()
                 .and_then(summarize_batch_tool_details)
                 .or_else(|| last_tool_summary(snapshot.activity.as_slice(), id));
+            let files = tool_files_from_result(
+                name,
+                partial_result.details.as_ref(),
+                last_tool_files(snapshot.activity.as_slice(), id),
+            );
             upsert_tool_activity(
                 &mut snapshot.activity,
                 id,
@@ -1305,6 +1321,7 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 summary,
                 AgentToolActivityPhase::Ongoing,
                 tool_output_preview(name, partial_result, true),
+                files,
             );
             true
         }
@@ -2358,6 +2375,7 @@ fn apply_tool_activity_event(
                 id,
                 name,
                 summarize_tool_arguments(name, arguments),
+                tool_files_from_arguments(name, arguments),
                 now_ms(),
             );
             true
@@ -2390,6 +2408,7 @@ fn apply_tool_activity_event(
                 summarize_tool_arguments(name, arguments),
                 AgentToolActivityPhase::Ongoing,
                 None,
+                tool_files_from_arguments(name, arguments),
             );
             true
         }
@@ -2408,6 +2427,13 @@ fn apply_tool_activity_event(
                 id,
                 name,
             );
+            let files = tool_files_from_event(
+                result.details.as_ref(),
+                tool_args,
+                activity.as_slice(),
+                id,
+                name,
+            );
             upsert_tool_activity(
                 activity,
                 id,
@@ -2415,6 +2441,7 @@ fn apply_tool_activity_event(
                 summary,
                 phase,
                 tool_output_preview(name, result, false),
+                files,
             );
             true
         }
@@ -2431,6 +2458,13 @@ fn apply_tool_activity_event(
                 id,
                 name,
             );
+            let files = tool_files_from_event(
+                partial_result.details.as_ref(),
+                tool_args,
+                activity.as_slice(),
+                id,
+                name,
+            );
             upsert_tool_activity(
                 activity,
                 id,
@@ -2438,6 +2472,7 @@ fn apply_tool_activity_event(
                 summary,
                 AgentToolActivityPhase::Ongoing,
                 tool_output_preview(name, partial_result, true),
+                files,
             );
             true
         }
@@ -2617,6 +2652,7 @@ fn upsert_tool_activity(
     summary: Option<String>,
     phase: AgentToolActivityPhase,
     output: Option<AgentToolOutputPreview>,
+    files: Vec<AgentToolFileChange>,
 ) {
     for entry in activity.iter_mut().rev() {
         let AgentActivityKind::Tool {
@@ -2625,6 +2661,7 @@ fn upsert_tool_activity(
             summary: entry_summary,
             phase: entry_phase,
             output: entry_output,
+            files: entry_files,
         } = &mut entry.kind
         else {
             continue;
@@ -2638,6 +2675,9 @@ fn upsert_tool_activity(
             if output.is_some() {
                 *entry_output = output;
             }
+            if !files.is_empty() {
+                *entry_files = files;
+            }
             return;
         }
     }
@@ -2648,6 +2688,7 @@ fn upsert_tool_activity(
             summary,
             phase,
             output,
+            files,
         },
     });
 }
@@ -2657,6 +2698,7 @@ fn upsert_queued_tool_activity(
     id: &str,
     name: &str,
     summary: Option<String>,
+    files: Vec<AgentToolFileChange>,
     queued_at_ms: u64,
 ) -> bool {
     for entry in activity.iter_mut().rev() {
@@ -2665,6 +2707,7 @@ fn upsert_queued_tool_activity(
             name: entry_name,
             summary: entry_summary,
             phase: entry_phase,
+            files: entry_files,
             ..
         } = &mut entry.kind
         else {
@@ -2683,6 +2726,9 @@ fn upsert_queued_tool_activity(
             AgentToolActivityPhase::Queued { .. } => {
                 if summary.is_some() {
                     *entry_summary = summary;
+                }
+                if !files.is_empty() {
+                    *entry_files = files;
                 }
                 name.clone_into(entry_name);
                 *entry_phase = AgentToolActivityPhase::Queued {
@@ -2703,6 +2749,7 @@ fn upsert_queued_tool_activity(
                 queued_at_ms,
             },
             output: None,
+            files,
         },
     });
     true
@@ -2753,6 +2800,188 @@ fn last_tool_summary(activity: &[AgentActivityEntry], id: &str) -> Option<String
         };
         (entry_id == id).then(|| summary.clone()).flatten()
     })
+}
+
+fn last_tool_files(activity: &[AgentActivityEntry], id: &str) -> Vec<AgentToolFileChange> {
+    activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                id: entry_id,
+                files,
+                ..
+            } if entry_id == id => Some(files.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn tool_files_from_event(
+    details: Option<&serde_json::Value>,
+    tool_args: &HashMap<String, serde_json::Value>,
+    activity: &[AgentActivityEntry],
+    id: &str,
+    name: &str,
+) -> Vec<AgentToolFileChange> {
+    let mut files = last_tool_files(activity, id);
+    if files.is_empty()
+        && let Some(arguments) = tool_args.get(id)
+    {
+        files = tool_files_from_arguments(name, arguments);
+    }
+    tool_files_from_result(name, details, files)
+}
+
+fn tool_files_from_arguments(
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Vec<AgentToolFileChange> {
+    let (key, operation) = match name {
+        "Edit" => ("edits", Some(AgentToolFileOperation::Edited)),
+        "Write" => ("files", None),
+        _ => return Vec::new(),
+    };
+    let Some(items) = arguments.get(key).and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    items
+        .iter()
+        .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+        .filter(|path| !path.is_empty() && seen.insert((*path).to_owned()))
+        .map(|path| AgentToolFileChange {
+            path: path.to_owned(),
+            operation,
+            status: AgentToolFileStatus::Pending,
+            line_count: None,
+            added: None,
+            removed: None,
+            message: None,
+        })
+        .collect()
+}
+
+fn tool_files_from_result(
+    name: &str,
+    details: Option<&serde_json::Value>,
+    mut previous: Vec<AgentToolFileChange>,
+) -> Vec<AgentToolFileChange> {
+    let Some(details) = details else {
+        return previous;
+    };
+    if let Some(files) = parse_tool_file_changes(name, details) {
+        return files;
+    }
+    let kind_matches = matches!(
+        (
+            name,
+            details.get("kind").and_then(serde_json::Value::as_str)
+        ),
+        ("Edit", Some("edit")) | ("Write", Some("write"))
+    );
+    if !kind_matches {
+        return previous;
+    }
+    let status = details
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !matches!(
+        status,
+        "prepare_failed" | "stale" | "cancelled" | "commit_failed"
+    ) {
+        return previous;
+    }
+    let failed_path = details.get("path").and_then(serde_json::Value::as_str);
+    let message = details
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    for file in &mut previous {
+        file.status = if failed_path == Some(file.path.as_str()) {
+            file.message.clone_from(&message);
+            AgentToolFileStatus::Failed
+        } else {
+            AgentToolFileStatus::NotAttempted
+        };
+    }
+    if let Some(path) = failed_path
+        && !previous.iter().any(|file| file.path == path)
+    {
+        previous.push(AgentToolFileChange {
+            path: path.to_owned(),
+            operation: (name == "Edit").then_some(AgentToolFileOperation::Edited),
+            status: AgentToolFileStatus::Failed,
+            line_count: None,
+            added: None,
+            removed: None,
+            message,
+        });
+    }
+    previous
+}
+
+fn parse_tool_file_changes(
+    name: &str,
+    details: &serde_json::Value,
+) -> Option<Vec<AgentToolFileChange>> {
+    let kind = details.get("kind")?.as_str()?;
+    let default_operation = match (name, kind) {
+        ("Edit", "edit" | "edit_prepared") => Some(AgentToolFileOperation::Edited),
+        ("Write", "write" | "write_prepared") => None,
+        _ => return None,
+    };
+    let changes = details.get("changes")?.as_array()?;
+    Some(
+        changes
+            .iter()
+            .filter_map(|change| parse_tool_file_change(change, default_operation))
+            .collect(),
+    )
+}
+
+fn parse_tool_file_change(
+    change: &serde_json::Value,
+    default_operation: Option<AgentToolFileOperation>,
+) -> Option<AgentToolFileChange> {
+    let path = change.get("path")?.as_str()?.to_owned();
+    if path.is_empty() {
+        return None;
+    }
+    let operation = match change.get("operation").and_then(serde_json::Value::as_str) {
+        Some("created") => Some(AgentToolFileOperation::Created),
+        Some("overwritten") => Some(AgentToolFileOperation::Overwritten),
+        Some(_) => None,
+        None => default_operation,
+    };
+    let status = match change.get("status").and_then(serde_json::Value::as_str) {
+        None => AgentToolFileStatus::Pending,
+        Some("committed") => AgentToolFileStatus::Committed,
+        Some("committed_unsynced") => AgentToolFileStatus::CommittedUnsynced,
+        Some("failed") => AgentToolFileStatus::Failed,
+        Some("not_attempted") => AgentToolFileStatus::NotAttempted,
+        Some(_) => return None,
+    };
+    Some(AgentToolFileChange {
+        path,
+        operation,
+        status,
+        line_count: detail_usize(change, "line_count"),
+        added: detail_usize(change, "added"),
+        removed: detail_usize(change, "removed"),
+        message: change
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
+fn detail_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|number| usize::try_from(number).ok())
 }
 
 fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option<String> {
