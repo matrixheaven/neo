@@ -42,10 +42,7 @@ pub(crate) struct TargetRelease {
 pub(crate) enum ReleaseDecision {
     AlreadyCurrent { channel: &'static str },
     Install(TargetRelease),
-    RequireStableSwitch {
-        current: Version,
-        target: Version,
-    },
+    RequireStableSwitch { current: Version, target: Version },
 }
 
 // ── UpdateMode ──────────────────────────────────────────────────────
@@ -94,7 +91,8 @@ pub(crate) fn platform_asset(version: &Version) -> anyhow::Result<AssetSpec> {
     };
 
     // v0.1.0 used plain binary assets on Unix (no archive wrapper).
-    let is_v0_1_0 = version.major == 0 && version.minor == 1 && version.patch == 0 && version.pre.is_empty();
+    let is_v0_1_0 =
+        version.major == 0 && version.minor == 1 && version.patch == 0 && version.pre.is_empty();
 
     let archive_name = if is_v0_1_0 && os != "windows" {
         base.to_string()
@@ -103,7 +101,10 @@ pub(crate) fn platform_asset(version: &Version) -> anyhow::Result<AssetSpec> {
     };
     let binary_name = format!("{base}{binary_ext}");
 
-    Ok(AssetSpec { archive_name, binary_name })
+    Ok(AssetSpec {
+        archive_name,
+        binary_name,
+    })
 }
 
 // ── Release selection ───────────────────────────────────────────────
@@ -158,9 +159,7 @@ pub(crate) fn select_release(
     let (best_version, _best_release) = match candidates.first() {
         Some((v, r)) => (v.clone(), *r),
         None => {
-            return Ok(ReleaseDecision::AlreadyCurrent {
-                channel,
-            });
+            return Ok(ReleaseDecision::AlreadyCurrent { channel });
         }
     };
 
@@ -291,9 +290,7 @@ fn verify_binary_version(path: &Path, expected: &Version) -> anyhow::Result<()> 
 
     let reported = parse_neo_version_output(&stdout)?;
     if reported != *expected {
-        bail!(
-            "{path:?} reported version {reported}, expected {expected}"
-        );
+        bail!("{path:?} reported version {reported}, expected {expected}");
     }
     Ok(())
 }
@@ -352,7 +349,10 @@ fn stage_copy(
         f.flush().with_context(|| "failed to flush temp file")?;
     }
     // sync_all via the File handle
-    tmp_file.as_file().sync_all().with_context(|| "failed to sync temp file")?;
+    tmp_file
+        .as_file()
+        .sync_all()
+        .with_context(|| "failed to sync temp file")?;
 
     Ok(tmp_file)
 }
@@ -365,10 +365,7 @@ fn stage_copy(
 /// 1. Copy current exe to a sibling temp file.
 /// 2. Verify the temp file reports the running version.
 /// 3. Atomically persist the temp file over the `.bak` path.
-fn promote_backup(
-    current_exe: &Path,
-    running_version: &Version,
-) -> anyhow::Result<PathBuf> {
+fn promote_backup(current_exe: &Path, running_version: &Version) -> anyhow::Result<PathBuf> {
     let bak = backup_path(current_exe)?;
     let parent = bak
         .parent()
@@ -460,21 +457,17 @@ fn restore_from_backup(
 /// 6. Promotes the current executable to `.bak`.
 /// 7. Atomically replaces the running binary.
 /// 8. On failure, automatically restores from `.bak` if backup was promoted.
-pub(crate) async fn update(
-    unstable: bool,
-    stable: bool,
-    rollback: bool,
-) -> anyhow::Result<String> {
+pub(crate) async fn update(unstable: bool, stable: bool, rollback: bool) -> anyhow::Result<String> {
     let mode = UpdateMode::from_flags(unstable, stable, rollback)?;
 
     if mode == UpdateMode::Rollback {
         return rollback_impl().await;
     }
 
-    let current_version: Version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .context("invalid compiled package version")?;
-    let current_exe = std::env::current_exe()
-        .context("failed to resolve current executable path")?;
+    let current_version: Version =
+        Version::parse(env!("CARGO_PKG_VERSION")).context("invalid compiled package version")?;
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current executable path")?;
 
     // 1. Fetch releases.
     let releases = self_update::backends::github::ReleaseList::configure()
@@ -542,9 +535,7 @@ pub(crate) async fn update(
             Ok(())
         });
 
-    let updater = builder
-        .build_async()
-        .context("failed to build updater")?;
+    let updater = builder.build_async().context("failed to build updater")?;
 
     let result = updater.update_extended_async().await;
 
@@ -604,8 +595,8 @@ pub(crate) async fn update(
 
 /// Offline one-shot rollback: restore from `.bak` without network.
 async fn rollback_impl() -> anyhow::Result<String> {
-    let current_exe = std::env::current_exe()
-        .context("failed to resolve current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current executable path")?;
     let bak = backup_path(&current_exe)?;
 
     // 1. Validate .bak exists and is a regular file.
@@ -637,8 +628,8 @@ async fn rollback_impl() -> anyhow::Result<String> {
         parse_neo_version_output(&stdout)?
     };
 
-    let running_version: Version = Version::parse(env!("CARGO_PKG_VERSION"))
-        .context("invalid compiled package version")?;
+    let running_version: Version =
+        Version::parse(env!("CARGO_PKG_VERSION")).context("invalid compiled package version")?;
 
     // 3. Create a transient guard copy of the current executable.
     // This is NOT a second backup slot — it's a temporary transaction file.
@@ -751,7 +742,10 @@ fn replace_with_recovery(
 /// - the user home directory itself
 /// - non-directory targets
 /// - symlink targets
-fn validate_neo_home(home: &std::path::Path, user_home: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn validate_neo_home(
+    home: &std::path::Path,
+    user_home: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     if !home.exists() {
         return Ok(()); // absent home is fine; we just won't delete anything
     }
@@ -784,9 +778,7 @@ fn validate_neo_home(home: &std::path::Path, user_home: Option<&std::path::Path>
     if let Some(uh) = user_home {
         if let Ok(canonical_uh) = std::fs::canonicalize(uh) {
             if canonical == canonical_uh {
-                bail!(
-                    "Neo home is the user home directory, refusing to delete: {canonical:?}"
-                );
+                bail!("Neo home is the user home directory, refusing to delete: {canonical:?}");
             }
         }
     }
@@ -836,8 +828,8 @@ fn confirm_delete_home(
 /// error. Neo reports the error and stops before touching `.bak` or
 /// Neo home.
 pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
-    let current_exe = std::env::current_exe()
-        .context("failed to resolve current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current executable path")?;
     let bak = backup_path(&current_exe)?;
     let neo_home = crate::config::neo_home();
     let user_home = crate::config::user_home();
@@ -880,9 +872,7 @@ pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
         Err(e) => {
             // On Windows, this typically fails with PermissionDenied or
             // sharing violation for the running .exe.
-            result.push_str(&format!(
-                "Failed to remove {current_exe:?}: {e}\n"
-            ));
+            result.push_str(&format!("Failed to remove {current_exe:?}: {e}\n"));
             result.push_str("Neither .bak nor Neo home data was removed.\n");
             result.push_str(&format!(
                 "Please close Neo and remove the executable manually: {current_exe:?}"
@@ -905,9 +895,7 @@ pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
                 false
             }
             Err(e) => {
-                result.push_str(&format!(
-                    "Failed to read backup metadata {bak:?}: {e}\n"
-                ));
+                result.push_str(&format!("Failed to read backup metadata {bak:?}: {e}\n"));
                 false
             }
         };
@@ -920,7 +908,8 @@ pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
                 Err(e) => {
                     result.push_str(&format!("Failed to remove backup {bak:?}: {e}\n"));
                     if delete_home {
-                        result.push_str("Neo home was not removed because backup removal failed.\n");
+                        result
+                            .push_str("Neo home was not removed because backup removal failed.\n");
                     }
                     bail!(result);
                 }
@@ -977,9 +966,13 @@ mod tests {
         let debug_dir = deps_dir.parent().unwrap(); // debug/
         let neo = debug_dir.join({
             #[cfg(windows)]
-            { "neo.exe" }
+            {
+                "neo.exe"
+            }
             #[cfg(not(windows))]
-            { "neo" }
+            {
+                "neo"
+            }
         });
         assert!(neo.exists(), "neo binary must exist at {neo:?}");
         neo
@@ -1007,29 +1000,45 @@ mod tests {
         let stable_011 = make_release("0.1.1", &[("neo-linux-x86_64.tar.gz", Some("sha256:def"))]);
 
         // Prerelease.
-        let rc2 = make_release("0.1.1-rc.2", &[("neo-linux-x86_64.tar.gz", Some("sha256:ghi"))]);
-        let rc3 = make_release("0.1.1-rc.3", &[("neo-linux-x86_64.tar.gz", Some("sha256:jkl"))]);
+        let rc2 = make_release(
+            "0.1.1-rc.2",
+            &[("neo-linux-x86_64.tar.gz", Some("sha256:ghi"))],
+        );
+        let rc3 = make_release(
+            "0.1.1-rc.3",
+            &[("neo-linux-x86_64.tar.gz", Some("sha256:jkl"))],
+        );
 
         // Equal precedence with different build metadata.
-        let stable_010_build = make_release("0.1.0+build2", &[("neo-linux-x86_64.tar.gz", Some("sha256:mno"))]);
+        let stable_010_build = make_release(
+            "0.1.0+build2",
+            &[("neo-linux-x86_64.tar.gz", Some("sha256:mno"))],
+        );
 
         // 1. Default stable: running 0.1.0, available 0.1.1 → install.
         let current = Version::parse("0.1.0").unwrap();
         let releases = vec![stable_011.clone(), stable_010.clone()];
         let decision = select_release(&releases, &current, UpdateMode::Stable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.1").unwrap()));
+        assert!(
+            matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.1").unwrap())
+        );
 
         // 2. Default stable: running 0.1.1-rc.2, available 0.1.0 → RequireStableSwitch.
         let current = Version::parse("0.1.1-rc.2").unwrap();
         let releases = vec![stable_010.clone()];
         let decision = select_release(&releases, &current, UpdateMode::Stable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::RequireStableSwitch { .. }));
+        assert!(matches!(
+            decision,
+            ReleaseDecision::RequireStableSwitch { .. }
+        ));
 
         // 3. Unstable: running 0.1.1-rc.2, available 0.1.1-rc.3 → install.
         let current = Version::parse("0.1.1-rc.2").unwrap();
         let releases = vec![rc3.clone(), rc2.clone()];
         let decision = select_release(&releases, &current, UpdateMode::Unstable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.1-rc.3").unwrap()));
+        assert!(
+            matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.1-rc.3").unwrap())
+        );
 
         // 4. Unstable: running 0.1.1-rc.3, available 0.1.1-rc.2 → AlreadyCurrent (no downgrade).
         let current = Version::parse("0.1.1-rc.3").unwrap();
@@ -1041,7 +1050,9 @@ mod tests {
         let current = Version::parse("0.1.1-rc.2").unwrap();
         let releases = vec![stable_010.clone()];
         let decision = select_release(&releases, &current, UpdateMode::StableSwitch).unwrap();
-        assert!(matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.0").unwrap()));
+        assert!(
+            matches!(decision, ReleaseDecision::Install(ref t) if t.version == Version::parse("0.1.0").unwrap())
+        );
 
         // 6. StableSwitch: running 0.1.1 (stable), available 0.1.0 → AlreadyCurrent (no downgrade of stable).
         let current = Version::parse("0.1.1").unwrap();
@@ -1152,22 +1163,16 @@ mod tests {
 
     #[test]
     fn exact_asset_requires_single_match_and_digest() {
-        let good = self_update::ReleaseAsset::new(
-            "neo-linux-x86_64.tar.gz",
-            "https://example.com/asset",
-        )
-        .with_digest("sha256:abc123");
+        let good =
+            self_update::ReleaseAsset::new("neo-linux-x86_64.tar.gz", "https://example.com/asset")
+                .with_digest("sha256:abc123");
 
-        let no_digest = self_update::ReleaseAsset::new(
-            "neo-linux-x86_64.tar.gz",
-            "https://example.com/asset",
-        );
+        let no_digest =
+            self_update::ReleaseAsset::new("neo-linux-x86_64.tar.gz", "https://example.com/asset");
 
-        let wrong_name = self_update::ReleaseAsset::new(
-            "neo-other.tar.gz",
-            "https://example.com/other",
-        )
-        .with_digest("sha256:def456");
+        let wrong_name =
+            self_update::ReleaseAsset::new("neo-other.tar.gz", "https://example.com/other")
+                .with_digest("sha256:def456");
 
         // Exactly one match with digest → succeeds.
         assert!(exact_asset_with_digest(&[good.clone()], "neo-linux-x86_64.tar.gz").is_some());
@@ -1179,7 +1184,9 @@ mod tests {
         assert!(exact_asset_with_digest(&[wrong_name], "neo-linux-x86_64.tar.gz").is_none());
 
         // Multiple matches → None.
-        assert!(exact_asset_with_digest(&[good.clone(), good], "neo-linux-x86_64.tar.gz").is_none());
+        assert!(
+            exact_asset_with_digest(&[good.clone(), good], "neo-linux-x86_64.tar.gz").is_none()
+        );
     }
 
     // ── Backup promotion and recovery test ─────────────────────────
@@ -1194,9 +1201,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tmp_exe = tmp.path().join({
             #[cfg(windows)]
-            { "neo.exe" }
+            {
+                "neo.exe"
+            }
             #[cfg(not(windows))]
-            { "neo" }
+            {
+                "neo"
+            }
         });
 
         // Copy test binary to disposable location.
@@ -1212,7 +1223,10 @@ mod tests {
         let bak = promote_backup(&tmp_exe, &version).unwrap();
         assert!(bak.exists(), ".bak must exist after promotion");
         let bak_str = bak.to_string_lossy();
-        assert!(bak_str.ends_with(".bak"), ".bak path must end with .bak, got: {bak_str}");
+        assert!(
+            bak_str.ends_with(".bak"),
+            ".bak path must end with .bak, got: {bak_str}"
+        );
 
         // Verify the .bak binary reports the right version.
         // On Windows, .bak is not directly executable; verify via metadata.
@@ -1268,9 +1282,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tmp_exe = tmp.path().join({
             #[cfg(windows)]
-            { "neo.exe" }
+            {
+                "neo.exe"
+            }
             #[cfg(not(windows))]
-            { "neo" }
+            {
+                "neo"
+            }
         });
         std::fs::copy(&test_exe, &tmp_exe).unwrap();
         #[cfg(unix)]
@@ -1299,8 +1317,14 @@ mod tests {
             &bak,
             |src| self_replace::self_replace(src),
         );
-        assert!(result.is_ok(), "successful rollback should succeed: {result:?}");
-        assert!(!bak.exists(), ".bak must be consumed after successful rollback");
+        assert!(
+            result.is_ok(),
+            "successful rollback should succeed: {result:?}"
+        );
+        assert!(
+            !bak.exists(),
+            ".bak must be consumed after successful rollback"
+        );
         verify_binary_version(&tmp_exe, &version).unwrap();
 
         // 2. Second rollback: reports absent backup.
@@ -1326,14 +1350,19 @@ mod tests {
             guard.path(),
             &version,
             &bak,
-            |_src| Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "simulated replace failure",
-            )),
+            |_src| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "simulated replace failure",
+                ))
+            },
         );
         assert!(result.is_err(), "simulated failure should return error");
         let err_msg = format!("{:?}", result.unwrap_err());
-        assert!(err_msg.contains("previous version was restored"), "error must mention restore: {err_msg}");
+        assert!(
+            err_msg.contains("previous version was restored"),
+            "error must mention restore: {err_msg}"
+        );
         assert!(bak.exists(), ".bak must be retained after failed replace");
         verify_binary_version(&tmp_exe, &version).unwrap();
     }
@@ -1346,59 +1375,31 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/test-neo-home");
 
         // "y" → true
-        let result = confirm_delete_home(
-            &mut "y\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "y\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(result);
 
         // "yes" → true
-        let result = confirm_delete_home(
-            &mut "yes\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "yes\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(result);
 
         // "Y" → true (case insensitive)
-        let result = confirm_delete_home(
-            &mut "Y\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "Y\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(result);
 
         // "n" → false
-        let result = confirm_delete_home(
-            &mut "n\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "n\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(!result);
 
         // empty → false
-        let result = confirm_delete_home(
-            &mut "\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(!result);
 
         // EOF → false
-        let result = confirm_delete_home(
-            &mut "".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(!result);
 
         // "no" → false
-        let result = confirm_delete_home(
-            &mut "no\n".as_bytes(),
-            &mut Vec::new(),
-            &path,
-        ).unwrap();
+        let result = confirm_delete_home(&mut "no\n".as_bytes(), &mut Vec::new(), &path).unwrap();
         assert!(!result);
 
         // Test unsafe path rejections.
@@ -1457,7 +1458,9 @@ mod tests {
         assert!(Cli::try_parse_from(["neo", "update", "--stable", "--rollback"]).is_err());
 
         // All-three conflict.
-        assert!(Cli::try_parse_from(["neo", "update", "--unstable", "--stable", "--rollback"]).is_err());
+        assert!(
+            Cli::try_parse_from(["neo", "update", "--unstable", "--stable", "--rollback"]).is_err()
+        );
 
         // --rc is not a valid flag.
         assert!(Cli::try_parse_from(["neo", "update", "--rc"]).is_err());
@@ -1466,7 +1469,10 @@ mod tests {
         let cli_y = Cli::try_parse_from(["neo", "uninstall", "-y"]).unwrap();
         let cli_yes = Cli::try_parse_from(["neo", "uninstall", "--yes"]).unwrap();
         match (&cli_y.command, &cli_yes.command) {
-            (Some(crate::cli::Command::Uninstall { yes: y1 }), Some(crate::cli::Command::Uninstall { yes: y2 })) => {
+            (
+                Some(crate::cli::Command::Uninstall { yes: y1 }),
+                Some(crate::cli::Command::Uninstall { yes: y2 }),
+            ) => {
                 assert!(*y1);
                 assert!(*y2);
             }
@@ -1475,11 +1481,18 @@ mod tests {
 
         // Verify that Update and Uninstall produce correct variant names.
         let cli = Cli::try_parse_from(["neo", "update"]).unwrap();
-        assert!(matches!(cli.command, Some(crate::cli::Command::Update { .. })));
+        assert!(matches!(
+            cli.command,
+            Some(crate::cli::Command::Update { .. })
+        ));
 
         let cli = Cli::try_parse_from(["neo", "update", "--unstable"]).unwrap();
         match cli.command {
-            Some(crate::cli::Command::Update { unstable, stable, rollback }) => {
+            Some(crate::cli::Command::Update {
+                unstable,
+                stable,
+                rollback,
+            }) => {
                 assert!(unstable);
                 assert!(!stable);
                 assert!(!rollback);

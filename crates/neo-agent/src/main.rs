@@ -103,7 +103,11 @@ async fn dispatch(
     // AppConfig::load so that broken provider config cannot block them.
     if let Some(ref cmd) = cli.command {
         match cmd {
-            Command::Update { unstable, stable, rollback } => {
+            Command::Update {
+                unstable,
+                stable,
+                rollback,
+            } => {
                 let result = modes::lifecycle::update(*unstable, *stable, *rollback).await?;
                 return Ok(result);
             }
