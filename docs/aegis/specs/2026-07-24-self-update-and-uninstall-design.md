@@ -1,7 +1,7 @@
 # Neo Self-Update and Uninstall Design
 
 Date: `2026-07-24`
-Status: `proposed; awaiting user approval`
+Status: `approved; implementation planning`
 ArchitectureReviewRequired: `yes`
 
 ## 1. Summary
@@ -67,7 +67,8 @@ GitHub exposes a SHA-256 digest for every current `v0.1.0` and RC2 asset.
   backups, backup manifest, or update history.
 - No package-manager integration for Cargo, Homebrew, winget, apt, or similar.
 - No privilege escalation, `sudo`, UAC prompt, shell script, PowerShell script,
-  or detached cleanup helper.
+  Neo-authored helper, or uninstall helper. The pinned replacement dependency's
+  internal temporary Windows process remains part of its update primitive.
 - No deletion of workspaces or files outside the exact resolved Neo home.
 - No Windows delayed-delete or delete-on-reboot behavior.
 - No compatibility with release asset layouts other than the proven `v0.1.0`
@@ -307,8 +308,12 @@ The mutation order is fixed:
 Any failure before step 7 leaves the current executable untouched. Once a
 verified `.bak` has been promoted, any replacement failure triggers one
 automatic restore attempt from that exact backup. Neo copies the backup to an
-isolated staging executable, validates that exact staged copy, and uses it with
-the same platform replacement mechanism.
+isolated staging executable, validates that exact staged copy, and atomically
+restores the exact `current_exe()` installation path captured before replacement.
+This path-level restore is required because Windows replacement may already have
+moved the running executable aside before returning an error; calling the
+self-replacement primitive a second time cannot resolve the now-absent original
+path.
 
 If automatic restoration succeeds, Neo removes the now-consumed `.bak` so a
 failed update does not create a false manual rollback point. The command still

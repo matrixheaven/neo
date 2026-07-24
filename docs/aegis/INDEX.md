@@ -195,3 +195,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-22 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/proof-bundle.md | RunWorkflow implementation audit and repair proof bundle |
 | 2026-07-23 | artifact | docs/aegis/work/2026-07-22-runworkflow-audit-repair/gate-input-pack.json | 2026-07-22-runworkflow-audit-repair gate input pack |
 | 2026-07-23 | work | docs/aegis/work/2026-07-22-runworkflow-audit-repair/proof-bundle.md | 2026-07-22-runworkflow-audit-repair proof bundle |
+| 2026-07-24 | plan | docs/aegis/plans/2026-07-24-self-update-and-uninstall.md | Neo Self-Update and Uninstall Implementation Plan |
