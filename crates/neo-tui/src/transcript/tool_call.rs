@@ -372,6 +372,7 @@ impl ToolCallComponent {
             && let Some(started_at) = self.streaming_started_at
         {
             let tokens = crate::transcript::tool_renderers::estimate_tool_tokens(
+                &self.state.name,
                 self.state.arguments.as_deref().unwrap_or(""),
             );
             let elapsed = started_at.elapsed().as_secs();

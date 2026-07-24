@@ -2099,6 +2099,21 @@ fn edit_streaming_preview_shows_flat_intent() {
 }
 
 #[test]
+fn edit_streaming_token_count_ignores_original_content() {
+    use neo_tui::transcript::tool_renderers::estimate_tool_tokens;
+
+    let original = "original file content ".repeat(1_000);
+    let before_new = format!(r#"{{"edits":[{{"path":"src/foo.rs","old":"{original}""#);
+    assert_eq!(estimate_tool_tokens("Edit", &before_new), 0);
+
+    let with_new = format!(r#"{before_new},"new":"small replacement"#);
+    assert_eq!(
+        estimate_tool_tokens("Edit", &with_new),
+        estimate_tool_tokens("Write", "small replacement")
+    );
+}
+
+#[test]
 fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
     let details = serde_json::json!({
         "kind": "edit",

@@ -1286,7 +1286,12 @@ pub fn render_streaming_preview(
 
 /// Public wrapper for token estimation (used by tool header streaming chip).
 #[must_use]
-pub fn estimate_tool_tokens(args: &str) -> usize {
+pub fn estimate_tool_tokens(tool_name: &str, args: &str) -> usize {
+    if tool_name == "Edit" {
+        return extract_partial_string_field(args, "new")
+            .as_deref()
+            .map_or(0, estimate_tokens);
+    }
     estimate_tokens(args)
 }
 
