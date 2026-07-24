@@ -1295,7 +1295,7 @@ mod workspace_policy_tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             sender
-                .send(futures::executor::block_on(prepared.recheck_all(&context)))
+                .send(prepared.recheck_all(&context))
                 .expect("send result");
         });
         let result = receiver
