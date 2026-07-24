@@ -1,4 +1,4 @@
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 
 use anyhow::Context;
 use neo_agent_core::rpc::{
@@ -8,6 +8,7 @@ use neo_agent_core::session::{
     JsonlSessionReader, SessionMetadataStore, SessionRecord, SessionSummarySource,
 };
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
 use super::types::{
     RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcSessionExportHtmlResult,
@@ -20,9 +21,10 @@ use crate::{
     prompt::templates::{self, PromptTemplateLocation},
 };
 
-pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
-    let mut output = String::new();
-    for line in io::stdin().lock().lines() {
+pub async fn execute(config: &AppConfig) -> anyhow::Result<()> {
+    let stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
+    for line in stdin.lines() {
         let line = line.context("failed to read RPC stdin")?;
         if line.trim().is_empty() {
             continue;
@@ -31,7 +33,7 @@ pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
             Ok(message) => message,
             Err(err) => {
                 push_rpc_message(
-                    &mut output,
+                    &mut stdout,
                     &RpcMessage::Response(err.to_response("parse-error")),
                 )?;
                 continue;
@@ -40,7 +42,7 @@ pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
 
         let RpcMessage::Request(request) = message else {
             push_rpc_message(
-                &mut output,
+                &mut stdout,
                 &RpcMessage::Response(RpcResponse::failure(
                     "invalid-message",
                     RpcError::new(
@@ -53,15 +55,15 @@ pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
             continue;
         };
 
-        handle_request(config, request, &mut output).await?;
+        handle_request(config, request, &mut stdout).await?;
     }
-    Ok(output)
+    Ok(())
 }
 
 async fn handle_request(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     match request.method.as_str() {
         "get_state" => push_rpc_message(
@@ -93,7 +95,7 @@ async fn handle_request(
 fn handle_get_commands(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let commands = match templates::discover_prompt_template_commands(
         &config.project_dir,
@@ -137,7 +139,7 @@ fn handle_get_commands(
 fn handle_sessions_list(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let sessions = match session_store(config).list_recent() {
         Ok(sessions) => sessions,
@@ -166,7 +168,7 @@ fn handle_sessions_list(
 async fn handle_sessions_get(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -274,7 +276,7 @@ async fn handle_sessions_get(
 async fn handle_sessions_export_html(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -344,7 +346,7 @@ async fn handle_sessions_export_html(
 async fn handle_sessions_export_json(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -395,7 +397,7 @@ async fn handle_sessions_export_json(
 fn handle_set_session_name(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -477,7 +479,7 @@ fn handle_set_session_name(
 async fn handle_get_messages(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -551,7 +553,7 @@ async fn handle_get_messages(
 async fn handle_prompt(
     config: &AppConfig,
     request: RpcRequest,
-    output: &mut String,
+    output: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let Some(message) = request.params.get("message").and_then(Value::as_str) else {
         return push_rpc_message(
@@ -567,26 +569,75 @@ async fn handle_prompt(
         );
     };
 
-    let turn = run::run_prompt(&[message.to_owned()], config).await?;
-    for event in &turn.events {
-        push_rpc_message(
-            output,
-            &RpcMessage::Notification(RpcNotification::new(
-                "agent.event",
-                serde_json::to_value(event)?,
-            )),
-        )?;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let prompt = vec![message.to_owned()];
+    let mut turn = std::pin::pin!(run::run_prompt_with_event_stream(&prompt, config, event_tx));
+    let mut turn_result: Option<anyhow::Result<run::PromptTurn>> = None;
+    loop {
+        if let Some(result) = turn_result.take() {
+            match event_rx.recv().await {
+                Some(Ok(event)) => {
+                    push_rpc_message(
+                        output,
+                        &RpcMessage::Notification(RpcNotification::new(
+                            "agent.event",
+                            serde_json::to_value(event)?,
+                        )),
+                    )?;
+                    turn_result = Some(result);
+                    continue;
+                }
+                Some(Err(_)) => {
+                    turn_result = Some(result);
+                    continue;
+                }
+                None => match result {
+                    Ok(turn) => {
+                        return push_rpc_message(
+                            output,
+                            &RpcMessage::Response(RpcResponse::success(
+                                request.id,
+                                json!({
+                                    "assistant_text": turn.assistant_text,
+                                    "event_count": turn.events.len(),
+                                }),
+                            )),
+                        );
+                    }
+                    Err(err) => {
+                        return push_rpc_message(
+                            output,
+                            &RpcMessage::Response(RpcResponse::failure(
+                                request.id,
+                                RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                            )),
+                        );
+                    }
+                },
+            }
+        }
+
+        tokio::select! {
+            result = event_rx.recv() => {
+                match result {
+                    Some(Ok(event)) => {
+                            push_rpc_message(
+                            output,
+                            &RpcMessage::Notification(RpcNotification::new(
+                                "agent.event",
+                                serde_json::to_value(event)?,
+                            )),
+                        )?;
+                    }
+                    Some(Err(_)) => {}
+                    None => {}
+                }
+            }
+            result = &mut turn => {
+                turn_result = Some(result);
+            }
+        }
     }
-    push_rpc_message(
-        output,
-        &RpcMessage::Response(RpcResponse::success(
-            request.id,
-            json!({
-                "assistant_text": turn.assistant_text,
-                "event_count": turn.events.len(),
-            }),
-        )),
-    )
 }
 
 fn session_store(config: &AppConfig) -> SessionMetadataStore {
@@ -663,7 +714,8 @@ fn session_count(config: &AppConfig) -> usize {
         .count()
 }
 
-fn push_rpc_message(output: &mut String, message: &RpcMessage) -> anyhow::Result<()> {
-    output.push_str(&JsonlCodec::encode(message)?);
+fn push_rpc_message(output: &mut dyn Write, message: &RpcMessage) -> anyhow::Result<()> {
+    output.write_all(JsonlCodec::encode(message)?.as_bytes())?;
+    output.flush()?;
     Ok(())
 }

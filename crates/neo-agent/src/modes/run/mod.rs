@@ -256,8 +256,64 @@ pub struct PendingApproval {
     pub response_tx: oneshot::Sender<ApprovalResponse>,
 }
 
-pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
-    run_prompt_with_retry_notices(prompt, config, false).await
+pub async fn run_prompt_with_event_stream(
+    prompt: &[String],
+    config: &AppConfig,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+) -> anyhow::Result<PromptTurn> {
+    run_prompt_streaming_with_retry_notices(prompt, config, event_tx).await
+}
+
+async fn run_prompt_streaming_with_retry_notices(
+    prompt: &[String],
+    config: &AppConfig,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+) -> anyhow::Result<PromptTurn> {
+    let prompt_text = prompt.join(" ");
+    let content = vec![Content::text(prompt_text.as_str())];
+    let created = crate::modes::sessions::create_new_session(config).await?;
+    let session_path = created.wire_path;
+    let session_id = created.session_id;
+    let mut writer = JsonlSessionWriter::create(&session_path)
+        .await
+        .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let user_message = user_message(content, MessageOrigin::User, None);
+    record_session_activity(config, &session_id, &prompt_text);
+    let runtime = match runtime_for_config(
+        config,
+        Some(session_root_from_wire_path(&session_path)?),
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            writer
+                .append_event(&AgentEvent::MessageAppended {
+                    message: user_message,
+                })
+                .await?;
+            writer.flush().await?;
+            return Err(error);
+        }
+    };
+    let streaming = StreamingTurnIo {
+        event_tx,
+        session_id: session_id.clone(),
+        cancel_token: CancellationToken::new(),
+    };
+    let turn = finish_prompt_turn_streaming(
+        user_message,
+        AgentContext::new(),
+        &mut writer,
+        runtime,
+        Vec::new(),
+        streaming,
+    )
+    .await?;
+    record_initial_session_title(config, &turn, &prompt_text).await;
+    Ok(turn)
 }
 
 async fn run_prompt_with_retry_notices(

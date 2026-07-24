@@ -213,7 +213,10 @@ async fn dispatch_command(
         Some(Command::Models { command }) => dispatch_model_command(config, command),
         Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
-        Some(Command::Rpc) => rpc::server::execute(config).await,
+        Some(Command::Rpc) => {
+            rpc::server::execute(config).await?;
+            Ok(String::new())
+        }
         Some(Command::Trust { command }) => trust_commands::execute(config, &command),
         None => {
             dispatch_default_command(config, resume_picker, interactive_options, log_receiver).await
@@ -507,7 +510,8 @@ async fn dispatch_default_command(
     log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
     if config.defaults.mode.eq_ignore_ascii_case("rpc") {
-        return rpc::server::execute(config).await;
+        rpc::server::execute(config).await?;
+        return Ok(String::new());
     }
     let startup = if resume_picker {
         modes::interactive::StartupAction::OpenSessionPicker

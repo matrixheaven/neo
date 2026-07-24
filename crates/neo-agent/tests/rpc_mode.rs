@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -928,6 +928,103 @@ fn read_http_request(socket: &mut TcpStream) -> RecordedRequest {
     let body = serde_json::from_slice(body_bytes).expect("json body");
 
     RecordedRequest { method, path, body }
+}
+
+fn run_interactive_requests(mut command: Command, requests: &[&str]) -> Vec<Value> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("neo command should spawn");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let mut reader = BufReader::new(stdout);
+    let mut responses = Vec::new();
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write request");
+        stdin.flush().expect("flush request");
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read response line");
+        responses.push(serde_json::from_str::<Value>(&line).expect("valid JSONL response"));
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("neo command should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    responses
+}
+
+#[test]
+fn rpc_responds_before_stdin_eof_and_accepts_next_request() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = session_bucket(temp.path());
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
+    std::fs::write(
+        isolated_home().join("config.toml"),
+        r#"
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-5"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let responses = run_interactive_requests(
+        command,
+        &[
+            r#"{"type":"request","id":"req-1","method":"get_state","params":{}}"#,
+            r#"{"type":"request","id":"req-2","method":"get_state","params":{}}"#,
+        ],
+    );
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["type"], "response");
+    assert_eq!(responses[0]["id"], "req-1");
+    assert_eq!(responses[0]["result"]["session_count"], 1);
+    assert_eq!(responses[1]["type"], "response");
+    assert_eq!(responses[1]["id"], "req-2");
+    assert!(responses[1]["result"]["session_count"].is_number());
+}
+
+#[test]
+fn rpc_prompt_failure_is_correlated_and_server_continues() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = session_bucket(temp.path());
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
+    std::fs::write(
+        isolated_home().join("config.toml"),
+        r#"
+default_provider = "missing"
+default_model = "no-such-model"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let responses = run_interactive_requests(
+        command,
+        &[
+            r#"{"type":"request","id":"prompt-fail","method":"prompt","params":{"message":"hi"}}"#,
+            r#"{"type":"request","id":"after-fail","method":"get_state","params":{}}"#,
+        ],
+    );
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["type"], "response");
+    assert_eq!(responses[0]["id"], "prompt-fail");
+    assert_eq!(responses[0]["error"]["code"], "internal_error");
+    assert_eq!(responses[1]["type"], "response");
+    assert_eq!(responses[1]["id"], "after-fail");
+    assert!(responses[1]["result"]["session_count"].as_u64().is_some());
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
