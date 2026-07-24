@@ -200,6 +200,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-self-update-and-uninstall.md | Neo Self-Update and Uninstall Implementation Plan |
 | 2026-07-24 | spec | docs/aegis/specs/2026-07-24-delegate-edit-write-file-activity-brief.md | Delegate Edit/Write File Activity Spec Brief |
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-delegate-edit-write-file-activity.md | Delegate Edit/Write File Activity Implementation Plan |
+| 2026-07-24 | spec | docs/aegis/specs/2026-07-24-crates-audit-remediation-design.md | Neo 2026-07-24 Crates Audit Remediation Design |
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/10-intent.md | Delegate Edit/Write File Activity intent |
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/20-checkpoint.md | Delegate Edit/Write File Activity checkpoint |
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/90-evidence.md | Delegate Edit/Write File Activity evidence |
