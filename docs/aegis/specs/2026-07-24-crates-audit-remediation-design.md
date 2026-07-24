@@ -114,15 +114,12 @@ Architecture Integrity Lens:
 
 ### 5.1 Provider-specific credentials
 
-`AppConfig::api_key_env` may represent an explicit invocation-level CLI/config
-override, but it must never be synthesized from the startup default provider
-and then reused after model/provider switching. Provider catalog configuration
-continues to populate each `ProviderSpec.api_key_env_vars`.
-
-The invocation resolver must apply an explicit caller override only when the
-caller actually supplied one. A model switch changes the selected
-`ProviderSpec`; it must not mutate or inherit another provider's environment
-variable list.
+The top-level `AppConfig::api_key_env` credential path is retired. Credentials
+belong only to the selected provider's `ProviderSpec`; a model switch changes
+the selected spec and can neither mutate nor inherit another provider's
+environment-variable list. Existing documentation and examples migrate to
+`[providers.<id>].api_key_env`; no top-level compatibility alias or fallback is
+retained.
 
 The public `env_api_keys` table and its re-exports are retired. All credential
 lookups, including Windows case-insensitive environment matching and Google key
@@ -237,8 +234,12 @@ are deleted.
 
 ### 9.3 Lossless native paths
 
-Windows replacement calls the wide-character API from `OsStr::encode_wide`
-without converting through UTF-8.
+Windows replacement uses a safe, audited wrapper that accepts native `Path` or
+wide-character input without converting through UTF-8. The implementation may
+upgrade or extend an existing safe dependency, but Neo itself remains
+`unsafe_code = "forbid"`. If no suitable safe API is available, implementation
+stops for an explicit dependency decision; it must not add an unsafe block or a
+remove-then-rename fallback.
 
 The append-only session index uses a versioned lossless native-path wire field:
 Unix bytes and Windows UTF-16 code units are encoded into JSON-safe text with a
@@ -293,8 +294,8 @@ of cleanup, not an acceptance target.
 ## 13. Acceptance Criteria
 
 1. Switching from an OpenAI model to an Anthropic model resolves only the
-   Anthropic provider's configured credentials unless the caller supplied an
-   explicit invocation override.
+   Anthropic provider's configured credentials; no top-level credential owner
+   or cross-provider override remains.
 2. No production export or call site for `env_api_keys` remains.
 3. An RPC client receives and can parse the first response while stdin stays
    open; a failed prompt returns a matching failure and the next request works.
