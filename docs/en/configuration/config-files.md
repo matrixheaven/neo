@@ -20,7 +20,6 @@ The top-level fields of `config.toml` come from `FileConfig`:
 | --- | --- | --- | --- |
 | `default_model` | string | `"gpt-4.1"` | Default model alias; may be an alias from `[models.<alias>]`, or a direct `<provider>/<model>` |
 | `default_provider` | string | `"openai"` | Default provider id, used to compose the display label when `default_model` does not contain `/` |
-| `api_key_env` | string | — | Global API key environment variable name (the provider's own `api_key_env` overrides this value) |
 | `permission_mode` | `"ask"` \| `"auto"` \| `"yolo"` | `"ask"` | Default permission mode, see [Permission Modes](permissions.md) |
 | `sessions_dir` | path | `~/.neo/sessions` | Session storage root directory, supports `~` expansion |
 | `model_scope` | string[] | `[]` (i.e. all) | List of model globs restricting available models, e.g. `["openai/gpt-*", "claude-sonnet-4:high"]` |
@@ -66,7 +65,7 @@ Each provider is declared with a `[providers.<id>]` sub-table. The `<id>` is a n
 | `api_key` | string | — | Inline API key (stored in plaintext in the config file) |
 | `api_key_env` | string | — | Name of the environment variable holding the API key, e.g. `OPENAI_API_KEY` |
 
-> `api_key_env` and `api_key` may coexist; at runtime the environment variable is read first, falling back to the inline value only if it is unavailable. For the exact strategy, see [Provider Configuration](providers.md#environment-variable-precedence).
+> `api_key_env` and `api_key` may coexist; at runtime the inline key is read first, falling back to the environment variable only when `api_key` is not set. For the exact strategy, see [Provider Configuration](providers.md#environment-variable-precedence).
 
 ## `[models.<alias>]` Table
 

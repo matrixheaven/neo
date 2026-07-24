@@ -160,7 +160,6 @@ pub(super) const fn default_runtime_compaction_keep_recent_messages() -> usize {
 pub(crate) struct FileConfig {
     pub(crate) default_model: Option<String>,
     pub(crate) default_provider: Option<String>,
-    pub(crate) api_key_env: Option<String>,
     pub(crate) providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Models defined inline via `[models.<alias>]` tables.
     pub(crate) models: Option<BTreeMap<String, ModelConfig>>,

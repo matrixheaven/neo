@@ -65,7 +65,6 @@ impl ConfigOverrides {
 pub struct AppConfig {
     pub default_model: String,
     pub default_provider: String,
-    pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Models defined inline in config.toml `[models.<alias>]`.
     pub models: BTreeMap<String, ModelConfig>,

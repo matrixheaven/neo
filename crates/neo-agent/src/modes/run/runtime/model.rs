@@ -1,10 +1,9 @@
-use std::{collections::BTreeMap, env, sync::Arc};
+use std::sync::Arc;
+
+use std::collections::BTreeMap;
 
 use anyhow::Context;
-use neo_ai::{
-    CredentialResolver, ModelClient, ModelRegistry, ModelSpec, ProviderId, ProviderRegistry,
-    ProviderSpec, ResolvedCredential,
-};
+use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderId, ProviderRegistry, ProviderSpec};
 
 use crate::config::{self, AppConfig, ModelConfig};
 
@@ -158,25 +157,7 @@ pub(crate) fn resolve_model_client(
     config: &AppConfig,
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
-    const RESOLVED_API_KEY_ENV: &str = "__NEO_RESOLVED_API_KEY";
-    let mut registry = provider_registry_for_config(config);
-    if let Some(mut provider) = provider_with_invocation_overrides(config, &model.provider.0) {
-        let credential = resolve_provider_credential(&provider);
-        let mut env = env::vars().collect::<BTreeMap<_, _>>();
-        if let Some(credential) = credential {
-            provider.api_key_env_vars = vec![RESOLVED_API_KEY_ENV.to_owned()];
-            env.insert(
-                RESOLVED_API_KEY_ENV.to_owned(),
-                credential.secret().to_owned(),
-            );
-        }
-        registry.register(provider);
-        return registry
-            .resolver_from(env)
-            .resolve(model)
-            .map_err(anyhow::Error::from);
-    }
-    registry
+    provider_registry_for_config(config)
         .resolver()
         .resolve(model)
         .map_err(anyhow::Error::from)
@@ -185,39 +166,7 @@ pub(crate) fn resolve_model_client(
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
     let mut registry = ProviderRegistry::production();
     apply_configured_provider_overrides(&mut registry, config);
-    if let Some(env_name) = &config.api_key_env
-        && let Some(mut provider) = registry.get(&config.default_provider).cloned()
-    {
-        provider.api_key_env_vars = vec![env_name.clone()];
-        registry.register(provider);
-    }
     registry
-}
-
-fn provider_with_invocation_overrides(
-    config: &AppConfig,
-    provider_id: &str,
-) -> Option<ProviderSpec> {
-    let registry = provider_registry_for_config(config);
-    let mut provider = registry.get(provider_id).cloned()?;
-    if let Some(env_name) = &config.api_key_env {
-        provider.api_key_env_vars = vec![env_name.clone()];
-    }
-    Some(provider)
-}
-
-fn resolve_provider_credential(provider: &ProviderSpec) -> Option<ResolvedCredential> {
-    resolve_provider_credential_from_env(provider, &env::vars().collect())
-}
-
-fn resolve_provider_credential_from_env(
-    provider: &ProviderSpec,
-    env: &BTreeMap<String, String>,
-) -> Option<ResolvedCredential> {
-    CredentialResolver::new(&provider.id)
-        .with_env(provider.api_key_env_vars.iter().map(String::as_str), env)
-        .with_auth_file_credentials(BTreeMap::new())
-        .resolve()
 }
 
 fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: &AppConfig) {
@@ -260,5 +209,86 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
             }
         };
         registry.register(provider);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::config::ConfigOverrides;
+
+    fn load_config_from(content: &str) -> AppConfig {
+        let temp = TempDir::new().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(&config_path, content).expect("write config");
+        let project_dir = temp.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project");
+        AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
+        })
+        .expect("load config")
+    }
+
+    #[test]
+    fn selected_provider_never_inherits_another_provider_credentials() {
+        let config = load_config_from(
+            r#"
+default_model = "openai/gpt"
+default_provider = "openai"
+
+[providers.openai]
+type = "openai_response"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.anthropic]
+type = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models."openai/gpt"]
+provider = "openai"
+model = "gpt"
+
+[models."anthropic/claude"]
+provider = "anthropic"
+model = "claude"
+"#,
+        );
+
+        let registry = provider_registry_for_config(&config);
+        let env = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "openai-secret".to_owned())]);
+        let resolver = registry.resolver_from(env);
+
+        let openai_model = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "gpt".to_owned(),
+            api: ApiKind::OpenAiResponse,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+        assert!(
+            resolver.resolve(&openai_model).is_ok(),
+            "openai resolves with its own key"
+        );
+
+        let anthropic_model = ModelSpec {
+            provider: ProviderId("anthropic".to_owned()),
+            model: "claude".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+        assert!(
+            resolver.resolve(&anthropic_model).is_err(),
+            "anthropic does not inherit openai's key"
+        );
     }
 }

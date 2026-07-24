@@ -913,7 +913,6 @@ mod tests {
         let config = crate::config::AppConfig {
             default_model: "gpt-4.1".to_owned(),
             default_provider: "openai".to_owned(),
-            api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_scope: Vec::new(),
@@ -992,7 +991,6 @@ mod tests {
         let config = crate::config::AppConfig {
             default_model: "gpt-4.1".to_owned(),
             default_provider: "openai".to_owned(),
-            api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_scope: Vec::new(),

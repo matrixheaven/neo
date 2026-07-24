@@ -55,11 +55,11 @@ api_key_env = "GEMINI_API_KEY"
 
 Provider 的 API key 通过以下顺序解析，命中即返回：
 
-1. **`api_key_env`** —— 读取该环境变量（推荐，避免明文写入配置）；
-2. **`api_key`** —— 配置文件中内联的 key 字符串；
+1. **`api_key`** —— 配置文件中内联的 key 字符串；
+2. **`api_key_env`** —— 读取该环境变量（推荐，避免明文写入配置）；
 3. 都未设置 → 调用 API 时返回未授权错误。
 
-同时存在时，**环境变量优先**——只有当 `api_key_env` 指向的变量取不到值，才会回落到 `api_key`。
+同时存在时，**内联值优先**——只有当 `api_key` 未设置时，才会回落到 `api_key_env`。
 
 ```toml
 # 推荐写法：通过环境变量注入
@@ -74,7 +74,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-v1-xxxxxxxxxxxx"
 ```
 
-> 顶层还有一个全局 `api_key_env` 字段，仅作为回退；provider 自身的 `api_key_env` 会覆盖它。
+> Provider 凭证按 provider 配置。每个 provider 自身的 `api_key` 或 `api_key_env` 提供其凭证。
 
 ## 自定义 Provider
 

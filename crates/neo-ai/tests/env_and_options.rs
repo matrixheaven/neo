@@ -1,38 +1,7 @@
-use std::collections::BTreeMap;
-
 use neo_ai::{
     ApiKind, ModelCapabilities, ModelSpec, ProviderId, ReasoningCapability, ReasoningEffort,
-    ReasoningPolicy, ReasoningSelection, env_api_key_from, find_env_keys_from,
+    ReasoningPolicy, ReasoningSelection,
 };
-
-#[test]
-fn env_api_key_resolves_provider_specific_variables_in_priority_order() {
-    let env = BTreeMap::from([
-        ("ANTHROPIC_API_KEY".to_owned(), "anthropic-key".to_owned()),
-        (
-            "ANTHROPIC_OAUTH_TOKEN".to_owned(),
-            "anthropic-oauth".to_owned(),
-        ),
-        ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
-    ]);
-
-    assert_eq!(
-        env_api_key_from("openai", &env),
-        Some("openai-key".to_owned())
-    );
-    assert_eq!(
-        env_api_key_from("anthropic", &env),
-        Some("anthropic-oauth".to_owned())
-    );
-    assert_eq!(
-        find_env_keys_from("anthropic", &env),
-        vec![
-            "ANTHROPIC_OAUTH_TOKEN".to_owned(),
-            "ANTHROPIC_API_KEY".to_owned()
-        ]
-    );
-    assert_eq!(env_api_key_from("unknown", &env), None);
-}
 
 #[test]
 fn reasoning_effort_serializes_as_stable_snake_case_values() {

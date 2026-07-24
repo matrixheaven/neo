@@ -20,7 +20,6 @@ Neo 使用**单一配置文件** `~/.neo/config.toml`（TOML 格式）管理所�
 | --- | --- | --- | --- |
 | `default_model` | string | `"gpt-4.1"` | 默认模型别名；可填 `[models.<alias>]` 的别名，或直接的 `<provider>/<model>` |
 | `default_provider` | string | `"openai"` | 默认 provider id，当 `default_model` 不含 `/` 时用于拼接显示标签 |
-| `api_key_env` | string | — | 全局 API key 环境变量名（provider 自身的 `api_key_env` 会覆盖此值） |
 | `permission_mode` | `"ask"` \| `"auto"` \| `"yolo"` | `"ask"` | 默认权限模式，详见 [权限模式](permissions.md) |
 | `sessions_dir` | path | `~/.neo/sessions` | 会话存储根目录，支持 `~` 展开 |
 | `model_scope` | string[] | `[]`（即全部） | 限制可用的 model glob 列表，例如 `["openai/gpt-*", "claude-sonnet-4:high"]` |
@@ -66,7 +65,7 @@ Neo 按以下顺序构造模型系统消息：
 | `api_key` | string | — | 内联 API key（明文存于配置文件中） |
 | `api_key_env` | string | — | 承载 API key 的环境变量名，如 `OPENAI_API_KEY` |
 
-> `api_key_env` 与 `api_key` 可同时存在；运行时优先读取环境变量，取不到才回落到内联值。具体策略见 [Provider 配置](providers.md#环境变量优先级)。
+> `api_key_env` 与 `api_key` 可同时存在；运行时优先读取内联值，仅在 `api_key` 未设置时回落到环境变量。具体策略见 [Provider 配置](providers.md#环境变量优先级)。
 
 ## `[models.<alias>]` 表
 

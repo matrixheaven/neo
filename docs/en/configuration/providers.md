@@ -55,11 +55,11 @@ api_key_env = "GEMINI_API_KEY"
 
 A provider's API key is resolved in the following order, returning on the first hit:
 
-1. **`api_key_env`** — reads this environment variable (recommended, to avoid writing plaintext into the config);
-2. **`api_key`** — the inline key string in the config file;
+1. **`api_key`** — the inline key string in the config file;
+2. **`api_key_env`** — reads this environment variable (recommended, to avoid writing plaintext into the config);
 3. If neither is set → an unauthorized error is returned when calling the API.
 
-When both are present, **the environment variable takes precedence** — Neo falls back to `api_key` only when the variable named by `api_key_env` has no value.
+When both are present, **the inline key takes precedence** — Neo falls back to `api_key_env` only when `api_key` is not set.
 
 ```toml
 # Recommended: inject via environment variable
@@ -74,7 +74,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-v1-xxxxxxxxxxxx"
 ```
 
-> There is also a top-level global `api_key_env` field, used only as a fallback; a provider's own `api_key_env` overrides it.
+> Provider credentials are configured per provider. Each provider's own `api_key` or `api_key_env` supplies its credentials.
 
 ## Custom Providers
 

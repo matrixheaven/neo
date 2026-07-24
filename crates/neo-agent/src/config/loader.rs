@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use super::types::{
     default_runtime_compaction_max_estimated_tokens,
 };
 use super::{
-    AppConfig, ConfigOverrides, Defaults, ProviderConfig, RuntimeCompactionConfig, RuntimeConfig,
+    AppConfig, ConfigOverrides, Defaults, RuntimeCompactionConfig, RuntimeConfig,
     RuntimeRetryConfig, TuiConfig, default_config_path, expand_user_path, neo_home,
 };
 use crate::{themes, trust};
@@ -89,9 +89,6 @@ impl AppConfig {
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
         let providers = file_config.providers.unwrap_or_default();
         let models = file_config.models.unwrap_or_default();
-        let api_key_env = file_config
-            .api_key_env
-            .or_else(|| provider_api_key_env(&providers, &default_provider));
         let model_scope = file_config.model_scope.unwrap_or_default();
         let prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let system_prompt_file = file_config.system_prompt_file.map(expand_user_path);
@@ -131,7 +128,6 @@ impl AppConfig {
         Ok(Self {
             default_model,
             default_provider,
-            api_key_env,
             providers,
             models,
             model_scope,
@@ -215,15 +211,6 @@ fn resolve_project_trust_state(
             Ok((false, trust::ProjectTrustState::Unknown { inputs }))
         }
     }
-}
-
-fn provider_api_key_env(
-    providers: &BTreeMap<String, ProviderConfig>,
-    provider_id: &str,
-) -> Option<String> {
-    providers
-        .get(provider_id)
-        .and_then(|provider| provider.api_key_env.clone())
 }
 
 fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {

@@ -10404,7 +10404,6 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
     AppConfig {
         default_model: "gpt-4.1".to_owned(),
         default_provider: "openai".to_owned(),
-        api_key_env: None,
         providers: BTreeMap::new(),
         models: BTreeMap::new(),
         model_scope: Vec::new(),

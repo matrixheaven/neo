@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::{
     AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
     ReasoningCapability,
-    auth::env_value,
+    auth::CredentialResolver,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::responses::OpenAiResponsesClient,
@@ -156,20 +156,26 @@ impl ProviderResolver {
             }
         })?;
 
-        // Credential: inline api_key > env vars.
-        let api_key = provider
-            .api_key
-            .clone()
-            .or_else(|| api_key_from_provider(provider, &self.env))
-            .ok_or_else(|| {
-                let reason = missing_reason(provider);
-                AiError::Configuration {
-                    message: format!(
-                        "missing credentials for provider {} ({reason})",
-                        provider.id
-                    ),
-                }
+        // Credential: inline api_key > env vars > auth file.
+        let credential = CredentialResolver::new(&provider.id)
+            .with_cli_api_key(provider.api_key.clone())
+            .with_env(
+                provider.api_key_env_vars.iter().map(String::as_str),
+                &self.env,
+            )
+            .resolve()
+            .ok_or_else(|| AiError::Configuration {
+                message: format!(
+                    "missing credentials for provider {} ({})",
+                    provider.id,
+                    provider
+                        .api_key_env_vars
+                        .first()
+                        .map_or("no sources", String::as_str)
+                ),
             })?;
+
+        let api_key = credential.secret().to_owned();
 
         let base_url = provider
             .base_url
@@ -184,25 +190,6 @@ impl ProviderResolver {
             ApiType::OpenAi => Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key))),
             ApiType::Google => Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key))),
         }
-    }
-}
-
-fn api_key_from_provider(
-    provider: &ProviderSpec,
-    env: &BTreeMap<String, String>,
-) -> Option<String> {
-    provider.api_key_env_vars.iter().find_map(|key| {
-        env_value(env, key)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    })
-}
-
-fn missing_reason(provider: &ProviderSpec) -> String {
-    match provider.api_key_env_vars.as_slice() {
-        [] => "no environment credential sources are registered".to_owned(),
-        [key] => format!("missing {key}"),
-        options => format!("missing one of: {}", options.join("; ")),
     }
 }
 

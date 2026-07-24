@@ -294,7 +294,6 @@ mod tests {
         AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "test-provider".to_owned(),
-            api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_scope: Vec::new(),

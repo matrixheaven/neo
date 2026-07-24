@@ -443,7 +443,6 @@ mod tests {
         let config = AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
-            api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_scope: Vec::new(),
