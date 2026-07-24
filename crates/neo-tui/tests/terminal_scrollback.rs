@@ -284,7 +284,10 @@ fn suspend_resume_preserves_committed_history() {
     );
 
     screen.process(b"shell-during-suspend-sentinel\r\n");
-    inline.resume_for_test().expect("resume terminal modes");
+    let (cursor_row, cursor_col) = screen.screen().cursor_position();
+    inline
+        .resume(80, 12, cursor_col, cursor_row, 1)
+        .expect("resume terminal modes");
     let resumed_frame = TerminalFrame::new(Vec::new(), live, None);
     let mut resumed = Vec::new();
     inline

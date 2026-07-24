@@ -493,18 +493,6 @@ impl InlineTerminal {
         Ok(())
     }
 
-    /// Resume without a fresh observation (test helper defaults generation bump).
-    pub fn resume_for_test(&mut self) -> std::io::Result<()> {
-        let generation = self.geometry.generation.saturating_add(1);
-        self.resume(
-            self.geometry.width,
-            self.geometry.height,
-            self.geometry.cursor_col,
-            self.geometry.cursor_row,
-            generation,
-        )
-    }
-
     pub fn leave(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
         if self.review_surface {
             let mut transition = Vec::new();
