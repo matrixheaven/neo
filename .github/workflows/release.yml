@@ -12,7 +12,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate package versions and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          mapfile -t versions < <(
+            jq -r '.packages[]
+              | select(.name == "neo-ai"
+                  or .name == "neo-agent-core"
+                  or .name == "neo-tui"
+                  or .name == "neo-agent")
+              | .version' <<<"$metadata"
+          )
+          if [ "${#versions[@]}" -ne 4 ]; then
+            echo "expected four Neo workspace packages, found ${#versions[@]}" >&2
+            exit 1
+          fi
+          mapfile -t unique_versions < <(printf '%s\n' "${versions[@]}" | sort -u)
+          if [ "${#unique_versions[@]}" -ne 1 ]; then
+            printf 'Neo package versions differ: %s\n' "${versions[*]}" >&2
+            exit 1
+          fi
+          expected_tag="v${unique_versions[0]}"
+          if [ "$GITHUB_REF_NAME" != "$expected_tag" ]; then
+            echo "release tag $GITHUB_REF_NAME must equal $expected_tag" >&2
+            exit 1
+          fi
+
   build:
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
