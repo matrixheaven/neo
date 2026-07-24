@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::diff::{diff_stats, unified_diff};
-use super::read::render_text_snapshot;
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::approval::{EditApprovalChange, EditApprovalPresentation};
 use crate::permissions::{FileWriteApprovalOperation, SessionApprovalKey, SessionApprovalScope};
@@ -228,7 +227,7 @@ fn apply_edit_plan(
     original: &str,
 ) -> Result<String, ToolResult> {
     let mut staged = original.to_owned();
-    for (staged_count, (edit_index, edit)) in plan.edits.iter().enumerate() {
+    for (edit_index, edit) in &plan.edits {
         let actual = count_non_overlapping(&staged, &edit.old);
         if actual != edit.expected_matches {
             let lines = match_line_numbers(&staged, &edit.old);
@@ -241,16 +240,7 @@ fn apply_edit_plan(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let guidance = if actual == 0 {
-                format!(
-                    "Use the comparison snapshot below to correct edits[{edit_index}].old, then resubmit the complete Edit call."
-                )
-            } else {
-                format!(
-                    "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
-                )
-            };
-            let mut failure = prepare_failed(
+            return Err(prepare_failed(
                 None,
                 Some(*edit_index),
                 Some(plan.path.display().to_string()),
@@ -258,10 +248,10 @@ fn apply_edit_plan(
                     "expected {} exact matches · found {actual}; matches at lines {line_list}",
                     edit.expected_matches
                 ),
-                &guidance,
-            );
-            append_match_snapshot(&mut failure, &plan.path, &staged, staged_count);
-            return Err(failure);
+                &format!(
+                    "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
+                ),
+            ));
         }
         staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
     }
@@ -278,44 +268,6 @@ fn apply_edit_plan(
         ));
     }
     Ok(staged)
-}
-
-fn append_match_snapshot(failure: &mut ToolResult, path: &Path, staged: &str, staged_count: usize) {
-    failure
-        .content
-        .push_str("\n\nComparison snapshot used for this match check");
-    if staged_count == 0 {
-        failure.content.push_str(" from the current file state");
-    } else {
-        let _ = write!(
-            failure.content,
-            " after {staged_count} earlier replacements were staged in this call"
-        );
-    }
-    failure.content.push_str("; zero writes were committed:\n");
-
-    let Some(snapshot) = render_text_snapshot(path, staged) else {
-        failure.content.push_str(
-            "Snapshot omitted because Read safety rules reject this path or content. No file content was returned.",
-        );
-        return;
-    };
-    failure.content.push_str(&snapshot.output);
-
-    if snapshot.lines_read < snapshot.total_lines {
-        let remaining = snapshot.total_lines - snapshot.lines_read;
-        let next_line = snapshot.lines_read + 1;
-        let _ = write!(
-            failure.content,
-            "\nSnapshot incomplete: this result includes only lines 1-{} of {}; {remaining} lines remain unread. Before retrying Edit, call Read with {}.",
-            snapshot.lines_read,
-            snapshot.total_lines,
-            json!({
-                "path": path.display().to_string(),
-                "line_offset": next_line,
-            })
-        );
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
