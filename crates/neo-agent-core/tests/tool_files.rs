@@ -163,8 +163,62 @@ async fn edit_flat_match_mismatch_reports_global_index_and_writes_nothing() {
     assert!(content.contains("matches at lines"), "{content}");
     assert!(content.contains("edits[1].old"), "{content}");
     assert!(content.contains("edits[1].expected_matches"), "{content}");
+    assert!(content.contains("1\tbbb bbb"), "{content}");
+    assert!(!content.contains("call Read"), "{content}");
     assert_eq!(std::fs::read_to_string(&a).expect("a"), "aaa\n");
     assert_eq!(std::fs::read_to_string(&b).expect("b"), "bbb bbb\n");
+}
+
+#[tokio::test]
+async fn edit_match_mismatch_returns_bounded_comparison_snapshot() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = neo_agent_core::ToolRegistry::with_builtin_tools();
+    let context = neo_agent_core::ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(neo_agent_core::ToolAccess::all());
+    let path = workspace.path().join("large.txt");
+    let original = (1..=1005)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    std::fs::write(&path, &original).expect("seed");
+
+    let edit = registry
+        .run(
+            "Edit",
+            &context,
+            json!({
+                "edits": [
+                    { "path": "large.txt", "old": "line 1\n", "new": "changed 1\n" },
+                    { "path": "large.txt", "old": "missing\n", "new": "replacement\n" }
+                ]
+            }),
+        )
+        .await
+        .expect("Edit result");
+
+    assert!(edit.is_error);
+    assert!(edit.content.contains("found 0"), "{}", edit.content);
+    assert!(
+        edit.content
+            .contains("after 1 earlier replacements were staged in this call"),
+        "{}",
+        edit.content
+    );
+    assert!(edit.content.contains("1\tchanged 1"), "{}", edit.content);
+    assert!(
+        edit.content.contains(
+            "Snapshot incomplete: this result includes only lines 1-1000 of 1005; 5 lines remain unread."
+        ),
+        "{}",
+        edit.content
+    );
+    assert!(
+        edit.content
+            .contains(r#"{"line_offset":1001,"path":"large.txt"}"#),
+        "{}",
+        edit.content
+    );
+    assert_eq!(std::fs::read_to_string(path).expect("read"), original);
 }
 
 #[tokio::test]

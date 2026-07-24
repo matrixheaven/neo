@@ -31,6 +31,8 @@ use crate::{AgentEvent, AgentMessage, ProcessSupervisor, StopReason, ToolRegistr
 pub struct AgentEventStream<'a> {
     inner: stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>,
     _workflow_event_drain_lease: Option<super::workflow_dispatch::WorkflowDispatchEventDrainLease>,
+    cancel_token: CancellationToken,
+    completed: bool,
 }
 
 struct SpawnedTurn {
@@ -57,7 +59,21 @@ impl Stream for AgentEventStream<'_> {
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(context)
+        match self.inner.as_mut().poll_next(context) {
+            std::task::Poll::Ready(None) => {
+                self.completed = true;
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+impl Drop for AgentEventStream<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancel_token.cancel();
+        }
     }
 }
 
@@ -277,6 +293,7 @@ impl AgentRuntime {
             .ok();
         let (workflow_event_lease, workflow_event_drain_lease) =
             workflow_event_leases.map_or((None, None), |(lease, drain)| (Some(lease), Some(drain)));
+        let stream_cancel_token = cancel_token.clone();
 
         tokio::spawn(Self::run_turn_spawned(SpawnedTurn {
             sender,
@@ -320,6 +337,8 @@ impl AgentRuntime {
         AgentEventStream {
             inner,
             _workflow_event_drain_lease: workflow_event_drain_lease,
+            cancel_token: stream_cancel_token,
+            completed: false,
         }
     }
 
@@ -419,6 +438,7 @@ impl AgentRuntime {
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (final_sender, final_receiver) = oneshot::channel();
+        let stream_cancel_token = cancel_token.clone();
 
         tokio::spawn(async move {
             let mut emitter = EventEmitter::new(sender, live_context);
@@ -485,6 +505,8 @@ impl AgentRuntime {
         AgentEventStream {
             inner,
             _workflow_event_drain_lease: None,
+            cancel_token: stream_cancel_token,
+            completed: false,
         }
     }
 }

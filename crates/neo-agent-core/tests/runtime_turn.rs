@@ -652,6 +652,61 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
 }
 
 #[tokio::test]
+async fn agent_event_stream_cancels_only_when_abandoned() {
+    let harness = DelayedHarness::new(vec![
+        DelayedStep::Event(AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "early".to_owned(),
+        }),
+        DelayedStep::Delay(Duration::from_millis(100)),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "late".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        }),
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    {
+        let mut stream = runtime.run_turn_with_cancel(
+            &mut context,
+            AgentMessage::user_text("abandon"),
+            cancel.clone(),
+        );
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("first event should stream")
+            .expect("stream should not close")
+            .expect("event should be ok");
+        assert!(matches!(event, AgentEvent::RunStarted { turn: 1 }));
+    }
+    timeout(Duration::from_millis(500), cancel.cancelled())
+        .await
+        .expect("dropping an incomplete stream should cancel the turn");
+
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    {
+        let mut stream = runtime.run_turn_with_cancel(
+            &mut context,
+            AgentMessage::user_text("drain"),
+            cancel.clone(),
+        );
+        while stream.next().await.is_some() {}
+    }
+    assert!(
+        !cancel.is_cancelled(),
+        "draining a stream to completion should not cancel the turn"
+    );
+}
+
+#[tokio::test]
 async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
