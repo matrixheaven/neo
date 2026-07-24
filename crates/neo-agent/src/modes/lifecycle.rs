@@ -39,6 +39,7 @@ pub(crate) struct TargetRelease {
     asset: AssetSpec,
 }
 
+#[derive(Debug)]
 pub(crate) enum ReleaseDecision {
     AlreadyCurrent { channel: &'static str },
     Install(TargetRelease),
@@ -91,8 +92,7 @@ pub(crate) fn platform_asset(version: &Version) -> anyhow::Result<AssetSpec> {
     };
 
     // v0.1.0 used plain binary assets on Unix (no archive wrapper).
-    let is_v0_1_0 =
-        version.major == 0 && version.minor == 1 && version.patch == 0 && version.pre.is_empty();
+    let is_v0_1_0 = *version == Version::new(0, 1, 0);
 
     let archive_name = if is_v0_1_0 && os != "windows" {
         base.to_string()
@@ -158,9 +158,7 @@ pub(crate) fn select_release(
 
     let (best_version, _best_release) = match candidates.first() {
         Some((v, r)) => (v.clone(), *r),
-        None => {
-            return Ok(ReleaseDecision::AlreadyCurrent { channel });
-        }
+        None => bail!("no {channel} release exists"),
     };
 
     // Equal precedence (including different build metadata) = already current.
@@ -339,7 +337,7 @@ fn stage_copy(
             .with_context(|| format!("failed to read permissions of {source:?}"))?
             .permissions();
         std::fs::set_permissions(tmp_file.path(), perms)
-            .with_context(|| format!("failed to set permissions on temp file"))?;
+            .context("failed to set permissions on temp file")?;
     }
 
     // Flush and sync.
@@ -426,11 +424,11 @@ fn restore_from_backup(
     // Check if install_path already exists and reports original version.
     // If it does, we may not need to replace it (e.g., self_replace didn't
     // move it yet).
-    if install_path.exists() {
-        if let Ok(()) = verify_binary_version(install_path, original_version) {
-            // Original binary still intact; no persist needed.
-            return Ok(());
-        }
+    if install_path.exists()
+        && let Ok(()) = verify_binary_version(install_path, original_version)
+    {
+        // Original binary still intact; no persist needed.
+        return Ok(());
     }
     // Atomically restore.
     staged
@@ -686,11 +684,11 @@ fn replace_with_recovery(
                 Ok(()) => {
                     // Success: consume .bak.
                     if let Err(rm_err) = std::fs::remove_file(bak_path) {
-                        return Ok(format!(
-                            "Rolled back {guard_version} → {successor_version}.\n\
-                             Warning: failed to remove backup {bak_path:?}: {rm_err}\n\
+                        bail!(
+                            "rollback installed {successor_version}, but failed to consume \
+                             backup {bak_path:?}: {rm_err}\n\
                              Please restart Neo."
-                        ));
+                        );
                     }
                     Ok(format!(
                         "Rolled back {guard_version} → {successor_version}.\n\
@@ -700,12 +698,21 @@ fn replace_with_recovery(
                 Err(verify_err) => {
                     // Post-install verification failed.
                     // Restore from guard, leave .bak intact.
-                    let _ = restore_from_backup(install_path, guard_path, guard_version);
-                    bail!(
-                        "rollback replacement succeeded but installed version \
-                         verification failed: {verify_err}\n\
-                         The previous version was restored. Backup remains at {bak_path:?}."
-                    );
+                    match restore_from_backup(install_path, guard_path, guard_version) {
+                        Ok(()) => bail!(
+                            "rollback replacement succeeded but installed version \
+                             verification failed: {verify_err}\n\
+                             The previous version was restored. Backup remains at {bak_path:?}."
+                        ),
+                        Err(restore_err) => bail!(
+                            "rollback replacement succeeded but installed version \
+                             verification failed: {verify_err}\n\
+                             guard restoration also failed: {restore_err}\n\
+                             current executable: {install_path:?}\n\
+                             backup: {bak_path:?}\n\
+                             manual recovery is required."
+                        ),
+                    }
                 }
             }
         }
@@ -775,15 +782,26 @@ fn validate_neo_home(
     }
 
     // Reject the user home itself.
-    if let Some(uh) = user_home {
-        if let Ok(canonical_uh) = std::fs::canonicalize(uh) {
-            if canonical == canonical_uh {
-                bail!("Neo home is the user home directory, refusing to delete: {canonical:?}");
-            }
-        }
+    if let Some(uh) = user_home
+        && let Ok(canonical_uh) = std::fs::canonicalize(uh)
+        && canonical == canonical_uh
+    {
+        bail!("Neo home is the user home directory, refusing to delete: {canonical:?}");
     }
 
     Ok(())
+}
+
+/// Validate the adjacent backup entry before uninstall mutates anything.
+fn uninstall_backup_exists(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => Ok(true),
+        Ok(_) => bail!("backup path is not a file or symlink, refusing to delete: {path:?}"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read backup metadata: {path:?}"))
+        }
+    }
 }
 
 /// Prompt the user for confirmation to delete the Neo home directory.
@@ -835,6 +853,7 @@ pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
     let user_home = crate::config::user_home();
 
     // Resolve and validate all paths before mutation.
+    let backup_exists = uninstall_backup_exists(&bak)?;
     let home_to_delete: Option<std::path::PathBuf> = if let Some(ref home) = neo_home {
         if home.exists() {
             validate_neo_home(home, user_home.as_deref())?;
@@ -882,37 +901,17 @@ pub(crate) fn uninstall(yes: bool) -> anyhow::Result<String> {
     }
 
     // 2. Remove .bak if present.
-    if bak.exists() {
-        // Verify it's not a directory or something unexpected.
-        let bak_meta = std::fs::symlink_metadata(&bak);
-        let remove_bak = match bak_meta {
-            Ok(m) if m.is_file() || m.is_symlink() => true,
-            Ok(m) => {
-                result.push_str(&format!(
-                    "Backup path is not a regular file, skipping: {bak:?} (kind: {:?})\n",
-                    m.file_type()
-                ));
-                false
+    if backup_exists {
+        match std::fs::remove_file(&bak) {
+            Ok(()) => {
+                result.push_str(&format!("Removed: {bak:?}\n"));
             }
             Err(e) => {
-                result.push_str(&format!("Failed to read backup metadata {bak:?}: {e}\n"));
-                false
-            }
-        };
-
-        if remove_bak {
-            match std::fs::remove_file(&bak) {
-                Ok(()) => {
-                    result.push_str(&format!("Removed: {bak:?}\n"));
+                result.push_str(&format!("Failed to remove backup {bak:?}: {e}\n"));
+                if delete_home {
+                    result.push_str("Neo home was not removed because backup removal failed.\n");
                 }
-                Err(e) => {
-                    result.push_str(&format!("Failed to remove backup {bak:?}: {e}\n"));
-                    if delete_home {
-                        result
-                            .push_str("Neo home was not removed because backup removal failed.\n");
-                    }
-                    bail!(result);
-                }
+                bail!(result);
             }
         }
     } else {
@@ -1066,30 +1065,29 @@ mod tests {
         let decision = select_release(&releases, &current, UpdateMode::Stable).unwrap();
         assert!(matches!(decision, ReleaseDecision::AlreadyCurrent { .. }));
 
-        // 8. Stable filter excludes prereleases.
+        // 8. Stable filter excludes prereleases and errors when none remain.
         let current = Version::parse("0.1.0").unwrap();
         let releases = vec![rc2.clone()];
-        let decision = select_release(&releases, &current, UpdateMode::Stable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::AlreadyCurrent { .. }));
+        let error = select_release(&releases, &current, UpdateMode::Stable).unwrap_err();
+        assert_eq!(error.to_string(), "no stable release exists");
 
-        // 9. Unstable filter excludes stable releases.
+        // 9. Unstable filter excludes stable releases and errors when none remain.
         let current = Version::parse("0.1.0-rc.1").unwrap();
         let releases = vec![stable_011.clone()];
-        let decision = select_release(&releases, &current, UpdateMode::Unstable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::AlreadyCurrent { .. }));
+        let error = select_release(&releases, &current, UpdateMode::Unstable).unwrap_err();
+        assert_eq!(error.to_string(), "no unstable release exists");
 
-        // 10. Empty release list → AlreadyCurrent.
+        // 10. Empty release list → error.
         let current = Version::parse("0.1.0").unwrap();
         let releases = vec![];
-        let decision = select_release(&releases, &current, UpdateMode::Stable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::AlreadyCurrent { .. }));
+        let error = select_release(&releases, &current, UpdateMode::Stable).unwrap_err();
+        assert_eq!(error.to_string(), "no stable release exists");
 
-        // 11. Empty release list → AlreadyCurrent (covered above).
-        // Non-SemVer releases cannot be constructed via Release::builder()
+        // 11. Non-SemVer releases cannot be constructed via Release::builder().
         let current = Version::parse("0.1.0").unwrap();
         let releases = vec![stable_011.clone()];
-        let decision = select_release(&releases, &current, UpdateMode::Unstable).unwrap();
-        assert!(matches!(decision, ReleaseDecision::AlreadyCurrent { .. }));
+        let error = select_release(&releases, &current, UpdateMode::Unstable).unwrap_err();
+        assert_eq!(error.to_string(), "no unstable release exists");
     }
 
     // ── Mapping test: six targets + v0.1.0 + unsupported ────────────
@@ -1102,6 +1100,7 @@ mod tests {
         // logic through the code structure.
 
         let v010 = Version::parse("0.1.0").unwrap();
+        let v010build = Version::parse("0.1.0+rebuild").unwrap();
         let v011 = Version::parse("0.1.1").unwrap();
         let v011rc = Version::parse("0.1.1-rc.2").unwrap();
 
@@ -1110,6 +1109,7 @@ mod tests {
 
         let asset_011 = platform_asset(&v011).unwrap();
         let asset_011rc = platform_asset(&v011rc).unwrap();
+        let asset_010build = platform_asset(&v010build).unwrap();
 
         // Current platform mapping.
         match (os, arch) {
@@ -1154,8 +1154,10 @@ mod tests {
         // RC archive uses .tar.gz on Unix, .zip on Windows (same as stable non-0.1.0).
         if os != "windows" {
             assert!(asset_011rc.archive_name.ends_with(".tar.gz"));
+            assert!(asset_010build.archive_name.ends_with(".tar.gz"));
         } else {
             assert!(asset_011rc.archive_name.ends_with(".zip"));
+            assert!(asset_010build.archive_name.ends_with(".zip"));
         }
     }
 
@@ -1365,6 +1367,22 @@ mod tests {
         );
         assert!(bak.exists(), ".bak must be retained after failed replace");
         verify_binary_version(&tmp_exe, &version).unwrap();
+
+        // 4. Post-replacement verification plus restoration failure reports both.
+        let missing_guard = tmp.path().join("missing-guard");
+        let result = replace_with_recovery(
+            &tmp_exe,
+            guard.path(),
+            &version,
+            &missing_guard,
+            &version,
+            &bak,
+            |_src| std::fs::remove_file(&tmp_exe),
+        );
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("guard restoration also failed"));
+        assert!(err_msg.contains("manual recovery is required"));
+        assert!(bak.exists(), ".bak must survive dual failure");
     }
 
     // ── Uninstall test ───────────────────────────────────────────────
@@ -1434,12 +1452,18 @@ mod tests {
         let valid = tmp.path().join("valid-neo-home");
         std::fs::create_dir(&valid).unwrap();
         validate_neo_home(&valid, None).unwrap();
+
+        // Backup entries are validated before any uninstall mutation.
+        let absent_backup = tmp.path().join("absent.bak");
+        assert!(!uninstall_backup_exists(&absent_backup).unwrap());
+        assert!(uninstall_backup_exists(&file).unwrap());
+        assert!(uninstall_backup_exists(tmp.path()).is_err());
     }
 
     // ── CLI contract test ───────────────────────────────────────────
 
-    #[test]
-    fn cli_lifecycle_contract_is_exact() {
+    #[tokio::test]
+    async fn cli_lifecycle_contract_is_exact() {
         use crate::cli::Cli;
         use clap::Parser;
 
@@ -1498,6 +1522,17 @@ mod tests {
                 assert!(!rollback);
             }
             _ => panic!("expected Update command"),
+        }
+
+        // Resume picker conflicts are rejected before lifecycle side effects.
+        for args in [["neo", "-r", "update"], ["neo", "-r", "uninstall"]] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let error = crate::dispatch(cli, None).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot be combined with a subcommand")
+            );
         }
     }
 }

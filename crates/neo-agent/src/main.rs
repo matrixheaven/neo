@@ -99,6 +99,12 @@ async fn dispatch(
     cli: Cli,
     log_receiver: Option<log_capture::CapturedEventReceiver>,
 ) -> anyhow::Result<String> {
+    if cli.resume_picker && cli.command.is_some() {
+        anyhow::bail!(
+            "--resume/-r starts the interactive session picker and cannot be combined with a subcommand"
+        );
+    }
+
     // Lifecycle commands (update/uninstall) are dispatched before
     // AppConfig::load so that broken provider config cannot block them.
     if let Some(ref cmd) = cli.command {
@@ -129,12 +135,6 @@ async fn dispatch(
     }
     resolve_resume_workspace(&cli)?;
     let config = AppConfig::load(overrides)?;
-
-    if cli.resume_picker && cli.command.is_some() {
-        anyhow::bail!(
-            "--resume/-r starts the interactive session picker and cannot be combined with a subcommand"
-        );
-    }
 
     let session_options = RunSessionOptions::from_cli(&cli);
     let interactive_options = modes::interactive::InteractiveOptions {
