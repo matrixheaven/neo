@@ -5,6 +5,12 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-24 | spec | docs/aegis/specs/2026-07-24-clippy-complexity-governance-design.md | Clippy Complexity Governance Design |
+| 2026-07-24 | plan | docs/aegis/plans/2026-07-24-clippy-complexity-governance.md | Clippy Complexity Governance Implementation Plan |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-clippy-complexity-governance/10-intent.md | Clippy Complexity Governance intent |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-clippy-complexity-governance/20-checkpoint.md | Clippy Complexity Governance checkpoint |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-clippy-complexity-governance/90-evidence.md | Clippy Complexity Governance evidence |
+| 2026-07-24 | work | docs/aegis/work/2026-07-24-clippy-complexity-governance/99-reflection.md | Clippy Complexity Governance reflection |
 | 2026-07-22 | plan | docs/aegis/plans/2026-07-22-non-blocking-instruction-cycles.md | Non-Blocking Instruction Import Cycles Implementation Plan |
 | 2026-07-22 | spec | docs/aegis/specs/2026-07-22-non-blocking-instruction-cycles-design.md | Non-Blocking Instruction Import Cycles |
 | 2026-07-22 | baseline | docs/aegis/baseline/2026-07-22-instruction-import-contract.md | Instruction Import Contract Baseline |
