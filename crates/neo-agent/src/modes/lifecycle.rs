@@ -1175,7 +1175,10 @@ mod tests {
                 .with_digest("sha256:def456");
 
         // Exactly one match with digest → succeeds.
-        assert!(exact_asset_with_digest(&[good.clone()], "neo-linux-x86_64.tar.gz").is_some());
+        assert!(
+            exact_asset_with_digest(std::slice::from_ref(&good), "neo-linux-x86_64.tar.gz")
+                .is_some()
+        );
 
         // Match without digest → None.
         assert!(exact_asset_with_digest(&[no_digest], "neo-linux-x86_64.tar.gz").is_none());
@@ -1350,12 +1353,7 @@ mod tests {
             guard.path(),
             &version,
             &bak,
-            |_src| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "simulated replace failure",
-                ))
-            },
+            |_src| Err(std::io::Error::other("simulated replace failure")),
         );
         assert!(result.is_err(), "simulated failure should return error");
         let err_msg = format!("{:?}", result.unwrap_err());
