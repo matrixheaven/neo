@@ -3621,17 +3621,19 @@ fn delegate_family_renders_edit_write_file_rows() {
 
 #[test]
 fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
-    let mut theme = TuiTheme::default();
-    theme.brand = Color::Rgb(1, 2, 3);
-    theme.status_ok = Color::Rgb(4, 5, 6);
-    theme.status_error = Color::Rgb(7, 8, 9);
-    theme.status_warn = Color::Rgb(10, 11, 12);
-    theme.status_pending = Color::Rgb(13, 14, 15);
-    theme.text_muted = Color::Rgb(16, 17, 18);
-    theme.text_primary = Color::Rgb(19, 20, 21);
-    theme.diff_added = Color::Rgb(22, 23, 24);
-    theme.diff_removed = Color::Rgb(25, 26, 27);
-    theme.diff_hunk = Color::Rgb(28, 29, 30);
+    let theme = TuiTheme {
+        brand: Color::Rgb(1, 2, 3),
+        status_ok: Color::Rgb(4, 5, 6),
+        status_error: Color::Rgb(7, 8, 9),
+        status_warn: Color::Rgb(10, 11, 12),
+        status_pending: Color::Rgb(13, 14, 15),
+        text_muted: Color::Rgb(16, 17, 18),
+        text_primary: Color::Rgb(19, 20, 21),
+        diff_added: Color::Rgb(22, 23, 24),
+        diff_removed: Color::Rgb(25, 26, 27),
+        diff_hunk: Color::Rgb(28, 29, 30),
+        ..TuiTheme::default()
+    };
 
     let file = |path: &str, status: AgentToolFileStatus| AgentToolFileChange {
         path: path.to_owned(),

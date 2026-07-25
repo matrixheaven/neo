@@ -168,16 +168,28 @@ fn child_tool_phase_style(phase: AgentToolActivityPhase, theme: &TuiTheme) -> St
     Style::default().fg(color)
 }
 
-pub(super) fn child_tool_status_spans(
-    name: &str,
-    summary: Option<&str>,
-    phase: AgentToolActivityPhase,
-    inline_files: Option<&[AgentToolFileChange]>,
-    verb_override: Option<&str>,
-    now_ms: u64,
-    max_width: usize,
-    theme: &TuiTheme,
-) -> Vec<Span> {
+pub(super) struct ChildToolStatus<'a> {
+    pub name: &'a str,
+    pub summary: Option<&'a str>,
+    pub phase: AgentToolActivityPhase,
+    pub inline_files: Option<&'a [AgentToolFileChange]>,
+    pub verb_override: Option<&'a str>,
+    pub now_ms: u64,
+    pub max_width: usize,
+    pub theme: &'a TuiTheme,
+}
+
+pub(super) fn child_tool_status_spans(status: ChildToolStatus<'_>) -> Vec<Span> {
+    let ChildToolStatus {
+        name,
+        summary,
+        phase,
+        inline_files,
+        verb_override,
+        now_ms,
+        max_width,
+        theme,
+    } = status;
     let verb = verb_override.unwrap_or_else(|| child_tool_verb(phase));
     let preserve_shell_summary = matches!(name, "Bash" | "Terminal")
         && summary.is_some_and(|summary| !summary.trim().is_empty());
@@ -490,16 +502,16 @@ pub fn render_child_tool_row(
     };
     let marker_style = child_tool_phase_style(row.phase, theme);
     let status_width = width.saturating_sub(visible_width(indent) + visible_width(marker) + 1);
-    let status = child_tool_status_spans(
-        row.name,
-        row.summary,
-        row.phase,
-        None,
-        None,
-        now_ms.unwrap_or(0),
-        status_width,
+    let status = child_tool_status_spans(ChildToolStatus {
+        name: row.name,
+        summary: row.summary,
+        phase: row.phase,
+        inline_files: None,
+        verb_override: None,
+        now_ms: now_ms.unwrap_or(0),
+        max_width: status_width,
         theme,
-    );
+    });
     let muted = Style::default().fg(theme.text_muted);
     let mut header = vec![
         Span::styled(indent.to_owned(), muted),

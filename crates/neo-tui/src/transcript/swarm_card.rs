@@ -13,7 +13,7 @@ use crate::transcript::{
     render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
-use super::child_activity::child_tool_status_spans;
+use super::child_activity::{ChildToolStatus, child_tool_status_spans};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwarmCardComponent {
@@ -602,16 +602,17 @@ fn child_activity_summary(
                 AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
             })
     {
-        return child_tool_status_spans(
+        return child_tool_status_spans(ChildToolStatus {
             name,
             summary,
             phase,
-            Some(files),
-            (matches!(phase, AgentToolActivityPhase::Ongoing) && waiting).then_some("waiting on"),
-            now,
-            status_width(name),
+            inline_files: Some(files),
+            verb_override: (matches!(phase, AgentToolActivityPhase::Ongoing) && waiting)
+                .then_some("waiting on"),
+            now_ms: now,
+            max_width: status_width(name),
             theme,
-        );
+        });
     }
     if waiting {
         return primary("waiting for activity".to_owned());
@@ -647,29 +648,29 @@ fn child_activity_summary(
                 AgentActivityKind::Text { .. } => None,
             })
     {
-        return child_tool_status_spans(
+        return child_tool_status_spans(ChildToolStatus {
             name,
             summary,
             phase,
-            Some(files),
-            None,
-            now,
-            status_width(name),
+            inline_files: Some(files),
+            verb_override: None,
+            now_ms: now,
+            max_width: status_width(name),
             theme,
-        );
+        });
     }
     let view = child_activity_view(agent, 1);
     if let Some(tool) = view.tools.last() {
-        return child_tool_status_spans(
-            tool.name,
-            tool.summary,
-            tool.phase,
-            Some(tool.files),
-            None,
-            now,
-            status_width(tool.name),
+        return child_tool_status_spans(ChildToolStatus {
+            name: tool.name,
+            summary: tool.summary,
+            phase: tool.phase,
+            inline_files: Some(tool.files),
+            verb_override: None,
+            now_ms: now,
+            max_width: status_width(tool.name),
             theme,
-        );
+        });
     }
     if let Some(final_text) = view.final_text {
         return primary(compact_chars(&one_line(&final_text), 96));
