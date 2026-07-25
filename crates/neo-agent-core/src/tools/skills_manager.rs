@@ -2,7 +2,6 @@ use std::{
     collections::BTreeSet,
     fmt::Write,
     fs as stdfs, io,
-    io::Write as _,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -366,7 +365,8 @@ impl Tool for CreateSkillTool {
                 })?;
             let content = format!("---\n{frontmatter}---\n\n{}", args.body);
 
-            let skills_root = ensure_safe_home_subdirectory(&user_home, Path::new("skills"))?;
+            let skills_root = user_home.join("skills");
+            atomic_file::ensure_safe_directory_tree(&skills_root).map_err(ToolError::Io)?;
             let skill_name = Path::new(&args.name);
             let skill_dir_path = skills_root.join(skill_name);
             let skill_dir_existed = match stdfs::symlink_metadata(&skill_dir_path) {
@@ -374,10 +374,10 @@ impl Tool for CreateSkillTool {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                 Err(error) => return Err(ToolError::Io(error)),
             };
-            let skill_dir =
-                ensure_safe_child_directory(&skills_root, skill_name).map_err(ToolError::Io)?;
+            let skill_dir = skills_root.join(skill_name);
+            atomic_file::ensure_safe_directory_tree(&skill_dir).map_err(ToolError::Io)?;
             let path = skill_dir.join("SKILL.md");
-            reject_reparse_or_symlink_if_present(&path).map_err(ToolError::Io)?;
+            atomic_file::reject_reparse_or_symlink_if_present(&path).map_err(ToolError::Io)?;
             let agents_dir = skill_dir.join("agents");
             let sidecar_path = agents_dir.join("neo.yaml");
             if sidecar_yaml.is_some() {
@@ -392,12 +392,12 @@ impl Tool for CreateSkillTool {
                 backup_skill_if_exists(skill_dir_existed, &user_home, &args.name, &skill_dir)
                     .await?;
 
-            write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
+            atomic_file::write_file_atomic(&path, content.as_bytes()).map_err(ToolError::Io)?;
 
             if let Some(sidecar_yaml) = sidecar_yaml {
-                ensure_safe_child_directory(&skill_dir, Path::new("agents"))
+                atomic_file::ensure_safe_directory_tree(&agents_dir).map_err(ToolError::Io)?;
+                atomic_file::write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes())
                     .map_err(ToolError::Io)?;
-                write_file_atomic(&sidecar_path, sidecar_yaml.as_bytes()).map_err(ToolError::Io)?;
             }
 
             for resource in &resources {
@@ -453,12 +453,13 @@ async fn backup_skill_if_exists(
         .unwrap_or_default()
         .as_secs();
     let backup_child = PathBuf::from("backups").join("skills");
-    let backup_root = ensure_safe_home_subdirectory(user_home, &backup_child)?;
+    let backup_root = user_home.join(&backup_child);
+    atomic_file::ensure_safe_directory_tree(&backup_root).map_err(ToolError::Io)?;
     let backup_id = format!("{timestamp}-{}", Uuid::new_v4());
-    let timestamp_dir =
-        ensure_safe_child_directory(&backup_root, Path::new(&backup_id)).map_err(ToolError::Io)?;
+    let timestamp_dir = backup_root.join(&backup_id);
+    atomic_file::ensure_safe_directory_tree(&timestamp_dir).map_err(ToolError::Io)?;
     let backup_dir = timestamp_dir.join(skill_name);
-    reject_reparse_or_symlink_if_present(&backup_dir).map_err(ToolError::Io)?;
+    atomic_file::reject_reparse_or_symlink_if_present(&backup_dir).map_err(ToolError::Io)?;
     if let Err(error) = copy_dir(skill_dir, &backup_dir).await {
         let _ = fs::remove_dir_all(&backup_dir).await;
         return Err(ToolError::Io(error));
@@ -507,7 +508,7 @@ fn prepare_host_metadata(
 
 fn preflight_sidecar_target(agents_dir: &Path, sidecar_path: &Path) -> io::Result<()> {
     match stdfs::symlink_metadata(agents_dir) {
-        Ok(_) => validate_safe_directory(agents_dir)?,
+        Ok(_) => atomic_file::validate_safe_directory(agents_dir)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
@@ -527,14 +528,6 @@ fn preflight_sidecar_target(agents_dir: &Path, sidecar_path: &Path) -> io::Resul
     }
 }
 
-fn ensure_safe_directory(path: &Path) -> Result<(), ToolError> {
-    ensure_safe_directory_tree(path).map_err(ToolError::Io)
-}
-
-fn ensure_safe_home_subdirectory(home: &Path, child: &Path) -> Result<PathBuf, ToolError> {
-    ensure_safe_directory(home)?;
-    ensure_safe_child_directory(home, child).map_err(ToolError::Io)
-}
 
 #[derive(Serialize)]
 struct CreateSkillFrontmatter<'a> {
@@ -781,17 +774,8 @@ fn write_resource_file(skill_dir: &Path, resource: &ValidatedResource) -> io::Re
             format!("resource path has no parent directory: {}", path.display()),
         )
     })?;
-    let relative_parent = parent.strip_prefix(skill_dir).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "resource parent escapes skill directory: {}",
-                parent.display()
-            ),
-        )
-    })?;
-    ensure_safe_child_directory(skill_dir, relative_parent)?;
-    write_file_atomic(&path, resource.content.as_bytes())?;
+    atomic_file::ensure_safe_directory_tree(parent)?;
+    atomic_file::write_file_atomic(&path, resource.content.as_bytes())?;
     apply_resource_executable(&path, resource.executable)
 }
 
@@ -813,7 +797,7 @@ fn preflight_resource_file(skill_dir: &Path, resource: &ValidatedResource) -> io
         )
     })?;
     preflight_resource_parent(skill_dir, relative_parent)?;
-    reject_reparse_or_symlink_if_present(&path)?;
+    atomic_file::reject_reparse_or_symlink_if_present(&path)?;
     match stdfs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -826,7 +810,7 @@ fn preflight_resource_file(skill_dir: &Path, resource: &ValidatedResource) -> io
 }
 
 fn preflight_resource_parent(skill_dir: &Path, relative_parent: &Path) -> io::Result<()> {
-    validate_safe_directory(skill_dir)?;
+    atomic_file::validate_safe_directory(skill_dir)?;
     let mut current = skill_dir.to_path_buf();
     for component in relative_parent.components() {
         match component {
@@ -834,7 +818,7 @@ fn preflight_resource_parent(skill_dir: &Path, relative_parent: &Path) -> io::Re
             Component::Normal(part) => {
                 current.push(part);
                 match stdfs::symlink_metadata(&current) {
-                    Ok(_) => validate_safe_directory(&current)?,
+                    Ok(_) => atomic_file::validate_safe_directory(&current)?,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error),
                 }
@@ -870,72 +854,6 @@ fn apply_resource_executable(_path: &Path, _executable: bool) -> io::Result<()> 
     Ok(())
 }
 
-fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    atomic_file::write_file_atomic(path, content)
-}
-
-fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
-    let metadata = match stdfs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if atomic_file::is_reparse_or_symlink(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to write through symlinked skill file {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
-    atomic_file::ensure_safe_directory_tree(path)
-}
-
-fn ensure_existing_safe_directory_tree(path: &Path) -> io::Result<()> {
-    atomic_file::validate_safe_directory(path)
-}
-
-fn ensure_safe_child_directory(parent: &Path, child: &Path) -> io::Result<PathBuf> {
-    atomic_file::validate_safe_directory(parent)?;
-    let mut current = parent.to_path_buf();
-    for component in child.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(part) => {
-                current.push(part);
-                match stdfs::symlink_metadata(&current) {
-                    Ok(_) => atomic_file::validate_safe_directory(&current)?,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        stdfs::create_dir(&current)?;
-                        atomic_file::validate_safe_directory(&current)?;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("refusing unsafe child path: {}", child.display()),
-                ));
-            }
-        }
-    }
-    Ok(current)
-}
-
-fn validate_safe_directory(path: &Path) -> io::Result<()> {
-    atomic_file::validate_safe_directory(path)
-}
-
-fn ensure_path_absent(path: &Path) -> io::Result<()> {
-    atomic_file::ensure_path_absent(path)
-}
-
 fn validate_regular_file(path: &Path) -> io::Result<()> {
     let metadata = stdfs::symlink_metadata(path)?;
     if atomic_file::is_reparse_or_symlink(&metadata) {
@@ -956,8 +874,8 @@ fn validate_regular_file(path: &Path) -> io::Result<()> {
 fn copy_file_safely(source: &Path, destination: &Path) -> io::Result<u64> {
     validate_regular_file(source)?;
     let source_metadata = stdfs::metadata(source)?;
-    reject_reparse_or_symlink_if_present(destination)?;
-    ensure_path_absent(destination)?;
+    atomic_file::reject_reparse_or_symlink_if_present(destination)?;
+    atomic_file::ensure_path_absent(destination)?;
     let mut input = stdfs::File::open(source)?;
     let mut output = stdfs::OpenOptions::new()
         .write(true)
@@ -1059,7 +977,7 @@ impl Tool for MoveSkillTool {
             let args = args?;
             let source = PathBuf::from(&args.source);
             match stdfs::symlink_metadata(&source) {
-                Ok(_) => ensure_existing_safe_directory_tree(&source).map_err(ToolError::Io)?,
+                Ok(_) => atomic_file::validate_safe_directory(&source).map_err(ToolError::Io)?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     return Ok(ToolResult::error(format!(
                         "source path does not exist: {}",
@@ -1080,7 +998,7 @@ impl Tool for MoveSkillTool {
                 Err(error) => return Err(ToolError::Io(error)),
             }
             let parent = PathBuf::from(&args.destination_parent);
-            ensure_safe_directory(&parent)?;
+            atomic_file::ensure_safe_directory_tree(&parent).map_err(ToolError::Io)?;
             let destination =
                 parent.join(source.file_name().ok_or_else(|| ToolError::InvalidInput {
                     tool: "MoveSkill".to_owned(),
@@ -1110,12 +1028,12 @@ impl Tool for MoveSkillTool {
                 .unwrap_or_default()
                 .as_secs();
             let backup_child = PathBuf::from("backups").join("skills");
-            let backup_root = ensure_safe_home_subdirectory(&backup_home, &backup_child)?;
-            let backup_dir =
-                ensure_safe_child_directory(&backup_root, Path::new(&format!("{timestamp}")))
-                    .map_err(ToolError::Io)?;
+            let backup_root = backup_home.join(&backup_child);
+            atomic_file::ensure_safe_directory_tree(&backup_root).map_err(ToolError::Io)?;
+            let backup_dir = backup_root.join(format!("{timestamp}"));
+            atomic_file::ensure_safe_directory_tree(&backup_dir).map_err(ToolError::Io)?;
             let backup_target = backup_dir.join(source.file_name().unwrap());
-            ensure_path_absent(&backup_target).map_err(ToolError::Io)?;
+            atomic_file::ensure_path_absent(&backup_target).map_err(ToolError::Io)?;
             if paths_refer_to_same_location(&source, &backup_target).await? {
                 return Ok(ToolResult::error(format!(
                     "backup target resolves to source path: {}",
@@ -1176,17 +1094,17 @@ async fn paths_refer_to_same_location(left: &Path, right: &Path) -> io::Result<b
 }
 
 async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
-    ensure_existing_safe_directory_tree(source)?;
+    atomic_file::validate_safe_directory(source)?;
     let parent = destination.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("path has no parent directory: {}", destination.display()),
         )
     })?;
-    ensure_existing_safe_directory_tree(parent)?;
-    ensure_path_absent(destination)?;
+    atomic_file::validate_safe_directory(parent)?;
+    atomic_file::ensure_path_absent(destination)?;
     stdfs::create_dir(destination)?;
-    validate_safe_directory(destination)?;
+    atomic_file::validate_safe_directory(destination)?;
     let mut entries = fs::read_dir(source).await?;
     while let Some(entry) = entries.next_entry().await? {
         let source_path = entry.path();
