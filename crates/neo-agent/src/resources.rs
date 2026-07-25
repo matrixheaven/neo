@@ -166,10 +166,12 @@ pub(crate) fn load_system_prompt(
         &system_prompt_candidates(system_prompt_file),
         "system prompt",
     )?;
-    let append_prompts: Vec<String> =
-        read_first_existing(&append_system_prompt_candidates(), "append system prompt")?
-            .into_iter()
-            .collect();
+    let append_prompts: Vec<String> = read_first_existing(
+        &resource_candidates(APPEND_SYSTEM_PROMPT_FILE),
+        "append system prompt",
+    )?
+    .into_iter()
+    .collect();
 
     Ok(join_system_prompt_parts(system_prompt, append_prompts))
 }
@@ -238,10 +240,6 @@ fn system_prompt_candidates(configured: Option<&Path>) -> Vec<PathBuf> {
         .into_iter()
         .chain(resource_candidates(SYSTEM_PROMPT_FILE))
         .collect()
-}
-
-fn append_system_prompt_candidates() -> Vec<PathBuf> {
-    resource_candidates(APPEND_SYSTEM_PROMPT_FILE)
 }
 
 fn resource_candidates(file_name: &str) -> Vec<PathBuf> {

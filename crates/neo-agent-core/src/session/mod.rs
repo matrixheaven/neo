@@ -719,7 +719,7 @@ impl SessionMetadataStore {
         ensure_safe_directory_tree(&self.sessions_dir)?;
         let content = serde_json::to_string_pretty(metadata)
             .map_err(|source| SessionError::Json { line: 0, source })?;
-        write_file_atomic(&self.metadata_path(), format!("{content}\n").as_bytes())?;
+        atomic_file::write_file_atomic(&self.metadata_path(), format!("{content}\n").as_bytes())?;
         Ok(())
     }
 
@@ -856,10 +856,6 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
         }
     }
     Ok(())
-}
-
-fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    atomic_file::write_file_atomic(path, content)
 }
 
 fn records_from_metadata(

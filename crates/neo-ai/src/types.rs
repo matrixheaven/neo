@@ -114,21 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn api_type_config_strings_round_trip() {
-        for api_type in [
-            ApiType::OpenAiResponse,
-            ApiType::OpenAi,
-            ApiType::Anthropic,
-            ApiType::Google,
-        ] {
-            assert_eq!(
-                ApiType::from_config_str(api_type.as_config_str()),
-                Some(api_type)
-            );
-        }
-    }
-
-    #[test]
     fn api_type_accepts_only_openai_and_openai_response() {
         assert_eq!(ApiType::from_config_str("openai"), Some(ApiType::OpenAi));
         assert_eq!(

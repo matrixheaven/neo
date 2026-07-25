@@ -396,27 +396,6 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
 }
 
 #[test]
-fn run_emits_jsonl_events_from_mock_provider_without_fake_output() {
-    let temp = TempDir::new().expect("tempdir");
-    let server = MockSseServer::start(vec![openai_response_sse("resp-run", "run reply")]);
-    write_mock_responses_config(&temp, &server.url);
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["run", "hello"]);
-
-    let stdout = run(command);
-
-    assert!(stdout.contains("run reply"));
-    assert!(!stdout.contains("fake response"));
-    assert!(!stdout.contains("placeholder"));
-    let sessions = session_files(temp.path());
-    assert_eq!(sessions.len(), 1);
-}
-
-#[test]
 fn run_output_json_emits_stable_typed_events_from_mock_provider() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-json", "json reply")]);

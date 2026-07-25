@@ -1174,7 +1174,7 @@ fn mcp_add_remote_http_probes_and_reports_success() {
 }
 
 #[test]
-fn mcp_add_remote_http_reports_failure_without_abort() {
+fn mcp_add_remote_http_reports_failure_deterministically() {
     let temp = TempDir::new().expect("tempdir");
 
     let mut add = neo();
@@ -1185,7 +1185,7 @@ fn mcp_add_remote_http_reports_failure_without_abort() {
         "-t",
         "remote-http",
         "--url",
-        "http://127.0.0.1:1/rpc",
+        &failure_server_url(),
         "--startup-timeout-ms",
         "200",
     ]);
@@ -1507,6 +1507,20 @@ transport = "http"
     // and without an API key the model call also fails.  The command should
     // not succeed either way.
     assert!(!output.status.success());
+}
+
+/// Bind an ephemeral TCP port and accept one connection, immediately closing the
+/// socket so the remote HTTP probe fails deterministically without relying on
+/// `127.0.0.1:1` behavior.
+fn failure_server_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failure server");
+    let url = format!("http://{}/rpc", listener.local_addr().expect("local addr"));
+    std::thread::spawn(move || {
+        if let Ok((socket, _)) = listener.accept() {
+            drop(socket);
+        }
+    });
+    url
 }
 
 #[derive(Debug, Clone)]

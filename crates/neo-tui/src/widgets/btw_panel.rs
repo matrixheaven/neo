@@ -246,12 +246,12 @@ impl<'a> BtwPanel<'a> {
         let mut lines = Vec::new();
         if self.state.sidecar.turns.is_empty() {
             if let Some(status) = &self.state.status_message {
-                lines.extend(wrap_ansi(
+                lines.extend(wrap_width(
                     &paint(status, Style::default().fg(self.theme.status_warn)),
                     inner_width,
                 ));
             } else {
-                lines.extend(wrap_ansi(
+                lines.extend(wrap_width(
                     &paint(
                         "Ready for a side question...",
                         Style::default().fg(self.theme.text_muted),
@@ -266,7 +266,7 @@ impl<'a> BtwPanel<'a> {
         }
         if let Some(status) = &self.state.status_message {
             lines.push(String::new());
-            lines.extend(wrap_ansi(
+            lines.extend(wrap_width(
                 &paint(status, Style::default().fg(self.theme.status_warn)),
                 inner_width,
             ));
@@ -280,13 +280,13 @@ impl<'a> BtwPanel<'a> {
         // Question line: "Q: <prompt>".
         let q_label = paint("Q: ", Style::default().fg(self.theme.brand).bold());
         let prompt = paint(&turn.prompt, Style::default().fg(self.theme.text_primary));
-        lines.extend(wrap_ansi(&format!("{q_label}{prompt}"), inner_width));
+        lines.extend(wrap_width(&format!("{q_label}{prompt}"), inner_width));
 
         // Optional thinking preview. While the answer is still streaming only
         // the last few reasoning lines are shown so the panel stays compact.
         if !turn.thinking.is_empty() {
             let thinking = paint(&turn.thinking, Style::default().fg(self.theme.text_muted));
-            let mut thinking_lines = wrap_ansi(&thinking, inner_width);
+            let mut thinking_lines = wrap_width(&thinking, inner_width);
             if turn.phase == BtwPhase::Running && thinking_lines.len() > THINKING_PREVIEW_LINES {
                 thinking_lines =
                     thinking_lines.split_off(thinking_lines.len() - THINKING_PREVIEW_LINES);
@@ -314,7 +314,7 @@ impl<'a> BtwPanel<'a> {
             BtwPhase::Failed => {
                 if let Some(error) = &turn.error {
                     let error = paint(error, Style::default().fg(self.theme.status_error));
-                    lines.extend(wrap_ansi(&error, inner_width));
+                    lines.extend(wrap_width(&error, inner_width));
                 } else {
                     lines.push(paint(
                         "Failed.",
@@ -352,17 +352,12 @@ fn top_border_with_title(width: usize, title: &str, border_style: Style) -> Stri
         paint(&ROUNDED.top_left.to_string(), border_style),
         title,
         RESET,
-        paint(&repeat_char(ROUNDED.horizontal, fill), border_style),
+        paint(
+            &std::iter::repeat_n(ROUNDED.horizontal, fill).collect::<String>(),
+            border_style,
+        ),
         paint(&ROUNDED.top_right.to_string(), border_style),
     )
-}
-
-fn wrap_ansi(text: &str, max_width: usize) -> Vec<String> {
-    wrap_width(text, max_width)
-}
-
-fn repeat_char(ch: char, n: usize) -> String {
-    std::iter::repeat_n(ch, n).collect()
 }
 
 #[cfg(test)]

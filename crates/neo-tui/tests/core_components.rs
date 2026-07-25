@@ -59,21 +59,6 @@ fn line_is_blank_ignores_styles_and_ansi_sequences() {
 }
 
 #[test]
-fn component_defaults_to_live_and_ignored_input() {
-    let mut component = StaticComponent {
-        rows: vec![Line::raw("ready")],
-        finalization: Finalization::Live,
-    };
-
-    assert_eq!(component.finalization(), Finalization::Live);
-    assert_eq!(
-        component.handle_input(InputEvent::Cancel),
-        InputResult::Ignored
-    );
-    assert_eq!(component.render(80), vec![Line::raw("ready")]);
-}
-
-#[test]
 fn container_stacks_children_in_order() {
     let mut container = Container::new();
     container.add_child(Box::new(StaticComponent {

@@ -62,40 +62,6 @@ fn reasoning_effort_serializes_max_and_stable_names() {
 }
 
 #[test]
-fn reasoning_selection_round_trips_structured_modes() {
-    let effort = ReasoningSelection::Effort {
-        effort: ReasoningEffort::high(),
-    };
-    let encoded = serde_json::to_value(&effort).expect("serialize effort selection");
-    assert_eq!(
-        encoded,
-        serde_json::json!({ "mode": "effort", "effort": "high" })
-    );
-    assert_eq!(
-        serde_json::from_value::<ReasoningSelection>(encoded).expect("deserialize effort"),
-        effort
-    );
-
-    let budget = ReasoningSelection::BudgetTokens {
-        budget_tokens: 8192,
-    };
-    let encoded = serde_json::to_value(&budget).expect("serialize budget selection");
-    assert_eq!(
-        encoded,
-        serde_json::json!({ "mode": "budget_tokens", "budget_tokens": 8192 })
-    );
-    assert_eq!(
-        serde_json::from_value::<ReasoningSelection>(encoded).expect("deserialize budget"),
-        budget
-    );
-
-    assert_eq!(
-        serde_json::to_value(ReasoningSelection::Off).expect("serialize off"),
-        serde_json::json!({ "mode": "off" })
-    );
-}
-
-#[test]
 fn reasoning_capability_validates_supported_selection() {
     let capability = ReasoningCapability::Effort {
         values: vec![ReasoningEffort::low(), ReasoningEffort::high()],

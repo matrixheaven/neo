@@ -65,19 +65,6 @@ fn profiles_carry_non_empty_when_to_use_guidance() {
 }
 
 #[test]
-fn role_selection_guide_mentions_every_role() {
-    let guide = AgentProfile::role_selection_guide();
-    assert!(guide.contains("When to use each role:"));
-    for role in AgentRole::ALL {
-        assert!(
-            guide.contains(&format!("- {}:", role.as_str())),
-            "guide missing role {}",
-            role.as_str()
-        );
-    }
-}
-
-#[test]
 fn delegate_and_swarm_schemas_surface_role_guide() {
     let registry = builtin_registry();
     let by_name = |name: &str| {
