@@ -2194,6 +2194,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "tempfile",
+ "tracing",
  "unicode-segmentation",
  "unicode-width",
  "vt100",

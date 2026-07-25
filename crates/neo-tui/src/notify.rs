@@ -108,7 +108,8 @@ fn spawn_desktop_notification(title: &str, body: &str, subtitle: Option<&str>) {
                 .spawn(move || report_notification_exit(wait_for_notification_child(&waiter)))
             {
                 stop_notification_child(&child);
-                finish_desktop_notification(true);
+                // Waiter-thread spawn failure is transient — clear in_flight, permit retry.
+                finish_desktop_notification(false);
                 report_notification_error_once(&format!(
                     "failed to start desktop notification waiter: {error}"
                 ));
@@ -183,7 +184,8 @@ fn stop_notification_child(child: &Mutex<Option<Child>>) {
 
 fn report_notification_exit(result: io::Result<ExitStatus>) {
     let diagnostic = notification_exit_diagnostic(result);
-    finish_desktop_notification(diagnostic.is_some());
+    // Child exit / wait failures are transient — clear in_flight only; never sticky-disable.
+    finish_desktop_notification(false);
     if let Some(message) = diagnostic {
         report_notification_error_once(&message);
     }
@@ -201,7 +203,7 @@ fn notification_exit_diagnostic(result: io::Result<ExitStatus>) -> Option<String
 
 fn report_notification_error_once(message: &str) {
     if !NOTIFICATION_ERROR_REPORTED.swap(true, Ordering::Relaxed) {
-        eprintln!("Neo notification: {message}");
+        tracing::warn!("Neo notification: {message}");
     }
 }
 
@@ -400,6 +402,38 @@ mod tests {
         assert!(!admit_notification(&mut state));
 
         finish_notification(&mut state, false);
+        assert!(admit_notification(&mut state));
+    }
+
+    #[test]
+    fn notification_child_failure_is_retryable() {
+        // Nonzero exit / wait error must produce a diagnostic…
+        let wait_err = notification_exit_diagnostic(Err(io::Error::other("wait failed")));
+        assert!(wait_err.is_some());
+
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt as _;
+            ExitStatus::from_raw(1 << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt as _;
+            ExitStatus::from_raw(1)
+        };
+        #[cfg(any(unix, windows))]
+        {
+            let exit_diag = notification_exit_diagnostic(Ok(status));
+            assert!(exit_diag.is_some());
+        }
+
+        // …but the completion transition never sticky-disables: clear in_flight only.
+        let mut state = NotificationState::default();
+        assert!(admit_notification(&mut state));
+        finish_notification(&mut state, false);
+        assert!(admit_notification(&mut state));
+        finish_notification(&mut state, false);
+        assert!(!state.disabled);
         assert!(admit_notification(&mut state));
     }
 
