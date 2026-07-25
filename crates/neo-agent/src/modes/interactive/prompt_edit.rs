@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, path::Component};
+use std::{fmt::Write as _, path::Component, sync::Arc};
 
 use anyhow::Result;
 
@@ -847,9 +847,13 @@ impl InteractiveController {
     }
 
     pub(super) fn write_clipboard_text(&mut self, copied: &str) {
-        if let Err(error) = (self.clipboard_writer)(copied) {
-            self.push_status(format!("Clipboard copy failed: {error}"));
-        }
+        // Internal copy buffer is updated by the caller before this. The system
+        // helper runs asynchronously under a private deadline so a blocked
+        // clipboard command cannot stall input or rendering.
+        self.cancel_pending_clipboard();
+        let writer = Arc::clone(&self.clipboard_writer);
+        let text = copied.to_owned();
+        self.pending_clipboard = Some(tokio::spawn(async move { writer(text).await }));
     }
 }
 

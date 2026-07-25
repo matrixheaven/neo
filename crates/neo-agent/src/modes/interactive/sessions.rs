@@ -38,9 +38,8 @@ impl InteractiveController {
 
         let command = format!("neo resume {}", session.id);
         self.push_status(command.clone());
-        if let Err(error) = (self.clipboard_writer)(&command) {
-            tracing::warn!("failed to copy resume command to clipboard: {error}");
-        }
+        // Async bounded helper path — same owner as prompt/transcript copy.
+        self.write_clipboard_text(&command);
         Ok(())
     }
 

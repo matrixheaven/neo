@@ -72,6 +72,37 @@ use git_status::{event_should_refresh_git_status, git_status_label};
 mod clipboard;
 use clipboard::write_system_clipboard;
 
+fn clipboard_stdio_piped() -> std::process::Stdio {
+    std::process::Stdio::piped()
+}
+
+fn clipboard_stdio_null() -> std::process::Stdio {
+    std::process::Stdio::null()
+}
+
+#[cfg(test)]
+fn clipboard_test_process_exists(pid: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let Ok(pid_num) = pid.parse::<u32>() else {
+            return false;
+        };
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid_num}"), "/NH"])
+            .output()
+            .expect("tasklist");
+        return String::from_utf8_lossy(&output.stdout).contains(&pid_num.to_string());
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
 mod snapshot;
 use snapshot::render_transcript_snapshot;
 
@@ -180,7 +211,8 @@ struct EventDriverCallbacks<RunTurn, LoadSession, ForkSession> {
 }
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
-type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+type BoxedClipboardFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+type ClipboardWriter = Arc<dyn Fn(String) -> BoxedClipboardFuture + Send + Sync>;
 type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 struct PendingFileCompletion {
@@ -395,6 +427,8 @@ pub(crate) struct InteractiveController {
     pending_question_prompts: BTreeMap<String, Vec<neo_agent_core::QuestionEventData>>,
     pending_background_question_followups: VecDeque<String>,
     clipboard_writer: ClipboardWriter,
+    /// At most one in-flight system clipboard helper write.
+    pending_clipboard: Option<JoinHandle<Result<()>>>,
     completion_root: PathBuf,
     pending_file_completion: Option<PendingFileCompletion>,
     queued_file_completion: Option<(PromptCompletionPrefix, bool)>,
@@ -869,7 +903,8 @@ impl InteractiveController {
             pending_questions: BTreeMap::new(),
             pending_question_prompts: BTreeMap::new(),
             pending_background_question_followups: VecDeque::new(),
-            clipboard_writer: Arc::new(write_system_clipboard),
+            clipboard_writer: Arc::new(|text| Box::pin(write_system_clipboard(text))),
+            pending_clipboard: None,
             completion_root: workspace_root.clone(),
             pending_file_completion: None,
             queued_file_completion: None,
@@ -1206,6 +1241,7 @@ impl InteractiveController {
         if self.active_turn.is_some() {
             self.abort_active_turn();
         }
+        self.cancel_pending_clipboard();
         self.tui
             .transcript_mut()
             .finalize_interrupted_live_entries();
@@ -1392,6 +1428,7 @@ impl InteractiveController {
             async_state_changed |= self.poll_pending_mcp_probe().await;
             async_state_changed |= self.poll_pending_file_completion().await;
             async_state_changed |= self.poll_pending_git_status().await;
+            async_state_changed |= self.poll_pending_clipboard().await;
             async_state_changed |= self.poll_mcp_startup().await;
             if async_state_changed || self.tui.is_transcript_dirty() {
                 frame_request = frame_request.merge(FrameRequest::Coalesced);
@@ -2103,6 +2140,37 @@ impl InteractiveController {
             self.request_git_status_refresh();
         }
         changed
+    }
+
+    fn cancel_pending_clipboard(&mut self) {
+        if let Some(handle) = self.pending_clipboard.take() {
+            handle.abort();
+        }
+    }
+
+    /// Poll the single controller-owned clipboard helper task.
+    ///
+    /// Reports failure status when the helper completes with an error. Cancelled
+    /// (replaced) tasks are silent.
+    async fn poll_pending_clipboard(&mut self) -> bool {
+        let Some(pending) = self.pending_clipboard.take() else {
+            return false;
+        };
+        if !pending.is_finished() {
+            self.pending_clipboard = Some(pending);
+            return false;
+        }
+        match pending.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.push_status(format!("Clipboard copy failed: {error}"));
+            }
+            Err(join_error) if join_error.is_cancelled() => {}
+            Err(join_error) => {
+                self.push_status(format!("Clipboard copy failed: {join_error}"));
+            }
+        }
+        true
     }
 
     fn frame_request_for_agent_event(event: &AgentEvent) -> FrameRequest {

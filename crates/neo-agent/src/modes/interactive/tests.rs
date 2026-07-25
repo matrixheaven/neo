@@ -898,6 +898,17 @@ async fn wait_for_file_completion(controller: &mut InteractiveController) {
     panic!("file completion did not finish");
 }
 
+async fn wait_for_clipboard_idle(controller: &mut InteractiveController) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while controller.pending_clipboard.is_some() {
+        if Instant::now() >= deadline {
+            panic!("clipboard helper did not finish");
+        }
+        let _ = controller.poll_pending_clipboard().await;
+        tokio::task::yield_now().await;
+    }
+}
+
 fn transcript_has_status(controller: &InteractiveController, expected: &str) -> bool {
     transcript_entries(controller).iter().any(
         |entry| matches!(entry, TranscriptEntry::Status { text, .. } if text.contains(expected)),
@@ -2042,7 +2053,7 @@ async fn event_loop_dispatches_editor_keybinding_actions_to_prompt_edits() {
             ))
         },
     );
-    controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
+    controller.set_clipboard_writer(Arc::new(|_text| Box::pin(async { Ok(()) })));
 
     for character in "hello brave world".chars() {
         controller
@@ -2098,7 +2109,7 @@ async fn event_loop_default_ctrl_c_clears_prompt_instead_of_copying() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
+    controller.set_clipboard_writer(Arc::new(|_text| Box::pin(async { Ok(()) })));
 
     controller.type_text("copy through keybinding");
     controller
@@ -2139,11 +2150,11 @@ async fn event_loop_copy_action_writes_prompt_to_injected_clipboard() {
         },
     );
     controller.set_clipboard_writer(Arc::new(move |text| {
-        recorded
-            .lock()
-            .expect("record clipboard text")
-            .push(text.to_owned());
-        Ok(())
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
     }));
 
     controller.type_text("copy to system clipboard");
@@ -2151,6 +2162,7 @@ async fn event_loop_copy_action_writes_prompt_to_injected_clipboard() {
         .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
         .await
         .expect("copy action succeeds");
+    wait_for_clipboard_idle(&mut controller).await;
 
     assert_eq!(
         copied.lock().expect("clipboard writes").as_slice(),
@@ -2174,11 +2186,11 @@ async fn event_loop_ctrl_c_prefers_selected_transcript_region() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.set_clipboard_writer(Arc::new(move |text| {
-        recorded
-            .lock()
-            .expect("record clipboard text")
-            .push(text.to_owned());
-        Ok(())
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
     }));
     controller
         .transcript_mut()
@@ -2204,6 +2216,7 @@ async fn event_loop_ctrl_c_prefers_selected_transcript_region() {
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
         .await
         .expect("copy action succeeds");
+    wait_for_clipboard_idle(&mut controller).await;
 
     assert_eq!(
         copied.lock().expect("clipboard writes").as_slice(),
@@ -2226,7 +2239,7 @@ async fn event_loop_clipboard_failure_keeps_internal_copy_buffer() {
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     controller.set_clipboard_writer(Arc::new(|_text| {
-        Err(anyhow::anyhow!("clipboard unavailable"))
+        Box::pin(async { Err(anyhow::anyhow!("clipboard unavailable")) })
     }));
 
     controller.type_text("copy fallback");
@@ -2234,6 +2247,7 @@ async fn event_loop_clipboard_failure_keeps_internal_copy_buffer() {
         .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
         .await
         .expect("clipboard failure is non-fatal");
+    wait_for_clipboard_idle(&mut controller).await;
 
     assert_eq!(controller.chrome().copy_buffer(), Some("copy fallback"));
     assert!(transcript_entries(&controller).iter().any(|entry| {
@@ -2242,6 +2256,120 @@ async fn event_loop_clipboard_failure_keeps_internal_copy_buffer() {
             TranscriptEntry::Status { text, .. }
                 if text.contains("Clipboard copy failed")
                     && text.contains("clipboard unavailable")
+        )
+    }));
+}
+
+#[tokio::test]
+async fn event_loop_clipboard_timeout_does_not_block_input() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_clipboard_writer(Arc::new(|_text| {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        })
+    }));
+
+    controller.type_text("block-free copy");
+    let started = Instant::now();
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .await
+        .expect("copy starts without waiting for helper");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "clipboard helper must not block input handling"
+    );
+    // Internal buffer updates immediately even while the helper is still running.
+    assert_eq!(controller.chrome().copy_buffer(), Some("block-free copy"));
+    assert!(controller.pending_clipboard.is_some());
+
+    controller
+        .handle_input_event(InputEvent::Insert('!'))
+        .await
+        .expect("further input still works while clipboard is pending");
+    assert_eq!(controller.chrome().prompt().text, "block-free copy!");
+    assert!(controller.pending_clipboard.is_some());
+
+    // Cancel the hanging helper so the test runtime can shut down promptly.
+    controller.cancel_pending_clipboard();
+    assert!(controller.pending_clipboard.is_none());
+}
+
+#[tokio::test]
+async fn new_clipboard_copy_cancels_previous_write() {
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let first_started_flag = Arc::clone(&first_started);
+    let second_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let second_ran_flag = Arc::clone(&second_ran);
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+
+    let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::clone(&call_count);
+    controller.set_clipboard_writer(Arc::new(move |_text| {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let first_started_flag = Arc::clone(&first_started_flag);
+        let second_ran_flag = Arc::clone(&second_ran_flag);
+        Box::pin(async move {
+            if n == 0 {
+                first_started_flag.notify_one();
+                // Hang until cancelled by the replacement copy.
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(())
+            } else {
+                second_ran_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        })
+    }));
+
+    controller.type_text("first");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .await
+        .expect("first copy starts");
+    tokio::time::timeout(Duration::from_secs(1), first_started.notified())
+        .await
+        .expect("first clipboard write should start");
+    assert!(controller.pending_clipboard.is_some());
+
+    controller.type_text(" second");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .await
+        .expect("second copy cancels first");
+    wait_for_clipboard_idle(&mut controller).await;
+
+    assert!(
+        second_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "replacement clipboard write should complete"
+    );
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both writes should be scheduled"
+    );
+    // Latest internal buffer is the second copy.
+    assert_eq!(controller.chrome().copy_buffer(), Some("first second"));
+    // Cancelled first write must not surface a failure status.
+    assert!(!transcript_entries(&controller).iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::Status { text, .. } if text.contains("Clipboard copy failed")
         )
     }));
 }
@@ -2275,11 +2403,11 @@ async fn event_loop_ctrl_c_cancels_overlay_without_copying_prompt() {
         },
     );
     controller.set_clipboard_writer(Arc::new(move |text| {
-        recorded
-            .lock()
-            .expect("record clipboard text")
-            .push(text.to_owned());
-        Ok(())
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
     }));
 
     controller.type_text("do not copy while overlay is focused");
@@ -10112,7 +10240,7 @@ async fn cross_workspace_picker_emits_parseable_product_resume_command() {
             Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
         },
     );
-    controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
+    controller.set_clipboard_writer(Arc::new(|_text| Box::pin(async { Ok(()) })));
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
@@ -10122,6 +10250,7 @@ async fn cross_workspace_picker_emits_parseable_product_resume_command() {
         .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
         .await
         .expect("select cross-cwd session");
+    wait_for_clipboard_idle(&mut controller).await;
 
     let expected = format!("neo resume {SESSION_A}");
     assert!(controller.chrome().focused_overlay().is_none());
