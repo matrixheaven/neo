@@ -7801,6 +7801,163 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
 }
 
 #[test]
+fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
+    // A live plan file must never become historical truth during replay.
+    let temp = std::env::temp_dir().join(format!(
+        "neo-plan-replay-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let plan_dir = temp.join("agents").join("main").join("plans");
+    std::fs::create_dir_all(&plan_dir).expect("create plan dir");
+    let plan_path = plan_dir.join("plan-1.md");
+    std::fs::write(
+        &plan_path,
+        "# Live workspace plan\n\nDo not show this on replay.",
+    )
+    .expect("write live plan");
+    let plan_path_text = plan_path.display().to_string();
+
+    // Aggregate-only history: no ToolExecutionFinished details. Even with a
+    // prior Write of the plan path and a live file on disk, only the header
+    // may render.
+    let mut aggregate_only = TranscriptPane::new(100, 24);
+    let aggregate_loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
+        .with_events([
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    [],
+                    [neo_agent_core::AgentToolCall {
+                        id: "write-1".into(),
+                        name: "Write".into(),
+                        raw_arguments: serde_json::json!({
+                            "files": [{
+                                "path": plan_path_text,
+                                "content": "# Staged write content\n\nFabricated."
+                            }]
+                        })
+                        .to_string()
+                        .into(),
+                    }],
+                    StopReason::ToolUse,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "write-1",
+                    "Write",
+                    [Content::text("Wrote plan")],
+                    false,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    [],
+                    [neo_agent_core::AgentToolCall {
+                        id: "exit-plan-1".into(),
+                        name: "ExitPlanMode".into(),
+                        raw_arguments: r#"{"plan_summary":"Ready"}"#.into(),
+                    }],
+                    StopReason::ToolUse,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "exit-plan-1",
+                    "ExitPlanMode",
+                    [Content::text("Selected approach: Execute")],
+                    false,
+                ),
+            },
+        ]);
+    replay_session_into_transcript(&mut aggregate_only, &aggregate_loaded);
+    let aggregate_frame = aggregate_only
+        .render_frame(100, 24)
+        .expect("render aggregate-only exit plan")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        aggregate_frame.contains("Current plan"),
+        "header must still render without details: {aggregate_frame}"
+    );
+    assert!(
+        !aggregate_frame.contains("Live workspace plan"),
+        "must not read live workspace plan file: {aggregate_frame}"
+    );
+    assert!(
+        !aggregate_frame.contains("Staged write content"),
+        "must not infer plan body from Write arguments: {aggregate_frame}"
+    );
+    assert!(
+        !aggregate_frame.contains("plan: plan-1.md"),
+        "plan box title must not appear without persisted details: {aggregate_frame}"
+    );
+
+    // Modern path: ToolExecutionFinished.result.details is the only durable
+    // plan body source. Coverage skips the aggregate ToolResult message.
+    let mut with_details = TranscriptPane::new(100, 24);
+    let detailed_loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
+        .with_events([
+            AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "exit-plan-2".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+                arguments: serde_json::json!({"plan_summary": "Ready"}),
+            },
+            AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "exit-plan-2".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+                result: ToolResult::ok("Selected approach: Execute").with_details(
+                    serde_json::json!({
+                        "plan_content": "# Persisted snapshot plan\n\nShip only this body.",
+                        "plan_path": plan_path_text,
+                    }),
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "exit-plan-2",
+                    "ExitPlanMode",
+                    [Content::text("Selected approach: Execute")],
+                    false,
+                ),
+            },
+        ]);
+    replay_session_into_transcript(&mut with_details, &detailed_loaded);
+    let detailed_frame = with_details
+        .render_frame(100, 24)
+        .expect("render detailed exit plan")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        detailed_frame.contains("Current plan"),
+        "header must render with details: {detailed_frame}"
+    );
+    assert!(
+        detailed_frame.contains("Persisted snapshot plan"),
+        "must render plan body from persisted details: {detailed_frame}"
+    );
+    assert!(
+        detailed_frame.contains("plan: plan-1.md"),
+        "must render plan path basename from persisted details: {detailed_frame}"
+    );
+    assert!(
+        !detailed_frame.contains("Live workspace plan"),
+        "must not substitute live workspace content for persisted body: {detailed_frame}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn replay_finalizes_dangling_shell_queue_without_restart() {
     let mut transcript = TranscriptPane::new(80, 12);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
