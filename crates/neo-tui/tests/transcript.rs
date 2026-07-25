@@ -330,8 +330,8 @@ fn instruction_card_renders_outcome_metadata_without_model_content() {
         ),
         (
             InstructionEpochOutcome::Updated,
-            "↻ Instructions updated · crates/neo-tui/**",
-            theme.status_warn,
+            "↻ User instructions reloaded · $NEO_HOME/AGENTS.md",
+            theme.brand,
         ),
         (
             InstructionEpochOutcome::PartiallyLoaded,
@@ -354,9 +354,10 @@ fn instruction_card_renders_outcome_metadata_without_model_content() {
         let mut epoch = base_instruction_epoch(outcome);
         if outcome == InstructionEpochOutcome::Updated {
             epoch.replacements = vec![InstructionReplacement {
-                display_path: instruction_workspace().join("crates/neo-tui"),
+                display_path: instruction_home().join(".neo"),
                 previous_revision: "e5f60718".to_owned(),
-                new_revision: "7af13c2e".to_owned(),
+                new_revision: "f44fdb8312b288ed4f70c4489efcf8416b4f9d31b380f62b44945bc3101e7c47"
+                    .to_owned(),
             }];
         }
         if outcome == InstructionEpochOutcome::Blocked {
@@ -411,7 +412,8 @@ fn instruction_card_renders_outcome_metadata_without_model_content() {
                 );
             }
             InstructionEpochOutcome::Updated => {
-                assert!(text.contains("revision 7af13c2e"), "{text}");
+                assert!(text.contains("Applied to current session"), "{text}");
+                assert!(!text.contains("f44fdb83"), "{text}");
             }
             InstructionEpochOutcome::PartiallyLoaded => {
                 // Needed 92K against the 64K effective instruction budget.
@@ -453,14 +455,15 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
     let lines = component.render_with_theme(100, &theme);
     let text = rendered_text(&lines);
 
-    // Sections: scope, loaded, ignored, imports, revision.
+    // Sections: scope, loaded, ignored, imports.
     assert!(text.contains("Scope"), "{text}");
     assert!(text.contains("$NEO_HOME/**"), "{text}");
     assert!(text.contains("\n  workspace\n"), "{text}");
     assert!(text.contains("crates/neo-tui/**"), "{text}");
     assert!(text.contains("Loaded"), "{text}");
     assert!(text.contains("$NEO_HOME/AGENTS.md"), "{text}");
-    assert!(text.contains("./AGENTS.md"), "{text}");
+    assert!(text.contains("\n  AGENTS.md"), "{text}");
+    assert!(!text.contains("./AGENTS.md"), "{text}");
     assert!(text.contains("crates/neo-tui/AGENTS.md"), "{text}");
     assert!(text.contains("8.2K"), "{text}");
     assert!(text.contains("17.4K"), "{text}");
@@ -476,10 +479,10 @@ fn expanded_instruction_card_lists_loaded_ignored_imports_and_redacted_paths() {
     assert!(text.contains("$NEO_HOME/CX.md"), "{text}");
     assert!(text.contains("crates/neo-tui/docs/testing.md"), "{text}");
     assert!(!text.contains("AGENTS.md · 1 import"), "{text}");
-    assert!(text.contains("Revision"), "{text}");
-    assert!(text.contains("a1b2c3d4"), "{text}");
-    assert!(text.contains("e5f60718"), "{text}");
-    assert!(text.contains("7af13c2e"), "{text}");
+    assert!(!text.contains("Revision"), "{text}");
+    assert!(!text.contains("a1b2c3d4"), "{text}");
+    assert!(!text.contains("e5f60718"), "{text}");
+    assert!(!text.contains("7af13c2e"), "{text}");
 
     // Paths are workspace-relative or ~/ relative: never absolute home or
     // workspace prefixes, and never the instruction body.

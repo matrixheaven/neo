@@ -2,7 +2,7 @@
 //!
 //! The card is a finalized semantic entry (never a live spinner). Every
 //! display string is built from epoch metadata — display-safe paths,
-//! revisions, token/source/import counts, and typed reasons — and the card
+//! token/source/import counts, and typed reasons — and the card
 //! never reads [`InstructionEpochData::model_content`]. Paths are rendered
 //! workspace-relative, `$NEO_HOME`-relative, or as a stable safe placeholder.
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use neo_agent_core::instructions::{
     InstructionBundleMetadata, InstructionEpochData, InstructionEpochOutcome,
-    InstructionOmissionReason, InstructionReplacement, InstructionScopeData, InstructionScopeKind,
+    InstructionOmissionReason, InstructionScopeData, InstructionScopeKind,
 };
 
 use crate::primitive::theme::TuiTheme;
@@ -101,13 +101,37 @@ impl InstructionCardComponent {
         let verb = match self.epoch.outcome {
             InstructionEpochOutcome::Ready => "◆ Instructions ready",
             InstructionEpochOutcome::Activated => "◆ Instructions loaded",
-            InstructionEpochOutcome::Updated => "↻ Instructions updated",
+            InstructionEpochOutcome::Updated => return self.updated_header(),
             InstructionEpochOutcome::Removed => "− Instructions removed",
             InstructionEpochOutcome::Reactivated => "◆ Instructions reactivated",
             InstructionEpochOutcome::PartiallyLoaded => "⚠ Instructions partially loaded",
             InstructionEpochOutcome::Blocked => "✕ Instructions blocked",
         };
         format!("{verb} · {}", self.primary_scope_label())
+    }
+
+    fn updated_header(&self) -> String {
+        let path = self
+            .epoch
+            .replacements
+            .last()
+            .map(|replacement| &replacement.display_path)
+            .or_else(|| self.primary_bundle().map(|bundle| &bundle.display_path));
+        let Some(path) = path else {
+            return "↻ Instructions reloaded".to_owned();
+        };
+        let owner =
+            if self.epoch.scopes.iter().any(|scope| {
+                scope.display_path == *path && scope.kind == InstructionScopeKind::Global
+            }) {
+                "User"
+            } else {
+                "Workspace"
+            };
+        format!(
+            "↻ {owner} instructions reloaded · {}",
+            self.instruction_file_label(path)
+        )
     }
 
     fn compact_detail(&self) -> Option<String> {
@@ -131,13 +155,7 @@ impl InstructionCardComponent {
                     format_tokens(bundle.token_estimate),
                 ))
             }
-            InstructionEpochOutcome::Updated => {
-                let revision = self
-                    .primary_replacement()
-                    .map(|replacement| replacement.new_revision.as_str())
-                    .or_else(|| self.primary_bundle().map(|bundle| bundle.revision.as_str()))?;
-                Some(format!("revision {revision}"))
-            }
+            InstructionEpochOutcome::Updated => Some("Applied to current session".to_owned()),
             InstructionEpochOutcome::Removed | InstructionEpochOutcome::Reactivated => None,
             InstructionEpochOutcome::PartiallyLoaded => {
                 let needed = self.total_selected_tokens()
@@ -191,7 +209,7 @@ impl InstructionCardComponent {
                 .iter()
                 .map(|bundle| {
                     (
-                        self.bundle_file_label(bundle),
+                        self.instruction_file_label(&bundle.display_path),
                         format_tokens(bundle.token_estimate),
                         String::new(),
                     )
@@ -209,7 +227,7 @@ impl InstructionCardComponent {
                 .iter()
                 .map(|bundle| {
                     (
-                        format!("{}/AGENTS.md", self.display_path(&bundle.display_path)),
+                        self.instruction_file_label(&bundle.display_path),
                         format_tokens(bundle.token_estimate),
                         omission_reason_label(bundle.reason).to_owned(),
                     )
@@ -230,46 +248,6 @@ impl InstructionCardComponent {
             .map(|path| section_row(&self.display_path(path), width, muted))
             .collect();
         push_section(lines, width, theme, "Imports", import_rows);
-
-        // Revisions: replacements show old → new; otherwise the pinned
-        // revision of each loaded bundle.
-        let revision_rows = if self.epoch.replacements.is_empty() {
-            Self::aligned_rows(
-                self.epoch
-                    .selected_bundles
-                    .iter()
-                    .map(|bundle| {
-                        (
-                            self.bundle_file_label(bundle),
-                            bundle.revision.clone(),
-                            String::new(),
-                        )
-                    })
-                    .collect(),
-                width,
-                theme,
-            )
-        } else {
-            Self::aligned_rows(
-                self.epoch
-                    .replacements
-                    .iter()
-                    .map(|replacement| {
-                        (
-                            format!("{}/AGENTS.md", self.display_path(&replacement.display_path)),
-                            format!(
-                                "{} → {}",
-                                replacement.previous_revision, replacement.new_revision
-                            ),
-                            String::new(),
-                        )
-                    })
-                    .collect(),
-                width,
-                theme,
-            )
-        };
-        push_section(lines, width, theme, "Revision", revision_rows);
     }
 
     /// Builds aligned `path  value  extra` rows with the path column padded
@@ -343,19 +321,12 @@ impl InstructionCardComponent {
             .or_else(|| self.epoch.selected_bundles.last())
     }
 
-    /// Replacement attached to the headline scope, else the last one.
-    fn primary_replacement(&self) -> Option<&InstructionReplacement> {
-        let scope_path = self.epoch.scopes.last().map(|scope| &scope.display_path);
-        self.epoch
-            .replacements
-            .iter()
-            .rev()
-            .find(|replacement| Some(&replacement.display_path) == scope_path)
-            .or_else(|| self.epoch.replacements.last())
-    }
-
-    fn bundle_file_label(&self, bundle: &InstructionBundleMetadata) -> String {
-        format!("{}/AGENTS.md", self.display_path(&bundle.display_path))
+    fn instruction_file_label(&self, directory: &Path) -> String {
+        if directory == self.primary_workspace {
+            "AGENTS.md".to_owned()
+        } else {
+            format!("{}/AGENTS.md", self.display_path(directory))
+        }
     }
 
     fn total_sources(&self) -> u64 {
@@ -433,9 +404,8 @@ fn outcome_color(outcome: InstructionEpochOutcome, theme: &TuiTheme) -> Color {
         InstructionEpochOutcome::Ready
         | InstructionEpochOutcome::Activated
         | InstructionEpochOutcome::Reactivated => theme.brand,
-        InstructionEpochOutcome::Updated | InstructionEpochOutcome::PartiallyLoaded => {
-            theme.status_warn
-        }
+        InstructionEpochOutcome::Updated => theme.brand,
+        InstructionEpochOutcome::PartiallyLoaded => theme.status_warn,
         InstructionEpochOutcome::Blocked => theme.status_error,
         InstructionEpochOutcome::Removed => theme.text_muted,
     }
