@@ -884,6 +884,16 @@ impl TranscriptPane {
         self.presentation.acknowledge(blocks);
     }
 
+    pub fn finalize_cancelled_live_model_attempt(&mut self) {
+        let Some(turn) = self.transcript.live_model_attempt_turn() else {
+            return;
+        };
+        self.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+            turn,
+            stop_reason: neo_agent_core::StopReason::Cancelled,
+        });
+    }
+
     pub fn finalize_interrupted_live_entries(&mut self) -> bool {
         let mut changed = false;
         while let Some(mut queued) = self.queued_approvals.pop_front() {

@@ -134,6 +134,9 @@ impl InteractiveController {
             self.abort_active_turn();
             Ok(())
         };
+        self.tui
+            .transcript_mut()
+            .finalize_cancelled_live_model_attempt();
         self.clear_interrupted_turn_state();
         result
     }

@@ -222,6 +222,11 @@ impl TranscriptStore {
         self.live_model_attempt.map(|(_, start)| start)
     }
 
+    #[must_use]
+    pub(crate) fn live_model_attempt_turn(&self) -> Option<u32> {
+        self.live_model_attempt.map(|(turn, _)| turn)
+    }
+
     pub(crate) fn take_empty_live_attempt_anchor(&mut self) -> Option<usize> {
         let (_, index) = self.live_model_attempt?;
         if !matches!(

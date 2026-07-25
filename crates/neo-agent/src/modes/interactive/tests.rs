@@ -2886,6 +2886,11 @@ async fn event_loop_escape_cancels_active_turn() {
                 turn: 1,
                 text: "started".to_owned(),
             });
+            channels.send_event(AgentEvent::ToolCallStarted {
+                turn: 1,
+                id: "pending-tool".to_owned(),
+                name: "Read".to_owned(),
+            });
             channels.cancel_token.cancelled().await;
             Ok(TurnOutcome::default())
         })
@@ -2911,8 +2916,8 @@ async fn event_loop_escape_cancels_active_turn() {
                 events: VecDeque::from([
                     Some(InputEvent::Submit),
                     None,
-                    // ESC should cancel the active turn
-                    Some(InputEvent::Cancel),
+                    // Raw terminal input maps ESC through the active keybindings.
+                    Some(InputEvent::Key(KeyId::new("escape").expect("valid key"))),
                     // After cancellation the app is idle; two Interrupts to exit
                     Some(InputEvent::Interrupt),
                     Some(InputEvent::Interrupt),
@@ -2928,6 +2933,13 @@ async fn event_loop_escape_cancels_active_turn() {
         .clone()
         .expect("turn token captured");
     assert!(token.is_cancelled());
+    assert!(controller.active_turn.is_none());
+    assert!(transcript_entries(&controller).iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::ToolRun { component }
+            if component.id() == "pending-tool"
+                && component.status() == neo_tui::shell::ToolStatusKind::Cancelled
+    )));
 }
 
 #[tokio::test]
