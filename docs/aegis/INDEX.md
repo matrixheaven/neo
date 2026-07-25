@@ -238,3 +238,21 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/resume-state-hint.json | 2026-07-25-delegate-tool-activity-summary-theme resume state hint |
 | 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/gate-input-pack.json | 2026-07-25-delegate-tool-activity-summary-theme gate input pack |
 | 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/proof-bundle.md | 2026-07-25-delegate-tool-activity-summary-theme proof bundle |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/10-intent.md | Fix Windows session index access denied intent |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/20-checkpoint.md | Fix Windows session index access denied checkpoint |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/90-evidence.md | Fix Windows session index access denied evidence |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/99-reflection.md | Fix Windows session index access denied reflection |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/task-intent-draft.json | Fix Windows session index access denied task intent draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/baseline-read-set-hint.json | Fix Windows session index access denied baseline read-set hint |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/baseline-usage-draft.json | Fix Windows session index access denied baseline usage draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/impact-statement-draft.json | Fix Windows session index access denied impact statement draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/todo-checkpoint-draft.json | Fix Windows session index access denied todo checkpoint draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/drift-check-draft.json | Fix Windows session index access denied drift check draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-diagnosis-current-source.json | 2026-07-25-windows-session-index-access-denied evidence diagnosis-current-source |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-diagnosis-rust-windows-contract.json | 2026-07-25-windows-session-index-access-denied evidence diagnosis-rust-windows-contract |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/resume-state-hint.json | 2026-07-25-windows-session-index-access-denied resume state hint |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-local-regression.json | 2026-07-25-windows-session-index-access-denied evidence local-regression |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-windows-native-ab-probe.json | 2026-07-25-windows-session-index-access-denied evidence windows-native-ab-probe |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-scoped-static-checks.json | 2026-07-25-windows-session-index-access-denied evidence scoped-static-checks |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/gate-input-pack.json | 2026-07-25-windows-session-index-access-denied gate input pack |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/proof-bundle.md | 2026-07-25-windows-session-index-access-denied proof bundle |

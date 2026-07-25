@@ -295,6 +295,7 @@ impl SessionIndex {
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.index_path)?;
         file.lock()?;
