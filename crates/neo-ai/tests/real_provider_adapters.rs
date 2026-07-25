@@ -1780,6 +1780,62 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     assert_anthropic_request(&server.requests().pop().unwrap());
 }
 
+#[tokio::test]
+async fn anthropic_missing_tool_name_is_protocol_error_without_tool_lifecycle_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "type": "message_start",
+            "message": { "id": "msg-missing-name" }
+        }),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "tool_use", "id": "toolu-missing" }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"path\":\"Cargo.toml\"}" }
+        }),
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "tool_use" },
+            "usage": { "output_tokens": 2 }
+        }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        events.iter().all(|event| match event {
+            Ok(AiStreamEvent::ToolCallStart { .. })
+            | Ok(AiStreamEvent::ToolCallArgsDelta { .. })
+            | Ok(AiStreamEvent::ToolCallEnd { .. }) => false,
+            _ => true,
+        }),
+        "missing tool name must not emit tool lifecycle events: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|event| event.is_err()).count(),
+        1,
+        "missing tool name must emit exactly one protocol error: {events:?}"
+    );
+    let error = events
+        .into_iter()
+        .find_map(Result::err)
+        .expect("missing tool name must emit a protocol error");
+    assert_eq!(error.code(), "provider.protocol_error");
+    assert!(
+        error.to_string().contains("without a function name"),
+        "unexpected error message: {error}"
+    );
+}
+
 fn assert_anthropic_request(sent: &RecordedRequest) {
     assert_eq!(sent.method, "POST");
     assert_eq!(sent.path, "/messages");

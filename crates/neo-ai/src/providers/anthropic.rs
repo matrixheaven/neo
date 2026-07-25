@@ -8,6 +8,7 @@ use super::common::error::{ProviderError, stream_failure};
 use super::common::helpers::{merge_token_usage, reject_images, rounded_f64};
 use super::common::sse::{SseFramer, StreamChunk};
 
+use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelClient, ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
@@ -537,15 +538,17 @@ impl IncrementalSse {
             })];
         }
 
-        self.parser.finish_events().into_iter().map(Ok).collect()
+        self.parser.finish_events().map_or_else(
+            |err| vec![Err(err.into_ai_error())],
+            |events| events.into_iter().map(Ok).collect(),
+        )
     }
 }
 
 struct ParseState {
     events: Vec<AiStreamEvent>,
     started: bool,
-    tool_args: BTreeMap<String, String>,
-    block_tool_ids: BTreeMap<u64, String>,
+    tool_calls: StreamingToolCallAssembler,
     thinking_blocks: BTreeMap<u64, ThinkingBlock>,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
@@ -563,8 +566,7 @@ impl Default for ParseState {
         Self {
             events: Vec::new(),
             started: false,
-            tool_args: BTreeMap::new(),
-            block_tool_ids: BTreeMap::new(),
+            tool_calls: StreamingToolCallAssembler::new(),
             thinking_blocks: BTreeMap::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
@@ -594,8 +596,8 @@ impl ParseState {
                     );
                 }
             }
-            Some("content_block_start") => self.ingest_block_start(value),
-            Some("content_block_delta") => self.ingest_block_delta(value),
+            Some("content_block_start") => self.ingest_block_start(value)?,
+            Some("content_block_delta") => self.ingest_block_delta(value)?,
             Some("content_block_stop") => self.ingest_block_stop(value),
             Some("message_delta") => self.ingest_message_delta(value),
             Some("message_stop") => {
@@ -649,24 +651,23 @@ impl ParseState {
         self.started = true;
     }
 
-    fn ingest_block_start(&mut self, value: &Value) {
+    fn ingest_block_start(&mut self, value: &Value) -> Result<(), ProviderError> {
         let block = value.get("content_block").unwrap_or(&Value::Null);
         let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
         match block.get("type").and_then(Value::as_str) {
             Some("tool_use") => {
                 self.ensure_started("message".to_owned());
-                let id = block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_owned();
-                self.block_tool_ids.insert(index, id.clone());
-                if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    self.events.push(AiStreamEvent::ToolCallStart {
-                        id,
-                        name: name.to_owned(),
-                    });
-                }
+                let chunk = ToolCallChunk {
+                    index: Some(index),
+                    id: block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| Some("tool".to_owned())),
+                    name: block.get("name").and_then(Value::as_str).map(str::to_owned),
+                    arguments_delta: None,
+                };
+                self.ingest_tool_chunk(chunk)?;
             }
             Some("thinking") => {
                 self.start_thinking_block(index);
@@ -680,9 +681,10 @@ impl ParseState {
             }
             _ => {}
         }
+        Ok(())
     }
 
-    fn ingest_block_delta(&mut self, value: &Value) {
+    fn ingest_block_delta(&mut self, value: &Value) -> Result<(), ProviderError> {
         let delta = value.get("delta").unwrap_or(&Value::Null);
         match delta.get("type").and_then(Value::as_str) {
             Some("text_delta") => {
@@ -718,24 +720,43 @@ impl ParseState {
             }
             Some("input_json_delta") => {
                 let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
-                let id = self
-                    .block_tool_ids
-                    .get(&index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("tool-{index}"));
-                if let Some(fragment) = delta.get("partial_json").and_then(Value::as_str) {
-                    self.tool_args
-                        .entry(id.clone())
-                        .or_default()
-                        .push_str(fragment);
-                    self.events.push(AiStreamEvent::ToolCallArgsDelta {
-                        id,
-                        json_fragment: fragment.to_owned(),
-                    });
-                }
+                let chunk = ToolCallChunk {
+                    index: Some(index),
+                    id: None,
+                    name: None,
+                    arguments_delta: delta
+                        .get("partial_json")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                };
+                self.ingest_tool_chunk(chunk)?;
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn ingest_tool_chunk(&mut self, chunk: ToolCallChunk) -> Result<(), ProviderError> {
+        match self.tool_calls.ingest(chunk) {
+            Ok(events) => self.push_tool_events(events),
+            Err(err) => return Err(ProviderError::Protocol(err.to_string())),
+        }
+        Ok(())
+    }
+
+    fn push_tool_events(&mut self, events: Vec<ToolCallAssemblyEvent>) {
+        self.events
+            .extend(events.into_iter().map(|event| match event {
+                ToolCallAssemblyEvent::Start { id, name } => {
+                    AiStreamEvent::ToolCallStart { id, name }
+                }
+                ToolCallAssemblyEvent::ArgsDelta { id, json_fragment } => {
+                    AiStreamEvent::ToolCallArgsDelta { id, json_fragment }
+                }
+                ToolCallAssemblyEvent::End { id, raw_arguments } => {
+                    AiStreamEvent::ToolCallEnd { id, raw_arguments }
+                }
+            }));
     }
 
     fn ingest_block_stop(&mut self, value: &Value) {
@@ -762,9 +783,9 @@ impl ParseState {
         }
     }
 
-    fn finish_events(&mut self) -> Vec<AiStreamEvent> {
+    fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {
         if self.finished {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.finished = true;
 
@@ -776,12 +797,11 @@ impl ParseState {
             });
         }
 
-        for (id, arguments) in &self.tool_args {
-            self.events.push(AiStreamEvent::ToolCallEnd {
-                id: id.clone(),
-                raw_arguments: arguments.clone(),
-            });
-        }
+        let tool_events = self
+            .tool_calls
+            .finish_all()
+            .map_err(|err| ProviderError::Protocol(err.to_string()))?;
+        self.push_tool_events(tool_events);
 
         if self.started {
             self.events.push(AiStreamEvent::MessageEnd {
@@ -790,7 +810,7 @@ impl ParseState {
             });
         }
 
-        self.drain_events()
+        Ok(self.drain_events())
     }
 
     fn start_thinking_block(&mut self, index: u64) {
