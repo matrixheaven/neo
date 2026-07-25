@@ -666,7 +666,7 @@ impl ImportExpander<'_> {
                     output.push_str(ending);
                     continue;
                 }
-                let display = escape_attribute(
+                let display = crate::xml_escape::escape_attribute(
                     &self
                         .resolver
                         .display_for_model(&canonical)
@@ -715,7 +715,7 @@ impl ImportExpander<'_> {
             let (source_path, canonical) = self.resolve_import(importer_dir, &target)?;
             let included = self.expand_canonical(&source_path, &canonical, depth + 1)?;
             if !included.is_empty() {
-                let display = escape_attribute(
+                let display = crate::xml_escape::escape_attribute(
                     &self
                         .resolver
                         .display_for_model(&canonical)
@@ -859,14 +859,6 @@ fn import_directive(trimmed: &str) -> Option<&str> {
         return None;
     }
     Some(target)
-}
-
-/// Escapes a provenance wrapper path attribute.
-pub(crate) fn escape_attribute(raw: &str) -> String {
-    raw.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// SHA-256 hex digest, the content-addressed identity of sources and

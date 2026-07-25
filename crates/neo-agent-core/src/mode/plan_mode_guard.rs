@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use crate::mode::plan::PlanMode;
 
@@ -62,21 +62,7 @@ fn plan_mode_write_deny(plan_mode: &PlanMode) -> PlanModeGuard {
 }
 
 fn paths_match(a: &Path, b: &Path) -> bool {
-    normalize(a) == normalize(b)
-}
-
-fn normalize(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            other => result.push(other.as_os_str()),
-        }
-    }
-    result
+    crate::workspace_policy::normalize_path(a) == crate::workspace_policy::normalize_path(b)
 }
 
 #[cfg(test)]

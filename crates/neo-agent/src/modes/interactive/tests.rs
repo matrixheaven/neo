@@ -9535,7 +9535,7 @@ fn model_selection_persists_reasoning_and_provider_across_reload() {
 }
 
 #[test]
-fn idle_model_and_provider_refresh_replace_bound_workflow_dispatch_client() {
+fn idle_model_and_provider_refreshes_bound_workflow_dispatch_client() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
     config.providers.insert(
@@ -9567,7 +9567,7 @@ fn idle_model_and_provider_refresh_replace_bound_workflow_dispatch_client() {
         .expect("workspace root");
     config
         .workflow_dispatch_resolver
-        .replace(neo_agent_core::runtime::WorkflowDispatchSnapshot {
+        .refresh(neo_agent_core::runtime::WorkflowDispatchSnapshot {
             config: initial_agent_config,
             model_client: Arc::clone(&initial_client),
             registry: Arc::new(neo_agent_core::ToolRegistry::with_builtin_tools()),

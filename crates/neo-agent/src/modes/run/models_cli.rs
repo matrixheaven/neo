@@ -69,12 +69,8 @@ fn configured_model_entry<'a>(
         capabilities: &model_cfg.capabilities,
         max_context_tokens: model_cfg.max_context_tokens,
         display_name: model_cfg.display_name.as_deref(),
-        is_default: configured_model_is_default(alias, model_cfg, config),
+        is_default: super::runtime::model_config_matches_default(alias, model_cfg, config),
     }
-}
-
-fn configured_model_is_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
-    super::runtime::model_config_matches_default(alias, model_cfg, config)
 }
 
 fn configured_models_json(

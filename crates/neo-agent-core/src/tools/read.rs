@@ -2,9 +2,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, normalize_path, parse_input, schema,
-};
+use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use crate::workspace_policy::normalize_path;
 
 const MAX_LINES: usize = 1000;
 const MAX_LINE_LENGTH: usize = 2000;

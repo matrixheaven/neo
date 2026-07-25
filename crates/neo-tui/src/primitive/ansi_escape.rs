@@ -346,17 +346,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rgb_foreground() {
-        assert_eq!(fg_to_ansi(Color::Rgb(255, 0, 0)), "\x1b[38;2;255;0;0m");
-    }
-
-    #[test]
-    fn named_colors() {
-        assert_eq!(fg_to_ansi(Color::Green), "\x1b[32m");
-        assert_eq!(fg_to_ansi(Color::White), "\x1b[97m");
-    }
-
-    #[test]
     fn foreground_and_background_named_colors_use_matching_ansi_slots() {
         let cases = [
             (Color::Reset, "\x1b[39m", "\x1b[49m"),

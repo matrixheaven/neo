@@ -274,7 +274,7 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
     let border_style = Style::default().fg(theme.brand);
     let mut lines = Vec::with_capacity(raw_lines.len() + 1);
     for raw in raw_lines {
-        lines.push(box_draw::side_bordered_line(&raw, width, border_style));
+        lines.push(box_draw::content_line(&raw, width, border_style));
     }
     lines.push(box_draw::bottom_border(width, border_style));
     Some(lines)

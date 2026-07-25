@@ -100,12 +100,6 @@ pub fn content_line(content: &str, width: usize, border_style: Style) -> String 
     )
 }
 
-/// Row with only left/right borders (no top/bottom), used for dropdown lists.
-#[must_use]
-pub fn side_bordered_line(content: &str, width: usize, border_style: Style) -> String {
-    content_line(content, width, border_style)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

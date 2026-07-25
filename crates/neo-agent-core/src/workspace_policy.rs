@@ -264,7 +264,7 @@ fn canonicalize_nearest_existing_parent(path: &Path) -> Result<PathBuf, Workspac
     }
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

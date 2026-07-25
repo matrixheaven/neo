@@ -344,7 +344,7 @@ impl ToolCallComponent {
             let elapsed = started_at.elapsed().as_secs();
             let chip = format!(
                 " · ~{} tok · {}",
-                crate::transcript::tool_renderers::format_tool_token_count(tokens),
+                crate::token_estimate::format_token_count(tokens),
                 format_elapsed(elapsed)
             );
             header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));

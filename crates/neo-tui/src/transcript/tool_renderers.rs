@@ -6,7 +6,7 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Style, clip_plain_to_width, truncate_width, visible_width};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
-use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
+use crate::token_estimate::{estimate_tokens, format_elapsed};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::partial_json::extract_partial_string_field;
@@ -1293,10 +1293,4 @@ pub fn estimate_tool_tokens(tool_name: &str, args: &str) -> usize {
             .map_or(0, estimate_tokens);
     }
     estimate_tokens(args)
-}
-
-/// Public wrapper for token count formatting (used by tool header streaming chip).
-#[must_use]
-pub fn format_tool_token_count(tokens: usize) -> String {
-    format_token_count(tokens)
 }

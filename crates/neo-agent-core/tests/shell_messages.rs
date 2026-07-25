@@ -84,3 +84,25 @@ fn shell_events_include_origin_and_outcome() {
     let finished_json = serde_json::to_string(&finished).expect("serialize");
     assert!(finished_json.contains("Completed"));
 }
+
+#[test]
+fn shell_command_message_escapes_xml_text_without_escaping_quotes() {
+    let message = AgentMessage::shell_command(
+        r#"echo "hello" & <world>"#,
+        r#"out "quoted"
+"#,
+        r#"err <x>
+"#,
+        Some(0),
+        ShellCommandOutcome::Completed,
+        false,
+    );
+    let text = message.text();
+    // Element text escapes markup delimiters only.
+    assert!(text.contains("&amp;"));
+    assert!(text.contains("&lt;"));
+    assert!(text.contains("&gt;"));
+    assert!(text.contains(r#""hello""#));
+    assert!(text.contains(r#""quoted""#));
+    assert!(!text.contains("&quot;"));
+}

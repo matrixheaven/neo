@@ -29,7 +29,7 @@ mod write;
 use std::{
     collections::BTreeMap,
     future::Future,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
 };
@@ -47,6 +47,7 @@ use crate::goal::GoalManager;
 use crate::multi_agent::MultiAgentRuntime;
 use crate::runtime::AgentConfig;
 
+use crate::workspace_policy::normalize_path;
 use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
 
 const MIN_SHELL_TIMEOUT_SECS: u64 = 300;
@@ -918,22 +919,6 @@ fn map_workspace_error(error: WorkspaceAccessError) -> ToolError {
         | WorkspaceAccessError::WriteDenied { path } => ToolError::PathOutsideWorkspace { path },
         WorkspaceAccessError::Io(source) => ToolError::Io(source),
     }
-}
-
-pub(crate) fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]

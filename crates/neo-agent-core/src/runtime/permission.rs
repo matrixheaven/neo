@@ -12,12 +12,12 @@ use crate::permissions::{
     ApprovalRuleStore, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
     command_might_be_dangerous, is_known_safe_command,
 };
-use crate::tools::normalize_path;
 use crate::tools::plan_mode::{
     ExitPlanModeInput, ExitPlanModeOption, ExitPlanModeSuggestion, prevalidate_exit_plan_mode,
 };
 use crate::tools::{ExitGoalModeArgs, prevalidate_exit_goal_mode};
 use crate::tools::{PreparedEdit, PreparedWrite};
+use crate::workspace_policy::normalize_path;
 use crate::{
     AgentEvent, AgentToolCall, ApprovalAction, ApprovalCancelReason, ApprovalOption,
     ApprovalPresentation, ApprovalRequest, ApprovalResolution, PermissionMode, PermissionOperation,

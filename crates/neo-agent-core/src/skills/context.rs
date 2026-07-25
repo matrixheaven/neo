@@ -16,17 +16,21 @@ use crate::skills::LoadedSkill;
 pub fn render_skill_context(skill: &LoadedSkill, instructions: &str) -> String {
     let mut xml = format!(
         "<neo-skill-loaded name=\"{name}\" source=\"{source}\" root=\"{root}\">",
-        name = escape_xml(&skill.name),
+        name = crate::xml_escape::escape_attribute(&skill.name),
         source = skill_source_label(skill),
-        root = escape_xml(&skill.root.display().to_string()),
+        root = crate::xml_escape::escape_attribute(&skill.root.display().to_string()),
     );
 
     if !skill.host_metadata.dependencies.is_empty() {
         xml.push_str("\n<dependencies>\n");
         for dep in &skill.host_metadata.dependencies {
-            let _ = write!(xml, "  <mcp value=\"{}\">", escape_xml(&dep.value));
+            let _ = write!(
+                xml,
+                "  <mcp value=\"{}\">",
+                crate::xml_escape::escape_attribute(&dep.value)
+            );
             if let Some(ref desc) = dep.description {
-                xml.push_str(&escape_xml(desc));
+                xml.push_str(&crate::xml_escape::escape_text(desc));
             }
             xml.push_str("</mcp>\n");
         }
@@ -46,14 +50,6 @@ fn skill_source_label(skill: &LoadedSkill) -> &'static str {
         crate::skills::SkillSource::Extra => "extra",
         crate::skills::SkillSource::User => "user",
     }
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]

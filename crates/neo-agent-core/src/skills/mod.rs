@@ -305,19 +305,15 @@ fn write_available_skill(prompt: &mut String, skill: &LoadedSkill) {
             prompt.push_str(" required=\"true\"");
         }
         if let Some(default) = &argument.default {
-            let _ = write!(prompt, " default=\"{}\"", escape_xml(default));
+            let _ = write!(
+                prompt,
+                " default=\"{}\"",
+                crate::xml_escape::escape_attribute(default)
+            );
         }
         prompt.push_str(" />\n");
     }
     prompt.push_str("</arguments>\n");
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone, Default)]

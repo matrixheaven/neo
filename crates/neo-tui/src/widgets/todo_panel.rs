@@ -475,18 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn selector_types_are_exported_from_widgets_surface() {
-        let counts = crate::widgets::TodoHiddenCounts::default();
-        let visible = crate::widgets::VisibleTodos {
-            indices: Vec::new(),
-            hidden: 0,
-            hidden_counts: counts,
-        };
-
-        assert_eq!(visible.hidden_counts, counts);
-    }
-
-    #[test]
     fn render_outputs_header_status_rows_and_hidden_count() {
         let todos = vec![
             item("old done task", TodoDisplayStatus::Done),

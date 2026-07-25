@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::tools::normalize_path;
 use crate::tools::{PreparedEdit, PreparedWrite};
+use crate::workspace_policy::normalize_path;
 use crate::{AgentToolCall, PlanSelection, ToolResult};
 use neo_ai::ToolSpec;
 

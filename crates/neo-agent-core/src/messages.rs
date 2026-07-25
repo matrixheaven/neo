@@ -761,24 +761,13 @@ fn shell_command_model_text(
     let exit_code = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
     format!(
         "<bash-input>\n{}\n</bash-input>\n<bash-stdout>\n{}\n</bash-stdout>\n<bash-stderr>\n{}\n</bash-stderr>\n<bash-status exit_code=\"{}\" outcome=\"{}\" truncated=\"{}\" />",
-        escape_xml_text(command),
-        escape_xml_text(stdout),
-        escape_xml_text(stderr),
-        escape_xml_attr(&exit_code),
+        crate::xml_escape::escape_text(command),
+        crate::xml_escape::escape_text(stdout),
+        crate::xml_escape::escape_text(stderr),
+        crate::xml_escape::escape_attribute(&exit_code),
         outcome.as_model_status(),
         truncated,
     )
-}
-
-fn escape_xml_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn escape_xml_attr(value: &str) -> String {
-    escape_xml_text(value).replace('"', "&quot;")
 }
 
 fn to_content_part(content: &Content) -> ContentPart {

@@ -246,22 +246,6 @@ impl WorkflowDispatchResolver {
             .map_err(|_| "workflow dispatch resolver lock poisoned".to_owned())
     }
 
-    /// Replace the dependencies used by subsequent workflow invocations.
-    ///
-    /// # Errors
-    /// Returns an error when the shared resolver lock is poisoned.
-    pub fn replace(&self, mut snapshot: WorkflowDispatchSnapshot) -> Result<(), String> {
-        snapshot.config.workflow_dispatch_resolver = Self::default();
-        let session = WorkflowDispatchSessionKey::from_config(&snapshot.config);
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "workflow dispatch resolver lock poisoned".to_owned())?;
-        state.latest_session = Some(session.clone());
-        state.snapshots.insert(session, snapshot);
-        Ok(())
-    }
-
     /// Refresh live dependencies without changing the active natural-turn
     /// event lease.
     ///

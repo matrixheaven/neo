@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use super::resolver::{
-    InstructionBundle, InstructionResolver, SourceIo, escape_attribute, find_agents_file,
-    sha256_hex,
+    InstructionBundle, InstructionResolver, SourceIo, find_agents_file, sha256_hex,
 };
 use super::types::{
     AgentInstructionState, IgnoredInstructionBundle, InstructionBudget, InstructionBundleMetadata,
@@ -30,6 +29,7 @@ use super::types::{
     instruction_selection_fingerprint,
 };
 use crate::runtime::estimate_text_tokens;
+use crate::xml_escape::escape_attribute;
 
 const AUTHORITY_PREFIX: &str = "<instruction_authority mode=\"replace_all\">\n\
 This epoch is the complete current path-scoped instruction snapshot. Earlier \

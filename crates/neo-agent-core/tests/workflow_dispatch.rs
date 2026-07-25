@@ -759,7 +759,7 @@ async fn each_run_one_resolves_current_live_registry() {
     second.register(EchoTool("second"));
     snapshot.config.model.model = "second-live-model".to_owned();
     snapshot.registry = Arc::new(second);
-    resolver.replace(snapshot).expect("replace snapshot");
+    resolver.refresh(snapshot).expect("refresh snapshot");
 
     let second = handle
         .run_one(invocation("inv_second"), "WorkflowEcho", json!({}))

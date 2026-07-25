@@ -118,7 +118,7 @@ pub(crate) fn discover_prompt_template_commands(
     );
     if let Some(global_prompts_dir) = global_prompts_dir {
         commands.extend(
-            load_user_prompt_templates(global_prompts_dir)?
+            load_prompt_templates_from_tree(global_prompts_dir)?
                 .into_iter()
                 .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
                 .map(|template| PromptTemplateCommand {
@@ -157,10 +157,6 @@ pub(crate) fn load_project_prompt_templates(
         return Ok(Vec::new());
     }
     load_prompt_templates_from_tree(&project_dir.join(".neo/prompts"))
-}
-
-fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
-    load_prompt_templates_from_tree(prompts_dir)
 }
 
 fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
@@ -248,7 +244,7 @@ fn find_prompt_template_by_name(
     let Some(global_prompts_dir) = global_prompts_dir else {
         return Ok(None);
     };
-    Ok(load_user_prompt_templates(global_prompts_dir)?
+    Ok(load_prompt_templates_from_tree(global_prompts_dir)?
         .into_iter()
         .find(|template| template.name == name))
 }
@@ -270,7 +266,7 @@ fn find_auto_prompt_template_by_name(
     let Some(global_prompts_dir) = global_prompts_dir else {
         return Ok(None);
     };
-    Ok(load_user_prompt_templates(global_prompts_dir)?
+    Ok(load_prompt_templates_from_tree(global_prompts_dir)?
         .into_iter()
         .filter(|template| !is_prompt_template_excluded(template, exclusions))
         .find(|template| template.name == name))
