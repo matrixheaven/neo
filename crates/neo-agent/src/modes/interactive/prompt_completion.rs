@@ -190,7 +190,11 @@ fn filesystem_completion_candidates(root: &Path, prefix: &str) -> Result<Vec<Com
         let file_type = entry
             .file_type()
             .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
-        let suffix = if file_type.is_dir() { "/" } else { "" };
+        let suffix = if file_type.is_dir() {
+            preferred_completion_separator(&request.display_dir).to_string()
+        } else {
+            String::new()
+        };
         let value = format!(
             "{}{}{}{}",
             request.mention_prefix, request.display_dir, name, suffix
@@ -475,7 +479,7 @@ pub(super) fn file_reference_completion_candidates_with_limits(
     max_completions: usize,
 ) -> Vec<CompletionCandidate> {
     let query = prefix.strip_prefix('@').unwrap_or(prefix).trim();
-    let query_segment = query.rsplit('/').next().unwrap_or(query);
+    let query_segment = last_path_segment(query);
     let show_dotfiles = query_segment.starts_with('.');
     let matcher = SkimMatcherV2::default().smart_case();
     let mut builder = WalkBuilder::new(root);
@@ -682,12 +686,32 @@ impl FilesystemCompletionRequest {
     }
 }
 
-fn split_completion_path(prefix: &str) -> (String, String) {
-    if prefix.ends_with('/') {
-        return (prefix.to_owned(), String::new());
+fn last_path_separator_index(text: &str) -> Option<usize> {
+    text.char_indices()
+        .rev()
+        .find(|(_, ch)| std::path::is_separator(*ch))
+        .map(|(index, _)| index)
+}
+
+fn last_path_segment(text: &str) -> &str {
+    match last_path_separator_index(text) {
+        Some(index) => &text[index + 1..],
+        None => text,
     }
-    match prefix.rsplit_once('/') {
-        Some((directory, name)) => (format!("{directory}/"), name.to_owned()),
+}
+
+/// Separator style already present in the user prefix, defaulting to `/`.
+fn preferred_completion_separator(display_dir: &str) -> char {
+    match last_path_separator_index(display_dir) {
+        Some(index) => display_dir[index..].chars().next().unwrap_or('/'),
+        None => '/',
+    }
+}
+
+fn split_completion_path(prefix: &str) -> (String, String) {
+    match last_path_separator_index(prefix) {
+        Some(index) if index + 1 == prefix.len() => (prefix.to_owned(), String::new()),
+        Some(index) => (prefix[..=index].to_owned(), prefix[index + 1..].to_owned()),
         None => (String::new(), prefix.to_owned()),
     }
 }
@@ -712,7 +736,10 @@ pub(super) fn longest_common_completion_prefix(completions: &[PickerItem]) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{prompt_completions_from_catalog, slash_completion_catalog};
+    use super::{
+        filesystem_completion_candidates, last_path_segment, preferred_completion_separator,
+        prompt_completions_from_catalog, slash_completion_catalog, split_completion_path,
+    };
 
     #[test]
     fn slash_catalog_is_stable_until_the_next_completion_session() {
@@ -732,5 +759,80 @@ mod tests {
         let next = prompt_completions_from_catalog(root.path(), "/", &refreshed)
             .expect("next completions");
         assert!(next.iter().any(|item| item.value == "/second"));
+    }
+
+    #[test]
+    fn completion_path_uses_native_separators() {
+        assert_eq!(
+            split_completion_path("src/"),
+            ("src/".to_owned(), String::new())
+        );
+        assert_eq!(
+            split_completion_path("src/main"),
+            ("src/".to_owned(), "main".to_owned())
+        );
+        assert_eq!(last_path_segment("src/main.rs"), "main.rs");
+        assert_eq!(preferred_completion_separator("src/"), '/');
+        assert_eq!(preferred_completion_separator(""), '/');
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                split_completion_path("src\\"),
+                ("src\\".to_owned(), String::new())
+            );
+            assert_eq!(
+                split_completion_path("src\\main"),
+                ("src\\".to_owned(), "main".to_owned())
+            );
+            assert_eq!(last_path_segment("src\\main.rs"), "main.rs");
+            assert_eq!(preferred_completion_separator("src\\"), '\\');
+
+            let root = tempfile::tempdir().expect("tempdir");
+            let nested = root.path().join("src").join("nested");
+            std::fs::create_dir_all(&nested).expect("mkdir");
+            std::fs::write(nested.join("main.rs"), "fn main() {}\n").expect("write");
+
+            let candidates =
+                filesystem_completion_candidates(root.path(), "src\\nest").expect("complete");
+            assert!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.value == "src\\nested\\"),
+                "expected backslash-preserving directory completion, got: {candidates:?}"
+            );
+            let file_candidates = filesystem_completion_candidates(root.path(), "src\\nested\\ma")
+                .expect("complete file");
+            assert!(
+                file_candidates
+                    .iter()
+                    .any(|candidate| candidate.value == "src\\nested\\main.rs"),
+                "expected backslash-preserving file completion, got: {file_candidates:?}"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            // On Unix, `\\` is a filename character, not a path separator.
+            assert_eq!(
+                split_completion_path("src\\main"),
+                (String::new(), "src\\main".to_owned())
+            );
+            assert_eq!(last_path_segment("src\\main.rs"), "src\\main.rs");
+
+            let root = tempfile::tempdir().expect("tempdir");
+            let nested = root.path().join("src").join("nested");
+            std::fs::create_dir_all(&nested).expect("mkdir");
+            std::fs::write(nested.join("main.rs"), "fn main() {}\n").expect("write");
+
+            let candidates =
+                filesystem_completion_candidates(root.path(), "src/nest").expect("complete");
+            assert!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.value == "src/nested/"),
+                "expected forward-slash directory completion, got: {candidates:?}"
+            );
+        }
     }
 }
