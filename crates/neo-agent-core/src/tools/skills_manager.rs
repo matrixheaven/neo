@@ -528,7 +528,6 @@ fn preflight_sidecar_target(agents_dir: &Path, sidecar_path: &Path) -> io::Resul
     }
 }
 
-
 #[derive(Serialize)]
 struct CreateSkillFrontmatter<'a> {
     name: &'a str,
