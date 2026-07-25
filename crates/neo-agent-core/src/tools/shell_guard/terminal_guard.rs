@@ -463,8 +463,10 @@ impl GuardedTerminal {
             (Some(cwd), start.command.clone())
         };
         #[cfg(windows)]
-        let command = format!("{} {command}", launch_barrier.wait_command());
+        let command = format!("{} {command}", WindowsLaunchBarrier::wait_command());
         let mut builder = CommandBuilder::new(&shell.shell_path);
+        #[cfg(windows)]
+        builder.env(WindowsLaunchBarrier::env_key(), launch_barrier.path());
         if shell.is_windows {
             builder.env("BASH_ENV", "");
             builder.arg("--noprofile");

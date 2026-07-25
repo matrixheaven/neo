@@ -544,7 +544,7 @@ impl GuardedBashProcess {
         #[cfg(windows)]
         let launch_barrier = WindowsLaunchBarrier::new(&start.status_dir);
         #[cfg(windows)]
-        let command = format!("{} {command}", launch_barrier.wait_command());
+        let command = format!("{} {command}", WindowsLaunchBarrier::wait_command());
 
         let mut command_builder = Command::new(&shell.shell_path);
         command_builder
@@ -557,6 +557,8 @@ impl GuardedBashProcess {
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
             .env("SHELL", &shell.shell_path);
+        #[cfg(windows)]
+        command_builder.env(WindowsLaunchBarrier::env_key(), launch_barrier.path());
         if std::env::var_os("GIT_TERMINAL_PROMPT").is_none() {
             command_builder.env("GIT_TERMINAL_PROMPT", "0");
         }

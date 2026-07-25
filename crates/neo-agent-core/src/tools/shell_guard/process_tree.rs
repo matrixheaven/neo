@@ -191,21 +191,24 @@ pub(super) struct WindowsLaunchBarrier {
 
 #[cfg(windows)]
 impl WindowsLaunchBarrier {
+    const ENV_KEY: &'static str = "__NEO_PROCESS_BARRIER_PATH";
+
     pub(super) fn new(runtime_dir: &Path) -> Self {
         Self {
             path: runtime_dir.join(format!(".neo-process-ready-{}", uuid::Uuid::new_v4())),
         }
     }
 
-    pub(super) fn wait_command(&self) -> String {
-        let command = format!(
-            "if exist \"{}\" exit /b 0 else exit /b 1",
-            self.path.display()
-        );
-        format!(
-            "until cmd.exe //d //c {}; do sleep 0.01; done;",
-            quote_posix_shell(&command)
-        )
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn env_key() -> &'static str {
+        Self::ENV_KEY
+    }
+
+    pub(super) fn wait_command() -> &'static str {
+        "until cmd.exe //d //e:off //c 'if exist \"%__NEO_PROCESS_BARRIER_PATH%\" exit /b 0 else exit /b 1'; do sleep 0.01; done;"
     }
 
     pub(super) fn release(&self) -> io::Result<()> {
@@ -224,20 +227,19 @@ impl Drop for WindowsLaunchBarrier {
     }
 }
 
-#[cfg(windows)]
-fn quote_posix_shell(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
     #[test]
-    fn launch_barrier_disables_msys_switch_path_conversion() {
+    fn launch_barrier_disables_msys_switch_and_command_extensions() {
         let temp = tempfile::tempdir().unwrap();
         let barrier = WindowsLaunchBarrier::new(temp.path());
 
-        assert!(barrier.wait_command().contains("cmd.exe //d //c"));
+        let command = barrier.wait_command();
+        assert!(command.contains("cmd.exe //d"));
+        assert!(command.contains("//e:off"));
+        assert!(command.contains("//c"));
+        assert!(command.contains("%__NEO_PROCESS_BARRIER_PATH%"));
     }
 }

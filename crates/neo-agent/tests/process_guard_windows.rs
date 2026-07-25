@@ -121,6 +121,60 @@ async fn windows_terminal_natural_exit_closes_job_with_descendant() {
 }
 
 #[tokio::test]
+async fn windows_launch_barrier_treats_status_path_as_data() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let status_dir = workspace.path().join("%PATH% ! & O'Reilly space");
+    std::fs::create_dir_all(&status_dir).expect("create status dir");
+    let mut guardian = tokio::process::Command::new(env!("CARGO_BIN_EXE_neo"))
+        .arg("__process-guard")
+        .current_dir(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn process guard");
+    let mut control = guardian.stdin.take().expect("guard stdin");
+    let mut stdout = guardian.stdout.take().expect("guard stdout");
+    let mut stderr = guardian.stderr.take().expect("guard stderr");
+    let stdout_drain =
+        tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await });
+    let stderr_drain =
+        tokio::spawn(async move { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await });
+
+    control
+        .write_all(&start_bash_frame(
+            &status_dir,
+            "windows-barrier-path-as-data",
+            "exit 0",
+        ))
+        .await
+        .expect("write Start frame");
+    control.flush().await.expect("flush Start frame");
+
+    let status = tokio::time::timeout(Duration::from_secs(10), guardian.wait())
+        .await
+        .expect("guardian exits")
+        .expect("wait guardian");
+    assert!(status.success(), "guardian failed: {status:?}");
+
+    let final_status: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(status_dir.join("windows-barrier-path-as-data.status.json"))
+            .expect("read final status"),
+    )
+    .expect("parse final status");
+    assert_eq!(final_status["exit"]["status"], "completed");
+
+    stdout_drain
+        .await
+        .expect("stdout drain join")
+        .expect("stdout drain");
+    stderr_drain
+        .await
+        .expect("stderr drain join")
+        .expect("stderr drain");
+}
+
+#[tokio::test]
 async fn windows_parent_eof_closes_assigned_job_with_descendant() {
     let workspace = tempfile::tempdir().expect("workspace");
     let pid_file = workspace.path().join("parent-eof-child.pid");
