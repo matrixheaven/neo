@@ -66,7 +66,6 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some("Fetching models.dev catalog...".to_owned()));
-        let _handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
@@ -154,7 +153,6 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some(format!("Importing provider {provider_id}...")));
-        let _handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
