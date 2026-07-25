@@ -13,7 +13,9 @@ use super::diff::{diff_stats, unified_diff};
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::approval::{EditApprovalChange, EditApprovalPresentation};
 use crate::permissions::{FileWriteApprovalOperation, SessionApprovalKey, SessionApprovalScope};
-use crate::session::atomic_file::{AtomicWriteStatus, replace_existing_file_atomic_status};
+use crate::session::atomic_file::{
+    AtomicWriteStatus, is_reparse_or_symlink, replace_existing_file_atomic_status,
+};
 
 const fn default_expected_matches() -> usize {
     1
@@ -1037,23 +1039,6 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(not(any(unix, windows)))]
 fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
-}
-
-fn is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
-}
-
-#[cfg(windows)]
-fn platform_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn platform_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(test)]

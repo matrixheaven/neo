@@ -14,8 +14,8 @@ use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::approval::{WriteApprovalChange, WriteApprovalPresentation, WriteApprovalPreview};
 use crate::permissions::{FileWriteApprovalOperation, SessionApprovalKey, SessionApprovalScope};
 use crate::session::atomic_file::{
-    AtomicWriteStatus, create_missing_directories_recording, replace_existing_file_atomic_status,
-    validate_safe_directory, write_file_atomic_create_new,
+    AtomicWriteStatus, create_missing_directories_recording, is_reparse_or_symlink,
+    replace_existing_file_atomic_status, validate_safe_directory, write_file_atomic_create_new,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1117,23 +1117,6 @@ fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
 #[cfg(not(any(unix, windows)))]
 fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
-}
-
-fn is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
-}
-
-#[cfg(windows)]
-fn platform_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn platform_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(test)]

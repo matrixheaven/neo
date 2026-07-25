@@ -9,6 +9,7 @@ use super::limits::WorkflowLimits;
 use super::state::{
     WorkflowActor, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowState,
 };
+use crate::session::atomic_file;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,7 +87,8 @@ pub struct JournalWriter {
 impl JournalWriter {
     pub fn open(path: &Path) -> Result<Self, WorkflowError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| WorkflowError::Journal(e.to_string()))?;
+            atomic_file::ensure_safe_directory_tree(parent)
+                .map_err(|e| WorkflowError::Journal(e.to_string()))?;
         }
 
         let created = match std::fs::OpenOptions::new()
@@ -103,7 +105,8 @@ impl JournalWriter {
             Err(error) => return Err(WorkflowError::Journal(error.to_string())),
         };
         if created && let Some(parent) = path.parent() {
-            sync_parent_directory(parent)?;
+            atomic_file::sync_directory(parent)
+                .map_err(|e| WorkflowError::Journal(e.to_string()))?;
         }
 
         let records = read_journal(path)?;
@@ -413,7 +416,8 @@ pub fn write_run_metadata(
     metadata: &super::state::WorkflowRunMetadata,
     limits: &WorkflowLimits,
 ) -> Result<PathBuf, WorkflowError> {
-    std::fs::create_dir_all(dir).map_err(|e| WorkflowError::Journal(e.to_string()))?;
+    atomic_file::ensure_safe_directory_tree(dir)
+        .map_err(|e| WorkflowError::Journal(e.to_string()))?;
     let path = dir.join("run.json");
     let json = serde_json::to_string_pretty(metadata)
         .map_err(|e| WorkflowError::Journal(e.to_string()))?;
@@ -425,42 +429,16 @@ pub fn write_run_metadata(
         )));
     }
 
-    let temporary_path = dir.join(format!(".run.json.{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        file.write_all(json.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        drop(file);
-
-        std::fs::hard_link(&temporary_path, &path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                WorkflowError::Journal(format!("run metadata already exists: {}", path.display()))
-            } else {
-                WorkflowError::Journal(error.to_string())
-            }
-        })?;
-        sync_parent_directory(dir)?;
-        Ok(path.clone())
-    })();
-    let _ = std::fs::remove_file(&temporary_path);
-    result
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(dir: &Path) -> Result<(), WorkflowError> {
-    std::fs::File::open(dir)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| WorkflowError::Journal(e.to_string()))
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_dir: &Path) -> Result<(), WorkflowError> {
-    Ok(())
+    match atomic_file::write_file_atomic_create_new(&path, json.as_bytes()) {
+        Ok(atomic_file::AtomicWriteStatus::Durable) => Ok(path),
+        Ok(atomic_file::AtomicWriteStatus::CommittedUnsynced(error)) => {
+            Err(WorkflowError::Journal(error.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(
+            WorkflowError::Journal(format!("run metadata already exists: {}", path.display())),
+        ),
+        Err(error) => Err(WorkflowError::Journal(error.to_string())),
+    }
 }
 
 pub fn read_run_metadata(dir: &Path) -> Result<super::state::WorkflowRunMetadata, WorkflowError> {

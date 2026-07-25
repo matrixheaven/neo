@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
+use crate::session::atomic_file;
 use crate::skills::{SkillSource, SkillStore, SkillStoreHandle};
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 
@@ -511,7 +512,7 @@ fn preflight_sidecar_target(agents_dir: &Path, sidecar_path: &Path) -> io::Resul
         Err(error) => return Err(error),
     }
     match stdfs::symlink_metadata(sidecar_path) {
-        Ok(metadata) if is_reparse_or_symlink(&metadata) || !metadata.is_file() => {
+        Ok(metadata) if atomic_file::is_reparse_or_symlink(&metadata) || !metadata.is_file() => {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -870,19 +871,7 @@ fn apply_resource_executable(_path: &Path, _executable: bool) -> io::Result<()> 
 }
 
 fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path has no parent directory: {}", path.display()),
-        )
-    })?;
-    ensure_existing_safe_directory_tree(parent)?;
-    reject_reparse_or_symlink_if_present(path)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    let file = temp.as_file_mut();
-    file.write_all(content)?;
-    file.sync_all()?;
-    temp.persist(path).map(|_| ()).map_err(|error| error.error)
+    atomic_file::write_file_atomic(path, content)
 }
 
 fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
@@ -891,7 +880,7 @@ fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if is_reparse_or_symlink(&metadata) {
+    if atomic_file::is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -904,16 +893,15 @@ fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()> {
 }
 
 fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
-    stdfs::create_dir_all(path)?;
-    validate_safe_directory(path)
+    atomic_file::ensure_safe_directory_tree(path)
 }
 
 fn ensure_existing_safe_directory_tree(path: &Path) -> io::Result<()> {
-    validate_safe_directory(path)
+    atomic_file::validate_safe_directory(path)
 }
 
 fn ensure_safe_child_directory(parent: &Path, child: &Path) -> io::Result<PathBuf> {
-    validate_safe_directory(parent)?;
+    atomic_file::validate_safe_directory(parent)?;
     let mut current = parent.to_path_buf();
     for component in child.components() {
         match component {
@@ -921,10 +909,10 @@ fn ensure_safe_child_directory(parent: &Path, child: &Path) -> io::Result<PathBu
             Component::Normal(part) => {
                 current.push(part);
                 match stdfs::symlink_metadata(&current) {
-                    Ok(_) => validate_safe_directory(&current)?,
+                    Ok(_) => atomic_file::validate_safe_directory(&current)?,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
                         stdfs::create_dir(&current)?;
-                        validate_safe_directory(&current)?;
+                        atomic_file::validate_safe_directory(&current)?;
                     }
                     Err(error) => return Err(error),
                 }
@@ -941,39 +929,16 @@ fn ensure_safe_child_directory(parent: &Path, child: &Path) -> io::Result<PathBu
 }
 
 fn validate_safe_directory(path: &Path) -> io::Result<()> {
-    let metadata = stdfs::symlink_metadata(path)?;
-    if is_reparse_or_symlink(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to write through symlinked skill directory {}",
-                path.display()
-            ),
-        ));
-    }
-    if !metadata.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("skill path is not a directory: {}", path.display()),
-        ));
-    }
-    Ok(())
+    atomic_file::validate_safe_directory(path)
 }
 
 fn ensure_path_absent(path: &Path) -> io::Result<()> {
-    match stdfs::symlink_metadata(path) {
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("path already exists: {}", path.display()),
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
+    atomic_file::ensure_path_absent(path)
 }
 
 fn validate_regular_file(path: &Path) -> io::Result<()> {
     let metadata = stdfs::symlink_metadata(path)?;
-    if is_reparse_or_symlink(&metadata) {
+    if atomic_file::is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("refusing to read symlinked skill file {}", path.display()),
@@ -1016,23 +981,6 @@ fn copy_file_permissions(
     _destination: &Path,
 ) -> io::Result<()> {
     Ok(())
-}
-
-fn is_reparse_or_symlink(metadata: &stdfs::Metadata) -> bool {
-    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
-}
-
-#[cfg(windows)]
-fn platform_reparse_point(metadata: &stdfs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn platform_reparse_point(_metadata: &stdfs::Metadata) -> bool {
-    false
 }
 
 pub struct MoveSkillTool {
@@ -1244,7 +1192,7 @@ async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
         let source_path = entry.path();
         let dest_path = destination.join(entry.file_name());
         let metadata = stdfs::symlink_metadata(&source_path)?;
-        if is_reparse_or_symlink(&metadata) {
+        if atomic_file::is_reparse_or_symlink(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(

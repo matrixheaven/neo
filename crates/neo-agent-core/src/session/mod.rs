@@ -664,7 +664,7 @@ impl SessionMetadataStore {
             }
             Err(error) => return Err(SessionError::Io(error)),
         };
-        if is_reparse_or_symlink(&metadata) {
+        if atomic_file::is_reparse_or_symlink(&metadata) {
             return Err(SessionError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("refusing symlinked session transcript {}", path.display()),
@@ -699,7 +699,7 @@ impl SessionMetadataStore {
             }
             Err(error) => return Err(SessionError::Io(error)),
         };
-        if is_reparse_or_symlink(&metadata) {
+        if atomic_file::is_reparse_or_symlink(&metadata) {
             return Err(SessionError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("refusing symlinked session metadata {}", path.display()),
@@ -732,7 +732,7 @@ impl SessionMetadataStore {
             let entry = entry?;
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
-            if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            if atomic_file::is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
                 continue;
             }
             let Some(name) = path.file_name().and_then(OsStr::to_str) else {
@@ -745,7 +745,7 @@ impl SessionMetadataStore {
             let Ok(wire_metadata) = fs::symlink_metadata(&wire_path) else {
                 continue;
             };
-            if is_reparse_or_symlink(&wire_metadata) || !wire_metadata.is_file() {
+            if atomic_file::is_reparse_or_symlink(&wire_metadata) || !wire_metadata.is_file() {
                 continue;
             }
             if validate_session_id(name).is_ok() {
@@ -757,14 +757,13 @@ impl SessionMetadataStore {
 }
 
 fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    validate_safe_directory(path)
+    atomic_file::ensure_safe_directory_tree(path)
 }
 
 fn ensure_existing_safe_directory_tree_if_present(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => {
-            ensure_existing_safe_directory_tree(path)?;
+            atomic_file::validate_safe_directory(path)?;
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -773,18 +772,18 @@ fn ensure_existing_safe_directory_tree_if_present(path: &Path) -> io::Result<boo
 }
 
 fn ensure_existing_safe_directory_tree(path: &Path) -> io::Result<()> {
-    validate_safe_directory(path)
+    atomic_file::validate_safe_directory(path)
 }
 
 fn ensure_existing_child_directory_tree(parent: &Path, child: &Path) -> io::Result<PathBuf> {
-    validate_safe_directory(parent)?;
+    atomic_file::validate_safe_directory(parent)?;
     let mut current = parent.to_path_buf();
     for component in child.components() {
         match component {
             Component::CurDir => {}
             Component::Normal(part) => {
                 current.push(part);
-                validate_safe_directory(&current)?;
+                atomic_file::validate_safe_directory(&current)?;
             }
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
                 return Err(io::Error::new(
@@ -797,34 +796,6 @@ fn ensure_existing_child_directory_tree(parent: &Path, child: &Path) -> io::Resu
     Ok(current)
 }
 
-fn validate_safe_directory(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if is_reparse_or_symlink(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("refusing symlinked session directory {}", path.display()),
-        ));
-    }
-    if !metadata.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("session path is not a directory: {}", path.display()),
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_path_absent(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("path already exists: {}", path.display()),
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 fn create_new_safe_directory(path: &Path) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
@@ -832,17 +803,17 @@ fn create_new_safe_directory(path: &Path) -> io::Result<()> {
             format!("path has no parent directory: {}", path.display()),
         )
     })?;
-    ensure_existing_safe_directory_tree(parent)?;
-    ensure_path_absent(path)?;
+    atomic_file::validate_safe_directory(parent)?;
+    atomic_file::ensure_path_absent(path)?;
     fs::create_dir(path)?;
-    validate_safe_directory(path)
+    atomic_file::validate_safe_directory(path)
 }
 
 /// Recursively copy a directory tree.
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
     let src = src.as_ref();
     let metadata = fs::symlink_metadata(src)?;
-    if is_reparse_or_symlink(&metadata) {
+    if atomic_file::is_reparse_or_symlink(&metadata) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("refusing to fork symlinked session root {}", src.display()),
@@ -859,7 +830,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
         let entry = entry?;
         let source_path = entry.path();
         let metadata = fs::symlink_metadata(&source_path)?;
-        if is_reparse_or_symlink(&metadata) {
+        if atomic_file::is_reparse_or_symlink(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -889,23 +860,6 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 
 fn write_file_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     atomic_file::write_file_atomic(path, content)
-}
-
-fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
-}
-
-#[cfg(windows)]
-fn platform_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn platform_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 fn records_from_metadata(

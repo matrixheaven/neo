@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::session::atomic_file;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceAccessRootKind {
     Primary,
@@ -220,7 +222,7 @@ fn reject_link_components(candidate: &Path, root: &Path) -> Result<(), Workspace
     for component in relative.components() {
         current.push(component.as_os_str());
         match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if is_reparse_or_symlink(&metadata) => {
+            Ok(metadata) if atomic_file::is_reparse_or_symlink(&metadata) => {
                 return Err(WorkspaceAccessError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
@@ -235,23 +237,6 @@ fn reject_link_components(candidate: &Path, root: &Path) -> Result<(), Workspace
         }
     }
     Ok(())
-}
-
-fn is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink() || platform_reparse_point(metadata)
-}
-
-#[cfg(windows)]
-fn platform_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn platform_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 fn canonicalize_nearest_existing_parent(path: &Path) -> Result<PathBuf, WorkspaceAccessError> {

@@ -135,8 +135,11 @@ pub(crate) fn replace_existing_file_atomic_status(
 }
 
 pub(crate) fn ensure_safe_directory_tree(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    validate_safe_directory(path)
+    let creation = create_missing_directories_recording(path);
+    if let Some(error) = creation.error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Directories created by [`create_missing_directories_recording`], plus the
@@ -240,6 +243,17 @@ pub(crate) fn create_missing_directories_recording(dir: &Path) -> DirectoryCreat
     DirectoryCreation {
         created,
         error: None,
+    }
+}
+
+pub(crate) fn ensure_path_absent(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("path already exists: {}", path.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -384,7 +398,7 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     sync_parent_dir(path)
 }
 
-fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink() || platform_reparse_point(metadata)
 }
 
@@ -468,5 +482,50 @@ mod tests {
         assert!(result.is_err());
         assert!(!target.exists());
         assert_eq!(fs::read(replacement).expect("replacement remains"), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_directory_tree_rejects_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let ancestor = workspace.path().join("ancestor");
+        symlink(outside.path(), &ancestor).expect("symlink ancestor");
+        let descendant = ancestor.join("child");
+
+        let result = ensure_safe_directory_tree(&descendant);
+
+        assert!(result.is_err(), "symlinked ancestor must be rejected");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!descendant.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn safe_directory_tree_rejects_junction_ancestor() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let ancestor = workspace.path().join("ancestor");
+        let status = std::process::Command::new("cmd.exe")
+            .args([
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                ancestor.to_str().expect("ancestor path"),
+                outside.path().to_str().expect("outside path"),
+            ])
+            .status()
+            .expect("spawn mklink");
+        assert!(status.success(), "mklink /J must succeed in test fixture");
+        let descendant = ancestor.join("child");
+
+        let result = ensure_safe_directory_tree(&descendant);
+
+        assert!(result.is_err(), "junction ancestor must be rejected");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!descendant.exists());
     }
 }
