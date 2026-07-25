@@ -665,10 +665,36 @@ impl WorkflowRuntime {
                 return Ok(());
             }
         };
-        let mut writer = JournalWriter::open(&journal_path)?;
+        let mut writer = match JournalWriter::open(&journal_path) {
+            Ok(writer) => writer,
+            Err(error) => {
+                handles.push(
+                    self.insert_failed_run(
+                        run_dir,
+                        metadata,
+                        format!("journal open failed: {error}"),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
+        };
         let incomplete = journal::find_incomplete_invocations(&records);
         if !incomplete.is_empty() {
-            let resolver = self.bound_recovery_resolver()?;
+            let resolver = match self.bound_recovery_resolver() {
+                Ok(resolver) => resolver,
+                Err(error) => {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            format!("recovery resolver failed: {error}"),
+                        )
+                        .await,
+                    );
+                    return Ok(());
+                }
+            };
             for invocation in incomplete {
                 let invocation = Arc::new(invocation);
                 let outcome = if let Some(resolver) = resolver.as_ref() {
@@ -684,7 +710,17 @@ impl WorkflowRuntime {
                     invocation_id: invocation.invocation_id.clone(),
                     outcome,
                 };
-                writer.append(&record, &self.limits)?;
+                if let Err(error) = writer.append(&record, &self.limits) {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            format!("recovery append failed: {error}"),
+                        )
+                        .await,
+                    );
+                    return Ok(());
+                }
                 records.push(record);
             }
         }
@@ -699,7 +735,17 @@ impl WorkflowRuntime {
                 reason: "host_exit".to_owned(),
                 actor: WorkflowActor::Runtime,
             };
-            writer.append(&record, &self.limits)?;
+            if let Err(error) = writer.append(&record, &self.limits) {
+                handles.push(
+                    self.insert_failed_run(
+                        run_dir,
+                        metadata,
+                        format!("recovery append failed: {error}"),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
             records.push(record);
             WorkflowState::Paused
         } else {
@@ -743,7 +789,11 @@ impl WorkflowRuntime {
 
         let mut handles = Vec::new();
         for entry in entries {
-            self.rehydrate_run_entry(entry, &mut handles).await?;
+            // Run-local failures are contained inside rehydrate_run_entry as
+            // inspectable failed handles. Only registry invariants return Err.
+            if let Err(error) = self.rehydrate_run_entry(entry, &mut handles).await {
+                return Err(error);
+            }
         }
         for handle in &handles {
             let snapshot = handle.snapshot().await;

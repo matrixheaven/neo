@@ -922,6 +922,101 @@ async fn corrupt_run_is_rehydrated_as_inspectable_failed_handle() {
 }
 
 #[tokio::test]
+async fn rehydrate_isolates_recovery_append_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+
+    // Bad sibling: durable incomplete invocation; recovery must append and will fail.
+    let bad_handle = create_run(&runtime, dir.path()).await;
+    let bad_id = bad_handle.run_id.clone();
+    let bad_path = journal_path(dir.path(), &bad_id);
+    let mut writer = JournalWriter::open(&bad_path).unwrap();
+    let input = serde_json::json!({"task": "stuck"});
+    writer
+        .append(
+            &JournalRecord::InvocationStarted {
+                seq: writer.next_seq(),
+                timestamp_ms: 2,
+                invocation_id: "inv_stuck".to_owned(),
+                call_index: 0,
+                kind: WorkflowInvocationKind::Delegate,
+                canonical_input: input.clone(),
+                canonical_input_hash: canonical_input_hash(&input),
+            },
+            &WorkflowLimits::default(),
+        )
+        .unwrap();
+
+    // Healthy sibling: already terminal so rehydrate needs no recovery append.
+    let good_handle = create_run(&runtime, dir.path()).await;
+    let good_id = good_handle.run_id.clone();
+    let good_path = journal_path(dir.path(), &good_id);
+    let mut good_writer = JournalWriter::open(&good_path).unwrap();
+    good_writer
+        .append(
+            &JournalRecord::StateChanged {
+                seq: good_writer.next_seq(),
+                timestamp_ms: 2,
+                previous: WorkflowState::Running,
+                new: WorkflowState::Completed,
+                reason: "done".to_owned(),
+                actor: WorkflowActor::Runtime,
+            },
+            &WorkflowLimits::default(),
+        )
+        .unwrap();
+    drop(bad_handle);
+    drop(good_handle);
+    drop(runtime);
+
+    // Force recovery append to hit journal total limit for the bad run only.
+    let recovered = WorkflowRuntime::new(WorkflowLimits {
+        journal_total_bytes: 1,
+        ..WorkflowLimits::default()
+    });
+    let handles = recovered
+        .rehydrate(dir.path())
+        .await
+        .expect("sibling rehydration continues after run-local recovery failure");
+    assert_eq!(handles.len(), 2);
+
+    let mut by_id = std::collections::HashMap::new();
+    for handle in &handles {
+        by_id.insert(handle.run_id.0.clone(), handle.snapshot().await);
+    }
+
+    let failed = by_id.get(&bad_id.0).expect("failed run handle present");
+    assert_eq!(failed.state, WorkflowState::Failed);
+    assert!(failed.recovery_failure);
+    assert!(
+        failed
+            .terminal_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("recovery append failed"),
+        "terminal reason was {:?}",
+        failed.terminal_reason
+    );
+
+    let healthy = by_id
+        .get(&good_id.0)
+        .expect("healthy sibling handle present");
+    assert_eq!(healthy.state, WorkflowState::Completed);
+    assert!(!healthy.recovery_failure);
+
+    // Recovery must not invent a finish record when the recovery append failed.
+    assert!(!read_journal(&bad_path).unwrap().iter().any(|record| {
+        matches!(
+            record,
+            JournalRecord::InvocationFinished {
+                invocation_id,
+                ..
+            } if invocation_id == "inv_stuck"
+        )
+    }));
+}
+
+#[tokio::test]
 async fn token_cap_uses_actual_usage_and_blocks_only_next_provider_call() {
     let dir = tempfile::tempdir().unwrap();
     let limits = WorkflowLimits {
