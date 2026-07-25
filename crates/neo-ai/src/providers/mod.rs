@@ -5,6 +5,10 @@ pub mod openai;
 
 mod common;
 
+/// Crate-private re-export of the shared HTTP status classifier so non-provider
+/// modules (catalog) can reuse it without duplicating status mapping.
+pub(crate) use common::http::http_status_error;
+
 use crate::types::ContentPart;
 
 /// Extract text from content parts, joining with newlines.

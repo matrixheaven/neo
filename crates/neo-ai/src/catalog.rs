@@ -16,6 +16,8 @@ pub const CATALOG_URL: &str = "https://models.dev/api.json";
 
 const CATALOG_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hard cap on a successful catalog response body (declared size and actual chunks).
+const CATALOG_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 /// A provider entry in the models.dev catalog.
 #[derive(Debug, Clone, Deserialize)]
@@ -123,7 +125,7 @@ pub async fn fetch_catalog_from(
         .map_err(|e| crate::error::AiError::Transport {
             message: e.to_string(),
         })?;
-    let resp = client
+    let mut resp = client
         .get(url)
         .header("Accept", "application/json")
         .send()
@@ -133,24 +135,50 @@ pub async fn fetch_catalog_from(
         })?;
 
     if !resp.status().is_success() {
+        // Known non-2xx status remains authoritative even if the diagnostic
+        // body cannot be fully read; the shared helper owns 64 KiB truncation.
+        return Err(crate::providers::http_status_error(resp)
+            .await
+            .into_ai_error());
+    }
+
+    if let Some(len) = resp.content_length()
+        && len > CATALOG_BODY_LIMIT_BYTES as u64
+    {
         return Err(crate::error::AiError::Protocol {
-            message: format!("catalog fetch returned {}", resp.status()),
+            message: format!(
+                "catalog response body exceeds limit: content-length {len} > {CATALOG_BODY_LIMIT_BYTES}"
+            ),
         });
     }
 
-    resp.json::<BTreeMap<String, CatalogEntry>>()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                crate::error::AiError::Transport {
-                    message: e.to_string(),
+    let mut bytes = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let new_len = bytes.len().saturating_add(chunk.len());
+                if new_len > CATALOG_BODY_LIMIT_BYTES {
+                    return Err(crate::error::AiError::Protocol {
+                        message: format!(
+                            "catalog response body exceeds {CATALOG_BODY_LIMIT_BYTES} bytes"
+                        ),
+                    });
                 }
-            } else {
-                crate::error::AiError::Protocol {
-                    message: e.to_string(),
-                }
+                bytes.extend_from_slice(&chunk);
             }
-        })
+            Ok(None) => break,
+            Err(e) => {
+                // Successful-status body transport failures stay Transport.
+                return Err(crate::error::AiError::Transport {
+                    message: e.to_string(),
+                });
+            }
+        }
+    }
+
+    serde_json::from_slice(&bytes).map_err(|e| crate::error::AiError::Protocol {
+        message: e.to_string(),
+    })
 }
 
 /// Infer the provider wire type from catalog entry metadata.
@@ -391,6 +419,122 @@ mod tests {
         .expect_err("stalled catalog response must time out");
 
         assert!(matches!(error, crate::error::AiError::Transport { .. }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn catalog_http_errors_use_shared_status_classification() {
+        async fn serve_status(status_line: &str, extra_headers: &str, body: &str) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind local catalog server");
+            let address = listener.local_addr().expect("catalog server address");
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra_headers}\r\n{body}",
+                body.len(),
+            );
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept catalog request");
+                let mut buf = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write catalog error response");
+            });
+            format!("http://{address}/catalog")
+        }
+
+        let auth_url = serve_status(
+            "HTTP/1.1 401 Unauthorized",
+            "",
+            r#"{"error":"invalid api key"}"#,
+        )
+        .await;
+        let auth_err = fetch_catalog_from(&auth_url)
+            .await
+            .expect_err("401 must classify as Auth");
+        assert!(
+            matches!(auth_err, crate::error::AiError::Auth { .. }),
+            "expected Auth, got {auth_err:?}"
+        );
+        assert!(!auth_err.is_retryable());
+
+        let rate_url = serve_status(
+            "HTTP/1.1 429 Too Many Requests",
+            "retry-after: 7\r\n",
+            r#"{"error":"rate limited"}"#,
+        )
+        .await;
+        let rate_err = fetch_catalog_from(&rate_url)
+            .await
+            .expect_err("429 must classify as RateLimit");
+        match &rate_err {
+            crate::error::AiError::RateLimit {
+                retry_after: Some(delay),
+                ..
+            } => assert_eq!(*delay, Duration::from_secs(7)),
+            other => panic!("expected RateLimit with Retry-After, got {other:?}"),
+        }
+        assert!(rate_err.is_retryable());
+
+        let server_url = serve_status(
+            "HTTP/1.1 503 Service Unavailable",
+            "",
+            r#"{"error":"backend down"}"#,
+        )
+        .await;
+        let server_err = fetch_catalog_from(&server_url)
+            .await
+            .expect_err("503 must classify as Server");
+        match &server_err {
+            crate::error::AiError::Server { status: 503, .. } => {}
+            other => panic!("expected Server 503, got {other:?}"),
+        }
+        assert!(server_err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn oversized_chunked_catalog_response_is_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local catalog server");
+        let address = listener.local_addr().expect("catalog server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept catalog request");
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            // Chunked success body with no Content-Length; stream past the 16 MiB cap.
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("write chunked headers");
+            let chunk = vec![b'x'; 64 * 1024];
+            let header = format!("{:x}\r\n", chunk.len());
+            let mut sent = 0usize;
+            while sent <= CATALOG_BODY_LIMIT_BYTES {
+                socket
+                    .write_all(header.as_bytes())
+                    .await
+                    .expect("write chunk size");
+                socket.write_all(&chunk).await.expect("write chunk body");
+                socket.write_all(b"\r\n").await.expect("write chunk CRLF");
+                sent = sent.saturating_add(chunk.len());
+            }
+            // Do not send the terminating 0-chunk; client must reject mid-stream.
+            std::future::pending::<()>().await;
+        });
+
+        let error = fetch_catalog_from(&format!("http://{address}/catalog"))
+            .await
+            .expect_err("oversized chunked catalog body must be rejected");
+        assert!(
+            matches!(error, crate::error::AiError::Protocol { .. }),
+            "oversize is Protocol, got {error:?}"
+        );
+        assert!(!error.is_retryable());
         server.abort();
     }
 
