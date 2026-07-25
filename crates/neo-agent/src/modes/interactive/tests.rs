@@ -8057,6 +8057,65 @@ async fn load_session_transcript_replays_token_usage_for_footer() {
 }
 
 #[tokio::test]
+async fn resume_rehydrates_todo_panel_and_clears_prior_session_todos() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    writer
+        .append(&AgentEvent::TodoUpdated {
+            turn: 1,
+            todos: vec![
+                neo_agent_core::TodoEventData {
+                    title: "Task 4".to_owned(),
+                    status: "in_progress".to_owned(),
+                },
+                neo_agent_core::TodoEventData {
+                    title: "Task 12".to_owned(),
+                    status: "pending".to_owned(),
+                },
+            ],
+        })
+        .await
+        .expect("append todo update");
+    writer.flush().await.expect("flush session");
+
+    let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect("load transcript");
+    assert_eq!(loaded.todos.len(), 2);
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.rebuild_transcript_from_session(&loaded);
+    let titles = controller
+        .tui
+        .chrome()
+        .todo_items()
+        .iter()
+        .map(|todo| todo.title.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(titles, ["Task 4", "Task 12"]);
+
+    controller.rebuild_transcript_from_session(&LoadedSessionTranscript::new(
+        "empty",
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert!(controller.tui.chrome().todo_items().is_empty());
+}
+
+#[tokio::test]
 async fn load_session_transcript_preserves_delegate_events_for_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");

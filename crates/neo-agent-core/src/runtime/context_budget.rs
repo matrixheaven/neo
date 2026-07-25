@@ -1,4 +1,4 @@
-use super::chat_request::workspace_context_message;
+use super::chat_request::{todo_context_message, workspace_context_message};
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::tokens::{
@@ -124,6 +124,8 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
     });
     let workspace_tokens =
         workspace_context_message(config).map_or(0, |message| estimate_message_tokens(&message));
+    let todo_tokens =
+        todo_context_message(context).map_or(0, |message| estimate_message_tokens(&message));
     let transform_tokens = config
         .context_append_transform
         .as_ref()
@@ -131,7 +133,7 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
             estimate_messages_tokens(&transform(context.messages()))
         });
 
-    system_tokens + workspace_tokens + transform_tokens
+    system_tokens + workspace_tokens + todo_tokens + transform_tokens
 }
 
 fn projected_effective_tokens(
@@ -201,7 +203,7 @@ mod tests {
     use super::*;
     use crate::compaction::projection::ProjectionPlan;
     use crate::harness::fake_model;
-    use crate::{AgentMessage, Content};
+    use crate::{AgentEvent, AgentMessage, Content, TodoEventData};
 
     #[test]
     fn budget_includes_system_workspace_transform_and_tools() {
@@ -231,6 +233,30 @@ mod tests {
         assert!(snapshot.fixed_overhead_tokens > 0);
         assert!(snapshot.tool_schema_tokens > 0);
         assert!(snapshot.raw_effective_tokens > context.estimated_tokens());
+    }
+
+    #[test]
+    fn budget_includes_ephemeral_todo_snapshot() {
+        let config = AgentConfig::for_model(fake_model());
+        let empty = AgentContext::new();
+        let context = AgentContext::from_replay(
+            [AgentEvent::TodoUpdated {
+                turn: 1,
+                todos: vec![TodoEventData {
+                    title: "Task 12".to_owned(),
+                    status: "pending".to_owned(),
+                }],
+            }]
+            .iter(),
+        );
+
+        let empty_snapshot =
+            ContextBudgetEstimator::snapshot(&config, &empty, ProjectionPlan::disabled());
+        let todo_snapshot =
+            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+
+        assert!(todo_snapshot.fixed_overhead_tokens > empty_snapshot.fixed_overhead_tokens);
+        assert_eq!(todo_snapshot.durable_tokens, empty_snapshot.durable_tokens);
     }
 
     #[test]

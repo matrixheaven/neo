@@ -25,7 +25,7 @@ use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, McpOAuthService,
     McpOAuthServiceConfig, McpServerStatus, MessageOrigin, PendingQuestion, PermissionMode,
-    ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
+    ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome, TodoEventData,
     instructions::{InstructionRegistry, InstructionRegistryConfig},
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
@@ -659,6 +659,7 @@ pub(crate) struct LoadedSessionTranscript {
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
     events: Vec<AgentEvent>,
+    todos: Vec<TodoEventData>,
     main_agent_token_usage: MainAgentTokenUsage,
 }
 
@@ -675,6 +676,7 @@ impl LoadedSessionTranscript {
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
             events: Vec::new(),
+            todos: Vec::new(),
             main_agent_token_usage: MainAgentTokenUsage::default(),
         }
     }
@@ -682,6 +684,12 @@ impl LoadedSessionTranscript {
     #[must_use]
     pub(crate) fn with_events(mut self, events: impl IntoIterator<Item = AgentEvent>) -> Self {
         self.events = events.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_todos(mut self, todos: Vec<TodoEventData>) -> Self {
+        self.todos = todos;
         self
     }
 
@@ -2456,6 +2464,7 @@ async fn load_session_transcript(
     }
     let loaded = LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
         .with_events(events)
+        .with_todos(context.todos().to_vec())
         .with_main_agent_token_usage(main_agent_token_usage);
     Ok(
         if let Some(title) = session_summary.and_then(|session| session.title) {

@@ -151,6 +151,12 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_main_agent_token_usage(loaded.main_agent_token_usage);
+        self.tui
+            .chrome_mut()
+            .apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
+                turn: 0,
+                todos: loaded.todos.clone(),
+            });
 
         let (cols, rows) = size().unwrap_or((80, 24));
         let neo_home = self.tui.transcript().neo_home().map(ToOwned::to_owned);
