@@ -603,7 +603,7 @@ pub fn format_mcp_status(snapshots: &[McpServerSnapshot]) -> String {
 
 fn format_mcp_diagnostic(diagnostic: &McpDiagnostic, include_hint: bool) -> String {
     fn sanitize_line(value: &str) -> String {
-        neo_tui::utils::shell_output::sanitize_shell_output(value)
+        neo_tui::primitive::strip_ansi(value)
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
