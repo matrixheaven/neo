@@ -5,6 +5,9 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-25 | handoff | docs/aegis/handoffs/2026-07-25-crates-audit-remediation.md | Neo 2026-07-25 Crates Audit Remediation Handoff Prompt |
+| 2026-07-25 | plan | docs/aegis/plans/2026-07-25-crates-audit-remediation.md | Neo 2026-07-25 Crates Audit Remediation Implementation Plan |
+| 2026-07-25 | spec | docs/aegis/specs/2026-07-25-crates-audit-remediation-design.md | Neo 2026-07-25 Crates Audit Remediation Design |
 | 2026-07-24 | spec | docs/aegis/specs/2026-07-24-self-update-and-uninstall-design.md | Neo Self-Update and Uninstall Design |
 | 2026-07-24 | plan | docs/aegis/plans/2026-07-24-self-update-and-uninstall.md | Neo Self-Update and Uninstall Implementation Plan |
 | 2026-07-24 | adr | docs/aegis/adr/ADR-0005-self-update-lifecycle.md | ADR-0005: Self-Update Lifecycle |
