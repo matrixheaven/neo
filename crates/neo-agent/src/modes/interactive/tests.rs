@@ -7965,7 +7965,7 @@ fn replay_preserves_all_unresolved_approval_cards_as_abandoned() {
 }
 
 #[test]
-fn rebuild_transcript_from_session_keeps_context_window_unseeded() {
+fn rebuild_transcript_from_session_keeps_configured_context_window_without_snapshot() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "new",
@@ -8416,6 +8416,15 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
         input_cache_write_tokens: 0,
     });
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
+        .with_events([AgentEvent::ContextWindowUpdated {
+            turn: 1,
+            used_tokens: 152_000,
+            projected_tokens: Some(152_000),
+            max_tokens: Some(262_000),
+            trigger_tokens: Some(209_600),
+            remaining_tokens: Some(110_000),
+            source: Some(neo_agent_core::ContextWindowSource::Configured),
+        }])
         .with_main_agent_token_usage(usage);
 
     controller.rebuild_transcript_from_session(&loaded);
@@ -8427,7 +8436,7 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
         .expect("footer contains context")
         .to_owned();
 
-    assert!(footer.contains("ctx --/512k"));
+    assert!(footer.contains("ctx 152k/262k"));
     assert!(footer.contains("↑33.9k"));
     assert!(footer.contains("↓2.8k"));
     assert!(footer.contains("cache 169.2k read"));

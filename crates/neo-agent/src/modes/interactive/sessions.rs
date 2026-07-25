@@ -151,6 +151,14 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_main_agent_token_usage(loaded.main_agent_token_usage);
+        for event in &loaded.events {
+            if matches!(
+                event,
+                neo_agent_core::AgentEvent::ContextWindowUpdated { .. }
+            ) {
+                self.tui.chrome_mut().apply_agent_event(event.clone());
+            }
+        }
         self.tui
             .chrome_mut()
             .apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
