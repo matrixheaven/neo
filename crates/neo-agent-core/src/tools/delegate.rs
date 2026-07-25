@@ -201,29 +201,49 @@ async fn start_background_delegate(
     let request_for_worker = request.clone();
     let task_id_for_worker = task_id.clone();
     let snapshot_for_worker = snapshot.clone();
+    let agent_id_for_worker = snapshot.id.as_str().to_owned();
     let event_callback = ctx.tool_event.clone();
+    // MultiAgentRuntime owns panic terminalization: supervise the worker
+    // JoinHandle, then mirror the resulting snapshot into BackgroundTaskManager.
     tokio::spawn(async move {
+        let runtime_for_finish = runtime.clone();
         let callback = event_callback.clone();
-        let output = runtime
-            .run_started_child_turn(
-                deps,
-                snapshot_for_worker,
-                request_for_worker.context,
-                move |agent| {
-                    if let Some(callback) = &callback {
-                        callback(AgentEvent::DelegateUpdated { turn, agent });
-                    }
-                },
-            )
-            .await;
+        let runner = tokio::spawn(async move {
+            runtime
+                .run_started_child_turn(
+                    deps,
+                    snapshot_for_worker,
+                    request_for_worker.context,
+                    move |agent| {
+                        if let Some(callback) = &callback {
+                            callback(AgentEvent::DelegateUpdated { turn, agent });
+                        }
+                    },
+                )
+                .await
+        });
+        let finished = match runner.await {
+            Ok(output) => output.snapshot,
+            Err(join_error) if join_error.is_panic() => runtime_for_finish
+                .finish_delegate_worker_panicked(&agent_id_for_worker)
+                .expect("panicked background delegate must exist"),
+            Err(_) => runtime_for_finish
+                .mark_background_terminal_reason(
+                    &crate::multi_agent::AgentId::from_existing(&agent_id_for_worker),
+                    AgentLifecycleState::Failed,
+                    crate::multi_agent::AgentTerminalReason::Error,
+                    Some("worker_task_cancelled".to_owned()),
+                )
+                .expect("cancelled background delegate must exist"),
+        };
         if let Some(callback) = &event_callback {
             callback(AgentEvent::DelegateFinished {
                 turn,
-                agent: output.snapshot.clone(),
+                agent: finished.clone(),
             });
         }
         background_tasks
-            .finish_delegate(&task_id_for_worker, output.snapshot)
+            .finish_delegate(&task_id_for_worker, finished)
             .await;
     });
     ToolResult::ok(format!(
@@ -311,21 +331,46 @@ async fn execute_delegate_swarm(
         let task_id_for_worker = task_id.clone();
         let event_callback = ctx.tool_event.clone();
         let initial_snapshot_for_worker = initial_snapshot.clone();
+        let swarm_id_for_worker = swarm_id.clone();
         tokio::spawn(async move {
-            let output = run_swarm_children(
-                runtime.clone(),
-                deps,
-                initial_snapshot_for_worker,
-                max_concurrency,
-                turn,
-                event_callback,
-                Some((background_tasks.clone(), task_id_for_worker.clone())),
-            )
-            .await;
-            let final_snapshot = output.snapshot;
-            runtime.register_swarm(final_snapshot.clone());
-            background_tasks
-                .finish_delegate_swarm(&task_id_for_worker, final_snapshot)
+            let runtime_for_finish = runtime.clone();
+            let background_for_finish = background_tasks.clone();
+            let task_id_for_finish = task_id_for_worker.clone();
+            let runner = tokio::spawn({
+                let runtime = runtime.clone();
+                let background_tasks = background_tasks.clone();
+                let task_id_for_worker = task_id_for_worker.clone();
+                async move {
+                    run_swarm_children(
+                        runtime,
+                        deps,
+                        initial_snapshot_for_worker,
+                        max_concurrency,
+                        turn,
+                        event_callback,
+                        Some((background_tasks, task_id_for_worker)),
+                    )
+                    .await
+                }
+            });
+            let final_snapshot = match runner.await {
+                Ok(output) => {
+                    let final_snapshot = output.snapshot;
+                    runtime_for_finish.register_swarm(final_snapshot.clone());
+                    final_snapshot
+                }
+                Err(join_error) if join_error.is_panic() => runtime_for_finish
+                    .finish_delegate_swarm_worker_panicked(&swarm_id_for_worker)
+                    .expect("panicked background swarm must exist"),
+                Err(_) => runtime_for_finish
+                    .finish_delegate_swarm_worker_failed(
+                        &swarm_id_for_worker,
+                        "worker_task_cancelled",
+                    )
+                    .expect("cancelled background swarm must exist"),
+            };
+            background_for_finish
+                .finish_delegate_swarm(&task_id_for_finish, final_snapshot)
                 .await;
         });
         return Ok(ToolResult::ok(format!(

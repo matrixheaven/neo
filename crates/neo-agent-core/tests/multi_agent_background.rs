@@ -1841,3 +1841,232 @@ async fn interrupt_delegate_stops_running_swarm_children() {
         waited.content
     );
 }
+
+fn normal_turn_events() -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_panic_test".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "working".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    ]
+}
+
+/// Panic on the first live progress event so the panic lands on the
+/// supervised background worker task (not the fire-and-forget model turn
+/// task nested inside AgentRuntime).
+fn panic_on_worker_progress() -> Arc<dyn Fn(AgentEvent) + Send + Sync> {
+    Arc::new(move |event: AgentEvent| match event {
+        AgentEvent::DelegateUpdated { .. }
+        | AgentEvent::DelegateSwarmUpdated { .. }
+        | AgentEvent::DelegateSwarmProgressUpdated { .. } => {
+            panic!("delegate worker test panic");
+        }
+        _ => {}
+    })
+}
+
+fn progress_panic_context() -> ToolContext {
+    let harness = FakeHarness::from_turns((0..16).map(|_| normal_turn_events()));
+    let dir = tempfile::tempdir().unwrap();
+    ToolContext::new(dir.path())
+        .unwrap()
+        .with_access(ToolAccess::all())
+        .with_child_runtime(
+            AgentConfig::for_model(harness.model())
+                .with_permission_mode(PermissionMode::Yolo)
+                .with_tool_execution_mode(ToolExecutionMode::Sequential),
+            harness.client(),
+            Arc::new(ToolRegistry::new()),
+            1,
+        )
+        .with_tool_event(panic_on_worker_progress())
+}
+
+#[tokio::test]
+async fn background_worker_panics_terminalize_delegate_and_swarm() {
+    let registry = ToolRegistry::with_builtin_tools();
+
+    // --- single background Delegate ---
+    let ctx = progress_panic_context();
+    let started = registry
+        .run(
+            "Delegate",
+            &ctx,
+            json!({
+                "task": "will panic on progress",
+                "mode": "background",
+            }),
+        )
+        .await
+        .expect("background delegate should start");
+    let agent_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("delegate agent id")
+        .to_owned();
+
+    let waited = registry
+        .run(
+            "WaitDelegate",
+            &ctx,
+            json!({ "ids": [agent_id.clone()], "timeout_ms": 5_000 }),
+        )
+        .await
+        .expect("WaitDelegate should resolve after panic terminalization");
+    assert!(
+        waited.content.contains("status: failed"),
+        "delegate wait content: {}",
+        waited.content
+    );
+
+    let runtime_snapshot = ctx
+        .multi_agent
+        .agent_snapshot(&agent_id)
+        .expect("canonical runtime snapshot");
+    assert_eq!(runtime_snapshot.state, AgentLifecycleState::Failed);
+    assert_eq!(
+        runtime_snapshot.terminal_reason,
+        Some(AgentTerminalReason::Error)
+    );
+    assert_eq!(
+        runtime_snapshot
+            .outcome
+            .as_ref()
+            .map(|outcome| outcome.summary.as_str()),
+        Some("worker_panicked")
+    );
+
+    let bg = ctx
+        .background_tasks
+        .snapshot(&agent_id)
+        .await
+        .expect("background manager must mirror runtime");
+    assert_eq!(bg.status.as_str(), "failed");
+    let bg_agent = bg.delegate.expect("delegate snapshot on background task");
+    assert_eq!(bg_agent.state, AgentLifecycleState::Failed);
+    assert_eq!(
+        bg_agent
+            .outcome
+            .as_ref()
+            .map(|outcome| outcome.summary.as_str()),
+        Some("worker_panicked")
+    );
+
+    let output = registry
+        .run("TaskOutput", &ctx, json!({ "task_id": agent_id }))
+        .await
+        .expect("TaskOutput should read mirrored failed snapshot");
+    assert!(
+        output.content.contains("failed") || output.content.contains("worker_panicked"),
+        "TaskOutput content: {}",
+        output.content
+    );
+
+    // --- background DelegateSwarm with multiple children ---
+    let ctx = progress_panic_context();
+    let started = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            json!({
+                "description": "panic swarm",
+                "items": [
+                    {"title": "child-a", "value": "a"},
+                    {"title": "child-b", "value": "b"},
+                ],
+                "prompt_template": "Process {{item}}",
+                "mode": "background",
+                "max_concurrency": 2
+            }),
+        )
+        .await
+        .expect("background swarm should start");
+    let swarm_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details.get("task_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("swarm task id")
+        .to_owned();
+
+    let waited = registry
+        .run(
+            "WaitDelegate",
+            &ctx,
+            json!({ "ids": [swarm_id.clone()], "timeout_ms": 5_000 }),
+        )
+        .await
+        .expect("WaitDelegate should resolve after swarm panic terminalization");
+    assert!(
+        waited.content.contains("status: failed"),
+        "swarm wait content: {}",
+        waited.content
+    );
+
+    let swarm = ctx
+        .multi_agent
+        .swarm_snapshot(&swarm_id)
+        .expect("canonical swarm snapshot");
+    assert_eq!(swarm.state, AgentLifecycleState::Failed);
+    assert!(
+        swarm
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal()),
+        "every swarm child must be terminal after worker panic: {swarm:#?}"
+    );
+    assert!(
+        swarm.children.iter().all(|child| !matches!(
+            child.agent.state,
+            AgentLifecycleState::Running | AgentLifecycleState::Queued
+        )),
+        "no swarm child may remain Running/Queued: {swarm:#?}"
+    );
+    assert!(
+        swarm.children.iter().any(|child| {
+            child.agent.state == AgentLifecycleState::Failed
+                && child
+                    .agent
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.summary == "worker_panicked")
+        }),
+        "at least one child must carry worker_panicked: {swarm:#?}"
+    );
+    for child in &swarm.children {
+        let agent = ctx
+            .multi_agent
+            .agent_snapshot(child.agent.id.as_str())
+            .expect("child agent in runtime");
+        assert!(
+            agent.state.is_terminal(),
+            "runtime child {} still {:?}",
+            child.agent.id.as_str(),
+            agent.state
+        );
+    }
+
+    let bg = ctx
+        .background_tasks
+        .snapshot(&swarm_id)
+        .await
+        .expect("background manager must mirror swarm");
+    assert_eq!(bg.status.as_str(), "failed");
+    let bg_swarm = bg.swarm.expect("swarm snapshot on background task");
+    assert_eq!(bg_swarm.state, AgentLifecycleState::Failed);
+    assert!(
+        bg_swarm
+            .children
+            .iter()
+            .all(|child| child.agent.state.is_terminal()),
+        "background swarm mirror must terminalize children: {bg_swarm:#?}"
+    );
+}

@@ -383,6 +383,88 @@ impl MultiAgentRuntime {
         Some(snapshot.clone())
     }
 
+    /// Terminalize a panicking background delegate worker as Failed/`worker_panicked`.
+    ///
+    /// `MultiAgentRuntime` owns panic terminalization; callers (background
+    /// adapters) only mirror the resulting snapshot.
+    #[must_use]
+    pub fn finish_delegate_worker_panicked(&self, agent_id: &str) -> Option<AgentSnapshot> {
+        self.mark_background_terminal_reason(
+            &AgentId::from_existing(agent_id),
+            AgentLifecycleState::Failed,
+            AgentTerminalReason::Error,
+            Some("worker_panicked".to_owned()),
+        )
+    }
+
+    /// Terminalize a panicking background swarm worker: fail every
+    /// queued/running child with `worker_panicked`, then register the final
+    /// Failed swarm snapshot so no child remains Running without a worker.
+    #[must_use]
+    pub fn finish_delegate_swarm_worker_panicked(
+        &self,
+        swarm_id: &str,
+    ) -> Option<super::SwarmSnapshot> {
+        self.finish_delegate_swarm_worker_failed(swarm_id, "worker_panicked")
+    }
+
+    /// Fail every non-terminal child of a swarm and register the final snapshot.
+    pub(crate) fn finish_delegate_swarm_worker_failed(
+        &self,
+        swarm_id: &str,
+        reason: &str,
+    ) -> Option<super::SwarmSnapshot> {
+        let reason_text = reason.to_owned();
+        let (snapshot, tokens) = {
+            let mut state = self.state.lock().expect("multi-agent state poisoned");
+            let Some(existing) = state.swarms.get(swarm_id) else {
+                return None;
+            };
+            let mut snapshot = project_swarm_from_agents(&state, existing);
+            let pending_ids: Vec<String> = snapshot
+                .children
+                .iter()
+                .filter(|child| !child.agent.state.is_terminal())
+                .map(|child| child.agent.id.as_str().to_owned())
+                .collect();
+            let now = now_ms();
+            for agent_id in &pending_ids {
+                if let Some(agent) = state.agents.get_mut(agent_id) {
+                    if agent.state.is_terminal() {
+                        continue;
+                    }
+                    agent.state = AgentLifecycleState::Failed;
+                    agent.terminal_at_ms.get_or_insert(now);
+                    agent.updated_at_ms = now;
+                    agent.terminal_reason = Some(AgentTerminalReason::Error);
+                    agent.latest_text = Some(bounded_latest_text(&reason_text));
+                    agent.outcome = Some(AgentTerminalOutcome {
+                        summary: bounded_latest_text(&reason_text),
+                        is_error: true,
+                    });
+                }
+            }
+            sync_swarm_children_from_agents(&state, &mut snapshot);
+            refresh_swarm(&mut snapshot);
+            let tokens = pending_ids
+                .iter()
+                .filter_map(|id| {
+                    state
+                        .agent_cancel_tokens
+                        .get(id)
+                        .map(|entry| entry.token.clone())
+                })
+                .collect::<Vec<_>>();
+            state.register_swarm_order(swarm_id);
+            state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
+            (snapshot, tokens)
+        };
+        for token in tokens {
+            token.cancel();
+        }
+        Some(snapshot)
+    }
+
     fn update_terminal_delegate(
         &self,
         id: &AgentId,
