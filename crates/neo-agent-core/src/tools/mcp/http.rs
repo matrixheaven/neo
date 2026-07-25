@@ -264,38 +264,50 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
     )))
 }
 
+const HTTP_NEEDS_AUTH_MESSAGE: &str =
+    "Server requires OAuth authorization. Run /mcp-config login <server_id> to authenticate.";
+
+/// Map typed rmcp HTTP/OAuth auth-required sources to [`McpErrorKind::NeedsAuth`].
+///
+/// Classification is structural only: HTTP status/auth variants and OAuth token
+/// refresh/auth-required results. Error text is presentation-only and never
+/// consulted for kind selection.
+fn streamable_http_needs_auth(err: &StreamableHttpError<OAuthHttpError>) -> bool {
+    match err {
+        StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_) => true,
+        StreamableHttpError::Client(OAuthHttpError::NeedsAuth(_)) => true,
+        StreamableHttpError::Auth(auth) => matches!(
+            auth,
+            rmcp::transport::AuthError::AuthorizationRequired
+                | rmcp::transport::AuthError::TokenExpired
+                | rmcp::transport::AuthError::InsufficientScope { .. }
+        ),
+        _ => false,
+    }
+}
+
 /// Convert rmcp initialization errors into user-friendly messages.
 ///
-/// rmcp's raw error `Display` output is verbose and leaks internal type names
-/// (`StreamableHttpError`, `AuthRequiredError`, etc.) which are confusing in
-/// the TUI.  This helper detects common failure patterns and returns a clear,
-/// actionable message instead.
+/// Auth classification uses typed transport errors only. Display text remains
+/// presentation-only so protocol/network failures that mention "401" stay
+/// [`McpErrorKind::Protocol`].
 #[allow(clippy::needless_pass_by_value)]
 fn friendly_http_init_error(err: rmcp::service::ClientInitializeError) -> McpError {
-    let display = err.to_string();
-
-    // OAuth required — the most common case for remote MCP servers.
-    if display.contains("AuthRequired")
-        || display.contains("AuthRequiredError")
-        || display.contains("Auth required")
-        || display.contains("auth_required")
-        || display.contains("401")
-        || display.contains("Unauthorized")
+    if let rmcp::service::ClientInitializeError::TransportError { error, .. } = &err
+        && let Some(http_err) = error
+            .error
+            .downcast_ref::<StreamableHttpError<OAuthHttpError>>()
+        && streamable_http_needs_auth(http_err)
     {
-        return McpError::needs_auth(
-            "Server requires OAuth authorization. Run /mcp-config login <server_id> to authenticate.",
-        );
+        return McpError::needs_auth(HTTP_NEEDS_AUTH_MESSAGE);
     }
 
-    // Connection refused / unreachable host.
-    if display.contains("ConnectionClosed") || display.contains("connection closed") {
-        return McpError::protocol(format!(
-            "Could not connect to MCP server. Check that the URL is reachable. ({display})"
-        ));
+    match err {
+        rmcp::service::ClientInitializeError::ConnectionClosed(msg) => McpError::protocol(format!(
+            "Could not connect to MCP server. Check that the URL is reachable. ({msg})"
+        )),
+        other => McpError::protocol(other.to_string()),
     }
-
-    // Fallback: include the raw error for less common failures.
-    McpError::protocol(display)
 }
 
 #[cfg(test)]
@@ -347,27 +359,44 @@ mod tests {
     }
 
     #[test]
-    fn friendly_http_init_error_maps_auth_required_to_needs_auth() {
-        let err = friendly_http_init_error(rmcp::service::ClientInitializeError::ConnectionClosed(
-            "AuthRequiredError: auth_required 401 Unauthorized".to_owned(),
-        ));
+    fn typed_http_auth_error_maps_to_needs_auth_without_text_matching() {
+        use rmcp::{
+            service::ClientInitializeError,
+            transport::{DynamicTransportError, streamable_http_client::AuthRequiredError},
+        };
+
+        let transport_err = StreamableHttpError::<OAuthHttpError>::AuthRequired(
+            AuthRequiredError::new(String::new()),
+        );
+        let init_err = ClientInitializeError::TransportError {
+            error: DynamicTransportError::from_parts(
+                "test-http-transport",
+                std::any::TypeId::of::<()>(),
+                Box::new(transport_err),
+            ),
+            context: "send initialize request".into(),
+        };
+
+        let err = friendly_http_init_error(init_err);
 
         assert_eq!(err.kind(), McpErrorKind::NeedsAuth);
         assert!(err.is_needs_auth());
-        assert_eq!(
-            err.message(),
-            "Server requires OAuth authorization. Run /mcp-config login <server_id> to authenticate."
-        );
+        assert_eq!(err.message(), HTTP_NEEDS_AUTH_MESSAGE);
+        // Presentation text is not the classifier: empty WWW-Authenticate still maps.
+        assert!(!err.message().contains("401"));
+        assert!(!err.message().contains("Unauthorized"));
     }
 
     #[test]
-    fn friendly_http_init_error_maps_rmcp_auth_required_text_to_needs_auth() {
+    fn ordinary_error_text_containing_401_remains_protocol() {
         let err = friendly_http_init_error(rmcp::service::ClientInitializeError::ConnectionClosed(
-            "Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<neo_agent_core::tools::mcp::http::OAuthStreamableHttpClient>>] error: Auth required, when send initialize request".to_owned(),
+            "upstream proxy returned 401 Unauthorized while tunnel setup failed".to_owned(),
         ));
 
-        assert_eq!(err.kind(), McpErrorKind::NeedsAuth);
-        assert!(err.is_needs_auth());
+        assert_eq!(err.kind(), McpErrorKind::Protocol);
+        assert!(!err.is_needs_auth());
+        assert!(err.message().contains("401"));
+        assert!(err.message().contains("Unauthorized"));
     }
 
     #[test]

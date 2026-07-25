@@ -1145,7 +1145,7 @@ fn oauth_identity_for_config(
 
 fn diagnostic_from_error(error: &McpError, config: &ManagedMcpServerConfig) -> McpDiagnostic {
     let message = error.message().to_owned();
-    let hint = diagnostic_hint(&message, config);
+    let hint = diagnostic_hint(error, config);
     McpDiagnostic {
         server_id: config.id.clone(),
         transport: config.transport.label().to_owned(),
@@ -1157,14 +1157,11 @@ fn diagnostic_from_error(error: &McpError, config: &ManagedMcpServerConfig) -> M
     }
 }
 
-fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<String> {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("authrequired")
-        || lower.contains("auth required")
-        || lower.contains("401")
-        || lower.contains("unauthorized")
-        || lower.contains("invalid_token")
-    {
+/// Build a presentation hint from the typed error kind (auth) and residual
+/// protocol diagnostics (start failure / timeout). Auth phrases in the message
+/// body never select the auth hint.
+fn diagnostic_hint(error: &McpError, config: &ManagedMcpServerConfig) -> Option<String> {
+    if error.is_needs_auth() {
         if matches!(
             config.transport,
             ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }
@@ -1176,6 +1173,8 @@ fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<Str
         }
         return Some("Check remote MCP authorization headers or disable this server.".to_owned());
     }
+
+    let lower = error.message().to_ascii_lowercase();
     if matches!(config.transport, ManagedMcpTransport::Stdio { .. })
         && lower.contains("failed to start")
     {
@@ -1642,11 +1641,21 @@ mod tests {
     #[test]
     fn diagnostic_hint_for_http_auth_mentions_login_command() {
         let config = http_server("remote-auth");
+        // Kind drives the hint; presentation text (even with "401") is ignored.
+        let err = McpError::needs_auth("presentation only: 401 Unauthorized");
 
-        let hint = diagnostic_hint("OAuth required: missing token", &config).unwrap();
+        let hint = diagnostic_hint(&err, &config).unwrap();
 
         assert!(hint.contains("/mcp-config login <server_id>"));
         assert!(hint.contains("neo mcp auth <server_id>"));
+    }
+
+    #[test]
+    fn diagnostic_hint_ignores_auth_phrases_in_protocol_message() {
+        let config = http_server("remote-auth");
+        let err = McpError::protocol("upstream proxy returned 401 Unauthorized");
+
+        assert!(diagnostic_hint(&err, &config).is_none());
     }
 
     #[test]
