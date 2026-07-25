@@ -234,9 +234,9 @@ mod tests {
     #[test]
     fn launch_barrier_disables_msys_switch_and_command_extensions() {
         let temp = tempfile::tempdir().unwrap();
-        let barrier = WindowsLaunchBarrier::new(temp.path());
+        let _barrier = WindowsLaunchBarrier::new(temp.path());
 
-        let command = barrier.wait_command();
+        let command = WindowsLaunchBarrier::wait_command();
         assert!(command.contains("cmd.exe //d"));
         assert!(command.contains("//e:off"));
         assert!(command.contains("//c"));
