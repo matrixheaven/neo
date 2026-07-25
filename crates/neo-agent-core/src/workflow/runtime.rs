@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::error::WorkflowError;
@@ -16,8 +17,8 @@ use super::journal::{
 };
 use super::limits::WorkflowLimits;
 use super::state::{
-    WorkflowActor, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowPhase,
-    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
+    WorkflowActor, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowOutcomeStatus, WorkflowPhase, WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
 use crate::AgentTokenUsage;
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
@@ -109,6 +110,8 @@ struct RunState {
     run_dir: PathBuf,
     control: Arc<RunControl>,
     worker_active: bool,
+    /// Supervisor task that awaits the runner `JoinHandle` and terminalizes panics.
+    worker_join: Option<JoinHandle<()>>,
     current_invocation: Option<String>,
     replay_entries: Vec<ReplayEntry>,
     replay_cursor: usize,
@@ -361,6 +364,7 @@ impl WorkflowRuntime {
             run_dir,
             control: Arc::clone(&control),
             worker_active: false,
+            worker_join: None,
             current_invocation: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,
@@ -465,10 +469,32 @@ impl WorkflowRuntime {
         };
         let runtime = self.clone();
         let id = run_id.clone();
-        tokio::spawn(async move {
-            let result = runner(handle, metadata, session_dir).await;
-            let _ = runtime.finish_worker(&id, result).await;
+        let runner_task: JoinHandle<Result<(), WorkflowError>> =
+            tokio::spawn(async move { runner(handle, metadata, session_dir).await });
+        let supervisor = tokio::spawn(async move {
+            match runner_task.await {
+                Ok(result) => {
+                    let _ = runtime.finish_worker(&id, result).await;
+                }
+                Err(join_error) if join_error.is_panic() => {
+                    let _ = runtime.finish_worker_panicked(&id).await;
+                }
+                Err(_) => {
+                    let _ = runtime
+                        .finish_worker(
+                            &id,
+                            Err(WorkflowError::Host(
+                                "workflow worker task cancelled".to_owned(),
+                            )),
+                        )
+                        .await;
+                }
+            }
         });
+        {
+            let mut guard = state.lock().await;
+            guard.worker_join = Some(supervisor);
+        }
         Ok(())
     }
 
@@ -1012,6 +1038,7 @@ impl WorkflowRuntime {
         let state = self.run_state(run_id).await?;
         let mut guard = state.lock().await;
         guard.worker_active = false;
+        guard.worker_join = None;
         if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
             return Ok(());
         }
@@ -1063,8 +1090,85 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    /// Terminalize a panicking worker: durable interrupted outcome first, then Failed.
+    async fn finish_worker_panicked(&self, run_id: &WorkflowId) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let mut guard = state.lock().await;
+        guard.worker_active = false;
+        guard.worker_join = None;
+        if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
+            return Ok(());
+        }
+
+        if let Some(invocation_id) = guard.current_invocation.clone() {
+            let outcome = WorkflowInvocationOutcome {
+                ok: false,
+                status: WorkflowOutcomeStatus::Interrupted,
+                summary: "workflow worker panicked".to_owned(),
+                interruption: None,
+                details: serde_json::json!({"reason": "worker_panicked"}),
+                actual_usage: None,
+                child_refs: Vec::new(),
+            };
+            let timestamp_ms = current_timestamp_ms();
+            let append_result = {
+                let writer = match guard.journal.as_mut() {
+                    Some(writer) => writer,
+                    None => {
+                        self.mark_recovery_failure_locked(
+                            &mut guard,
+                            "workflow worker panicked with unavailable journal",
+                        );
+                        return Ok(());
+                    }
+                };
+                writer.append(
+                    &JournalRecord::InvocationFinished {
+                        seq: writer.next_seq(),
+                        timestamp_ms,
+                        invocation_id,
+                        outcome,
+                    },
+                    &self.limits,
+                )
+            };
+            match append_result {
+                Ok(sequence) => {
+                    // Invocation outcome must be durable before workflow terminalization.
+                    guard.current_invocation = None;
+                    guard.failure_count = guard.failure_count.saturating_add(1);
+                    guard.projection_sequence = Some(sequence);
+                    guard.updated_at_ms = Some(timestamp_ms);
+                    self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+                }
+                Err(error) => {
+                    self.mark_recovery_failure_locked(
+                        &mut guard,
+                        &format!("workflow worker panic invocation finalization failed: {error}"),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let completion = self.transition_locked(
+            &mut guard,
+            WorkflowState::Failed,
+            "worker_panicked",
+            WorkflowActor::Runtime,
+        );
+        if let Err(error) = completion {
+            self.mark_recovery_failure_locked(
+                &mut guard,
+                &format!("workflow worker panic finalization failed: {error}"),
+            );
+        }
+        Ok(())
+    }
+
     fn mark_recovery_failure_locked(&self, state: &mut RunState, reason: &str) {
         state.worker_active = false;
+        state.worker_join = None;
         state.current_invocation = None;
         state.state = WorkflowState::Failed;
         state.failure_count = state.failure_count.saturating_add(1);
@@ -1225,6 +1329,7 @@ impl WorkflowRuntime {
             run_dir,
             control: Arc::clone(&control),
             worker_active: false,
+            worker_join: None,
             current_invocation: None,
             replay_entries,
             replay_cursor: 0,
@@ -1289,6 +1394,7 @@ impl WorkflowRuntime {
             run_dir,
             control: Arc::clone(&control),
             worker_active: false,
+            worker_join: None,
             current_invocation: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,

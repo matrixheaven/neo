@@ -998,3 +998,108 @@ async fn token_cap_uses_actual_usage_and_blocks_only_next_provider_call() {
         3
     );
 }
+
+#[tokio::test]
+async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let in_effect = Arc::new(Notify::new());
+    runtime
+        .bind_runner({
+            let in_effect = Arc::clone(&in_effect);
+            move |handle, _metadata, _session_dir| {
+                let in_effect = Arc::clone(&in_effect);
+                async move {
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "boom"}),
+                            true,
+                            move |_| {
+                                let in_effect = Arc::clone(&in_effect);
+                                async move {
+                                    in_effect.notify_waiters();
+                                    panic!("workflow worker test panic");
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+
+    let handle = create_run(&runtime, dir.path()).await;
+    let path = journal_path(dir.path(), &handle.run_id);
+    runtime.start_worker(&handle.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), in_effect.notified())
+        .await
+        .expect("effect started");
+    wait_for_state(&handle, WorkflowState::Failed).await;
+
+    let snapshot = handle.snapshot().await;
+    assert!(!snapshot.recovery_failure);
+    assert_eq!(snapshot.state, WorkflowState::Failed);
+    assert_eq!(snapshot.terminal_reason.as_deref(), Some("worker_panicked"));
+
+    let records = read_journal(&path).unwrap();
+    let finished_idx = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                JournalRecord::InvocationFinished {
+                    outcome: WorkflowInvocationOutcome {
+                        status: WorkflowOutcomeStatus::Interrupted,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .expect("interrupted invocation outcome");
+    let failed_idx = records
+        .iter()
+        .position(|record| {
+            matches!(
+                record,
+                JournalRecord::StateChanged {
+                    new: WorkflowState::Failed,
+                    reason,
+                    ..
+                } if reason == "worker_panicked"
+            )
+        })
+        .expect("failed state after worker panic");
+    assert!(
+        finished_idx < failed_idx,
+        "invocation outcome must be durable before workflow terminalization"
+    );
+
+    match &records[finished_idx] {
+        JournalRecord::InvocationFinished { outcome, .. } => {
+            assert!(!outcome.ok);
+            assert_eq!(outcome.status, WorkflowOutcomeStatus::Interrupted);
+            assert_eq!(
+                outcome.details.get("reason").and_then(|v| v.as_str()),
+                Some("worker_panicked")
+            );
+        }
+        other => panic!("expected InvocationFinished, got {other:?}"),
+    }
+
+    // No open invocation remains after panic supervision.
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        JournalRecord::InvocationStarted { invocation_id, .. }
+            if !records.iter().any(|finish| matches!(
+                finish,
+                JournalRecord::InvocationFinished {
+                    invocation_id: finished_id,
+                    ..
+                } if finished_id == invocation_id
+            ))
+    )));
+}
