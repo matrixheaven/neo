@@ -138,9 +138,32 @@ impl JsonlSessionWriter {
     }
 }
 
-async fn acquire_session_lock(path: &Path) -> Result<fs::File, SessionError> {
+fn session_lock_sidecar_path(path: &Path) -> PathBuf {
     let mut lock_path = path.as_os_str().to_owned();
     lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn try_acquire_lock_file(lock_path: &Path) -> Result<fs::File, SessionError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(SESSION_LOCK_RETRY_DELAY);
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(SessionError::Io(error)),
+        }
+    }
+}
+
+async fn acquire_session_lock(path: &Path) -> Result<fs::File, SessionError> {
+    let lock_path = session_lock_sidecar_path(path);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -459,13 +482,14 @@ impl SessionMetadataStore {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
-        let mut metadata = self.read_metadata()?;
-        metadata
-            .sessions
-            .entry(session_id.to_owned())
-            .or_default()
-            .name = Some(name);
-        self.write_metadata(&metadata)?;
+        self.mutate_metadata(|metadata| {
+            metadata
+                .sessions
+                .entry(session_id.to_owned())
+                .or_default()
+                .name = Some(name);
+            Ok(())
+        })?;
 
         Ok(self
             .list()?
@@ -498,11 +522,12 @@ impl SessionMetadataStore {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
-        let mut metadata = self.read_metadata()?;
-        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
-        stored.summary = Some(summary.text.clone());
-        stored.summary_record = Some(summary);
-        self.write_metadata(&metadata)?;
+        self.mutate_metadata(|metadata| {
+            let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+            stored.summary = Some(summary.text.clone());
+            stored.summary_record = Some(summary);
+            Ok(())
+        })?;
 
         Ok(self
             .list()?
@@ -521,12 +546,13 @@ impl SessionMetadataStore {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
-        let mut metadata = self.read_metadata()?;
-        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
-        stored.workspace = workspace;
-        stored.last_user_prompt = last_user_prompt;
-        stored.updated_at = Some(updated_at);
-        self.write_metadata(&metadata)?;
+        self.mutate_metadata(|metadata| {
+            let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+            stored.workspace = workspace;
+            stored.last_user_prompt = last_user_prompt;
+            stored.updated_at = Some(updated_at);
+            Ok(())
+        })?;
 
         Ok(self
             .list()?
@@ -545,19 +571,15 @@ impl SessionMetadataStore {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
-        let mut metadata = self.read_metadata()?;
-        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
-        if stored.name.is_some() {
-            return Ok(self
-                .list()?
-                .into_iter()
-                .find(|session| session.id == session_id)
-                .expect("named session should be listable"));
-        }
-        stored.title = Some(title);
-        stored.title_model = model;
-        stored.title_updated_at = Some(updated_at);
-        self.write_metadata(&metadata)?;
+        self.mutate_metadata(|metadata| {
+            let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+            if stored.name.is_none() {
+                stored.title = Some(title);
+                stored.title_model = model;
+                stored.title_updated_at = Some(updated_at);
+            }
+            Ok(())
+        })?;
 
         Ok(self
             .list()?
@@ -575,6 +597,10 @@ impl SessionMetadataStore {
         self.ensure_session_exists(parent_id)?;
         ensure_safe_directory_tree(&self.sessions_dir)?;
 
+        // Hold the stable metadata sidecar lock across ID allocation, directory
+        // publication, metadata commit, and failure rollback.
+        let _lock = self.acquire_metadata_lock()?;
+
         let child_id = self.next_child_id()?;
         let parent_dir = self.session_dir(parent_id);
         let child_dir = self.session_dir(&child_id);
@@ -590,6 +616,26 @@ impl SessionMetadataStore {
         result
     }
 
+    /// Sole internal metadata read-modify-write. Locks a stable sibling sidecar
+    /// (never the replaced metadata file), rereads, mutates, then atomically
+    /// replaces. On mutation/write failure the previous metadata remains intact.
+    fn mutate_metadata<T>(
+        &self,
+        mutate: impl FnOnce(&mut SessionMetadataFile) -> Result<T, SessionError>,
+    ) -> Result<T, SessionError> {
+        let _lock = self.acquire_metadata_lock()?;
+        let mut metadata = self.read_metadata()?;
+        let value = mutate(&mut metadata)?;
+        self.write_metadata(&metadata)?;
+        Ok(value)
+    }
+
+    fn acquire_metadata_lock(&self) -> Result<fs::File, SessionError> {
+        ensure_safe_directory_tree(&self.sessions_dir)?;
+        try_acquire_lock_file(&session_lock_sidecar_path(&self.metadata_path()))
+    }
+
+    /// Caller must hold [`Self::acquire_metadata_lock`].
     fn record_fork_metadata(
         &self,
         parent_id: &str,
@@ -1038,4 +1084,113 @@ fn one_line_message_text(message: &AgentMessage) -> String {
         .collect::<Vec<_>>()
         .join("");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const SESSION_ID: &str = "session_00000000-0000-4000-8000-000000000301";
+
+    fn write_session_transcript(dir: &Path, session_id: &str) {
+        let session_dir = dir.join(session_id);
+        let wire_path = main_agent_wire_path(&session_dir);
+        fs::create_dir_all(wire_path.parent().expect("wire parent")).expect("create session dir");
+        fs::write(
+            wire_path, "{}
+",
+        )
+        .expect("write transcript");
+    }
+
+    #[test]
+    fn metadata_mutation_sidecar_serializes_and_preserves_previous_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path();
+        write_session_transcript(sessions_dir, SESSION_ID);
+
+        let store = SessionMetadataStore::new(sessions_dir);
+        store
+            .rename(SESSION_ID, "before".to_owned())
+            .expect("seed rename");
+
+        let metadata_path = store.metadata_path();
+        let sidecar_path = session_lock_sidecar_path(&metadata_path);
+        assert_ne!(
+            sidecar_path, metadata_path,
+            "lock must be a sibling sidecar, never the metadata file"
+        );
+        assert!(
+            sidecar_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(".lock")),
+            "sidecar lock path should end with .lock"
+        );
+
+        let previous = fs::read_to_string(&metadata_path).expect("read previous metadata");
+        let failed: Result<(), SessionError> = store.mutate_metadata(|_metadata| {
+            Err(SessionError::MissingSession("inject-failure".to_owned()))
+        });
+        assert!(failed.is_err(), "injected mutation failure should surface");
+        let after_failure = fs::read_to_string(&metadata_path).expect("read after failure");
+        assert_eq!(
+            previous, after_failure,
+            "failed mutate_metadata must preserve the previous metadata file"
+        );
+
+        let barrier = Arc::new(Barrier::new(2));
+        let held = store.acquire_metadata_lock().expect("hold sidecar lock");
+        assert!(
+            sidecar_path.is_file(),
+            "acquiring the lock should create the stable sidecar file"
+        );
+
+        let store_for_thread = SessionMetadataStore::new(sessions_dir);
+        let barrier_for_thread = Arc::clone(&barrier);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            barrier_for_thread.wait();
+            let rename_started = Instant::now();
+            let result = store_for_thread.rename(SESSION_ID, "after".to_owned());
+            (result, rename_started.elapsed())
+        });
+
+        barrier.wait();
+        thread::sleep(Duration::from_millis(80));
+        let during_hold = fs::read_to_string(&metadata_path).expect("read while locked");
+        assert!(
+            during_hold.contains("before"),
+            "blocked mutator must not publish while the sidecar lock is held"
+        );
+        assert!(
+            !during_hold.contains("after"),
+            "blocked mutator must not publish while the sidecar lock is held"
+        );
+        drop(held);
+
+        let (result, blocked_for) = worker.join().expect("join worker");
+        result.expect("serialized rename should succeed after unlock");
+        assert!(
+            blocked_for >= Duration::from_millis(40),
+            "rename should block on the held sidecar lock, waited {blocked_for:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "overall serialization window should cover the held lock"
+        );
+
+        let final_content = fs::read_to_string(&metadata_path).expect("read final metadata");
+        assert!(
+            final_content.contains("after"),
+            "serialized rename should publish after the lock is released"
+        );
+        assert!(
+            sidecar_path.is_file(),
+            "stable sidecar must remain across metadata atomic replacement"
+        );
+    }
 }
