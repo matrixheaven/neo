@@ -343,9 +343,9 @@ impl ToolCallComponent {
             );
             let elapsed = started_at.elapsed().as_secs();
             let chip = format!(
-                " · ~{} tok · {}m",
+                " · ~{} tok · {}",
                 crate::transcript::tool_renderers::format_tool_token_count(tokens),
-                elapsed
+                format_elapsed(elapsed)
             );
             header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));
         }
@@ -421,4 +421,29 @@ fn wrap_live_rows(lines: &[String], width: usize, style: Style) -> Vec<Line> {
                 .map(move |segment| Line::styled(format!("{PREFIX}{segment}"), style))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn file_write_streaming_chip_formats_elapsed_seconds() {
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: "edit-1".to_owned(),
+            name: "Edit".to_owned(),
+            arguments: Some("{}".to_owned()),
+            result: None,
+            details: None,
+            status: ToolStatusKind::Running,
+            exit_code: None,
+        });
+        component.streaming_started_at = Some(Instant::now() - Duration::from_secs(65));
+
+        let header = component.render(120)[0].text();
+
+        assert!(header.contains("~0 tok · 1m 5s"), "{header}");
+    }
 }
