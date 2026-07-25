@@ -210,7 +210,10 @@ impl NeoTui {
                 cursor,
                 true,
                 next_animation_deadline,
-            );
+            )
+            // Alternate screens have no native scrollback. Keep capture enabled
+            // so wheel events reach the transcript viewport instead of disappearing.
+            .with_mouse_capture(true);
         }
 
         if let Some(viewport) = self.automatic_overflow.as_mut() {
@@ -229,7 +232,10 @@ impl NeoTui {
                 cursor,
                 true,
                 next_animation_deadline,
-            );
+            )
+            // Automatic overflow uses the same alternate-screen viewport as review.
+            // Without capture, the terminal consumes the wheel but cannot scroll it.
+            .with_mouse_capture(true);
         }
 
         for block in &mut update.history {

@@ -110,6 +110,7 @@ fn transcript_browser_frame_is_bounded_and_marked_review_surface() {
     let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
 
     assert!(frame.review_surface);
+    assert!(frame.mouse_capture);
     assert!(frame.history.is_empty());
     assert!(frame.live.len() <= 12);
 }
@@ -317,6 +318,7 @@ fn automatic_transcript_overflow_is_bounded_and_preserves_source_and_chrome() {
 
     assert!(tui.automatic_overflow_active());
     assert!(frame.review_surface);
+    assert!(frame.mouse_capture);
     assert!(frame.history.is_empty());
     assert!(frame.live.len() <= 8, "frame height: {}", frame.live.len());
     assert!(
