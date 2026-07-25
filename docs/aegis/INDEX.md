@@ -219,3 +219,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/evidence-bundle-draft-neo-agent-compile.json | 2026-07-24-delegate-edit-write-file-activity evidence neo-agent-compile |
 | 2026-07-24 | artifact | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/gate-input-pack.json | 2026-07-24-delegate-edit-write-file-activity gate input pack |
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/proof-bundle.md | 2026-07-24-delegate-edit-write-file-activity proof bundle |
+| 2026-07-25 | spec | docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md | Delegate Tool Activity Summary And Theme Spec Brief |
+| 2026-07-25 | plan | docs/aegis/plans/2026-07-25-delegate-tool-activity-summary-theme.md | Delegate Tool Activity Summary And Theme Implementation Plan |
