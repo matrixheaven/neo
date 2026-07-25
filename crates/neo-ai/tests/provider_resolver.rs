@@ -150,6 +150,27 @@ fn production_registry_includes_google_generative_ai_credentials() {
 }
 
 #[test]
+fn production_registry_uses_only_anthropic_api_key() {
+    let registry = ProviderRegistry::production();
+    let anthropic = registry
+        .get("anthropic")
+        .expect("anthropic provider should exist");
+
+    assert_eq!(anthropic.provider_type, ApiType::Anthropic);
+    assert_eq!(
+        anthropic.api_key_env_vars,
+        vec!["ANTHROPIC_API_KEY".to_owned()]
+    );
+    assert!(
+        !anthropic
+            .api_key_env_vars
+            .iter()
+            .any(|name| name.contains("OAUTH")),
+        "built-in Anthropic must not advertise OAuth token env vars"
+    );
+}
+
+#[test]
 fn provider_resolver_rejects_missing_credentials_and_test_only_fake() {
     let registry = ProviderRegistry::production();
     let resolver = registry.resolver_from(BTreeMap::new());

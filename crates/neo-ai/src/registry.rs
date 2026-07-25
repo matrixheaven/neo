@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, ffi::OsString, sync::Arc};
 
 use crate::{
     AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
@@ -126,7 +126,7 @@ impl ProviderRegistry {
     pub fn resolver(&self) -> ProviderResolver {
         ProviderResolver {
             registry: self.clone(),
-            env: std::env::vars().collect(),
+            env: collect_utf8_environment(std::env::vars_os()),
         }
     }
 
@@ -275,7 +275,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "Anthropic",
             ApiType::Anthropic,
             Some("https://api.anthropic.com/v1"),
-            &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            &["ANTHROPIC_API_KEY"],
         ),
         provider(
             "google",
@@ -311,5 +311,72 @@ fn provider(
             .map(|value| (*value).to_owned())
             .collect(),
         provider_type,
+    }
+}
+
+/// Collect environment pairs that convert losslessly to UTF-8.
+///
+/// Unrelated non-UTF-8 entries are skipped so they cannot panic credential
+/// resolution for a valid target key.
+fn collect_utf8_environment<I>(vars: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    vars.into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            Some((key, value))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn collect_utf8_environment_skips_non_utf8_pairs() {
+        let good_key = OsString::from("GOOD_KEY");
+        let good_value = OsString::from("good-value");
+        let target_key = OsString::from("OPENAI_API_KEY");
+        let target_value = OsString::from("secret");
+
+        #[cfg(unix)]
+        let (bad_key, bad_value_key, bad_value) = {
+            use std::os::unix::ffi::OsStringExt as _;
+            (
+                OsString::from_vec(b"BAD\xffKEY".to_vec()),
+                OsString::from("BAD_VALUE_KEY"),
+                OsString::from_vec(b"val\xffue".to_vec()),
+            )
+        };
+
+        #[cfg(windows)]
+        let (bad_key, bad_value_key, bad_value) = {
+            use std::os::windows::ffi::OsStringExt as _;
+            // Unpaired high surrogates are not valid UTF-16 / UTF-8.
+            (
+                OsString::from_wide(&[0xD800]),
+                OsString::from("BAD_VALUE_KEY"),
+                OsString::from_wide(&[b'v' as u16, 0xD800, b'e' as u16]),
+            )
+        };
+
+        let env = collect_utf8_environment([
+            (good_key, good_value),
+            (bad_key, OsString::from("ignored")),
+            (bad_value_key, bad_value),
+            (target_key, target_value),
+        ]);
+
+        assert_eq!(env.get("GOOD_KEY").map(String::as_str), Some("good-value"));
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("secret")
+        );
+        assert!(!env.contains_key("BAD_VALUE_KEY"));
+        assert_eq!(env.len(), 2);
     }
 }
