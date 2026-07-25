@@ -24,7 +24,7 @@ neo-ai = { path = "../neo-ai" }
 neo-tui = { path = "../neo-tui" }
 schemars.workspace = true
 reqwest.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

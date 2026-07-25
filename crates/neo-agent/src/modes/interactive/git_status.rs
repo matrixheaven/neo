@@ -203,28 +203,76 @@ pub(super) fn parse_git_numstat(stdout: &str) -> (u32, u32) {
 pub(super) fn parse_git_untracked_files_z(stdout: &[u8]) -> Vec<PathBuf> {
     stdout
         .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .filter(|segment| !segment.is_empty())
+        .map(decode_git_path_segment)
         .collect()
 }
 
-pub(super) fn count_untracked_changes(workspace_root: &Path, paths: &[PathBuf]) -> (u32, u32) {
-    paths.iter().fold(
-        (0_u32, 0_u32),
-        |(added, untracked), path| match count_text_file_lines(&workspace_root.join(path)) {
-            Some(lines) => (added.saturating_add(lines), untracked),
-            None => (added, untracked.saturating_add(1)),
-        },
-    )
+#[cfg(unix)]
+fn decode_git_path_segment(segment: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(OsString::from_vec(segment.to_vec()))
 }
 
+#[cfg(windows)]
+fn decode_git_path_segment(segment: &[u8]) -> PathBuf {
+    // `git ls-files -z` on Windows emits paths as UTF-8 bytes. If a segment is
+    // not valid UTF-8, represent it as one uninspectable entry instead of a
+    // lossy text path.
+    match std::str::from_utf8(segment) {
+        Ok(text) => PathBuf::from(text),
+        Err(_) => PathBuf::new(),
+    }
+}
+
+pub(super) fn count_untracked_changes(workspace_root: &Path, paths: &[PathBuf]) -> (u32, u32) {
+    paths
+        .iter()
+        .fold((0_u32, 0_u32), |(added, untracked), path| {
+            let full_path = match contained_join(workspace_root, path) {
+                Some(full_path) => full_path,
+                None => return (added, untracked.saturating_add(1)),
+            };
+            match count_text_file_lines(&full_path) {
+                Some(lines) => (added.saturating_add(lines), untracked),
+                None => (added, untracked.saturating_add(1)),
+            }
+        })
+}
+
+/// Join a git-relative path to the workspace root, accepting it only if it is
+/// relative and contains no parent-directory escapes.
+fn contained_join(workspace_root: &Path, path: &Path) -> Option<PathBuf> {
+    if path.has_root() {
+        return None;
+    }
+    for component in path.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return None;
+        }
+    }
+    let joined = workspace_root.join(path);
+    joined.strip_prefix(workspace_root).ok()?;
+    Some(joined)
+}
+
+const MAX_INSPECT_BYTES: usize = 1024 * 1024;
+
 fn count_text_file_lines(path: &Path) -> Option<u32> {
-    let mut file = File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
+    let mut file = open_inspection_file(path).ok()?;
+
+    // Recheck the opened handle: regular files only, no symlinks or reparse
+    // points. This closes the race where the path is swapped between our
+    // earlier checks and the read.
+    let metadata = file.metadata().ok()?;
+    if metadata.is_symlink() || !metadata.is_file() {
         return None;
     }
 
     let mut buffer = [0_u8; 8192];
+    let mut total = 0_usize;
     let mut lines = 0_u32;
     let mut saw_byte = false;
     let mut last_byte = 0_u8;
@@ -232,6 +280,10 @@ fn count_text_file_lines(path: &Path) -> Option<u32> {
         let read = file.read(&mut buffer).ok()?;
         if read == 0 {
             break;
+        }
+        total = total.saturating_add(read);
+        if total > MAX_INSPECT_BYTES {
+            return None;
         }
         for byte in &buffer[..read] {
             if *byte == 0 {
@@ -243,6 +295,32 @@ fn count_text_file_lines(path: &Path) -> Option<u32> {
         }
     }
     Some(lines.saturating_add(u32::from(saw_byte && last_byte != b'\n')))
+}
+
+#[cfg(unix)]
+fn open_inspection_file(path: &Path) -> Result<File, std::io::Error> {
+    use rustix::fs::{OFlags, open};
+
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()))?;
+    Ok(File::from(fd))
+}
+
+#[cfg(windows)]
+fn open_inspection_file(path: &Path) -> Result<File, std::io::Error> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Open reparse points without following them so a swapped-in symlink or
+    // junction is inspected on the handle, not transparently resolved.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 fn parse_git_numstat_count(value: Option<&str>) -> u32 {

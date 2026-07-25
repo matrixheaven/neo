@@ -560,6 +560,84 @@ fn git_status_badge_counts_untracked_changes() {
     assert_eq!(badge.format(), "feature [+2 -0 ?1]");
 }
 
+#[cfg(unix)]
+#[test]
+fn git_status_untracked_fifo_returns_without_blocking() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fifo_path = dir.path().join("fifo-file");
+    let status = Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo should succeed");
+
+    let paths = parse_git_untracked_files_z(b"fifo-file\0");
+    let start = Instant::now();
+    let (added, untracked) = count_untracked_changes(dir.path(), &paths);
+    let elapsed = start.elapsed();
+
+    assert_eq!(added, 0, "FIFO should not contribute line counts");
+    assert_eq!(untracked, 1, "FIFO should count as one unknown entry");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "FIFO inspection should return without blocking, took {elapsed:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn git_status_untracked_non_utf8_path_is_counted_losslessly() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let raw_name: Vec<u8> = vec![0xC0, 0xAF, b'n', b'.', b'r', b's'];
+    let name = OsString::from_vec(raw_name.clone());
+    fs::write(dir.path().join(&name), "line one\nline two\n").expect("write non-utf8 file");
+
+    let mut bytes = raw_name.clone();
+    bytes.push(0);
+    let paths = parse_git_untracked_files_z(&bytes);
+    let (added, untracked) = count_untracked_changes(dir.path(), &paths);
+
+    assert_eq!(added, 2, "non-UTF-8 path should be inspected losslessly");
+    assert_eq!(untracked, 0, "non-UTF-8 path should not count as unknown");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_status_untracked_windows_unicode_path_is_counted_losslessly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = "\u{1F980}\u{1F41E}.rs";
+    fs::write(dir.path().join(name), "first\nsecond\nthird\n").expect("write unicode file");
+
+    let mut bytes = name.as_bytes().to_vec();
+    bytes.push(0);
+    let paths = parse_git_untracked_files_z(&bytes);
+    let (added, untracked) = count_untracked_changes(dir.path(), &paths);
+
+    assert_eq!(added, 3, "unicode path should be inspected losslessly");
+    assert_eq!(untracked, 0, "unicode path should not count as unknown");
+}
+
+#[test]
+fn git_status_untracked_file_over_limit_counts_as_unknown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let oversized = vec![b'a'; 1024 * 1024 + 1];
+    fs::write(dir.path().join("big.txt"), &oversized).expect("write oversized file");
+
+    let paths = parse_git_untracked_files_z(b"big.txt\0");
+    let (added, untracked) = count_untracked_changes(dir.path(), &paths);
+
+    assert_eq!(added, 0, "oversized file should not contribute line counts");
+    assert_eq!(
+        untracked, 1,
+        "oversized file should count as one unknown entry"
+    );
+}
+
 #[test]
 fn git_status_badge_is_absent_when_git_program_is_missing() {
     let missing = git_status_label_with_program(
