@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -700,6 +700,187 @@ impl BackgroundTaskManager {
         snapshots.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         snapshots.truncate(limit);
         snapshots
+    }
+
+    /// Metadata-only enumeration for discovery (`TaskList`).
+    ///
+    /// Never hydrates `<task>.log` bodies. Full output remains available only
+    /// through [`Self::output`] / `TaskOutput`.
+    pub async fn list_metadata(&self, active_only: bool) -> Vec<BackgroundTaskSnapshot> {
+        let mut task_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
+        task_ids.extend(self.persisted_task_ids().await);
+        task_ids.sort();
+        task_ids.dedup();
+        let mut snapshots = Vec::new();
+        for task_id in task_ids {
+            if let Some(snapshot) = self.metadata_snapshot(&task_id).await
+                && (!active_only || snapshot.status.is_active())
+            {
+                snapshots.push(snapshot);
+            }
+        }
+        snapshots
+    }
+
+    async fn metadata_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+        if let Some(snapshot) = self.metadata_from_memory(task_id).await {
+            return Some(snapshot);
+        }
+        self.persisted_metadata_snapshot(task_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn metadata_from_memory(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+        if let Some(snapshot) = self.metadata_bash_snapshot(task_id).await {
+            return Some(snapshot);
+        }
+
+        let tasks = self.inner.lock().await;
+        let record = tasks.get(task_id)?;
+        if let BackgroundTaskState::Workflow { handle } = &record.state {
+            let handle = handle.clone();
+            let description = record.description.clone();
+            let elapsed = record.started_at.elapsed();
+            drop(tasks);
+            let workflow = handle.snapshot().await;
+            return Some(BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Workflow,
+                status: workflow_status(workflow.state),
+                description,
+                elapsed,
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: None,
+            });
+        }
+        let mut snapshot = Self::snapshot_from_record(record, task_id);
+        snapshot.output = None;
+        snapshot.answers = None;
+        snapshot.delegate = None;
+        snapshot.swarm = None;
+        Some(snapshot)
+    }
+
+    async fn metadata_bash_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+        let mut tasks = self.inner.lock().await;
+        let record = tasks.get_mut(task_id)?;
+        let BackgroundTaskState::BashRunning(command) = &record.state else {
+            return None;
+        };
+        let started_at = record.started_at;
+        let description = record.description.clone();
+        if let Some(result) = command.client.final_result() {
+            let status = background_status(&result);
+            let output = command_output_from_guard(result);
+            record.state = BackgroundTaskState::BashFinished { status, output };
+            return Some(BackgroundTaskSnapshot {
+                task_id: task_id.to_owned(),
+                kind: BackgroundTaskKind::Bash,
+                status,
+                description,
+                elapsed: started_at.elapsed(),
+                output: None,
+                answers: None,
+                delegate: None,
+                swarm: None,
+            });
+        }
+        Some(BackgroundTaskSnapshot {
+            task_id: task_id.to_owned(),
+            kind: BackgroundTaskKind::Bash,
+            status: BackgroundTaskStatus::Running,
+            description,
+            elapsed: started_at.elapsed(),
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: None,
+        })
+    }
+
+    async fn persisted_metadata_snapshot(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
+        let Some(root) = &self.persistence_dir else {
+            return Ok(None);
+        };
+        validate_persisted_task_id(task_id, root)?;
+        let final_path = root.join(format!("{task_id}.status.json"));
+        let running_path = root.join(format!("{task_id}.running.json"));
+        Ok(
+            match Self::inspect_persisted_task_metadata(task_id, &final_path, &running_path).await?
+            {
+                PersistedTaskFiles::Final(snapshot) => Some(*snapshot),
+                PersistedTaskFiles::Missing => None,
+                PersistedTaskFiles::Running => Some(BackgroundTaskSnapshot {
+                    task_id: task_id.to_owned(),
+                    kind: BackgroundTaskKind::Bash,
+                    status: BackgroundTaskStatus::ParentExited,
+                    description: task_id.to_owned(),
+                    elapsed: Duration::ZERO,
+                    output: None,
+                    answers: None,
+                    delegate: None,
+                    swarm: None,
+                }),
+            },
+        )
+    }
+
+    async fn inspect_persisted_task_metadata(
+        task_id: &str,
+        final_path: &Path,
+        running_path: &Path,
+    ) -> Result<PersistedTaskFiles, ToolError> {
+        if let Some(snapshot) = Self::read_persisted_final_metadata(task_id, final_path).await? {
+            return Ok(PersistedTaskFiles::Final(Box::new(snapshot)));
+        }
+        let running = Self::read_persisted_running(task_id, running_path).await?;
+        if let Some(snapshot) = Self::read_persisted_final_metadata(task_id, final_path).await? {
+            return Ok(PersistedTaskFiles::Final(Box::new(snapshot)));
+        }
+        let second_running = Self::read_persisted_running(task_id, running_path).await?;
+        if running && second_running {
+            Ok(PersistedTaskFiles::Running)
+        } else {
+            Ok(PersistedTaskFiles::Missing)
+        }
+    }
+
+    /// Read terminal persisted status without hydrating `<task>.log`.
+    async fn read_persisted_final_metadata(
+        task_id: &str,
+        final_path: &Path,
+    ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
+        let bytes = match tokio::fs::read(final_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ToolError::Io(error)),
+        };
+        let status: GuardStatus = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_recovery_data(task_id, final_path, error))?;
+        validate_persisted_task_identity(
+            task_id,
+            final_path,
+            status.schema_version,
+            &status.task_id,
+        )?;
+        Ok(Some(BackgroundTaskSnapshot {
+            task_id: task_id.to_owned(),
+            kind: BackgroundTaskKind::Bash,
+            status: background_status_from_kind(status.exit.status),
+            description: task_id.to_owned(),
+            elapsed: Duration::ZERO,
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: None,
+        }))
     }
 
     pub async fn output(
@@ -1486,13 +1667,13 @@ impl Tool for TaskListTool {
          - After a context compaction, or whenever you are unsure which background tasks are running or what their task IDs are, call this tool to re-enumerate them instead of guessing a task ID.\n\
          - Prefer the default `active_only=true`, which lists only non-terminal tasks. Pass `active_only=false` only when you specifically need to see tasks that have already finished.\n\
          - `limit` caps how many tasks are returned. It accepts a value between 1 and 100 and defaults to 20 when omitted.\n\
-         - This tool only lists tasks; it does not return their output. Use it first to locate the task ID you need, then call `TaskOutput` with that ID to read the task's output and details.\n\
+         - This tool only lists bash, question, and workflow task metadata; it does not return their output and does not list delegates or swarms. Use it first to locate the task ID you need, then call `TaskOutput` with that ID to read the task's output and details. Use `ListDelegates` to discover delegate agents and swarms.\n\
          - This tool is read-only and does not change any state, so it is always safe to call, including in plan mode.\n\n\
          Return format:\n\
          Returns a list of background tasks. Each entry includes:\n\
          - task_id: Unique identifier for the task (use this with TaskOutput/TaskStop).\n\
          - status: \"running\", \"completed\", \"failed\", \"cancelled\", or \"timed_out\".\n\
-         - kind: The type of background work, such as \"bash\", \"question\", \"delegate\", or \"delegate-swarm\".\n\
+         - kind: The type of background work: \"bash\", \"question\", or \"workflow\".\n\
          - description: Short human-readable description provided at creation time.\n\
          - elapsed: Time since the task was started (e.g. \"2m 30s\")."
     }
@@ -1506,16 +1687,15 @@ impl Tool for TaskListTool {
             let input: TaskListInput = parse_input(self.name(), input)?;
             let active_only = input.active_only.unwrap_or(true);
             let limit = input.limit.unwrap_or(20).clamp(1, 100);
-            let mut tasks = ctx.background_tasks.list(active_only, limit).await;
-            let existing_ids = tasks
-                .iter()
-                .map(|task| task.task_id.clone())
-                .collect::<HashSet<_>>();
-            tasks.extend(runtime_delegate_task_snapshots(
-                ctx,
-                active_only,
-                &existing_ids,
-            ));
+            let mut tasks = ctx.background_tasks.list_metadata(active_only).await;
+            tasks.retain(|task| {
+                matches!(
+                    task.kind,
+                    BackgroundTaskKind::Bash
+                        | BackgroundTaskKind::Question
+                        | BackgroundTaskKind::Workflow
+                )
+            });
             tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
             tasks.truncate(limit);
             Ok(task_list_result(&tasks, active_only))
@@ -1806,59 +1986,6 @@ impl Tool for TaskResumeTool {
                 .await
         })
     }
-}
-
-fn runtime_delegate_task_snapshots(
-    ctx: &ToolContext,
-    active_only: bool,
-    existing_ids: &HashSet<String>,
-) -> Vec<BackgroundTaskSnapshot> {
-    let mut snapshots = Vec::new();
-
-    for agent in ctx.multi_agent.list_agents(!active_only) {
-        let task_id = agent.id.as_str().to_owned();
-        if existing_ids.contains(&task_id) {
-            continue;
-        }
-        let status = status_from_agent_state(agent.state);
-        if active_only && !status.is_active() {
-            continue;
-        }
-        snapshots.push(BackgroundTaskSnapshot {
-            task_id,
-            kind: BackgroundTaskKind::Delegate,
-            status,
-            description: agent.display_title(),
-            elapsed: agent.elapsed,
-            output: None,
-            answers: None,
-            delegate: Some(agent),
-            swarm: None,
-        });
-    }
-
-    for swarm in ctx.multi_agent.list_swarms() {
-        if existing_ids.contains(&swarm.swarm_id) {
-            continue;
-        }
-        let status = status_from_agent_state(swarm.state);
-        if active_only && !status.is_active() {
-            continue;
-        }
-        snapshots.push(BackgroundTaskSnapshot {
-            task_id: swarm.swarm_id.clone(),
-            kind: BackgroundTaskKind::DelegateSwarm,
-            status,
-            description: swarm.description.clone(),
-            elapsed: Duration::ZERO,
-            output: None,
-            answers: None,
-            delegate: None,
-            swarm: Some(swarm),
-        });
-    }
-
-    snapshots
 }
 
 pub fn task_list_result(tasks: &[BackgroundTaskSnapshot], active_only: bool) -> ToolResult {
@@ -2478,83 +2605,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_list_tool_includes_active_runtime_delegate_without_background_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path()).unwrap();
-        let agent = ctx
-            .multi_agent
-            .start_foreground_delegate_for_test("calculate a small sum");
+    async fn task_list_uses_metadata_only_enumeration_and_excludes_delegates() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let tasks = tempfile::tempdir().expect("tasks");
+        let secret_log = "SECRET_TASK_LOG_BODY_MUST_NOT_APPEAR_IN_TASK_LIST";
+        tokio::fs::write(
+            tasks.path().join("bash-persisted.status.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "task_id": "bash-persisted",
+                "started_at_ms": 1,
+                "finished_at_ms": 2,
+                "exit": {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "signal": null,
+                    "resource_limit": null,
+                    "omitted_output_bytes": 0,
+                    "omitted_log_bytes": 0
+                },
+                "cleanup_errors": []
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("write status");
+        tokio::fs::write(
+            tasks.path().join("bash-persisted.log"),
+            secret_log.as_bytes(),
+        )
+        .await
+        .expect("write log");
 
-        let tool = TaskListTool;
-        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+        manager
+            .start_question("q-list".to_owned(), "Pick one".to_owned())
+            .await;
 
-        assert!(!result.is_error);
-        assert!(result.content.contains("active_background_tasks: 1"));
-        assert!(
-            result
-                .content
-                .contains(&format!("task_id: {}", agent.id.as_str()))
-        );
-        assert!(result.content.contains("kind: delegate"));
-        assert!(result.content.contains("status: running"));
-        assert_eq!(
-            result.details.as_ref().unwrap()["tasks"][0]["task_id"],
-            agent.id.as_str()
-        );
-        assert_eq!(
-            result.details.as_ref().unwrap()["tasks"][0]["kind"],
-            "delegate"
-        );
-    }
-
-    #[tokio::test]
-    async fn task_list_tool_includes_active_runtime_swarm_without_background_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path()).unwrap();
-        let swarm_id = ctx.multi_agent.create_swarm_for_test(vec![(
-            "calculate a small sum",
-            crate::multi_agent::AgentLifecycleState::Running,
-        )]);
-
-        let tool = TaskListTool;
-        let result = tool.execute(&ctx, json!({})).await.expect("execute");
-
-        assert!(!result.is_error);
-        assert!(result.content.contains("active_background_tasks: 1"));
-        assert!(result.content.contains(&format!("task_id: {swarm_id}")));
-        assert!(result.content.contains("kind: delegate-swarm"));
-        assert!(result.content.contains("status: running"));
-        assert_eq!(
-            result.details.as_ref().unwrap()["tasks"][0]["task_id"],
-            swarm_id
-        );
-        assert_eq!(
-            result.details.as_ref().unwrap()["tasks"][0]["kind"],
-            "delegate-swarm"
-        );
-    }
-
-    #[tokio::test]
-    async fn task_list_tool_deduplicates_delegate_background_records() {
-        let manager = BackgroundTaskManager::new();
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(dir.path())
-            .unwrap()
+        let ctx = ToolContext::new(workspace.path())
+            .expect("tool context")
             .with_background_tasks(manager.clone());
         let agent = ctx
             .multi_agent
-            .start_foreground_delegate_for_test("calculate another small sum");
+            .start_foreground_delegate_for_test("should not appear in TaskList");
         manager.start_delegate(agent.clone()).await;
+        let swarm_id = ctx.multi_agent.create_swarm_for_test(vec![(
+            "runtime swarm must not appear",
+            crate::multi_agent::AgentLifecycleState::Running,
+        )]);
 
-        let tool = TaskListTool;
-        let result = tool.execute(&ctx, json!({})).await.expect("execute");
-        let tasks = result.details.as_ref().unwrap()["tasks"]
+        let result = TaskListTool
+            .execute(&ctx, json!({ "active_only": false }))
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("task_id: q-list"));
+        assert!(result.content.contains("kind: question"));
+        assert!(result.content.contains("task_id: bash-persisted"));
+        assert!(result.content.contains("kind: bash"));
+        assert!(
+            !result.content.contains(secret_log),
+            "TaskList must not hydrate persisted logs: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains(agent.id.as_str()),
+            "TaskList must exclude manager delegate records"
+        );
+        assert!(
+            !result.content.contains(&swarm_id),
+            "TaskList must not synthesize runtime swarms"
+        );
+        assert!(!result.content.contains("kind: delegate"));
+        assert!(!result.content.contains("kind: delegate-swarm"));
+
+        let listed = result.details.as_ref().unwrap()["tasks"]
             .as_array()
-            .unwrap();
+            .expect("tasks array");
+        assert_eq!(listed.len(), 2);
+        for task in listed {
+            let kind = task["kind"].as_str().expect("kind");
+            assert!(
+                matches!(kind, "bash" | "question" | "workflow"),
+                "unexpected kind {kind}"
+            );
+            assert!(task.get("stdout").is_none());
+            assert!(task.get("output").is_none());
+        }
 
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0]["task_id"], agent.id.as_str());
-        assert_eq!(tasks[0]["kind"], "delegate");
+        let metadata = manager.list_metadata(false).await;
+        assert!(
+            metadata.iter().all(|snap| snap.output.is_none()),
+            "list_metadata must never hydrate output bodies"
+        );
+        assert!(
+            metadata.iter().any(|snap| snap.task_id == agent.id.as_str()
+                && snap.kind == BackgroundTaskKind::Delegate),
+            "manager still tracks delegates; TaskList filters them"
+        );
     }
 
     #[tokio::test]
