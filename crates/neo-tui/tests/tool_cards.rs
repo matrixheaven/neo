@@ -3035,3 +3035,24 @@ fn streaming_batch_write_uses_unverified_content_preview_without_raw_json() {
         "streaming must not show raw JSON keys: {rows:?}"
     );
 }
+
+#[test]
+fn shell_run_sanitizes_split_control_strings_with_canonical_ansi_state() {
+    use neo_tui::primitive::theme::TuiTheme;
+    use neo_tui::transcript::ShellRunComponent;
+
+    let mut card = ShellRunComponent::running("shell-1", "echo test");
+    card.append_live_output("\x1b[3");
+    card.append_live_output("1mvisible\x1b[0m");
+
+    let rows = plain(card.render(80, &TuiTheme::default()));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("visible"),
+        "visible text should appear: {joined:?}"
+    );
+    assert!(
+        !joined.contains('\x1b'),
+        "escape sequences should not leak: {joined:?}"
+    );
+}

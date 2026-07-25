@@ -14,7 +14,6 @@ pub mod terminal_capabilities;
 pub mod terminal_image;
 pub mod token_estimate;
 pub mod transcript;
-pub mod utils;
 pub mod widgets;
 
 pub use app::NeoTui;

@@ -4,11 +4,11 @@ use std::time::Instant;
 use neo_agent_core::ShellCommandOutcome;
 use neo_agent_core::tools::{format_command_timeout, format_shell_failure};
 
+use crate::primitive::ansi_escape::AnsiParser;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Finalization, Line, Span, Style};
+use crate::primitive::{Finalization, Line, Span, Style, strip_ansi};
 use crate::token_estimate::format_elapsed;
-use crate::utils::shell_output::{sanitize_shell_output, split_sanitized_shell_lines};
 
 const MAX_LIVE_OUTPUT_LINES: usize = 12;
 const MAX_LIVE_OUTPUT_CHARS: usize = 256 * 1024;
@@ -40,6 +40,7 @@ pub struct ShellRunComponent {
     live_output: Vec<String>,
     dropped_live_output_lines: usize,
     live_output_chars: usize,
+    parser: AnsiParser,
 }
 
 impl ShellRunComponent {
@@ -56,6 +57,7 @@ impl ShellRunComponent {
             live_output: Vec::new(),
             dropped_live_output_lines: 0,
             live_output_chars: 0,
+            parser: AnsiParser::new(),
         }
     }
 
@@ -68,6 +70,7 @@ impl ShellRunComponent {
             live_output: Vec::new(),
             dropped_live_output_lines: 0,
             live_output_chars: 0,
+            parser: AnsiParser::new(),
         }
     }
 
@@ -123,7 +126,8 @@ impl ShellRunComponent {
     }
 
     pub fn append_live_output(&mut self, output: impl AsRef<str>) -> bool {
-        let sanitized = sanitize_shell_output(output.as_ref());
+        let mut sanitized = String::new();
+        self.parser.consume(output.as_ref(), &mut sanitized);
         if sanitized.is_empty() {
             return false;
         }
@@ -165,6 +169,7 @@ impl ShellRunComponent {
         self.live_output.clear();
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
+        self.parser.finalize();
         true
     }
 
@@ -363,7 +368,8 @@ pub(crate) fn finished_plain_lines(
     outcome: &ShellCommandOutcome,
     truncated: bool,
 ) -> Vec<String> {
-    let mut lines = split_sanitized_shell_lines(stdout, stderr);
+    let combined = format!("{}{}", strip_ansi(stdout), strip_ansi(stderr));
+    let mut lines: Vec<String> = combined.lines().map(str::to_owned).collect();
     match outcome {
         ShellCommandOutcome::Backgrounded { .. } => {
             lines.push("Moved to background. Use /tasks to view.".to_owned());
