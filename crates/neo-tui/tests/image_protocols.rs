@@ -1,12 +1,10 @@
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
-use neo_tui::shell::InlineImageRenderCache;
 use neo_tui::terminal_image::{
     ImageDisplayOptions, ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy,
     ImageSource, InlineImage, Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions,
     KittyImageFormat, NegotiatedImageProtocol, TerminalImageCapabilities,
     encode_iterm2_inline_image, encode_kitty_graphics,
 };
-use neo_tui::transcript::InlineImageRender;
 
 #[test]
 fn kitty_graphics_encodes_png_bytes_as_direct_apc_transfer() {
@@ -242,67 +240,4 @@ fn terminal_image_thumbnail_falls_back_without_inline_support_or_space() {
     assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
     assert_eq!(rendered.lines, vec!["[image #1 (640x480)]"]);
     assert!(rendered.escape_sequence.is_none());
-}
-
-#[test]
-fn inline_image_render_cache_suppresses_duplicates_until_redraw_reset() {
-    let renders = vec![
-        InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-1".to_owned(),
-        },
-        InlineImageRender {
-            id: "image-2".to_owned(),
-            escape_sequence: "kitty-2".to_owned(),
-        },
-    ];
-    let mut cache = InlineImageRenderCache::default();
-
-    assert_eq!(cache.take_pending(renders.clone()), renders);
-    assert!(
-        cache
-            .take_pending(vec![InlineImageRender {
-                id: "image-1".to_owned(),
-                escape_sequence: "kitty-1".to_owned(),
-            }])
-            .is_empty()
-    );
-
-    cache.reset_for_full_redraw();
-    assert_eq!(
-        cache.take_pending(vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-1".to_owned(),
-        }]),
-        vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-1".to_owned(),
-        }]
-    );
-}
-
-#[test]
-fn inline_image_render_cache_reemits_changed_image_payload_without_full_reset() {
-    let mut cache = InlineImageRenderCache::default();
-
-    assert_eq!(
-        cache.take_pending(vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-old".to_owned(),
-        }]),
-        vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-old".to_owned(),
-        }]
-    );
-    assert_eq!(
-        cache.take_pending(vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-new".to_owned(),
-        }]),
-        vec![InlineImageRender {
-            id: "image-1".to_owned(),
-            escape_sequence: "kitty-new".to_owned(),
-        }]
-    );
 }

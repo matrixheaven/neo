@@ -4,7 +4,6 @@ mod context;
 mod dialog_dispatch;
 mod dialog_factory;
 mod event_router;
-mod image_cache;
 mod input_dispatch;
 mod overlay;
 mod pending_input;
@@ -20,7 +19,6 @@ pub use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, T
 pub use approval::ApprovalRequestModal;
 pub use command_palette::{CommandPaletteState, CommandSpec};
 pub use context::{ContextWindow, MainAgentTokenUsage};
-pub use image_cache::InlineImageRenderCache;
 pub use neo_agent_core::{
     ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,
     ApprovalResolution, ApprovalResponse,

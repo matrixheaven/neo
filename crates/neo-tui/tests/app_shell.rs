@@ -1369,12 +1369,6 @@ fn transcript_pane_inline_images_are_structured_entries() {
         Some(neo_tui::transcript::TranscriptEntry::Image { mime_type, payload, .. })
             if mime_type == "image/png" && payload.is_some()
     ));
-
-    let sequences = runtime.inline_image_sequences(
-        ImageRenderPolicy::new(ImageProtocolPreference::Iterm2),
-        TerminalImageCapabilities::default().with_iterm2(true),
-    );
-    assert_eq!(sequences.len(), 1);
 }
 
 #[test]

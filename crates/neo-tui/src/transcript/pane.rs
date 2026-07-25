@@ -11,9 +11,8 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
-    ApprovalPromptData, InlineImageRender, McpStartupStatusData, ShellRunComponent,
-    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptEntryId,
-    TranscriptStore,
+    ApprovalPromptData, McpStartupStatusData, ShellRunComponent, ToolCallComponent, ToolCallState,
+    TranscriptBrowserState, TranscriptEntry, TranscriptEntryId, TranscriptStore,
 };
 
 use super::entry::RetryStatusData;
@@ -570,31 +569,6 @@ impl TranscriptPane {
             }
         };
         self.push_transcript(entry);
-    }
-
-    #[must_use]
-    pub fn inline_image_renders(
-        &self,
-        policy: ImageRenderPolicy,
-        capabilities: TerminalImageCapabilities,
-    ) -> Vec<InlineImageRender> {
-        self.transcript
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.inline_image_render(policy, capabilities))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn inline_image_sequences(
-        &self,
-        policy: ImageRenderPolicy,
-        capabilities: TerminalImageCapabilities,
-    ) -> Vec<String> {
-        self.inline_image_renders(policy, capabilities)
-            .into_iter()
-            .map(|render| render.escape_sequence)
-            .collect()
     }
 
     pub fn scroll_transcript_up(&mut self, rows: usize) {

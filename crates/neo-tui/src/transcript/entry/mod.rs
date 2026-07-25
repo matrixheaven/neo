@@ -941,45 +941,6 @@ impl TranscriptEntry {
         }
         copy::complex_copy_parts(self)
     }
-
-    #[must_use]
-    pub fn inline_image_render(
-        &self,
-        image_render_policy: ImageRenderPolicy,
-        image_capabilities: TerminalImageCapabilities,
-    ) -> Option<InlineImageRender> {
-        let Self::Image {
-            id,
-            mime_type,
-            metadata,
-            payload,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let payload = payload.as_ref()?;
-        image_render_policy
-            .render_inline_image_bytes(
-                id,
-                mime_type,
-                payload,
-                metadata.clone(),
-                image_capabilities,
-                &ImageDisplayOptions::bounded(1, 1),
-            )
-            .escape_sequence
-            .map(|escape_sequence| InlineImageRender {
-                id: id.clone(),
-                escape_sequence,
-            })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlineImageRender {
-    pub id: String,
-    pub escape_sequence: String,
 }
 
 pub(super) fn format_token_count_usize(tokens: usize) -> String {
