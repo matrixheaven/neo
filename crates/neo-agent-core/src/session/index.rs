@@ -158,7 +158,10 @@ impl PathWire {
                 Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
             }
             #[cfg(not(unix))]
-            PathWire::Unix(_) => Err("unix path wire on non-unix platform".to_owned()),
+            PathWire::Unix(encoded) => {
+                drop(encoded);
+                Err("unix path wire on non-unix platform".to_owned())
+            }
             #[cfg(windows)]
             PathWire::Windows(b64) => {
                 use std::os::windows::ffi::OsStringExt;
@@ -178,7 +181,10 @@ impl PathWire {
                 Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
             }
             #[cfg(not(windows))]
-            PathWire::Windows(_) => Err("windows path wire on non-windows platform".to_owned()),
+            PathWire::Windows(encoded) => {
+                drop(encoded);
+                Err("windows path wire on non-windows platform".to_owned())
+            }
         }
     }
 }

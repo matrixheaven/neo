@@ -1057,36 +1057,6 @@ async fn prepare_model_request(
                 snapshot.projection
             }
         }
-        CompactionDecision::ForceAfterOverflow {
-            snapshot: decided, ..
-        } => {
-            let compaction_sink = emitter.sink();
-            run_full_compaction(
-                model,
-                config,
-                &mut emitter.context,
-                FullCompactionInput {
-                    reason: crate::CompactionReason::Threshold,
-                    snapshot: decided,
-                    custom_instruction: None,
-                },
-                cancel_token,
-                move |event| compaction_sink.emit_event(event),
-            )
-            .await?;
-            rehydrate_instruction_context_after_compaction(emitter, true).await;
-            snapshot = context_budget_snapshot(
-                config,
-                &emitter.context,
-                request_projection_plan(config, &emitter.context),
-            );
-            snapshot.projection
-        }
-        CompactionDecision::StopWithContextError { message, .. } => {
-            return Err(AgentRuntimeError::Model(AiError::ContextOverflow {
-                message,
-            }));
-        }
     };
 
     emit_context_window_snapshot(emitter, &snapshot);

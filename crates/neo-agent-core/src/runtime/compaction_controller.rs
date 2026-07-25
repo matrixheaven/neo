@@ -65,14 +65,6 @@ pub enum CompactionDecision {
         reason: CompactionReason,
         urgency: CompactionUrgency,
     },
-    ForceAfterOverflow {
-        snapshot: ContextBudgetSnapshot,
-        observed_limit: usize,
-    },
-    StopWithContextError {
-        snapshot: ContextBudgetSnapshot,
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
