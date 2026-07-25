@@ -244,11 +244,54 @@ impl Drop for RawModeGuard {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod windows_input_mode {
     use std::io;
 
     const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+    /// Private console mode query/set seam so tests can inject deterministic failures
+    /// without a public trait or second production path.
+    #[derive(Clone, Copy)]
+    struct ConsoleModeOps {
+        query: fn() -> io::Result<u32>,
+        set: fn(u32) -> io::Result<()>,
+    }
+
+    #[cfg(windows)]
+    fn query_console_mode() -> io::Result<u32> {
+        winapi_util::console::mode(&io::stdin())
+    }
+
+    #[cfg(windows)]
+    fn set_console_mode(mode: u32) -> io::Result<()> {
+        winapi_util::console::set_mode(&io::stdin(), mode)
+    }
+
+    // Non-Windows stubs exist only so `cfg(test)` can compile the seamed unit
+    // tests on Unix hosts. Production entry uses this module solely on Windows.
+    #[cfg(not(windows))]
+    fn query_console_mode() -> io::Result<u32> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "windows console mode is unavailable on this host",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    fn set_console_mode(_mode: u32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "windows console mode is unavailable on this host",
+        ))
+    }
+
+    const fn default_console_mode_ops() -> ConsoleModeOps {
+        ConsoleModeOps {
+            query: query_console_mode,
+            set: set_console_mode,
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     pub(super) struct WindowsInputModeGuard {
@@ -257,7 +300,7 @@ mod windows_input_mode {
     }
 
     impl WindowsInputModeGuard {
-        fn inactive() -> Self {
+        const fn inactive() -> Self {
             Self {
                 original_mode: 0,
                 changed: false,
@@ -270,15 +313,17 @@ mod windows_input_mode {
         }
 
         pub(super) fn enter() -> io::Result<Self> {
-            let stdin = io::stdin();
-            let Ok(mode) = winapi_util::console::mode(&stdin) else {
-                return Ok(Self::inactive());
-            };
+            Self::enter_with(default_console_mode_ops())
+        }
+
+        fn enter_with(ops: ConsoleModeOps) -> io::Result<Self> {
+            // Query failure must abort entry — never continue with unknown input semantics.
+            let mode = (ops.query)()?;
             let vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
             if vt_mode == mode {
                 return Ok(Self::inactive());
             }
-            winapi_util::console::set_mode(&stdin, vt_mode)?;
+            (ops.set)(vt_mode)?;
             Ok(Self {
                 original_mode: mode,
                 changed: true,
@@ -286,12 +331,79 @@ mod windows_input_mode {
         }
 
         pub(super) fn restore(&mut self) {
+            self.restore_with(set_console_mode);
+        }
+
+        fn restore_with(&mut self, set: fn(u32) -> io::Result<()>) {
             if !self.changed {
                 return;
             }
-            let stdin = io::stdin();
-            let _ = winapi_util::console::set_mode(&stdin, self.original_mode);
+            let _ = set(self.original_mode);
             self.changed = false;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[test]
+        fn query_failure_aborts_entry() {
+            fn fail_query() -> io::Result<u32> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "console mode query failed",
+                ))
+            }
+            fn set_must_not_run(_: u32) -> io::Result<()> {
+                panic!("set_mode must not run after query failure");
+            }
+
+            let error = WindowsInputModeGuard::enter_with(ConsoleModeOps {
+                query: fail_query,
+                set: set_must_not_run,
+            })
+            .expect_err("query failure must abort TUI entry");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains("console mode query failed"));
+        }
+
+        #[test]
+        fn enable_and_restore_round_trip() {
+            // Simulated console mode without ENABLE_VIRTUAL_TERMINAL_INPUT.
+            static MODE: AtomicU32 = AtomicU32::new(0x0007);
+
+            fn query() -> io::Result<u32> {
+                Ok(MODE.load(Ordering::SeqCst))
+            }
+            fn set(mode: u32) -> io::Result<()> {
+                MODE.store(mode, Ordering::SeqCst);
+                Ok(())
+            }
+
+            let original = MODE.load(Ordering::SeqCst);
+            assert_eq!(original & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+
+            let mut guard = WindowsInputModeGuard::enter_with(ConsoleModeOps { query, set })
+                .expect("enable VT input mode");
+            assert!(
+                guard.changed,
+                "guard must record that the console mode was changed"
+            );
+            assert_eq!(
+                MODE.load(Ordering::SeqCst),
+                original | ENABLE_VIRTUAL_TERMINAL_INPUT
+            );
+            assert_eq!(guard.original_mode, original);
+
+            guard.restore_with(set);
+            assert!(!guard.changed);
+            assert_eq!(
+                MODE.load(Ordering::SeqCst),
+                original,
+                "restore must write the original mode back"
+            );
         }
     }
 }
