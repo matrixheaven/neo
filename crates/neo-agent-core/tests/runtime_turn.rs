@@ -1380,8 +1380,9 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
     );
     // After the second compaction, the context should contain:
     // 1. The injected compaction summary system message
-    // 2. The third assistant response
-    assert_eq!(context.messages().len(), 2);
+    // 2. The third user message
+    // 3. The third assistant response
+    assert_eq!(context.messages().len(), 3);
     assert!(matches!(
         context.messages().first(),
         Some(AgentMessage::System { .. })

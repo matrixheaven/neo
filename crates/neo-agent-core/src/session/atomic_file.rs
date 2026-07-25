@@ -164,7 +164,16 @@ pub(crate) fn create_missing_directories_recording(dir: &Path) -> DirectoryCreat
     loop {
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+                if is_reparse_or_symlink(&metadata) {
+                    return DirectoryCreation {
+                        created: Vec::new(),
+                        error: Some(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("refusing symlinked directory {}", current.display()),
+                        )),
+                    };
+                }
+                if !metadata.is_dir() {
                     return DirectoryCreation {
                         created: Vec::new(),
                         error: Some(io::Error::new(

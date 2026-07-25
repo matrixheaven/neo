@@ -1659,7 +1659,7 @@ mod tests {
             .await
             .expect_err("symlinked skill directories should be invalid input");
 
-        assert!(error.to_string().contains("symlinked skill directory"));
+        assert!(error.to_string().contains("symlinked directory"));
     }
 
     #[cfg(unix)]
@@ -1682,7 +1682,7 @@ mod tests {
             .await
             .expect_err("symlinked skills root should be invalid input");
 
-        assert!(error.to_string().contains("symlinked skill directory"));
+        assert!(error.to_string().contains("symlinked directory"));
     }
 
     #[cfg(unix)]
@@ -1713,7 +1713,7 @@ mod tests {
             .await
             .expect_err("symlinked backup parent should be invalid input");
 
-        assert!(error.to_string().contains("symlinked skill directory"));
+        assert!(error.to_string().contains("symlinked directory"));
         assert!(
             !outside.path().join("skills").exists(),
             "backup must not follow a symlinked backup parent"
@@ -1752,7 +1752,7 @@ mod tests {
             .await
             .expect_err("symlinked skill file should be invalid input");
 
-        assert!(error.to_string().contains("symlinked skill file"));
+        assert!(error.to_string().contains("symlinked file"));
         assert_eq!(
             std::fs::read_to_string(outside_file).expect("read outside"),
             "outside"
@@ -1782,7 +1782,7 @@ mod tests {
             .await
             .expect_err("dangling symlinked skill file should be invalid input");
 
-        assert!(error.to_string().contains("symlinked skill file"));
+        assert!(error.to_string().contains("symlinked file"));
     }
 
     #[tokio::test]
@@ -2153,7 +2153,7 @@ mod tests {
             .await
             .expect_err("symlinked resource target should fail");
 
-        assert!(error.to_string().contains("symlinked skill file"));
+        assert!(error.to_string().contains("symlinked file"));
         assert_eq!(
             fs::read_to_string(skill_dir.join("SKILL.md"))
                 .await
@@ -2858,7 +2858,7 @@ mod tests {
             .expect_err("symlinked source skill should be rejected");
 
         assert!(
-            error.to_string().contains("symlinked skill directory"),
+            error.to_string().contains("symlinked directory"),
             "error should name symlink risk: {error}"
         );
         assert_eq!(

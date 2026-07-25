@@ -1,8 +1,5 @@
-use neo_tui::input::InputEvent;
 use neo_tui::primitive::{Color, Style};
-use neo_tui::primitive::{
-    Component, Container, Finalization, GutterContainer, InputResult, Line, Span, Text,
-};
+use neo_tui::primitive::{Component, Container, Finalization, GutterContainer, Line, Span, Text};
 
 struct StaticComponent {
     rows: Vec<Line>,
