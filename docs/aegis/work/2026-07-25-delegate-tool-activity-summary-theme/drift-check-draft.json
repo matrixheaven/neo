@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-25-delegate-tool-activity-summary-theme",
+  "taskIntentRef": "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md"
+  ],
+  "scopeStatus": "aligned-with-approved-four-file-scope",
+  "compatStatus": "preserved-card-runtime-and-non-edit-write-contracts",
+  "retirementStatus": "old-plain-formatter-and-reexport-removed",
+  "newRiskSignals": [],
+  "decision": "continue"
+}

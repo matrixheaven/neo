@@ -3576,3 +3576,245 @@ fn delegate_family_renders_edit_write_file_rows() {
     assert!(compact.contains(&long_path), "{file_rows:#?}");
     assert!(!compact.contains("+99"), "pending rows show paths only");
 }
+
+#[test]
+fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
+    let mut theme = TuiTheme::default();
+    theme.brand = Color::Rgb(1, 2, 3);
+    theme.status_ok = Color::Rgb(4, 5, 6);
+    theme.status_error = Color::Rgb(7, 8, 9);
+    theme.status_warn = Color::Rgb(10, 11, 12);
+    theme.status_pending = Color::Rgb(13, 14, 15);
+    theme.text_muted = Color::Rgb(16, 17, 18);
+    theme.text_primary = Color::Rgb(19, 20, 21);
+    theme.diff_added = Color::Rgb(22, 23, 24);
+    theme.diff_removed = Color::Rgb(25, 26, 27);
+    theme.diff_hunk = Color::Rgb(28, 29, 30);
+
+    let file = |path: &str, status: AgentToolFileStatus| AgentToolFileChange {
+        path: path.to_owned(),
+        operation: Some(AgentToolFileOperation::Edited),
+        status,
+        line_count: None,
+        added: Some(1),
+        removed: Some(1),
+        message: None,
+    };
+    let tool = |id: &str,
+                name: &str,
+                phase: AgentToolActivityPhase,
+                files: Vec<AgentToolFileChange>| AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            summary: None,
+            phase,
+            output: None,
+            files,
+        },
+    };
+
+    let mut failed = file("detail/failed.rs", AgentToolFileStatus::Failed);
+    failed.message = Some("permission denied".to_owned());
+    let mut delegate = running_delegate();
+    delegate.activity = vec![
+        tool(
+            "done",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            vec![file("detail/committed.rs", AgentToolFileStatus::Committed)],
+        ),
+        tool(
+            "failed",
+            "Write",
+            AgentToolActivityPhase::Failed,
+            vec![failed],
+        ),
+    ];
+    let detailed = DelegateCardComponent::new(delegate).render_with_theme(180, &theme);
+
+    let span = |text: &str| {
+        detailed
+            .iter()
+            .flat_map(|line| line.spans())
+            .find(|span| span.text() == text)
+            .expect("styled span")
+    };
+    for (verb, name, color) in [
+        ("Used", "Edit", theme.status_ok),
+        ("Failed", "Write", theme.status_error),
+    ] {
+        assert_eq!(span(verb).style().fg, Some(color));
+        assert_eq!(span(name).style().fg, Some(theme.brand));
+        assert!(span(name).style().bold);
+    }
+    for (path, marker, color) in [
+        ("detail/committed.rs", "M", theme.diff_hunk),
+        ("detail/failed.rs", "✗ M", theme.status_error),
+    ] {
+        assert_eq!(span(marker).style().fg, Some(color));
+        assert_eq!(span(path).style().fg, Some(theme.text_primary));
+    }
+    assert_eq!(span("+1").style().fg, Some(theme.diff_added));
+    assert_eq!(span("-1").style().fg, Some(theme.diff_removed));
+    assert_eq!(
+        span("permission denied").style().fg,
+        Some(theme.status_error)
+    );
+
+    let complete_files = vec![
+        file("complete-first.rs", AgentToolFileStatus::Committed),
+        file("complete-second.rs", AgentToolFileStatus::Committed),
+    ];
+    let priority_files = vec![
+        file("priority-canonical.rs", AgentToolFileStatus::Committed),
+        file("priority-pending.rs", AgentToolFileStatus::Pending),
+        file(
+            "priority-unsynced.rs",
+            AgentToolFileStatus::CommittedUnsynced,
+        ),
+        file("priority-failed.rs", AgentToolFileStatus::Failed),
+    ];
+    let mut long_summary = tool(
+        "long-summary",
+        "Read",
+        AgentToolActivityPhase::Done,
+        Vec::new(),
+    );
+    let AgentActivityKind::Tool { summary, .. } = &mut long_summary.kind else {
+        unreachable!();
+    };
+    *summary = Some("x".repeat(160));
+    let mut swarm = swarm_with_child_states(vec![AgentLifecycleState::Running; 7]);
+    let activities = vec![
+        tool(
+            "single-edit",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            vec![file("single-edit.rs", AgentToolFileStatus::Committed)],
+        ),
+        tool(
+            "single-write",
+            "Write",
+            AgentToolActivityPhase::Ongoing,
+            vec![file("single-write.md", AgentToolFileStatus::Pending)],
+        ),
+        tool(
+            "complete",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            complete_files,
+        ),
+        tool(
+            "priority-failed",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            priority_files.clone(),
+        ),
+        tool(
+            "priority-unsynced",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            priority_files[..3].to_vec(),
+        ),
+        tool(
+            "priority-pending",
+            "Edit",
+            AgentToolActivityPhase::Done,
+            priority_files[..2].to_vec(),
+        ),
+        long_summary,
+    ];
+    for (child, activity) in swarm.children.iter_mut().zip(activities) {
+        child.agent.tool_count = 1;
+        child.agent.latest_text = None;
+        child.agent.activity = vec![activity];
+    }
+    let mut swarm_card = SwarmCardComponent::new(swarm);
+    let collapsed = swarm_card.render_with_theme(300, &theme);
+    let child_rows = collapsed
+        .iter()
+        .filter(|line| (0..7).any(|index| line.text().contains(&format!("Agent{index}  ["))))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_rows.len(),
+        7,
+        "collapsed swarm must use one row per child"
+    );
+
+    let row = |name: &str| {
+        child_rows
+            .iter()
+            .copied()
+            .find(|line| line.text().contains(name))
+            .expect("collapsed child row")
+    };
+    for name in ["Agent0", "Agent1"] {
+        assert!(!row(name).text().contains("1 file"), "{}", row(name).text());
+    }
+    assert!(row("Agent0").text().contains("single-edit.rs"));
+    assert!(row("Agent1").text().contains("single-write.md"));
+    assert!(row("Agent2").text().contains("2 files"));
+    assert!(row("Agent2").text().contains("complete-first.rs"));
+    assert!(row("Agent2").text().contains("total +2 -2"));
+    assert!(!row("Agent2").text().contains("complete-second.rs"));
+    assert!(row("Agent3").text().contains("priority-failed.rs"));
+    assert!(row("Agent4").text().contains("priority-unsynced.rs"));
+    assert!(row("Agent5").text().contains("priority-pending.rs"));
+    assert!(!row("Agent5").text().contains("total"));
+    assert!(!row("Agent5").text().contains("+"));
+    let ordinary = row("Agent6").text();
+    let ordinary_status = &ordinary[ordinary.find("Used Read").expect("ordinary tool status")..];
+    assert_eq!(ordinary_status.chars().count(), 96, "{ordinary_status}");
+    assert!(ordinary_status.ends_with("..."), "{ordinary_status}");
+    assert!(!ordinary_status.contains('…'), "{ordinary_status}");
+
+    let style = |line: &Line, text: &str| {
+        line.spans()
+            .iter()
+            .find(|span| span.text() == text)
+            .expect("collapsed styled span")
+            .style()
+    };
+    let single = row("Agent0");
+    assert_eq!(style(single, "Used").fg, Some(theme.status_ok));
+    assert_eq!(style(single, "Edit").fg, Some(theme.brand));
+    assert!(style(single, "Edit").bold);
+    assert_eq!(style(single, "M").fg, Some(theme.diff_hunk));
+    assert_eq!(style(single, "single-edit.rs").fg, Some(theme.text_primary));
+    assert_eq!(style(single, " +1").fg, Some(theme.diff_added));
+    assert_eq!(style(single, " -1").fg, Some(theme.diff_removed));
+    assert_eq!(style(row("Agent1"), "Using").fg, Some(theme.text_primary));
+    assert_eq!(style(row("Agent3"), "M").fg, Some(theme.status_error));
+    assert_eq!(style(row("Agent4"), "! M").fg, Some(theme.status_warn));
+    assert_eq!(style(row("Agent5"), "…").fg, Some(theme.status_pending));
+
+    swarm_card.set_expanded(true);
+    let expanded = swarm_card.render_with_theme(300, &theme);
+    let agent_two = expanded
+        .iter()
+        .rposition(|line| line.text().contains("Agent2  ["))
+        .expect("expanded child header");
+    let heading = agent_two
+        + expanded[agent_two + 1..]
+            .iter()
+            .position(|line| line.text().contains("• Used Edit"))
+            .expect("expanded tool heading")
+        + 1;
+    assert!(
+        !expanded[heading].text().contains("complete-first.rs"),
+        "detailed heading must not repeat an inline path: {}",
+        expanded[heading].text()
+    );
+    let positions = ["complete-first.rs", "complete-second.rs"].map(|path| {
+        expanded[heading + 1..]
+            .iter()
+            .position(|line| line.text().contains(path))
+            .expect("expanded file row")
+    });
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        style(&expanded[heading + 1 + positions[0]], "complete-first.rs").fg,
+        Some(theme.text_primary)
+    );
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-25-delegate-tool-activity-summary-theme",
+  "currentTodo": "Commit verified implementation",
+  "completedTodos": [
+    "Build shared semantic tool activity spans",
+    "Use shared spans in collapsed DelegateSwarm rows",
+    "Add focused regression and close review findings"
+  ],
+  "activeSlice": "Final verification and commit",
+  "evidenceRefs": [
+    "focused-regression",
+    "ongoing-neutral-regression",
+    "binary-check",
+    "scoped-format-diff"
+  ],
+  "blockedOn": null,
+  "nextStep": "Inspect final scoped diff, stage only task files, and commit",
+  "updatedAt": "2026-07-25"
+}

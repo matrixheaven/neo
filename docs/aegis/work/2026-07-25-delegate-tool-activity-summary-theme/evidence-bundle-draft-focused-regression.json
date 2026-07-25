@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "focused-regression",
+  "type": "test",
+  "source": "cargo nextest run -p neo-tui --test multi_agent_transcript delegate_family_tool_activity_uses_theme_and_collapsed_file_hint",
+  "summary": "1 passed, 74 skipped; collapsed file hints, truthful totals, semantic theme spans, expanded full-list compatibility",
+  "verifier": "Codex"
+}

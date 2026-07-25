@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-07-25-delegate-tool-activity-summary-theme",
+  "requiredBaselineRefs": [
+    "docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md",
+    "docs/aegis/specs/2026-07-24-delegate-edit-write-file-activity-brief.md"
+  ],
+  "deliveredContextRefs": [],
+  "acknowledgedBeforePlanRefs": [
+    "docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md",
+    "docs/aegis/specs/2026-07-24-delegate-edit-write-file-activity-brief.md"
+  ],
+  "citedInPlanRefs": [
+    "docs/aegis/plans/2026-07-25-delegate-tool-activity-summary-theme.md"
+  ],
+  "missingRefs": [],
+  "decision": "continue"
+}

@@ -8,7 +8,9 @@ use neo_agent_core::multi_agent::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width, wrap_width};
+use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width};
+
+use super::tool_renderers::hard_wrap_line;
 
 pub const MAX_CHILD_TOOL_ROWS: usize = 4;
 const THINKING_PREVIEW_LINES: usize = 2;
@@ -147,30 +149,126 @@ pub fn child_activity_view(
     }
 }
 
-#[must_use]
-pub fn child_tool_status_text(
+const fn child_tool_verb(phase: AgentToolActivityPhase) -> &'static str {
+    match phase {
+        AgentToolActivityPhase::Queued { .. } => "Queued",
+        AgentToolActivityPhase::Ongoing => "Using",
+        AgentToolActivityPhase::Done => "Used",
+        AgentToolActivityPhase::Failed => "Failed",
+    }
+}
+
+fn child_tool_phase_style(phase: AgentToolActivityPhase, theme: &TuiTheme) -> Style {
+    let color = match phase {
+        AgentToolActivityPhase::Queued { .. } => theme.status_pending,
+        AgentToolActivityPhase::Ongoing => theme.text_primary,
+        AgentToolActivityPhase::Done => theme.status_ok,
+        AgentToolActivityPhase::Failed => theme.status_error,
+    };
+    Style::default().fg(color)
+}
+
+pub(super) fn child_tool_status_spans(
     name: &str,
     summary: Option<&str>,
     phase: AgentToolActivityPhase,
+    inline_files: Option<&[AgentToolFileChange]>,
+    verb_override: Option<&str>,
     now_ms: u64,
-) -> String {
-    bounded_child_tool_status_text(name, summary, phase, now_ms, usize::MAX)
+    max_width: usize,
+    theme: &TuiTheme,
+) -> Vec<Span> {
+    let verb = verb_override.unwrap_or_else(|| child_tool_verb(phase));
+    let preserve_shell_summary = matches!(name, "Bash" | "Terminal")
+        && summary.is_some_and(|summary| !summary.trim().is_empty());
+    let verb_style = if verb_override.is_some() {
+        Style::default().fg(theme.status_pending)
+    } else {
+        child_tool_phase_style(phase, theme)
+    };
+    let mut spans = vec![
+        Span::styled(verb, verb_style),
+        Span::styled(" ", Style::default().fg(theme.text_muted)),
+        Span::styled(name, Style::default().fg(theme.brand).bold()),
+    ];
+    if matches!(name, "Edit" | "Write")
+        && let Some(files) = inline_files.filter(|files| !files.is_empty())
+    {
+        spans.extend(inline_file_spans(files, phase, theme));
+    } else if let Some(summary) =
+        bounded_status_summary(verb, name, summary, phase, now_ms, max_width)
+    {
+        spans.push(Span::styled(
+            format!(" ({summary})"),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+    if let AgentToolActivityPhase::Queued {
+        position: Some(position),
+        queued_at_ms,
+    } = phase
+    {
+        let waiting_s = now_ms.saturating_sub(queued_at_ms) / 1_000;
+        spans.push(Span::styled(
+            format!(" · #{position} · waiting {waiting_s}s"),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+    if preserve_shell_summary {
+        spans
+    } else {
+        compact_styled_chars(spans, max_width)
+    }
 }
 
-pub(super) fn bounded_child_tool_status_text(
+fn compact_styled_chars(spans: Vec<Span>, max_chars: usize) -> Vec<Span> {
+    if spans
+        .iter()
+        .map(|span| span.text().chars().count())
+        .sum::<usize>()
+        <= max_chars
+    {
+        return spans;
+    }
+    let mut remaining = max_chars.saturating_sub(3);
+    let mut compact = Vec::new();
+    let mut ellipsis_style = Style::default();
+    for span in spans {
+        ellipsis_style = span.style();
+        if remaining == 0 {
+            break;
+        }
+        let count = span.text().chars().count();
+        if count <= remaining {
+            compact.push(span);
+            remaining -= count;
+        } else {
+            compact.push(Span::styled(
+                span.text().chars().take(remaining).collect::<String>(),
+                span.style(),
+            ));
+            break;
+        }
+    }
+    compact.push(Span::styled("...", ellipsis_style));
+    compact
+}
+
+fn bounded_status_summary(
+    verb: &str,
     name: &str,
     summary: Option<&str>,
     phase: AgentToolActivityPhase,
     now_ms: u64,
     max_width: usize,
-) -> String {
-    let verb = match phase {
-        AgentToolActivityPhase::Queued { .. } => "Queued",
-        AgentToolActivityPhase::Ongoing => "Using",
-        AgentToolActivityPhase::Done => "Used",
-        AgentToolActivityPhase::Failed => "Failed",
-    };
-    let fixed_suffix = if let AgentToolActivityPhase::Queued {
+) -> Option<String> {
+    let summary = summary
+        .filter(|value| !value.trim().is_empty())
+        .map(one_line)?;
+    if !matches!(name, "Bash" | "Terminal") {
+        return Some(summary);
+    }
+    let queue_suffix = if let AgentToolActivityPhase::Queued {
         position: Some(position),
         queued_at_ms,
     } = phase
@@ -180,42 +278,167 @@ pub(super) fn bounded_child_tool_status_text(
     } else {
         String::new()
     };
-    bounded_tool_status_text(verb, name, summary, &fixed_suffix, max_width)
-}
-
-pub(super) fn bounded_tool_status_text(
-    verb: &str,
-    name: &str,
-    summary: Option<&str>,
-    fixed_suffix: &str,
-    max_width: usize,
-) -> String {
-    let summary = summary
-        .filter(|value| !value.trim().is_empty())
-        .map(one_line);
-    let text = match &summary {
-        Some(summary) => format!("{verb} {name} ({summary}){fixed_suffix}"),
-        None => format!("{verb} {name}{fixed_suffix}"),
-    };
-    if !matches!(name, "Bash" | "Terminal") {
-        return compact_chars(&text, max_width);
-    }
-    let Some(summary) = summary else {
-        return compact_chars(&text, max_width);
-    };
     let fixed_width = visible_width(verb)
         + 1
         + visible_width(name)
         + visible_width(" ()")
-        + visible_width(fixed_suffix);
+        + visible_width(&queue_suffix);
     let summary_width = max_width.saturating_sub(fixed_width);
-    if summary_width == 0 {
-        return format!("{verb} {name}{fixed_suffix}");
+    (summary_width > 0).then(|| compact_middle_width(&summary, summary_width))
+}
+
+fn inline_file_spans(
+    files: &[AgentToolFileChange],
+    phase: AgentToolActivityPhase,
+    theme: &TuiTheme,
+) -> Vec<Span> {
+    let muted = Style::default().fg(theme.text_muted);
+    let mut spans = Vec::new();
+    if files.len() > 1 {
+        spans.push(Span::styled(format!(" · {} files", files.len()), muted));
     }
-    format!(
-        "{verb} {name} ({}){fixed_suffix}",
-        compact_middle_width(&summary, summary_width)
-    )
+    let file = representative_file(files);
+    spans.push(Span::styled(" · ", muted));
+    spans.extend(inline_file_marker_spans(file, theme));
+    spans.push(Span::styled(" ", muted));
+    spans.push(Span::styled(
+        file.path.clone(),
+        Style::default().fg(theme.text_primary),
+    ));
+
+    if files.len() == 1 {
+        append_single_file_stats(&mut spans, file, theme);
+    } else if phase == AgentToolActivityPhase::Done
+        && let Some((added, removed)) = aggregate_diff_stats(files)
+    {
+        spans.push(Span::styled(" · total", muted));
+        spans.push(Span::styled(
+            format!(" +{added}"),
+            Style::default().fg(theme.diff_added),
+        ));
+        spans.push(Span::styled(
+            format!(" -{removed}"),
+            Style::default().fg(theme.diff_removed),
+        ));
+    }
+    append_file_message(&mut spans, file, theme);
+    spans
+}
+
+fn representative_file(files: &[AgentToolFileChange]) -> &AgentToolFileChange {
+    for status in [
+        AgentToolFileStatus::Failed,
+        AgentToolFileStatus::CommittedUnsynced,
+        AgentToolFileStatus::Pending,
+    ] {
+        if let Some(file) = files.iter().find(|file| file.status == status) {
+            return file;
+        }
+    }
+    &files[0]
+}
+
+fn aggregate_diff_stats(files: &[AgentToolFileChange]) -> Option<(usize, usize)> {
+    if files
+        .iter()
+        .any(|file| file.status == AgentToolFileStatus::Pending)
+    {
+        return None;
+    }
+    files
+        .iter()
+        .try_fold((0usize, 0usize), |(added, removed), file| {
+            Some((
+                added.checked_add(file.added?)?,
+                removed.checked_add(file.removed?)?,
+            ))
+        })
+}
+
+fn append_single_file_stats(spans: &mut Vec<Span>, file: &AgentToolFileChange, theme: &TuiTheme) {
+    if file.status == AgentToolFileStatus::Pending {
+        return;
+    }
+    let muted = Style::default().fg(theme.text_muted);
+    match file.operation {
+        Some(AgentToolFileOperation::Edited) => {
+            if let (Some(added), Some(removed)) = (file.added, file.removed) {
+                spans.push(Span::styled(" ·", muted));
+                spans.push(Span::styled(
+                    format!(" +{added}"),
+                    Style::default().fg(theme.diff_added),
+                ));
+                spans.push(Span::styled(
+                    format!(" -{removed}"),
+                    Style::default().fg(theme.diff_removed),
+                ));
+            }
+        }
+        Some(AgentToolFileOperation::Created | AgentToolFileOperation::Overwritten) => {
+            if let Some(lines) = file.line_count {
+                spans.push(Span::styled(format!(" · {lines} lines"), muted));
+            }
+        }
+        None => {}
+    }
+}
+
+fn inline_file_marker_spans(file: &AgentToolFileChange, theme: &TuiTheme) -> Vec<Span> {
+    let operation = file_operation_marker(file.operation);
+    let (text, style) = match file.status {
+        AgentToolFileStatus::Pending => ("…".to_owned(), theme.status_pending),
+        AgentToolFileStatus::Committed => (
+            operation.unwrap_or("•").to_owned(),
+            file_operation_color(file.operation, theme),
+        ),
+        AgentToolFileStatus::CommittedUnsynced => (
+            operation.map_or_else(|| "!".to_owned(), |operation| format!("! {operation}")),
+            theme.status_warn,
+        ),
+        AgentToolFileStatus::Failed => (operation.unwrap_or("✗").to_owned(), theme.status_error),
+        AgentToolFileStatus::NotAttempted => (
+            operation.map_or_else(|| "–".to_owned(), |operation| format!("– {operation}")),
+            theme.text_muted,
+        ),
+    };
+    vec![Span::styled(text, Style::default().fg(style))]
+}
+
+const fn file_operation_marker(operation: Option<AgentToolFileOperation>) -> Option<&'static str> {
+    match operation {
+        Some(AgentToolFileOperation::Edited | AgentToolFileOperation::Overwritten) => Some("M"),
+        Some(AgentToolFileOperation::Created) => Some("C"),
+        None => None,
+    }
+}
+
+const fn file_operation_color(
+    operation: Option<AgentToolFileOperation>,
+    theme: &TuiTheme,
+) -> crate::primitive::Color {
+    match operation {
+        Some(AgentToolFileOperation::Created) => theme.diff_added,
+        Some(AgentToolFileOperation::Edited | AgentToolFileOperation::Overwritten) | None => {
+            theme.diff_hunk
+        }
+    }
+}
+
+fn append_file_message(spans: &mut Vec<Span>, file: &AgentToolFileChange, theme: &TuiTheme) {
+    let Some(message) = file
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+    else {
+        return;
+    };
+    spans.push(Span::styled(" · ", Style::default().fg(theme.text_muted)));
+    let color = if file.status == AgentToolFileStatus::Failed {
+        theme.status_error
+    } else {
+        theme.status_warn
+    };
+    spans.push(Span::styled(one_line(message), Style::default().fg(color)));
 }
 
 fn compact_middle_width(text: &str, max_width: usize) -> String {
@@ -265,31 +488,26 @@ pub fn render_child_tool_row(
         | AgentToolActivityPhase::Ongoing
         | AgentToolActivityPhase::Queued { .. } => "•",
     };
-    let marker_style = match row.phase {
-        AgentToolActivityPhase::Failed => Style::default().fg(theme.status_error),
-        AgentToolActivityPhase::Done => Style::default().fg(theme.status_ok),
-        AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. } => {
-            Style::default().fg(theme.text_primary)
-        }
-    };
+    let marker_style = child_tool_phase_style(row.phase, theme);
     let status_width = width.saturating_sub(visible_width(indent) + visible_width(marker) + 1);
-    let status = bounded_child_tool_status_text(
+    let status = child_tool_status_spans(
         row.name,
         row.summary,
         row.phase,
+        None,
+        None,
         now_ms.unwrap_or(0),
         status_width,
+        theme,
     );
     let muted = Style::default().fg(theme.text_muted);
-    let mut lines = vec![
-        Line::from_spans(vec![
-            Span::styled(indent.to_owned(), muted),
-            Span::styled(marker, marker_style),
-            Span::raw(" "),
-            Span::raw(status),
-        ])
-        .truncate_to_width(width),
+    let mut header = vec![
+        Span::styled(indent.to_owned(), muted),
+        Span::styled(marker, marker_style),
+        Span::styled(" ", muted),
     ];
+    header.extend(status);
+    let mut lines = vec![Line::from_spans(header).truncate_to_width(width)];
     lines.extend(render_child_file_rows(row.files, width, indent, theme));
     if let Some(output) = row.output {
         lines.extend(render_output_preview(output, width, indent, theme));
@@ -310,25 +528,26 @@ fn render_child_file_rows(
         .max(1);
     let mut lines = Vec::new();
     for file in files {
-        let text = child_file_text(file);
-        let color = match file.status {
-            AgentToolFileStatus::Failed => theme.status_error,
-            AgentToolFileStatus::CommittedUnsynced => theme.status_warn,
-            AgentToolFileStatus::Pending
-            | AgentToolFileStatus::Committed
-            | AgentToolFileStatus::NotAttempted => theme.text_muted,
-        };
-        for (index, chunk) in wrap_width(&text, content_width).into_iter().enumerate() {
+        let file_line = Line::from_spans(child_file_spans(file, theme));
+        for (index, row) in hard_wrap_line(&file_line, content_width)
+            .into_iter()
+            .enumerate()
+        {
             let prefix = if index == 0 {
                 &first_prefix
             } else {
                 &continuation_prefix
             };
             lines.push(
-                Line::from_spans(vec![
-                    Span::styled(prefix.clone(), Style::default().fg(theme.text_muted)),
-                    Span::styled(chunk, Style::default().fg(color)),
-                ])
+                Line::from_spans(
+                    vec![Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(theme.text_muted),
+                    )]
+                    .into_iter()
+                    .chain(row.into_spans())
+                    .collect(),
+                )
                 .truncate_to_width(width),
             );
         }
@@ -336,48 +555,60 @@ fn render_child_file_rows(
     lines
 }
 
-fn child_file_text(file: &AgentToolFileChange) -> String {
-    let operation = match file.operation {
-        Some(AgentToolFileOperation::Edited | AgentToolFileOperation::Overwritten) => "M",
-        Some(AgentToolFileOperation::Created) => "C",
-        None => "",
-    };
+fn child_file_spans(file: &AgentToolFileChange, theme: &TuiTheme) -> Vec<Span> {
+    let operation = file_operation_marker(file.operation);
     let marker = match file.status {
-        AgentToolFileStatus::Pending => "…",
-        AgentToolFileStatus::Committed => operation,
-        AgentToolFileStatus::CommittedUnsynced => "!",
-        AgentToolFileStatus::Failed => "✗",
-        AgentToolFileStatus::NotAttempted => "–",
-    };
-    let operation_suffix = matches!(
-        file.status,
-        AgentToolFileStatus::CommittedUnsynced
-            | AgentToolFileStatus::Failed
-            | AgentToolFileStatus::NotAttempted
-    )
-    .then_some(operation)
-    .filter(|operation| !operation.is_empty())
-    .map_or_else(String::new, |operation| format!(" {operation}"));
-    let stats = if file.status == AgentToolFileStatus::Pending {
-        String::new()
-    } else {
-        match file.operation {
-            Some(AgentToolFileOperation::Edited) => match (file.added, file.removed) {
-                (Some(added), Some(removed)) => format!("  +{added} -{removed}"),
-                _ => String::new(),
-            },
-            Some(AgentToolFileOperation::Created | AgentToolFileOperation::Overwritten) => file
-                .line_count
-                .map_or_else(String::new, |lines| format!("  {lines} lines")),
-            None => String::new(),
+        AgentToolFileStatus::Pending => "…".to_owned(),
+        AgentToolFileStatus::Committed => operation.unwrap_or("").to_owned(),
+        AgentToolFileStatus::CommittedUnsynced => {
+            operation.map_or_else(|| "!".to_owned(), |operation| format!("! {operation}"))
+        }
+        AgentToolFileStatus::Failed => {
+            operation.map_or_else(|| "✗".to_owned(), |operation| format!("✗ {operation}"))
+        }
+        AgentToolFileStatus::NotAttempted => {
+            operation.map_or_else(|| "–".to_owned(), |operation| format!("– {operation}"))
         }
     };
-    let message = file
-        .message
-        .as_deref()
-        .filter(|message| !message.trim().is_empty())
-        .map_or_else(String::new, |message| format!(" · {}", one_line(message)));
-    format!("{marker}{operation_suffix} {}{stats}{message}", file.path)
+    let marker_color = match file.status {
+        AgentToolFileStatus::Pending => theme.status_pending,
+        AgentToolFileStatus::Committed => file_operation_color(file.operation, theme),
+        AgentToolFileStatus::CommittedUnsynced => theme.status_warn,
+        AgentToolFileStatus::Failed => theme.status_error,
+        AgentToolFileStatus::NotAttempted => theme.text_muted,
+    };
+    let muted = Style::default().fg(theme.text_muted);
+    let mut spans = vec![
+        Span::styled(marker, Style::default().fg(marker_color)),
+        Span::styled(" ", muted),
+        Span::styled(file.path.clone(), Style::default().fg(theme.text_primary)),
+    ];
+    if file.status != AgentToolFileStatus::Pending {
+        match file.operation {
+            Some(AgentToolFileOperation::Edited) => {
+                if let (Some(added), Some(removed)) = (file.added, file.removed) {
+                    spans.push(Span::styled("  ", muted));
+                    spans.push(Span::styled(
+                        format!("+{added}"),
+                        Style::default().fg(theme.diff_added),
+                    ));
+                    spans.push(Span::styled(" ", muted));
+                    spans.push(Span::styled(
+                        format!("-{removed}"),
+                        Style::default().fg(theme.diff_removed),
+                    ));
+                }
+            }
+            Some(AgentToolFileOperation::Created | AgentToolFileOperation::Overwritten) => {
+                if let Some(lines) = file.line_count {
+                    spans.push(Span::styled(format!("  {lines} lines"), muted));
+                }
+            }
+            None => {}
+        }
+    }
+    append_file_message(&mut spans, file, theme);
+    spans
 }
 
 pub fn render_child_thinking(

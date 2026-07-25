@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md"
+  ],
+  "impactStatement": "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/impact-statement-draft.json",
+  "compatPlan": "No core/runtime/schema/event/card-layout changes",
+  "retirementPlan": "old-plain-formatter-and-reexport-removed",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-binary-check.json",
+    "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-focused-regression.json",
+    "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-ongoing-neutral-regression.json",
+    "docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-scoped-format-diff.json"
+  ]
+}

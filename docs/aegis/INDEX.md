@@ -221,3 +221,20 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-24 | work | docs/aegis/work/2026-07-24-delegate-edit-write-file-activity/proof-bundle.md | 2026-07-24-delegate-edit-write-file-activity proof bundle |
 | 2026-07-25 | spec | docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md | Delegate Tool Activity Summary And Theme Spec Brief |
 | 2026-07-25 | plan | docs/aegis/plans/2026-07-25-delegate-tool-activity-summary-theme.md | Delegate Tool Activity Summary And Theme Implementation Plan |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/10-intent.md | Delegate Tool Activity Summary And Theme intent |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/20-checkpoint.md | Delegate Tool Activity Summary And Theme checkpoint |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/90-evidence.md | Delegate Tool Activity Summary And Theme evidence |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/99-reflection.md | Delegate Tool Activity Summary And Theme reflection |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/task-intent-draft.json | Delegate Tool Activity Summary And Theme task intent draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/baseline-read-set-hint.json | Delegate Tool Activity Summary And Theme baseline read-set hint |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/baseline-usage-draft.json | Delegate Tool Activity Summary And Theme baseline usage draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/impact-statement-draft.json | Delegate Tool Activity Summary And Theme impact statement draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/todo-checkpoint-draft.json | Delegate Tool Activity Summary And Theme todo checkpoint draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/drift-check-draft.json | Delegate Tool Activity Summary And Theme drift check draft |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-focused-regression.json | 2026-07-25-delegate-tool-activity-summary-theme evidence focused-regression |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-ongoing-neutral-regression.json | 2026-07-25-delegate-tool-activity-summary-theme evidence ongoing-neutral-regression |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-binary-check.json | 2026-07-25-delegate-tool-activity-summary-theme evidence binary-check |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/evidence-bundle-draft-scoped-format-diff.json | 2026-07-25-delegate-tool-activity-summary-theme evidence scoped-format-diff |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/resume-state-hint.json | 2026-07-25-delegate-tool-activity-summary-theme resume state hint |
+| 2026-07-25 | artifact | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/gate-input-pack.json | 2026-07-25-delegate-tool-activity-summary-theme gate input pack |
+| 2026-07-25 | work | docs/aegis/work/2026-07-25-delegate-tool-activity-summary-theme/proof-bundle.md | 2026-07-25-delegate-tool-activity-summary-theme proof bundle |

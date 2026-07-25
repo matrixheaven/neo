@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "neo-tui transcript presentation"
+  ],
+  "owners": [
+    "crates/neo-tui/src/transcript/child_activity.rs"
+  ],
+  "invariants": [
+    "One semantic activity renderer; collapsed Swarm remains one line"
+  ],
+  "compatBoundary": "No core/runtime/schema/event/card-layout changes",
+  "nonGoals": [
+    "All-path collapsed display or new theme/config surface"
+  ]
+}

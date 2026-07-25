@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "scoped-format-diff",
+  "type": "static-check",
+  "source": "rustfmt --check --edition 2024 <four touched Rust files>; git diff --check -- <scoped files>",
+  "summary": "both checks exited 0",
+  "verifier": "Codex"
+}

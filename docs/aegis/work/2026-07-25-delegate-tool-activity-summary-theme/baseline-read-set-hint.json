@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    "docs/aegis/specs/2026-07-25-delegate-tool-activity-summary-theme-brief.md"
+  ],
+  "whyRelevant": "Approved product behavior and compatibility boundary",
+  "missingAuthority": []
+}

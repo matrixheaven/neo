@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "binary-check",
+  "type": "build",
+  "source": "cargo check -p neo-agent --bin neo",
+  "summary": "exit 0; neo-agent binary and touched neo-tui dependency compile",
+  "verifier": "Codex"
+}

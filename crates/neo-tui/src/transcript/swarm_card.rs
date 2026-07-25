@@ -8,13 +8,12 @@ use crate::primitive::{
     Color, Component, Expandable, Finalization, Line, Span, Style, visible_width,
 };
 use crate::transcript::{
-    MAX_CHILD_TOOL_ROWS, child_activity_view, child_tool_status_text, compact_chars,
-    display_elapsed, format_cache_token_usage, format_elapsed, format_token_count, one_line,
-    render_child_body, render_child_final, render_child_thinking, render_child_tool_row,
-    role_badge_style, role_label,
+    MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed,
+    format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
+    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
-use super::child_activity::{bounded_child_tool_status_text, bounded_tool_status_text};
+use super::child_activity::child_tool_status_spans;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwarmCardComponent {
@@ -230,25 +229,25 @@ impl SwarmCardComponent {
                 waiting,
                 self.now_ms,
                 activity_width,
+                theme,
             );
-            lines.push(
-                Line::from_spans(vec![
-                    Span::styled(format!("{branch} "), muted),
-                    Span::styled(child.agent.display_name.as_str(), state_style),
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("[{}]", role_label(child.agent.role)),
-                        role_badge_style(child.agent.role, theme),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(marker(child.agent.state), state_style),
-                    Span::raw(" ["),
-                    progress_bar_line(progress, child.agent.state, theme),
-                    Span::raw("] "),
-                    Span::styled(format!("{activity_prefix}{activity_summary}"), primary),
-                ])
-                .truncate_to_width(width),
-            );
+            let mut spans = vec![
+                Span::styled(format!("{branch} "), muted),
+                Span::styled(child.agent.display_name.as_str(), state_style),
+                Span::raw("  "),
+                Span::styled(
+                    format!("[{}]", role_label(child.agent.role)),
+                    role_badge_style(child.agent.role, theme),
+                ),
+                Span::raw(" "),
+                Span::styled(marker(child.agent.state), state_style),
+                Span::raw(" ["),
+                progress_bar_line(progress, child.agent.state, theme),
+                Span::raw("] "),
+                Span::styled(activity_prefix, primary),
+            ];
+            spans.extend(activity_summary);
+            lines.push(Line::from_spans(spans).truncate_to_width(width));
         }
         lines
     }
@@ -564,43 +563,58 @@ fn child_activity_summary(
     waiting: bool,
     now_ms: Option<u64>,
     max_tool_width: usize,
-) -> String {
+    theme: &TuiTheme,
+) -> Vec<Span> {
+    let primary = |text: String| vec![Span::styled(text, Style::default().fg(theme.text_primary))];
+    let status_width = |name: &str| {
+        if matches!(name, "Bash" | "Terminal") {
+            max_tool_width
+        } else {
+            96
+        }
+    };
     if agent.state == AgentLifecycleState::Queued {
         if !agent.task_title.is_empty() {
-            return compact_chars(&one_line(&agent.task_title), 96);
+            return primary(compact_chars(&one_line(&agent.task_title), 96));
         }
-        return compact_chars(&one_line(fallback_item), 96);
+        return primary(compact_chars(&one_line(fallback_item), 96));
     }
     let now = now_ms.unwrap_or_else(|| child_activity_time_ms(agent));
-    if let Some((name, summary, phase)) = agent.activity.iter().rev().find_map(|entry| match &entry
-        .kind
+    if let Some((name, summary, phase, files)) =
+        agent
+            .activity
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                AgentActivityKind::Tool {
+                    name,
+                    summary,
+                    phase,
+                    files,
+                    ..
+                } if matches!(
+                    phase,
+                    AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
+                ) =>
+                {
+                    Some((name.as_str(), summary.as_deref(), *phase, files.as_slice()))
+                }
+                AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+            })
     {
-        AgentActivityKind::Tool {
+        return child_tool_status_spans(
             name,
             summary,
             phase,
-            ..
-        } if matches!(
-            phase,
-            AgentToolActivityPhase::Ongoing | AgentToolActivityPhase::Queued { .. }
-        ) =>
-        {
-            Some((name.as_str(), summary.as_deref(), *phase))
-        }
-        AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
-    }) {
-        if matches!(phase, AgentToolActivityPhase::Ongoing) && waiting {
-            let max_width = if matches!(name, "Bash" | "Terminal") {
-                max_tool_width
-            } else {
-                96
-            };
-            return bounded_tool_status_text("waiting on", name, summary, "", max_width);
-        }
-        return bounded_phase_tool_status(name, summary, phase, now, max_tool_width);
+            Some(files),
+            (matches!(phase, AgentToolActivityPhase::Ongoing) && waiting).then_some("waiting on"),
+            now,
+            status_width(name),
+            theme,
+        );
     }
     if waiting {
-        return "waiting for activity".to_owned();
+        return primary("waiting for activity".to_owned());
     }
     // For terminal agents, prefer the final summary/assistant text over the
     // last tool activity — otherwise a completed child always shows "Used X"
@@ -609,57 +623,66 @@ fn child_activity_summary(
         if let Some(outcome) = &agent.outcome
             && !outcome.summary.trim().is_empty()
         {
-            return compact_chars(&one_line(&outcome.summary), 96);
+            return primary(compact_chars(&one_line(&outcome.summary), 96));
         }
         if let Some(text) = &agent.latest_text
             && !text.trim().is_empty()
         {
-            return compact_chars(&one_line(text), 96);
+            return primary(compact_chars(&one_line(text), 96));
         }
     }
-    if let Some((name, summary, phase)) = agent.activity.iter().rev().find_map(|entry| match &entry
-        .kind
+    if let Some((name, summary, phase, files)) =
+        agent
+            .activity
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                AgentActivityKind::Tool {
+                    name,
+                    summary,
+                    phase,
+                    files,
+                    ..
+                } => Some((name.as_str(), summary.as_deref(), *phase, files.as_slice())),
+                AgentActivityKind::Text { .. } => None,
+            })
     {
-        AgentActivityKind::Tool {
+        return child_tool_status_spans(
             name,
             summary,
             phase,
-            ..
-        } => Some((name.as_str(), summary.as_deref(), *phase)),
-        AgentActivityKind::Text { .. } => None,
-    }) {
-        return bounded_phase_tool_status(name, summary, phase, now, max_tool_width);
+            Some(files),
+            None,
+            now,
+            status_width(name),
+            theme,
+        );
     }
     let view = child_activity_view(agent, 1);
     if let Some(tool) = view.tools.last() {
-        return bounded_phase_tool_status(tool.name, tool.summary, tool.phase, now, max_tool_width);
+        return child_tool_status_spans(
+            tool.name,
+            tool.summary,
+            tool.phase,
+            Some(tool.files),
+            None,
+            now,
+            status_width(tool.name),
+            theme,
+        );
     }
     if let Some(final_text) = view.final_text {
-        return compact_chars(&one_line(&final_text), 96);
+        return primary(compact_chars(&one_line(&final_text), 96));
     }
     if let Some(text) = &agent.latest_text
         && !text.trim().is_empty()
     {
-        return compact_chars(&one_line(text), 96);
+        return primary(compact_chars(&one_line(text), 96));
     }
     if !agent.task_title.is_empty() {
-        return compact_chars(&one_line(&agent.task_title), 96);
+        return primary(compact_chars(&one_line(&agent.task_title), 96));
     }
-    compact_chars(&one_line(fallback_item), 96)
-}
-
-fn bounded_phase_tool_status(
-    name: &str,
-    summary: Option<&str>,
-    phase: AgentToolActivityPhase,
-    now_ms: u64,
-    max_width: usize,
-) -> String {
-    if matches!(name, "Bash" | "Terminal") {
-        bounded_child_tool_status_text(name, summary, phase, now_ms, max_width)
-    } else {
-        compact_chars(&child_tool_status_text(name, summary, phase, now_ms), 96)
-    }
+    primary(compact_chars(&one_line(fallback_item), 96))
 }
 
 fn progress_meter(progress: f32, theme: &TuiTheme) -> Span {
