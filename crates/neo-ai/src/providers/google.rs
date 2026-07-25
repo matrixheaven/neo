@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::common::error::{ProviderError, stream_failure};
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
-use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
+use super::common::sse::{SseFramer, StreamChunk};
 
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
@@ -78,8 +78,10 @@ impl ModelClient for GoogleGenerativeAiClient {
 
 fn request_url(base_url: &str, model: &str) -> Result<reqwest::Url, ProviderError> {
     let model = model.strip_prefix("models/").unwrap_or(model);
-    let mut url = reqwest::Url::parse(&format!("{base_url}/models/{model}:streamGenerateContent"))
-        .map_err(|err| ProviderError::Url(format!("invalid Google Generative AI URL: {err}")))?;
+    let mut url = super::common::http::request_url(
+        base_url,
+        &format!("/models/{model}:streamGenerateContent"),
+    )?;
     url.query_pairs_mut().append_pair("alt", "sse");
     Ok(url)
 }
@@ -455,7 +457,7 @@ fn stream_response(
 
 #[derive(Default)]
 struct IncrementalSse {
-    buffer: Vec<u8>,
+    framer: SseFramer,
     parser: ParseState,
     stopped: bool,
 }
@@ -466,28 +468,30 @@ impl IncrementalSse {
             return Vec::new();
         }
 
-        self.buffer.extend_from_slice(bytes);
         let mut out = Vec::new();
-
-        while let Some((index, delimiter_len)) = find_frame_end(&self.buffer) {
-            let frame = self
-                .buffer
-                .drain(..index + delimiter_len)
-                .collect::<Vec<_>>();
-            match parse_sse_frame(&frame) {
-                Ok(Some(payload)) => {
-                    if let Err(err) = self.ingest_payload(&payload, &mut out) {
-                        self.stopped = true;
-                        out.push(Err(err));
-                        break;
+        match self.framer.push(bytes) {
+            Ok(frames) => {
+                for frame in frames {
+                    match frame.parse() {
+                        Ok(Some(payload)) => {
+                            if let Err(err) = self.ingest_payload(&payload, &mut out) {
+                                self.stopped = true;
+                                out.push(Err(err));
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.stopped = true;
+                            out.push(Err(err));
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    self.stopped = true;
-                    out.push(Err(err));
-                    break;
-                }
+            }
+            Err(err) => {
+                self.stopped = true;
+                out.push(Err(err));
             }
         }
 
@@ -985,6 +989,29 @@ mod tests {
             ProviderError::Protocol(message)
                 if message == "Google tool results are missing for tool calls: call-1"
         ));
+    }
+
+    #[test]
+    fn request_url_rejects_non_http_schemes_without_retry() {
+        let error = request_url("file:///etc", "gemini-pro")
+            .unwrap_err()
+            .into_ai_error();
+        assert!(matches!(error, AiError::Protocol { .. }));
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn oversized_sse_frame_is_rejected() {
+        let mut parser = IncrementalSse::default();
+        let data = "x".repeat(SseFramer::MAX_FRAME_BYTES + 1);
+        let body = format!("data: {data}\n\n");
+        let error = parser
+            .push_chunk(body.as_bytes())
+            .into_iter()
+            .find_map(Result::err)
+            .expect("should emit an error");
+        assert!(matches!(error, AiError::Protocol { .. }));
+        assert!(!error.is_retryable());
     }
 
     #[test]

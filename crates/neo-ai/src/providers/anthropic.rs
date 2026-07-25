@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::common::error::{ProviderError, stream_failure};
 use super::common::helpers::{merge_token_usage, reject_images, rounded_f64};
-use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
+use super::common::sse::{SseFramer, StreamChunk};
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
@@ -462,7 +462,7 @@ fn stream_response(
 
 #[derive(Default)]
 struct IncrementalSse {
-    buffer: Vec<u8>,
+    framer: SseFramer,
     parser: ParseState,
     saw_done: bool,
     stopped: bool,
@@ -474,34 +474,36 @@ impl IncrementalSse {
             return Vec::new();
         }
 
-        self.buffer.extend_from_slice(bytes);
         let mut out = Vec::new();
-
-        while let Some((index, delimiter_len)) = find_frame_end(&self.buffer) {
-            let frame = self
-                .buffer
-                .drain(..index + delimiter_len)
-                .collect::<Vec<_>>();
-            match parse_sse_frame(&frame) {
-                Ok(Some(payload)) if payload == "[DONE]" => {
-                    self.saw_done = true;
-                    self.stopped = true;
-                    out.extend(self.finish());
-                    break;
-                }
-                Ok(Some(payload)) => {
-                    if let Err(err) = self.ingest_payload(&payload, &mut out) {
-                        self.stopped = true;
-                        out.push(Err(err));
-                        break;
+        match self.framer.push(bytes) {
+            Ok(frames) => {
+                for frame in frames {
+                    match frame.parse() {
+                        Ok(Some(payload)) if payload == "[DONE]" => {
+                            self.saw_done = true;
+                            self.stopped = true;
+                            out.extend(self.finish());
+                            break;
+                        }
+                        Ok(Some(payload)) => {
+                            if let Err(err) = self.ingest_payload(&payload, &mut out) {
+                                self.stopped = true;
+                                out.push(Err(err));
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.stopped = true;
+                            out.push(Err(err));
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    self.stopped = true;
-                    out.push(Err(err));
-                    break;
-                }
+            }
+            Err(err) => {
+                self.stopped = true;
+                out.push(Err(err));
             }
         }
 
@@ -884,6 +886,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn oversized_sse_frame_is_rejected() {
+        let mut parser = IncrementalSse::default();
+        let data = "x".repeat(SseFramer::MAX_FRAME_BYTES + 1);
+        let body = format!("data: {data}\n\n");
+        let error = parser
+            .push_chunk(body.as_bytes())
+            .into_iter()
+            .find_map(Result::err)
+            .expect("should emit an error");
+        assert!(matches!(error, AiError::Protocol { .. }));
+        assert!(!error.is_retryable());
     }
 
     #[test]
