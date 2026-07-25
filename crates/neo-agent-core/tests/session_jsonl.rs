@@ -349,6 +349,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
         state: AgentLifecycleState::Running,
         mode: neo_agent_core::multi_agent::AgentRunMode::Foreground,
         detached_from_foreground: false,
+        started_at_ms: Some(41),
         updated_at_ms: 42,
         terminal_at_ms: None,
         terminal_reason: None,
@@ -389,6 +390,11 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
 
     let mut legacy = serde_json::to_value(&event).expect("serialize legacy-shaped event");
     legacy
+        .pointer_mut("/DelegateProgressUpdated/progress")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("progress object")
+        .remove("started_at_ms");
+    legacy
         .pointer_mut("/DelegateProgressUpdated/progress/last_tool")
         .and_then(serde_json::Value::as_object_mut)
         .expect("last tool object")
@@ -398,6 +404,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
     let AgentEvent::DelegateProgressUpdated { progress, .. } = legacy_event else {
         panic!("expected delegate progress event");
     };
+    assert_eq!(progress.started_at_ms, None);
     assert!(
         progress.last_tool.is_some_and(|tool| tool.files.is_empty()),
         "old progress events must default to no file rows"
@@ -425,6 +432,7 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
                 state: AgentLifecycleState::Running,
                 mode: neo_agent_core::multi_agent::AgentRunMode::Foreground,
                 detached_from_foreground: false,
+                started_at_ms: Some(6),
                 updated_at_ms: 7,
                 terminal_at_ms: None,
                 terminal_reason: None,

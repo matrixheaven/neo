@@ -2972,6 +2972,48 @@ fn explicit_animation_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
 }
 
 #[test]
+fn swarm_progress_preserves_started_time_for_live_elapsed_ticks() {
+    let mut pane = TranscriptPane::new(160, 30);
+    let queued = swarm_with_child_states(vec![AgentLifecycleState::Queued]);
+    let mut running = queued.children[0].agent.clone();
+    running.state = AgentLifecycleState::Running;
+    running.started_at_ms = Some(1_000);
+    running.updated_at_ms = 8_000;
+    running.elapsed = Duration::from_secs(7);
+    running.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "bash-1".to_owned(),
+            name: "Bash".to_owned(),
+            summary: Some("cargo test".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+            files: Vec::new(),
+        },
+    });
+
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 7,
+        swarm: queued,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmProgressUpdated {
+        turn: 7,
+        swarm_id: "swarm_test".to_owned(),
+        state: AgentLifecycleState::Running,
+        aggregate: SwarmAggregate::from_states([AgentLifecycleState::Running]),
+        child_progress: SwarmChildProgress {
+            item_index: 1,
+            progress: AgentProgressSnapshot::from_agent(&running),
+        },
+    });
+
+    let _ = pane.render_frame(160, 30);
+    pane.advance_animation_at_ms(61_000);
+    let frame = pane.render_frame(160, 30).unwrap_or_default().join("\n");
+
+    assert!(frame.contains("1m 0s"), "{frame}");
+}
+
+#[test]
 fn detached_foreground_delegate_renders_backgrounded_without_ctrl_b_hint() {
     let mut snapshot = running_delegate();
     snapshot.mode = AgentRunMode::Background;

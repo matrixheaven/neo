@@ -258,6 +258,8 @@ pub struct AgentProgressSnapshot {
     pub state: AgentLifecycleState,
     pub mode: AgentRunMode,
     pub detached_from_foreground: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_at_ms: Option<u64>,
@@ -289,6 +291,7 @@ impl AgentProgressSnapshot {
             state: agent.state,
             mode: agent.mode,
             detached_from_foreground: agent.detached_from_foreground,
+            started_at_ms: agent.started_at_ms,
             updated_at_ms: agent.updated_at_ms,
             terminal_at_ms: agent.terminal_at_ms,
             terminal_reason: agent.terminal_reason,
@@ -469,6 +472,7 @@ pub fn apply_agent_progress(
     snapshot.state = progress.state;
     snapshot.mode = progress.mode;
     snapshot.detached_from_foreground = progress.detached_from_foreground;
+    snapshot.started_at_ms = progress.started_at_ms;
     snapshot.updated_at_ms = snapshot.updated_at_ms.max(progress.updated_at_ms);
     snapshot.terminal_at_ms = progress.terminal_at_ms;
     snapshot.terminal_reason = progress.terminal_reason;
