@@ -916,66 +916,78 @@ impl MultiAgentRuntime {
         agent_id: &str,
         message: String,
     ) -> Result<(), String> {
-        let Some(agent) = self.agent_snapshot(agent_id) else {
-            return Err(format!("unknown delegate target `{agent_id}`"));
-        };
-        if !matches!(agent.state, AgentLifecycleState::Running) {
-            return Err(format!(
-                "agent already {}; terminal agents cannot receive live messages. To continue this agent, call Delegate with resume=\"{}\".",
-                agent.state.as_str(),
-                agent.id.as_str()
-            ));
-        }
         let mailbox_message = super::DelegateMailboxMessage {
             id: format!("live_{}", uuid::Uuid::new_v4().simple()),
             text: message,
             delivered: false,
         };
-        if self.deliver_live_message(agent_id, &mailbox_message) {
-            self.record_live_message(agent_id);
-            Ok(())
-        } else {
-            Err(format!(
-                "agent is not running; use Delegate with resume=\"{}\" to continue it",
-                agent.id.as_str()
-            ))
+        match self.deliver_live_message(agent_id, &mailbox_message) {
+            LiveMessageDelivery::Delivered => Ok(()),
+            LiveMessageDelivery::Unknown => Err(format!("unknown delegate target `{agent_id}`")),
+            LiveMessageDelivery::NotRunning => {
+                if let Some(agent) = self.agent_snapshot(agent_id) {
+                    if matches!(agent.state, AgentLifecycleState::Running) {
+                        Err(format!(
+                            "agent is not running; use Delegate with resume=\"{}\" to continue it",
+                            agent.id.as_str()
+                        ))
+                    } else {
+                        Err(format!(
+                            "agent already {}; terminal agents cannot receive live messages. To continue this agent, call Delegate with resume=\"{}\".",
+                            agent.state.as_str(),
+                            agent.id.as_str()
+                        ))
+                    }
+                } else {
+                    Err(format!(
+                        "agent is not running; use Delegate with resume=\"{agent_id}\" to continue it"
+                    ))
+                }
+            }
         }
     }
 
+    /// Validate the live-steer generation and enqueue in one registry operation.
+    ///
+    /// Holds the multi-agent state lock only for the synchronous lookup + enqueue
+    /// path (no `.await`). Returns [`LiveMessageDelivery::Delivered`] only when
+    /// the message was accepted by the live receiver for the current generation.
     #[must_use]
     pub fn deliver_live_message(
         &self,
         agent_id: &str,
         message: &super::DelegateMailboxMessage,
-    ) -> bool {
-        let handle = self
-            .state
-            .lock()
-            .expect("multi-agent state poisoned")
-            .steer_handles
-            .get(agent_id)
-            .map(|entry| entry.handle.clone());
-        let Some(handle) = handle else {
-            return false;
+    ) -> LiveMessageDelivery {
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        let known = state.agents.contains_key(agent_id);
+        let Some(entry) = state.steer_handles.get(agent_id) else {
+            return if known {
+                LiveMessageDelivery::NotRunning
+            } else {
+                LiveMessageDelivery::Unknown
+            };
         };
-        handle.push(ActiveTurnInput::SteerNow(AgentMessage::user_text(format!(
-            "Delegate message {}:\n{}",
-            message.id, message.text
-        ))));
-        true
-    }
-
-    fn record_live_message(&self, agent_id: &str) {
-        if let Some(agent) = self
-            .state
-            .lock()
-            .expect("multi-agent state poisoned")
-            .agents
-            .get_mut(agent_id)
-        {
+        // Entry presence under the registry lock is generation validation: Drop and
+        // replacement both require this lock, so the handle cannot be unregistered
+        // between lookup and enqueue.
+        let accepted = entry
+            .handle
+            .try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(format!(
+                "Delegate message {}:\n{}",
+                message.id, message.text
+            ))));
+        if !accepted {
+            return if known {
+                LiveMessageDelivery::NotRunning
+            } else {
+                LiveMessageDelivery::Unknown
+            };
+        }
+        if let Some(agent) = state.agents.get_mut(agent_id) {
             agent.live_messages_received = agent.live_messages_received.saturating_add(1);
             agent.updated_at_ms = now_ms();
         }
+        LiveMessageDelivery::Delivered
     }
 
     /// Return the item indices of children that can be resumed (queued, failed,
@@ -1166,11 +1178,13 @@ impl MultiAgentRuntime {
                     text: message.to_owned(),
                     delivered: false,
                 };
-                if self.deliver_live_message(child.agent.id.as_str(), &mailbox_message) {
-                    delivered.push(child.agent.id.as_str().to_owned());
-                    self.record_live_message(child.agent.id.as_str());
-                } else {
-                    skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
+                match self.deliver_live_message(child.agent.id.as_str(), &mailbox_message) {
+                    LiveMessageDelivery::Delivered => {
+                        delivered.push(child.agent.id.as_str().to_owned());
+                    }
+                    LiveMessageDelivery::NotRunning | LiveMessageDelivery::Unknown => {
+                        skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
+                    }
                 }
             } else {
                 skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
@@ -1229,6 +1243,17 @@ pub struct ChildRunOutput {
     pub snapshot: AgentSnapshot,
     pub events: Vec<AgentEvent>,
     pub messages: Vec<AgentMessage>,
+}
+
+/// Outcome of an atomic live-steer delivery attempt.
+///
+/// `Delivered` is returned only when generation validation and enqueue both
+/// succeed while the live-steer registry entry remains authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveMessageDelivery {
+    Delivered,
+    NotRunning,
+    Unknown,
 }
 
 type LiveSwarmMessageResult = Result<(Vec<String>, Vec<(String, AgentLifecycleState)>), String>;
@@ -4383,6 +4408,68 @@ mod tests {
     }
 
     #[test]
+    fn live_delivery_unregister_race_never_reports_false_delivered() {
+        let runtime = MultiAgentRuntime::new();
+        let registration = runtime.register_live_steer("agent_race");
+        let orphan_handle = registration.handle();
+
+        // Unregister before delivery: the old race cloned the handle under the
+        // registry lock, released it, then pushed and reported success even though
+        // Drop had already cleared the live entry.
+        drop(registration);
+
+        let outcome = runtime.deliver_live_message(
+            "agent_race",
+            &crate::multi_agent::DelegateMailboxMessage {
+                id: "msg_after_unregister".to_owned(),
+                text: "should not deliver".to_owned(),
+                delivered: false,
+            },
+        );
+        assert_ne!(
+            outcome,
+            LiveMessageDelivery::Delivered,
+            "unregister must not report Delivered"
+        );
+        assert_eq!(
+            orphan_handle.pending(),
+            0,
+            "orphaned receiver must not accept after unregister"
+        );
+
+        // While the registry entry is live, delivery is accepted exactly once.
+        let live = runtime.register_live_steer("agent_race");
+        let live_handle = live.handle();
+        assert_eq!(
+            runtime.deliver_live_message(
+                "agent_race",
+                &crate::multi_agent::DelegateMailboxMessage {
+                    id: "msg_while_live".to_owned(),
+                    text: "deliver me".to_owned(),
+                    delivered: false,
+                },
+            ),
+            LiveMessageDelivery::Delivered
+        );
+        assert_eq!(live_handle.pending(), 1);
+
+        // After Drop of the live registration, a subsequent push cannot claim success.
+        drop(live);
+        assert_ne!(
+            runtime.deliver_live_message(
+                "agent_race",
+                &crate::multi_agent::DelegateMailboxMessage {
+                    id: "msg_after_drop".to_owned(),
+                    text: "too late".to_owned(),
+                    delivered: false,
+                },
+            ),
+            LiveMessageDelivery::Delivered
+        );
+        assert_eq!(live_handle.pending(), 1);
+    }
+
+    #[test]
     fn live_steer_guard_does_not_remove_replacement() {
         let runtime = MultiAgentRuntime::new();
         let first = runtime.register_live_steer("agent_test");
@@ -4391,14 +4478,17 @@ mod tests {
 
         drop(first);
 
-        assert!(runtime.deliver_live_message(
-            "agent_test",
-            &crate::multi_agent::DelegateMailboxMessage {
-                id: "message_test".to_owned(),
-                text: "keep replacement".to_owned(),
-                delivered: false,
-            },
-        ));
+        assert_eq!(
+            runtime.deliver_live_message(
+                "agent_test",
+                &crate::multi_agent::DelegateMailboxMessage {
+                    id: "message_test".to_owned(),
+                    text: "keep replacement".to_owned(),
+                    delivered: false,
+                },
+            ),
+            LiveMessageDelivery::Delivered
+        );
         assert_eq!(second_handle.pending(), 1);
 
         drop(second);
@@ -4440,14 +4530,17 @@ mod tests {
         assert_eq!(preserved.generation, existing.generation);
         drop(state);
         runtime.state.clear_poison();
-        assert!(runtime.deliver_live_message(
-            "agent_test",
-            &crate::multi_agent::DelegateMailboxMessage {
-                id: "message_after_overflow".to_owned(),
-                text: "keep existing handle".to_owned(),
-                delivered: false,
-            },
-        ));
+        assert_eq!(
+            runtime.deliver_live_message(
+                "agent_test",
+                &crate::multi_agent::DelegateMailboxMessage {
+                    id: "message_after_overflow".to_owned(),
+                    text: "keep existing handle".to_owned(),
+                    delivered: false,
+                },
+            ),
+            LiveMessageDelivery::Delivered
+        );
         assert_eq!(existing_handle.pending(), 1);
     }
 

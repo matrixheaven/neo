@@ -888,31 +888,39 @@ impl Tool for MessageDelegateTool {
                 }
             }
 
-            if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.id)
-                && agent.state.is_terminal()
-            {
-                return Ok(terminal_delegate_error(
-                    agent.id.as_str(),
-                    agent.state,
-                    DelegateTerminalAction::Message,
-                ));
-            }
-
+            // Atomic delivery is the sole authority: no snapshot precheck. Map
+            // typed NotRunning/Unknown outcomes to action-specific errors after
+            // the registry reports non-delivery.
             match ctx
                 .multi_agent
                 .deliver_live_agent_message(&input.id, input.message.clone())
             {
                 Ok(()) => Ok(ToolResult::ok(format!(
-                    "target: {}\nstatus: delivered\nmessage: {}",
+                    "target: {}\noutcome: delivered\nmessage: {}",
                     input.id, input.message
                 ))
                 .with_details(json!({
                     "target": input.id,
-                    "status": "delivered",
+                    "outcome": "delivered",
                     "delivered": [input.id],
                     "message": input.message,
                 }))),
-                Err(message) => Ok(ToolResult::error(message)),
+                Err(message) => {
+                    let target = input.id.as_str();
+                    if message.contains("unknown delegate target") {
+                        return Ok(delegate_target_not_found(target));
+                    }
+                    if let Some(agent) = ctx.multi_agent.agent_snapshot(target)
+                        && agent.state.is_terminal()
+                    {
+                        return Ok(terminal_delegate_error(
+                            agent.id.as_str(),
+                            agent.state,
+                            DelegateTerminalAction::Message,
+                        ));
+                    }
+                    Ok(ToolResult::error(message))
+                }
             }
         })
     }

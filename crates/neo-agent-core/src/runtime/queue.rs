@@ -221,10 +221,21 @@ impl SteerInputHandle {
     }
 
     /// Push a live input onto the queue. Called by the controller.
+    ///
+    /// Returns whether the input was accepted by the live queue. Poisoned or
+    /// otherwise unavailable queues report failure instead of silently dropping.
+    #[must_use]
+    pub fn try_push(&self, input: ActiveTurnInput) -> bool {
+        let Ok(mut queue) = self.inner.lock() else {
+            return false;
+        };
+        queue.push_back(input);
+        true
+    }
+
+    /// Push a live input onto the queue, ignoring acceptance.
     pub fn push(&self, input: ActiveTurnInput) {
-        if let Ok(mut queue) = self.inner.lock() {
-            queue.push_back(input);
-        }
+        let _ = self.try_push(input);
     }
 
     /// Drain all pending live inputs. Called by the runtime at step boundaries.
