@@ -9,6 +9,7 @@ mod edit_tool_presentation;
 pub mod entry;
 mod event_handler;
 mod instruction_card;
+mod live_output;
 pub mod pane;
 pub mod partial_json;
 pub mod plan_box;

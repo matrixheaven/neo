@@ -5,6 +5,7 @@ use crate::primitive::{Component, Expandable, Finalization, Line, Span, strip_an
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::format_elapsed;
 
+use super::live_output::LiveOutput;
 use super::plan_box::PlanBoxComponent;
 use super::shell_tool_presentation;
 use super::tool_renderers::{
@@ -45,9 +46,7 @@ impl QueueDisplayState {
 pub struct ToolCallComponent {
     state: ToolCallState,
     expanded: bool,
-    live_output: Vec<String>,
-    dropped_live_output_lines: usize,
-    live_output_chars: usize,
+    live_output: LiveOutput,
     workspace_dir: Option<PathBuf>,
     streaming_started_at: Option<Instant>,
     queue: Option<QueueDisplayState>,
@@ -64,9 +63,7 @@ impl ToolCallComponent {
         Self {
             state,
             expanded: false,
-            live_output: Vec::new(),
-            dropped_live_output_lines: 0,
-            live_output_chars: 0,
+            live_output: LiveOutput::new(MAX_LIVE_OUTPUT_LINES, MAX_LIVE_OUTPUT_CHARS),
             workspace_dir: None,
             streaming_started_at,
             queue: None,
@@ -146,16 +143,7 @@ impl ToolCallComponent {
     }
 
     pub fn append_live_output(&mut self, output: impl Into<String>) -> bool {
-        let output = output.into();
-        if output.is_empty() {
-            return false;
-        }
-        for line in output.lines() {
-            self.live_output_chars += line.chars().count();
-            self.live_output.push(line.to_owned());
-        }
-        self.trim_live_output();
-        true
+        self.live_output.append(&output.into())
     }
 
     /// Retain structured Edit progress/prepared details on the live card.
@@ -165,20 +153,6 @@ impl ToolCallComponent {
         }
         self.state.details = Some(details);
         true
-    }
-
-    fn trim_live_output(&mut self) {
-        while self.live_output.len() > MAX_LIVE_OUTPUT_LINES
-            || self.live_output_chars > MAX_LIVE_OUTPUT_CHARS
-        {
-            let Some(line) = self.live_output.first() else {
-                self.live_output_chars = 0;
-                break;
-            };
-            self.live_output_chars = self.live_output_chars.saturating_sub(line.chars().count());
-            self.live_output.remove(0);
-            self.dropped_live_output_lines += 1;
-        }
     }
 
     pub fn set_result(
@@ -198,8 +172,6 @@ impl ToolCallComponent {
             || self.state.exit_code != exit_code
             || self.state.status != status
             || !self.live_output.is_empty()
-            || self.dropped_live_output_lines != 0
-            || self.live_output_chars != 0
             || self.streaming_started_at.is_some()
             || self.queue.is_some();
         if !changed {
@@ -209,9 +181,7 @@ impl ToolCallComponent {
         self.state.details = details;
         self.state.exit_code = exit_code;
         self.state.status = status;
-        self.live_output.clear();
-        self.dropped_live_output_lines = 0;
-        self.live_output_chars = 0;
+        self.live_output.finalize();
         self.streaming_started_at = None;
         self.queue = None;
         true
@@ -225,8 +195,6 @@ impl ToolCallComponent {
             || self.state.exit_code.is_some()
             || self.state.status != status
             || !self.live_output.is_empty()
-            || self.dropped_live_output_lines != 0
-            || self.live_output_chars != 0
             || self.streaming_started_at.is_some()
             || self.queue.is_some();
         if !changed {
@@ -238,9 +206,7 @@ impl ToolCallComponent {
         }
         self.state.exit_code = None;
         self.state.status = status;
-        self.live_output.clear();
-        self.dropped_live_output_lines = 0;
-        self.live_output_chars = 0;
+        self.live_output.finalize();
         self.streaming_started_at = None;
         self.queue = None;
         true
@@ -289,7 +255,7 @@ impl ToolCallComponent {
 
     #[must_use]
     pub fn has_live_rows(&self) -> bool {
-        self.dropped_live_output_lines > 0 || !self.live_output.is_empty()
+        self.live_output.dropped_lines() > 0 || !self.live_output.is_empty()
     }
 
     #[must_use]
@@ -432,13 +398,13 @@ impl ToolCallComponent {
         }
         if self.state.status == ToolStatusKind::Running {
             let live_style = Style::default().fg(theme.text_muted);
-            if self.dropped_live_output_lines > 0 {
+            if self.live_output.dropped_lines() > 0 {
                 rows.push(Line::styled(
-                    format!("  ... ({} earlier lines)", self.dropped_live_output_lines),
+                    format!("  ... ({} earlier lines)", self.live_output.dropped_lines()),
                     Style::default().fg(theme.text_muted),
                 ));
             }
-            rows.extend(wrap_live_rows(&self.live_output, width, live_style));
+            rows.extend(wrap_live_rows(&self.live_output.tail(), width, live_style));
         }
         rows
     }

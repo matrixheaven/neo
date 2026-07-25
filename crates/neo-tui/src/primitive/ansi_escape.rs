@@ -126,6 +126,146 @@ pub fn paint(text: &str, style: Style) -> String {
     }
 }
 
+/// Classification of ANSI string sequences introduced by `ESC <kind>` or a C1 control byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringKind {
+    Osc,
+    Dcs,
+    Sos,
+    Apc,
+    Pm,
+}
+
+/// State for the incremental ANSI control parser.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum AnsiParseState {
+    /// Normal text; control characters are stripped or preserved.
+    #[default]
+    Ground,
+    /// Saw `ESC` and are examining the next byte.
+    Esc,
+    /// Inside a `CSI` sequence (`ESC [` or C1 `CSI`).
+    Csi,
+    /// Inside a string sequence (OSC, DCS, SOS, APC, PM).
+    String(StringKind),
+    /// Inside a string sequence and saw `ESC`; the next byte determines `ST`.
+    StringEsc(StringKind),
+    /// Saw one of the `ESC ( ) * + - . /` introducers and need one more byte.
+    SingleChar,
+}
+
+/// Incremental ANSI escape sequence parser.
+///
+/// `AnsiParser` can be fed input in arbitrary chunks. Sequences split across
+/// chunk boundaries are held in parser state until they terminate or the parser
+/// is finalized. Finalizing discards any pending control state so a trailing
+/// partial sequence does not leak into later output.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AnsiParser {
+    state: AnsiParseState,
+}
+
+impl AnsiParser {
+    /// Create a new parser in the ground state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the parser, discarding any pending control state.
+    pub fn reset(&mut self) {
+        self.state = AnsiParseState::Ground;
+    }
+
+    /// Finalize parsing, discarding any pending control state.
+    pub fn finalize(&mut self) {
+        self.reset();
+    }
+
+    /// Consume `input` and append visible characters to `output`.
+    ///
+    /// Newlines and tabs are preserved. CSI, OSC, DCS, APC, PM, SOS, C1
+    /// controls, and other control characters are stripped. Sequences split
+    /// across calls are held in parser state.
+    ///
+    /// Returns the number of visible characters appended to `output`.
+    pub fn consume(&mut self, input: &str, output: &mut String) -> usize {
+        let mut appended = 0;
+        for ch in input.chars() {
+            match self.state {
+                AnsiParseState::Ground => {
+                    if ch == '\x1b' {
+                        self.state = AnsiParseState::Esc;
+                    } else if ch == '\u{009b}' {
+                        self.state = AnsiParseState::Csi;
+                    } else if ch == '\u{009d}' {
+                        self.state = AnsiParseState::String(StringKind::Osc);
+                    } else if ch == '\u{0090}' {
+                        self.state = AnsiParseState::String(StringKind::Dcs);
+                    } else if ch == '\u{0098}' {
+                        self.state = AnsiParseState::String(StringKind::Sos);
+                    } else if ch == '\u{009f}' {
+                        self.state = AnsiParseState::String(StringKind::Apc);
+                    } else if ch == '\u{009e}' {
+                        self.state = AnsiParseState::String(StringKind::Pm);
+                    } else if ch == '\u{009c}' {
+                        // C1 ST in ground state has no effect.
+                    } else if ch.is_control() && !matches!(ch, '\n' | '\t') {
+                        // Drop C0 controls (except newline and tab).
+                    } else {
+                        output.push(ch);
+                        appended += 1;
+                    }
+                }
+                AnsiParseState::Esc => match ch {
+                    '[' => self.state = AnsiParseState::Csi,
+                    ']' => self.state = AnsiParseState::String(StringKind::Osc),
+                    'P' => self.state = AnsiParseState::String(StringKind::Dcs),
+                    'X' => self.state = AnsiParseState::String(StringKind::Sos),
+                    '_' => self.state = AnsiParseState::String(StringKind::Apc),
+                    '^' => self.state = AnsiParseState::String(StringKind::Pm),
+                    '(' | ')' | '*' | '+' | '-' | '.' | '/' => {
+                        self.state = AnsiParseState::SingleChar;
+                    }
+                    '\u{009b}' => self.state = AnsiParseState::Csi,
+                    _ => self.state = AnsiParseState::Ground,
+                },
+                AnsiParseState::Csi => {
+                    if ('\x40'..='\x7e').contains(&ch) {
+                        self.state = AnsiParseState::Ground;
+                    }
+                    // Otherwise remain in CSI until the final byte arrives.
+                }
+                AnsiParseState::String(kind) => {
+                    if ch == '\x07' || ch == '\x18' || ch == '\x1a' || ch == '\u{009c}' {
+                        self.state = AnsiParseState::Ground;
+                    } else if ch == '\x1b' {
+                        self.state = AnsiParseState::StringEsc(kind);
+                    }
+                }
+                AnsiParseState::StringEsc(kind) => {
+                    if ch == '\\' {
+                        self.state = AnsiParseState::Ground;
+                    } else {
+                        // ESC was not followed by backslash, so it is part of
+                        // the string and this byte is processed as string content.
+                        self.state = AnsiParseState::String(kind);
+                        if ch == '\x07' || ch == '\x18' || ch == '\x1a' || ch == '\u{009c}' {
+                            self.state = AnsiParseState::Ground;
+                        } else if ch == '\x1b' {
+                            self.state = AnsiParseState::StringEsc(kind);
+                        }
+                    }
+                }
+                AnsiParseState::SingleChar => {
+                    self.state = AnsiParseState::Ground;
+                }
+            }
+        }
+        appended
+    }
+}
+
 /// If `s` starts with an ANSI escape sequence at byte `start`, return that sequence.
 /// Mirrors the set of sequences handled by `strip_ansi`.
 pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
@@ -195,18 +335,9 @@ pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
 #[must_use]
 pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut index = 0;
-    while index < s.len() {
-        if let Some(seq) = next_sequence(s, index) {
-            index += seq.len();
-        } else {
-            let ch = s[index..].chars().next().unwrap();
-            if !ch.is_control() || matches!(ch, '\n' | '\t') {
-                result.push(ch);
-            }
-            index += ch.len_utf8();
-        }
-    }
+    let mut parser = AnsiParser::new();
+    parser.consume(s, &mut result);
+    parser.finalize();
     result
 }
 
@@ -339,5 +470,59 @@ mod tests {
     #[test]
     fn strip_ansi_osc_terminated_by_bel() {
         assert_eq!(strip_ansi("\x1b]0;title\x07visible"), "visible");
+    }
+
+    #[test]
+    fn parser_consumes_split_csi_across_chunks() {
+        let mut parser = AnsiParser::new();
+        let mut out = String::new();
+        parser.consume("\x1b[3", &mut out);
+        assert_eq!(out, "");
+        parser.consume("1mred\x1b[0m", &mut out);
+        assert_eq!(out, "red");
+        parser.finalize();
+    }
+
+    #[test]
+    fn parser_consumes_split_osc_across_chunks() {
+        let mut parser = AnsiParser::new();
+        let mut out = String::new();
+        parser.consume("\x1b]0;ti", &mut out);
+        assert_eq!(out, "");
+        parser.consume("tle\x07hello", &mut out);
+        assert_eq!(out, "hello");
+        parser.finalize();
+    }
+
+    #[test]
+    fn parser_consumes_split_dcs_apc_pm_sos_across_chunks() {
+        for (intro, kind) in [('P', "DCS"), ('_', "APC"), ('^', "PM"), ('X', "SOS")] {
+            let mut parser = AnsiParser::new();
+            let mut out = String::new();
+            parser.consume(&format!("\x1b{intro}pay"), &mut out);
+            assert_eq!(out, "", "{kind} partial should hold");
+            parser.consume("load\x1b\\visible", &mut out);
+            assert_eq!(out, "visible", "{kind} termination failed");
+            parser.finalize();
+        }
+    }
+
+    #[test]
+    fn parser_finalizes_away_trailing_partial_sequence() {
+        let mut parser = AnsiParser::new();
+        let mut out = String::new();
+        parser.consume("text\x1b[", &mut out);
+        parser.finalize();
+        assert_eq!(out, "text");
+    }
+
+    #[test]
+    fn parser_resets_pending_control_state() {
+        let mut parser = AnsiParser::new();
+        let mut out = String::new();
+        parser.consume("\x1b[", &mut out);
+        parser.reset();
+        parser.consume("visible", &mut out);
+        assert_eq!(out, "visible");
     }
 }

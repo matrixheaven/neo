@@ -833,7 +833,7 @@ fn bash_running_card_shows_live_output_tail() {
     });
 
     for n in 1..=10 {
-        card.append_live_output(format!("line {n}"));
+        card.append_live_output(format!("line {n}\n"));
     }
 
     let rows = plain(card.render(80));
@@ -3054,5 +3054,113 @@ fn shell_run_sanitizes_split_control_strings_with_canonical_ansi_state() {
     assert!(
         !joined.contains('\x1b'),
         "escape sequences should not leak: {joined:?}"
+    );
+}
+
+#[test]
+fn tool_call_live_output_reassembles_split_lines_and_ansi() {
+    use neo_tui::transcript::ToolCallComponent;
+
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "live-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: Some(r#"{"command":"echo test"}"#.to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+
+    card.append_live_output("line one\nline ");
+    let rows = plain(card.render(80));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("line one"),
+        "first complete line should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("line "),
+        "partial tail should be preserved: {joined:?}"
+    );
+
+    card.append_live_output("two\n\x1b[3");
+    let rows = plain(card.render(80));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("line two"),
+        "reassembled line should appear: {joined:?}"
+    );
+
+    card.append_live_output("1mred\x1b[0m\nline three");
+    let rows = plain(card.render(80));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("red"),
+        "sanitized visible text should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("line three"),
+        "trailing partial line should appear: {joined:?}"
+    );
+    assert!(
+        !joined.contains('\x1b'),
+        "escape sequences should not leak: {joined:?}"
+    );
+}
+
+#[test]
+fn shell_run_live_output_reassembles_split_control_sequences() {
+    use neo_tui::primitive::theme::TuiTheme;
+    use neo_tui::transcript::ShellRunComponent;
+
+    let mut card = ShellRunComponent::running("shell-1", "echo test");
+    card.append_live_output("\x1b]0;ti");
+    card.append_live_output("tle\x07hello\n\x1b[3");
+    card.append_live_output("1mworld\x1b[0m\npartial");
+
+    let rows = plain(card.render(80, &TuiTheme::default()));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("hello"),
+        "visible text should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("world"),
+        "sanitized visible text should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("partial"),
+        "trailing partial line should appear: {joined:?}"
+    );
+    assert!(
+        !joined.contains('\x1b'),
+        "escape sequences should not leak: {joined:?}"
+    );
+}
+
+#[test]
+fn shell_live_output_bounds_eviction_without_losing_partial_tail() {
+    use neo_tui::primitive::theme::TuiTheme;
+    use neo_tui::transcript::ShellRunComponent;
+
+    let mut card = ShellRunComponent::running("shell-1", "yes");
+    for n in 1..=15 {
+        card.append_live_output(format!("line {n}\n"));
+    }
+    card.append_live_output("tail");
+
+    let rows = plain(card.render(80, &TuiTheme::default()));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("tail"),
+        "partial tail must survive eviction: {joined:?}"
+    );
+    assert!(
+        !joined.contains("line 1\n"),
+        "oldest complete line should be evicted: {joined:?}"
+    );
+    assert!(
+        joined.contains("earlier lines"),
+        "eviction marker should be shown: {joined:?}"
     );
 }

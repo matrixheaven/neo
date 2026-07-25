@@ -4,7 +4,7 @@ use std::time::Instant;
 use neo_agent_core::ShellCommandOutcome;
 use neo_agent_core::tools::{format_command_timeout, format_shell_failure};
 
-use crate::primitive::ansi_escape::AnsiParser;
+use super::live_output::LiveOutput;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Finalization, Line, Span, Style, strip_ansi};
@@ -37,10 +37,7 @@ pub struct ShellRunComponent {
     id: String,
     command: String,
     state: ShellRunState,
-    live_output: Vec<String>,
-    dropped_live_output_lines: usize,
-    live_output_chars: usize,
-    parser: AnsiParser,
+    live_output: LiveOutput,
 }
 
 impl ShellRunComponent {
@@ -54,10 +51,7 @@ impl ShellRunComponent {
                 waiting_ms: 0,
                 observed_at: Instant::now(),
             },
-            live_output: Vec::new(),
-            dropped_live_output_lines: 0,
-            live_output_chars: 0,
-            parser: AnsiParser::new(),
+            live_output: LiveOutput::new(MAX_LIVE_OUTPUT_LINES, MAX_LIVE_OUTPUT_CHARS),
         }
     }
 
@@ -67,10 +61,7 @@ impl ShellRunComponent {
             id: id.into(),
             command: command.into(),
             state: ShellRunState::Running,
-            live_output: Vec::new(),
-            dropped_live_output_lines: 0,
-            live_output_chars: 0,
-            parser: AnsiParser::new(),
+            live_output: LiveOutput::new(MAX_LIVE_OUTPUT_LINES, MAX_LIVE_OUTPUT_CHARS),
         }
     }
 
@@ -126,17 +117,7 @@ impl ShellRunComponent {
     }
 
     pub fn append_live_output(&mut self, output: impl AsRef<str>) -> bool {
-        let mut sanitized = String::new();
-        self.parser.consume(output.as_ref(), &mut sanitized);
-        if sanitized.is_empty() {
-            return false;
-        }
-        for line in sanitized.lines() {
-            self.live_output_chars += line.chars().count();
-            self.live_output.push(line.to_owned());
-        }
-        self.trim_live_output();
-        true
+        self.live_output.append(output.as_ref())
     }
 
     pub fn finish(
@@ -158,18 +139,11 @@ impl ShellRunComponent {
             outcome,
             truncated,
         };
-        if self.state == next_state
-            && self.live_output.is_empty()
-            && self.dropped_live_output_lines == 0
-            && self.live_output_chars == 0
-        {
+        if self.state == next_state && self.live_output.is_empty() {
             return false;
         }
         self.state = next_state;
-        self.live_output.clear();
-        self.dropped_live_output_lines = 0;
-        self.live_output_chars = 0;
-        self.parser.finalize();
+        self.live_output.finalize();
         true
     }
 
@@ -177,16 +151,13 @@ impl ShellRunComponent {
         if self.finalization() == Finalization::Finalized {
             return false;
         }
-        let mut stdout = self.live_output.join("\n");
-        if self.dropped_live_output_lines > 0 {
-            stdout = format!(
-                "... ({} earlier lines)\n{stdout}",
-                self.dropped_live_output_lines
-            );
+        let (mut stdout, dropped) = self.live_output.finalize();
+        if dropped > 0 {
+            stdout.insert(0, format!("... ({} earlier lines)\n", dropped));
         }
-        let truncated = self.dropped_live_output_lines > 0;
+        let truncated = dropped > 0;
         self.finish(
-            stdout,
+            stdout.join("\n"),
             "Interrupted when terminal exited",
             None,
             None,
@@ -228,13 +199,17 @@ impl ShellRunComponent {
                 rows.push(Line::styled(format!("  {status}"), muted_style));
             }
             ShellRunState::Running => {
-                if self.dropped_live_output_lines > 0 {
+                if self.live_output.dropped_lines() > 0 {
                     rows.push(Line::styled(
-                        format!("  ... ({} earlier lines)", self.dropped_live_output_lines),
+                        format!("  ... ({} earlier lines)", self.live_output.dropped_lines()),
                         muted_style,
                     ));
                 }
-                rows.extend(wrap_output_lines(&self.live_output, width, muted_style));
+                rows.extend(wrap_output_lines(
+                    &self.live_output.tail(),
+                    width,
+                    muted_style,
+                ));
                 rows.push(Line::styled("  ctrl+b to background", muted_style));
             }
             state @ ShellRunState::Finished { .. } => {
@@ -275,7 +250,7 @@ impl ShellRunComponent {
                 text.push_str(&status);
             }
             ShellRunState::Running => {
-                for line in &self.live_output {
+                for line in &self.live_output.tail() {
                     text.push('\n');
                     text.push_str(line);
                 }
@@ -297,20 +272,6 @@ impl ShellRunComponent {
             }
         }
         text
-    }
-
-    fn trim_live_output(&mut self) {
-        while self.live_output.len() > MAX_LIVE_OUTPUT_LINES
-            || self.live_output_chars > MAX_LIVE_OUTPUT_CHARS
-        {
-            let Some(line) = self.live_output.first() else {
-                self.live_output_chars = 0;
-                break;
-            };
-            self.live_output_chars = self.live_output_chars.saturating_sub(line.chars().count());
-            self.live_output.remove(0);
-            self.dropped_live_output_lines += 1;
-        }
     }
 }
 
