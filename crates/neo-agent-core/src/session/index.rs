@@ -4,9 +4,12 @@
 //! This enables `neo resume <session_id>` to locate a session even if the
 //! user is in a different workspace than where the session was created.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use base64::Engine;
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::ser::{Serialize, SerializeMap, SerializeStruct, Serializer};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
@@ -16,11 +19,234 @@ use super::{SessionError, SessionMetadataFile, SessionSummary, validate_session_
 const INDEX_FILENAME: &str = "session_index.jsonl";
 
 /// One entry in the global session index.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionIndexEntry {
     pub session_id: String,
     pub session_dir: PathBuf,
     pub workdir: PathBuf,
+}
+
+/// Private versioned/tagged wire for `SessionIndexEntry`.
+///
+/// Old Unicode string records remain readable; new records use a tagged
+/// native-path object per path field. Cross-platform wires are rejected as
+/// foreign, and invalid base64 or malformed unit payloads are rejected so
+/// that bad lines are skipped deterministically.
+impl Serialize for SessionIndexEntry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("SessionIndexEntry", 4)?;
+        state.serialize_field("v", &1_u32)?;
+        state.serialize_field("session_id", &self.session_id)?;
+        state.serialize_field("session_dir", &WirePath(&self.session_dir))?;
+        state.serialize_field("workdir", &WirePath(&self.workdir))?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionIndexEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = SessionIndexEntry;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a session index entry object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut version = None::<u32>;
+                let mut session_id = None::<String>;
+                let mut session_dir = None::<PathBuf>;
+                let mut workdir = None::<PathBuf>;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "v" => version = Some(map.next_value()?),
+                        "session_id" => session_id = Some(map.next_value()?),
+                        "session_dir" => {
+                            session_dir = Some(
+                                map.next_value::<PathWire>()?
+                                    .into_path_buf()
+                                    .map_err(serde::de::Error::custom)?,
+                            );
+                        }
+                        "workdir" => {
+                            workdir = Some(
+                                map.next_value::<PathWire>()?
+                                    .into_path_buf()
+                                    .map_err(serde::de::Error::custom)?,
+                            );
+                        }
+                        _ => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                match version.unwrap_or(1) {
+                    1 => {}
+                    other => {
+                        return Err(serde::de::Error::custom(format_args!(
+                            "unsupported session index entry version {other}"
+                        )));
+                    }
+                }
+
+                let session_id =
+                    session_id.ok_or_else(|| serde::de::Error::missing_field("session_id"))?;
+                let session_dir =
+                    session_dir.ok_or_else(|| serde::de::Error::missing_field("session_dir"))?;
+                let workdir = workdir.ok_or_else(|| serde::de::Error::missing_field("workdir"))?;
+
+                Ok(SessionIndexEntry {
+                    session_id,
+                    session_dir,
+                    workdir,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EntryVisitor)
+    }
+}
+
+struct WirePath<'a>(&'a Path);
+
+impl Serialize for WirePath<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("kind", "unix")?;
+            map.serialize_entry("bytes", &base64_encode(self.0.as_os_str().as_bytes()))?;
+            map.end()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+
+            let units: Vec<u16> = self.0.as_os_str().encode_wide().collect();
+            let bytes: Vec<u8> = units.iter().copied().flat_map(u16::to_ne_bytes).collect();
+
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("kind", "windows")?;
+            map.serialize_entry("units", &base64_encode(&bytes))?;
+            map.end()
+        }
+    }
+}
+
+enum PathWire {
+    Legacy(String),
+    Unix(String),
+    Windows(String),
+}
+
+impl PathWire {
+    fn into_path_buf(self) -> Result<PathBuf, String> {
+        match self {
+            PathWire::Legacy(text) => Ok(PathBuf::from(text)),
+            #[cfg(unix)]
+            PathWire::Unix(b64) => {
+                use std::os::unix::ffi::OsStringExt;
+
+                let bytes = base64_decode(&b64)
+                    .map_err(|error| format!("invalid unix path base64: {error}"))?;
+                Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+            }
+            #[cfg(not(unix))]
+            PathWire::Unix(_) => Err("unix path wire on non-unix platform".to_owned()),
+            #[cfg(windows)]
+            PathWire::Windows(b64) => {
+                use std::os::windows::ffi::OsStringExt;
+
+                let bytes = base64_decode(&b64)
+                    .map_err(|error| format!("invalid windows path base64: {error}"))?;
+                if bytes.len() % 2 != 0 {
+                    return Err(format!(
+                        "windows path units length {} is not even",
+                        bytes.len()
+                    ));
+                }
+                let units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+            }
+            #[cfg(not(windows))]
+            PathWire::Windows(_) => Err("windows path wire on non-windows platform".to_owned()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PathWire {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PathWireVisitor;
+
+        impl<'de> Visitor<'de> for PathWireVisitor {
+            type Value = PathWire;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a path string or tagged native-path wire object")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(PathWire::Legacy(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(PathWire::Legacy(value))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut kind = None::<String>;
+                let mut bytes = None::<String>;
+                let mut units = None::<String>;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "kind" => kind = Some(map.next_value()?),
+                        "bytes" => bytes = Some(map.next_value()?),
+                        "units" => units = Some(map.next_value()?),
+                        _ => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                match kind.as_deref() {
+                    Some("unix") => {
+                        let bytes =
+                            bytes.ok_or_else(|| serde::de::Error::missing_field("bytes"))?;
+                        Ok(PathWire::Unix(bytes))
+                    }
+                    Some("windows") => {
+                        let units =
+                            units.ok_or_else(|| serde::de::Error::missing_field("units"))?;
+                        Ok(PathWire::Windows(units))
+                    }
+                    Some(other) => Err(serde::de::Error::custom(format_args!(
+                        "unknown path wire kind: {other}"
+                    ))),
+                    None => Err(serde::de::Error::missing_field("kind")),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(PathWireVisitor)
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn base64_decode(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    base64::engine::general_purpose::STANDARD.decode(text)
 }
 
 #[derive(Debug, Error)]
@@ -404,5 +630,110 @@ mod tests {
             entries[0].session_id,
             "session_00000000-0000-4000-8000-000000000005"
         );
+    }
+
+    #[test]
+    fn index_round_trips_native_non_unicode_paths() {
+        let tmp = TempDir::new().unwrap();
+        let index = SessionIndex::new(tmp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000010";
+
+        #[cfg(unix)]
+        let (session_dir, workdir) = {
+            use std::os::unix::ffi::OsStringExt;
+
+            let session_dir = PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'/', b't', 0xff, b's', b'e', b's', b's',
+            ]));
+            let workdir = PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'/', b'w', 0xff, b'r', b'k',
+            ]));
+            (session_dir, workdir)
+        };
+
+        #[cfg(windows)]
+        let (session_dir, workdir) = {
+            use std::os::windows::ffi::OsStringExt;
+
+            // Unpaired UTF-16 surrogate code units that cannot be represented as
+            // a Unicode string and therefore cannot survive a lossy conversion.
+            let session_dir = PathBuf::from(std::ffi::OsString::from_wide(&[
+                0x44, 0x65, 0x73, 0x6b, 0x74, 0x6f, 0x70, 0xD800, 0x5c, 0x73, 0x65, 0x73, 0x73,
+            ]));
+            let workdir = PathBuf::from(std::ffi::OsString::from_wide(&[
+                0x43, 0x3a, 0x5c, 0x77, 0x6f, 0x72, 0x6b, 0xD83D,
+            ]));
+            (session_dir, workdir)
+        };
+
+        index
+            .append(&SessionIndexEntry {
+                session_id: session_id.to_owned(),
+                session_dir: session_dir.clone(),
+                workdir: workdir.clone(),
+            })
+            .unwrap();
+
+        let found = index.find(session_id).unwrap().unwrap();
+        assert_eq!(found.session_dir, session_dir);
+        assert_eq!(found.workdir, workdir);
+
+        let content = std::fs::read_to_string(&index.index_path).unwrap();
+        let line = content.lines().next().unwrap();
+        #[cfg(unix)]
+        assert!(line.contains("\"kind\":\"unix\""));
+        #[cfg(windows)]
+        assert!(line.contains("\"kind\":\"windows\""));
+    }
+
+    #[test]
+    fn index_reads_existing_unicode_record_without_rewrite() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join(INDEX_FILENAME);
+        let session_id = "session_00000000-0000-4000-8000-000000000099";
+        let original = format!(
+            "{{\"session_id\":\"{session_id}\",\"session_dir\":\"/old/session_dir\",\"workdir\":\"/old/workdir\"}}\n"
+        );
+        std::fs::write(&index_path, &original).unwrap();
+
+        let index = SessionIndex::from_path(index_path.clone());
+        let found = index.find(session_id).unwrap().unwrap();
+        assert_eq!(found.session_dir, PathBuf::from("/old/session_dir"));
+        assert_eq!(found.workdir, PathBuf::from("/old/workdir"));
+
+        let after_read = std::fs::read_to_string(&index_path).unwrap();
+        assert_eq!(after_read, original);
+
+        index
+            .append(&SessionIndexEntry {
+                session_id: "session_00000000-0000-4000-8000-000000000100".to_owned(),
+                session_dir: PathBuf::from("/new/session_dir"),
+                workdir: PathBuf::from("/new/workdir"),
+            })
+            .unwrap();
+
+        let content = std::fs::read_to_string(&index_path).unwrap();
+        let mut lines = content.lines();
+        assert_eq!(lines.next().unwrap(), original.trim_end_matches('\n'));
+        let new_line = lines.next().unwrap();
+        assert!(new_line.contains("\"v\":1"));
+        assert!(new_line.contains("\"kind\":"));
+    }
+
+    #[test]
+    fn index_rejects_foreign_and_invalid_wire_encodings() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join(INDEX_FILENAME);
+
+        #[cfg(unix)]
+        let foreign_line = r#"{"session_id":"session_00000000-0000-4000-8000-000000000020","session_dir":{"kind":"windows","units":"AA=="},"workdir":"/w"}"#;
+        #[cfg(windows)]
+        let foreign_line = r#"{"session_id":"session_00000000-0000-4000-8000-000000000020","session_dir":{"kind":"unix","bytes":"//8="},"workdir":"C:\\w"}"#;
+
+        let invalid_line = r#"{"session_id":"session_00000000-0000-4000-8000-000000000021","session_dir":{"kind":"unix","bytes":"!!!"},"workdir":"/w"}"#;
+        std::fs::write(&index_path, format!("{foreign_line}\n{invalid_line}\n")).unwrap();
+
+        let entries = SessionIndex::from_path(index_path).list_all().unwrap();
+        assert!(entries.is_empty());
     }
 }
