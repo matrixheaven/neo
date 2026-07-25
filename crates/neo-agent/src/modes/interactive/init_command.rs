@@ -106,7 +106,6 @@ pub(super) struct AgentsGuideIssue {
     pub(super) message: String,
 }
 
-#[allow(dead_code)]
 pub(super) fn init_instruction(prompt: &str) -> Option<&str> {
     let trimmed = prompt.trim();
     if trimmed == "/init" {
@@ -166,7 +165,6 @@ Golden style example. Use this for structure, concision, and operational tone on
     )
 }
 
-#[allow(dead_code)]
 pub(super) fn wrap_init_system_reminder(prompt: &str) -> String {
     format!("<system-reminder>\n{}\n</system-reminder>", prompt.trim())
 }

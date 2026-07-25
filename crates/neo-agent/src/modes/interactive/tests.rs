@@ -303,39 +303,6 @@ fn plan_review_request(id: &str) -> ApprovalRequest {
     }
 }
 
-fn goal_review_request(id: &str) -> ApprovalRequest {
-    ApprovalRequest {
-        turn: 1,
-        id: id.to_owned(),
-        operation: PermissionOperation::GoalTransition,
-        presentation: ApprovalPresentation::Goal {
-            title: "Start goal?".to_owned(),
-            objective: "Ship the feature".to_owned(),
-            completion_criterion: Some("Tests pass".to_owned()),
-            phases: vec!["Plan".to_owned(), "Implement".to_owned()],
-        },
-        options: vec![
-            ApprovalOption {
-                label: "Start goal".to_owned(),
-                description: None,
-                action: ApprovalAction::StartGoal,
-            },
-            ApprovalOption {
-                label: "Reject with feedback".to_owned(),
-                description: None,
-                action: ApprovalAction::ReviseGoal {
-                    preset_feedback: None,
-                },
-            },
-            ApprovalOption {
-                label: "Reject".to_owned(),
-                description: None,
-                action: ApprovalAction::RejectGoal,
-            },
-        ],
-    }
-}
-
 fn make_pending_approval(
     request: ApprovalRequest,
 ) -> (
@@ -374,13 +341,6 @@ fn shell_session_scope(command: &[&str]) -> SessionApprovalScope {
         label: "Approve this exact command for this session".to_owned(),
         detail: test_workspace_root().display().to_string(),
     }
-}
-
-/// Keep the `_goal` helper referenced so Plan/Goal builders stay compiled even
-/// when no current test exercises Goal review.
-#[allow(dead_code)]
-fn _goal_review_request_for_builders() -> ApprovalRequest {
-    goal_review_request("goal-1")
 }
 
 #[test]

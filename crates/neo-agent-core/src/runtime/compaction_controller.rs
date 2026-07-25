@@ -52,7 +52,6 @@ impl CompactionController {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CompactionDecision {
     NoAction {
         snapshot: ContextBudgetSnapshot,

@@ -139,7 +139,6 @@ impl Serialize for WirePath<'_> {
     }
 }
 
-#[allow(dead_code)]
 enum PathWire {
     Legacy(String),
     Unix(String),
