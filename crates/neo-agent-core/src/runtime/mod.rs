@@ -21,6 +21,7 @@ mod tool_arguments;
 mod tool_dispatch;
 mod turn_loop;
 pub mod workflow_dispatch;
+pub mod workflow_recovery_dispatch;
 
 pub use agent::*;
 pub use config::*;
@@ -31,3 +32,4 @@ pub use queue::*;
 pub(crate) use tokens::*;
 pub use tool_dispatch::emit_repaired_tool_arguments_warning;
 pub use workflow_dispatch::*;
+pub use workflow_recovery_dispatch::resolve_proven_terminal_outcome;

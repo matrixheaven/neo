@@ -15,7 +15,7 @@ use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
 use super::error::WorkflowError;
 use super::journal::{
     self, IncompleteInvocation, JournalEnvelope, JournalRecord, JournalV2Writer,
-    canonical_input_hash,
+    canonical_input_hash, find_incomplete_invocations_v2,
 };
 use super::limits::WorkflowLimits;
 use super::state::{
@@ -33,10 +33,10 @@ mod support;
 use support::{
     ReplayEntry, RunControl, add_usage, aggregate_usage, aggregate_usage_v2, bounded_summary,
     compact_resource_limited_outcome, current_timestamp_ms, failure_count_v2, final_result_v2,
-    invocation_count_v2, last_state, latest_log_summary, latest_report_summary,
-    latest_report_summary_v2, projection_timestamps, projection_timestamps_v2, recovered_phase,
-    recovered_phase_v2, recovered_reports, recovered_reports_v2, replay_entries, replay_entries_v2,
-    report_summary,
+    interrupted_outcome, invocation_count_v2, last_state, latest_log_summary,
+    latest_report_summary, latest_report_summary_v2, projection_timestamps,
+    projection_timestamps_v2, recovered_phase, recovered_phase_v2, recovered_reports,
+    recovered_reports_v2, replay_entries, replay_entries_v2, report_summary,
 };
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
@@ -324,6 +324,26 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    /// Bind the production recovery resolver once. Repeated composition calls
+    /// are harmless; the resolver never dispatches or mutates child stores.
+    pub fn bind_recovery_resolver_if_unbound<F, Fut>(
+        &self,
+        resolver: F,
+    ) -> Result<(), WorkflowError>
+    where
+        F: Fn(Arc<IncompleteInvocation>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<WorkflowInvocationOutcome>> + Send + 'static,
+    {
+        let mut slot = self
+            .recovery_resolver
+            .write()
+            .map_err(|_| WorkflowError::Host("workflow recovery lock poisoned".to_owned()))?;
+        if slot.is_none() {
+            *slot = Some(Arc::new(move |invocation| Box::pin(resolver(invocation))));
+        }
+        Ok(())
+    }
+
     /// Create a V2 run: durable `run.json` + `RunCreated` + `Queued` before any
     /// task registration or worker start. Failure rolls back only a never-started
     /// directory (nothing is registered in the runtime map until durability).
@@ -519,14 +539,17 @@ impl WorkflowRuntime {
             }
             guard.worker_active = true;
             guard.worker_permit = Some(permit);
-            let session_dir = guard
-                .run_dir
-                .parent()
-                .and_then(Path::parent)
-                .ok_or_else(|| {
-                    WorkflowError::Host("workflow run directory has no session parent".to_owned())
-                })?
-                .to_path_buf();
+            let session_dir = match guard.run_dir.parent().and_then(Path::parent) {
+                Some(session_dir) => session_dir.to_path_buf(),
+                None => {
+                    guard.worker_active = false;
+                    guard.current_invocation = None;
+                    self.release_worker_admission_locked(&mut guard);
+                    return Err(WorkflowError::Host(
+                        "workflow run directory has no session parent".to_owned(),
+                    ));
+                }
+            };
             (
                 WorkflowHandle {
                     run_id: run_id.clone(),
@@ -848,6 +871,23 @@ impl WorkflowRuntime {
                 return Ok(());
             }
         };
+
+        // Reconcile durable starts without finishes via the production
+        // (or test-injected) read-only resolver. Never relaunches effects.
+        if let Err(error) = self
+            .reconcile_incomplete_invocations_v2(&mut writer, &metadata, &journal_path)
+            .await
+        {
+            handles.push(
+                self.insert_failed_run(
+                    run_dir,
+                    metadata,
+                    format!("recovery append failed: {error}"),
+                )
+                .await,
+            );
+            return Ok(());
+        }
 
         // Crash after FinalResultRecorded / before Completed: append only the
         // missing terminal state. Never re-execute Lua or rewrite the result.
@@ -1348,6 +1388,7 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.worker_active = false;
             guard.worker_join = None;
+            guard.current_invocation = None;
             self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
                 return Ok(());
@@ -1460,6 +1501,7 @@ impl WorkflowRuntime {
             guard.worker_join = None;
             self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
+                guard.current_invocation = None;
                 return Ok(());
             }
         }
@@ -1559,6 +1601,8 @@ impl WorkflowRuntime {
         state.worker_active = false;
         state.worker_join = None;
         state.current_invocation = None;
+        // Unsequenced recovery-failure projection must not leak occupancy.
+        self.release_worker_admission_locked(state);
         state.state = WorkflowState::Failed;
         state.failure_count = state.failure_count.saturating_add(1);
         state.projection_sequence = None;
@@ -1708,7 +1752,46 @@ impl WorkflowRuntime {
             .map_err(|_| WorkflowError::Host("workflow runner lock poisoned".to_owned()))
     }
 
-    #[allow(dead_code)] // rebound by Task 5 production recovery path for V2 incomplete effects
+    /// Append finishes for durable starts lacking finishes using the bound
+    /// read-only resolver. Adopts exactly one proven terminal result; zero /
+    /// conflicting / unknown results become interrupted(host_exit). Never
+    /// dispatches or auto-retries external effects.
+    async fn reconcile_incomplete_invocations_v2(
+        &self,
+        writer: &mut JournalV2Writer,
+        metadata: &WorkflowRunMetadata,
+        journal_path: &Path,
+    ) -> Result<(), WorkflowError> {
+        let envelopes = journal::collect_journal_v2(journal_path, Some(&metadata.run_id))?;
+        let incomplete = find_incomplete_invocations_v2(&envelopes);
+        if incomplete.is_empty() {
+            return Ok(());
+        }
+
+        let resolver = self.bound_recovery_resolver()?;
+        for invocation in incomplete {
+            let invocation = Arc::new(invocation);
+            let outcome = if let Some(resolver) = resolver.as_ref() {
+                resolver(Arc::clone(&invocation))
+                    .await
+                    .unwrap_or_else(|| interrupted_outcome(&invocation))
+            } else {
+                interrupted_outcome(&invocation)
+            };
+
+            let timestamp_ms = current_timestamp_ms();
+            let prepared = effect::prepare_invocation_finish(
+                writer,
+                metadata.run_id.clone(),
+                invocation.invocation_id.clone(),
+                outcome,
+                timestamp_ms,
+            );
+            effect::commit_invocation_finish(writer, &prepared, &self.limits)?;
+        }
+        Ok(())
+    }
+
     fn bound_recovery_resolver(&self) -> Result<Option<Arc<RecoveryResolver>>, WorkflowError> {
         self.recovery_resolver
             .read()

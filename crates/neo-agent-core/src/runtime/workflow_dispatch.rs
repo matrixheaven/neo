@@ -225,6 +225,18 @@ impl WorkflowDispatchResolver {
         let projection_resolver = self.clone();
         runtime.bind_projection_emitter_if_unbound(move |session_dir, stage, workflow| {
             projection_resolver.emit_workflow_projection(session_dir, stage, workflow);
+        })?;
+
+        // Production read-only recovery: adopt proven terminal child/task results only.
+        let recovery_resolver = self.clone();
+        runtime.bind_recovery_resolver_if_unbound(move |invocation| {
+            let resolver = recovery_resolver.clone();
+            async move {
+                super::workflow_recovery_dispatch::resolve_proven_terminal_outcome(
+                    &resolver, invocation,
+                )
+                .await
+            }
         })
     }
 
@@ -243,6 +255,20 @@ impl WorkflowDispatchResolver {
         self.state
             .read()
             .map(|state| state.snapshots.contains_key(&session))
+            .map_err(|_| "workflow dispatch resolver lock poisoned".to_owned())
+    }
+
+    /// Read-only clone of every bound session snapshot for recovery lookup.
+    ///
+    /// Never mutates resolver state. Used only by the production recovery
+    /// resolver; callers must not dispatch through the returned snapshots.
+    ///
+    /// # Errors
+    /// Returns an error when the shared resolver lock is poisoned.
+    pub fn bound_snapshots(&self) -> Result<Vec<WorkflowDispatchSnapshot>, String> {
+        self.state
+            .read()
+            .map(|state| state.snapshots.values().cloned().collect())
             .map_err(|_| "workflow dispatch resolver lock poisoned".to_owned())
     }
 

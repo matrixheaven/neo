@@ -805,6 +805,40 @@ pub fn find_incomplete_invocations(records: &[JournalRecord]) -> Vec<IncompleteI
         .collect()
 }
 
+/// Incomplete V2 starts (durable InvocationStarted without InvocationFinished).
+#[must_use]
+pub fn find_incomplete_invocations_v2(envelopes: &[JournalEnvelope]) -> Vec<IncompleteInvocation> {
+    let mut started: Vec<IncompleteInvocation> = Vec::new();
+    let mut finished_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for envelope in envelopes {
+        match &envelope.payload {
+            JournalPayload::InvocationFinished { invocation_id, .. } => {
+                finished_ids.insert(invocation_id.as_str());
+            }
+            JournalPayload::InvocationStarted {
+                invocation_id,
+                call_index,
+                kind,
+                ..
+            } => {
+                started.push(IncompleteInvocation {
+                    invocation_id: invocation_id.clone(),
+                    call_index: *call_index,
+                    kind: *kind,
+                    canonical_input_hash: envelope.canonical_input_hash.clone().unwrap_or_default(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    started
+        .into_iter()
+        .filter(|inv| !finished_ids.contains(inv.invocation_id.as_str()))
+        .collect()
+}
+
 pub fn write_run_metadata(
     dir: &Path,
     metadata: &super::state::WorkflowRunMetadata,

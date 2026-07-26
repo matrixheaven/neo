@@ -1,7 +1,7 @@
 //! V2 workflow identity, state, and transactional lifecycle tests (Tasks 1 + 4).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use neo_agent_core::workflow::journal::{
@@ -508,6 +508,190 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
         .await
         .expect_err("ordinary resume must not bypass awaiting_user");
     assert_eq!(err.code(), WorkflowErrorCode::AwaitingUser);
+    assert_eq!(
+        handles[0].snapshot().await.state,
+        WorkflowState::AwaitingUser
+    );
+}
+
+#[tokio::test]
+async fn worker_panic_clears_active_state_and_releases_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::default();
+    let in_effect = Arc::new(tokio::sync::Notify::new());
+    runtime
+        .bind_runner({
+            let in_effect = Arc::clone(&in_effect);
+            move |handle, _metadata, _session_dir| {
+                let in_effect = Arc::clone(&in_effect);
+                async move {
+                    handle
+                        .invoke(
+                            0,
+                            WorkflowInvocationKind::Delegate,
+                            serde_json::json!({"task": "boom"}),
+                            true,
+                            move |_| {
+                                let in_effect = Arc::clone(&in_effect);
+                                async move {
+                                    in_effect.notify_waiters();
+                                    panic!("workflow worker test panic");
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+
+    let handle = runtime
+        .create_run(dir.path(), launch_request())
+        .await
+        .expect("create");
+    runtime.start_worker(&handle.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), in_effect.notified())
+        .await
+        .expect("effect started");
+
+    // Wait until supervision terminalizes the run.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.snapshot().await.state == WorkflowState::Failed {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker panic terminalized");
+
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Failed);
+    assert_eq!(snapshot.terminal_reason.as_deref(), Some("worker_panicked"));
+    assert!(!snapshot.recovery_failure);
+
+    // Active markers and admission occupancy must be cleared.
+    // Snapshot does not expose worker_active; occupancy proves permit release.
+    let occupancy = runtime.admission().occupancy();
+    assert_eq!(
+        occupancy.active_workers, 0,
+        "worker panic must release admission permits"
+    );
+
+    // Journal must finish the open invocation before Failed.
+    let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
+    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let finished = envelopes.iter().any(|env| {
+        matches!(
+            &env.payload,
+            JournalPayload::InvocationFinished {
+                outcome: WorkflowInvocationOutcome {
+                    status: WorkflowOutcomeStatus::Interrupted,
+                    ..
+                },
+                ..
+            }
+        )
+    });
+    assert!(finished, "panic must durable-finish the open invocation");
+}
+
+#[tokio::test]
+async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_id = WorkflowRunId::generate();
+    let run_path = run_dir(dir.path(), &run_id);
+    std::fs::create_dir_all(&run_path).unwrap();
+    let meta = neo_agent_core::workflow::WorkflowRunMetadata {
+        run_id: run_id.clone(),
+        parent_run_id: None,
+        name: "await".to_owned(),
+        description: String::new(),
+        phases: Vec::new(),
+        script: "return nil".to_owned(),
+        script_sha256: WorkflowRevision::from_bytes(b"return nil")
+            .as_str()
+            .to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "/workflow".to_owned(),
+        journal_format_version: 2,
+    };
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
+        .unwrap();
+    let journal_path = run_path.join("journal.jsonl");
+    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let limits = WorkflowLimits::default();
+    for (seq, payload) in [
+        JournalPayload::RunCreated {
+            name: "await".to_owned(),
+            description: None,
+            launch_source: Some("/workflow".to_owned()),
+        },
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Queued,
+            new: WorkflowState::Running,
+            reason: "worker_start".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+        JournalPayload::UserInputRequested {
+            request_id: "req_await".to_owned(),
+            prompt: Some(serde_json::json!({"q": "continue?"})),
+        },
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Running,
+            new: WorkflowState::AwaitingUser,
+            reason: "user_input".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let env = JournalEnvelope::new(seq as u64, 1_000 + seq as u64, run_id.clone(), payload);
+        writer.append(&env, &limits).unwrap();
+    }
+    drop(writer);
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runtime = WorkflowRuntime::default();
+    runtime
+        .bind_runner({
+            let starts = Arc::clone(&starts);
+            move |_handle, _metadata, _session_dir| {
+                let starts = Arc::clone(&starts);
+                async move {
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    panic!("rehydrate must not start a worker");
+                }
+            }
+        })
+        .unwrap();
+
+    let handles = runtime.rehydrate(dir.path()).await.unwrap();
+    assert_eq!(handles.len(), 1);
+    let snapshot = handles[0].snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::AwaitingUser);
+    assert!(!snapshot.recovery_failure);
+    assert_eq!(
+        starts.load(Ordering::Acquire),
+        0,
+        "rehydrate starts no worker"
+    );
+    assert_eq!(
+        runtime.admission().occupancy().active_workers,
+        0,
+        "rehydrate must not take worker permits"
+    );
+
+    // AwaitingUser is preserved; ordinary resume still rejected.
+    let err = handles[0]
+        .resume(WorkflowActor::Human)
+        .await
+        .expect_err("ordinary resume must not bypass awaiting_user");
+    assert_eq!(err.code(), WorkflowErrorCode::AwaitingUser);
+    assert_eq!(starts.load(Ordering::Acquire), 0);
     assert_eq!(
         handles[0].snapshot().await.state,
         WorkflowState::AwaitingUser

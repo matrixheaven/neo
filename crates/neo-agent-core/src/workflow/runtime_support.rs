@@ -191,6 +191,23 @@ pub(super) fn last_state(records: &[JournalRecord]) -> (WorkflowState, Option<St
         ))
 }
 
+pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: false,
+        status: WorkflowOutcomeStatus::Interrupted,
+        summary: "interrupted by host exit".to_owned(),
+        interruption: None,
+        details: serde_json::json!({
+            "reason": "host_exit",
+            "call_index": invocation.call_index,
+            "canonical_input_hash": invocation.canonical_input_hash,
+            "side_effect_occurred": true,
+        }),
+        actual_usage: None,
+        child_refs: Vec::new(),
+    }
+}
+
 pub(super) fn compact_resource_limited_outcome(
     reason: &str,
     original: &WorkflowInvocationOutcome,
