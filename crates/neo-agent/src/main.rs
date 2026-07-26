@@ -218,6 +218,7 @@ async fn dispatch_command(
             Ok(String::new())
         }
         Some(Command::Trust { command }) => trust_commands::execute(config, &command),
+        Some(Command::Workflow { command }) => modes::workflow::execute(command, config).await,
         None => {
             dispatch_default_command(config, resume_picker, interactive_options, log_receiver).await
         }

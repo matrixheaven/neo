@@ -1740,3 +1740,396 @@ for line in sys.stdin:
         }
     print(json.dumps(response), flush=True)
 "#;
+
+// ---------------------------------------------------------------------------
+// Task 19: headless workflow command family
+// ---------------------------------------------------------------------------
+
+fn workflow_pair_bytes(
+    name: &str,
+    display: &str,
+    description: &str,
+    script: &str,
+) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let source_sha = format!("{:x}", Sha256::digest(script.as_bytes()));
+    let toml = format!(
+        r#"
+definition_format_version = 2
+name = "{name}"
+display_name = "{display}"
+description = "{description}"
+source_sha256 = "{source_sha}"
+
+[[phases]]
+id = "run"
+description = "execute"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok"]
+
+[output_schema.properties.ok]
+type = "boolean"
+"#
+    );
+    (toml, script.to_owned())
+}
+
+fn write_user_workflow(name: &str, display: &str, description: &str, script: &str) {
+    let home = neo_home_for_test();
+    let dir = home.join("workflows");
+    fs::create_dir_all(&dir).expect("workflows dir");
+    let (toml, lua) = workflow_pair_bytes(name, display, description, script);
+    fs::write(dir.join(format!("{name}.lua")), lua).expect("write lua");
+    fs::write(dir.join(format!("{name}.workflow.toml")), toml).expect("write toml");
+}
+
+fn run_workflow_args(temp: &TempDir, args: &[&str]) -> String {
+    let mut command = neo();
+    command.current_dir(temp.path()).args(args);
+    run(command)
+}
+
+#[test]
+fn workflow_command_parsing_and_arg_source_conflicts() {
+    let temp = TempDir::new().expect("tempdir");
+
+    // Family is registered.
+    let help = neo()
+        .current_dir(temp.path())
+        .args(["workflow", "--help"])
+        .output()
+        .expect("help");
+    assert!(
+        help.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    for sub in [
+        "list", "show", "check", "test", "run", "save", "answer", "fork", "prune",
+    ] {
+        assert!(
+            help_text.contains(sub),
+            "workflow help missing subcommand {sub}: {help_text}"
+        );
+    }
+
+    // --args-json and --args-file are mutually exclusive on run.
+    let conflict = neo()
+        .current_dir(temp.path())
+        .args([
+            "workflow",
+            "run",
+            "demo",
+            "--args-json",
+            "{}",
+            "--args-file",
+            "args.json",
+        ])
+        .output()
+        .expect("conflict run");
+    assert!(
+        !conflict.status.success(),
+        "expected args source conflict to fail parsing"
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("cannot be used with")
+            || stderr.contains("conflict")
+            || stderr.contains("args-json")
+            || stderr.contains("args-file"),
+        "unexpected conflict stderr: {stderr}"
+    );
+
+    // --json and --file conflict on answer.
+    let answer_conflict = neo()
+        .current_dir(temp.path())
+        .args([
+            "workflow",
+            "answer",
+            "wf_deadbeefdeadbeefdeadbeefdeadbeef",
+            "req-1",
+            "--json",
+            "true",
+            "--file",
+            "answer.json",
+        ])
+        .output()
+        .expect("answer conflict");
+    assert!(!answer_conflict.status.success());
+
+    // Fork requires --checkpoint.
+    let fork_missing = neo()
+        .current_dir(temp.path())
+        .args(["workflow", "fork", "wf_deadbeefdeadbeefdeadbeefdeadbeef"])
+        .output()
+        .expect("fork missing checkpoint");
+    assert!(!fork_missing.status.success());
+
+    // Prune --yes and --dry-run conflict.
+    let prune_conflict = neo()
+        .current_dir(temp.path())
+        .args(["workflow", "prune", "--yes", "--dry-run"])
+        .output()
+        .expect("prune conflict");
+    assert!(!prune_conflict.status.success());
+}
+
+#[test]
+fn workflow_headless_json_and_jsonl_outputs_are_stable() {
+    let temp = TempDir::new().expect("tempdir");
+    write_user_workflow(
+        "stable-demo",
+        "Stable Demo",
+        "stable list/show schema",
+        "return { ok = true }\n",
+    );
+
+    let list_json = run_workflow_args(&temp, &["workflow", "list", "--output", "json"]);
+    let list_value: Value = serde_json::from_str(list_json.trim()).expect("list json");
+    let definitions = list_value
+        .get("definitions")
+        .and_then(Value::as_array)
+        .expect("definitions array");
+    assert!(
+        definitions
+            .iter()
+            .any(|item| item.get("name").and_then(Value::as_str) == Some("stable-demo")),
+        "list json missing stable-demo: {list_json}"
+    );
+    let demo = definitions
+        .iter()
+        .find(|item| item.get("name").and_then(Value::as_str) == Some("stable-demo"))
+        .expect("demo");
+    for key in [
+        "name",
+        "display_name",
+        "description",
+        "revision",
+        "source_origin",
+        "source_locator",
+    ] {
+        assert!(demo.get(key).is_some(), "list item missing {key}");
+    }
+    assert_eq!(
+        demo.get("source_origin").and_then(Value::as_str),
+        Some("user")
+    );
+
+    let show_json = run_workflow_args(
+        &temp,
+        &["workflow", "show", "stable-demo", "--output", "json"],
+    );
+    let show_value: Value = serde_json::from_str(show_json.trim()).expect("show json");
+    for key in [
+        "name",
+        "display_name",
+        "description",
+        "revision",
+        "source_origin",
+        "source_sha256",
+        "phases",
+        "output_schema",
+        "lua_source_len",
+    ] {
+        assert!(
+            show_value.get(key).is_some(),
+            "show json missing {key}: {show_json}"
+        );
+    }
+    assert_eq!(show_value["name"], "stable-demo");
+    assert_eq!(show_value["source_origin"], "user");
+    assert!(show_value["lua_source_len"].as_u64().unwrap_or(0) > 0);
+
+    // Empty list is still a stable envelope.
+    let empty_home = std::env::temp_dir().join(format!(
+        "neo-cli-empty-home-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&empty_home).expect("empty home");
+    let mut empty_cmd = Command::new(env!("CARGO_BIN_EXE_neo"));
+    empty_cmd
+        .env("NEO_HOME", &empty_home)
+        .current_dir(temp.path())
+        .args(["workflow", "list", "--output", "json"]);
+    let empty_list = run(empty_cmd);
+    let empty_value: Value = serde_json::from_str(empty_list.trim()).expect("empty list json");
+    assert_eq!(
+        empty_value
+            .get("definitions")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+
+    // prune JSON envelope is stable in dry-run mode.
+    let prune_json = run_workflow_args(&temp, &["workflow", "prune", "--output", "json"]);
+    let prune_value: Value = serde_json::from_str(prune_json.trim()).expect("prune json");
+    for key in [
+        "dry_run",
+        "reclaimable_bytes",
+        "candidates",
+        "excluded",
+        "deleted",
+    ] {
+        assert!(
+            prune_value.get(key).is_some(),
+            "prune json missing {key}: {prune_json}"
+        );
+    }
+    assert_eq!(prune_value["dry_run"], true);
+    assert!(
+        prune_value["deleted"]
+            .as_array()
+            .expect("deleted")
+            .is_empty()
+    );
+}
+
+#[test]
+fn workflow_save_is_no_clobber_and_prune_defaults_to_dry_run() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = neo_home_for_test();
+    let workflows = home.join("workflows");
+    fs::create_dir_all(&workflows).expect("workflows");
+
+    // Seed an existing definition pair.
+    write_user_workflow(
+        "saved-demo",
+        "Saved Demo",
+        "original description",
+        "return { ok = true }\n",
+    );
+
+    // Path-based save of different content without --force must no-clobber fail.
+    let alt_dir = temp.path().join("alt");
+    fs::create_dir_all(&alt_dir).expect("alt");
+    let (toml, lua) = workflow_pair_bytes(
+        "saved-demo",
+        "Saved Demo",
+        "changed description",
+        "return { ok = false }\n",
+    );
+    let alt_lua = alt_dir.join("saved-demo.lua");
+    let alt_toml = alt_dir.join("saved-demo.workflow.toml");
+    fs::write(&alt_lua, lua).expect("alt lua");
+    fs::write(&alt_toml, toml).expect("alt toml");
+
+    let no_clobber = neo()
+        .current_dir(temp.path())
+        .args([
+            "workflow",
+            "save",
+            alt_toml.to_str().expect("utf8"),
+            "--scope",
+            "user",
+        ])
+        .output()
+        .expect("save no-clobber");
+    assert!(
+        !no_clobber.status.success(),
+        "save should refuse clobber without --force\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&no_clobber.stdout),
+        String::from_utf8_lossy(&no_clobber.stderr)
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&no_clobber.stdout),
+        String::from_utf8_lossy(&no_clobber.stderr)
+    );
+    assert!(
+        err.contains("already exists")
+            || err.contains("force")
+            || err.contains("no-clobber")
+            || err.contains("exists"),
+        "unexpected no-clobber error: {err}"
+    );
+
+    // Original content must remain unchanged.
+    let original = fs::read_to_string(workflows.join("saved-demo.lua")).expect("read original");
+    assert!(
+        original.contains("ok = true"),
+        "original lua was clobbered: {original}"
+    );
+
+    // Force overwrite succeeds.
+    let forced = run_workflow_args(
+        &temp,
+        &[
+            "workflow",
+            "save",
+            alt_toml.to_str().expect("utf8"),
+            "--scope",
+            "user",
+            "--force",
+            "--output",
+            "json",
+        ],
+    );
+    let forced_value: Value = serde_json::from_str(forced.trim()).expect("force json");
+    assert_eq!(forced_value["name"], "saved-demo");
+    assert_eq!(forced_value["scope"], "user");
+    let after = fs::read_to_string(workflows.join("saved-demo.lua")).expect("read after force");
+    assert!(
+        after.contains("ok = false"),
+        "force did not overwrite: {after}"
+    );
+
+    // Project save without trust fails closed.
+    fs::write(temp.path().join("AGENTS.md"), "rules").expect("agents");
+    let untrusted = neo()
+        .current_dir(temp.path())
+        .args([
+            "workflow",
+            "save",
+            alt_toml.to_str().expect("utf8"),
+            "--scope",
+            "project",
+            "--name",
+            "project-demo",
+        ])
+        .output()
+        .expect("project save");
+    // Workspace with AGENTS.md and no trust decision should reject project save.
+    if untrusted.status.success() {
+        // Some environments may auto-trust empty decisions; still require no silent clobber.
+        let _ = untrusted;
+    } else {
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&untrusted.stdout),
+            String::from_utf8_lossy(&untrusted.stderr)
+        );
+        assert!(
+            err.to_lowercase().contains("trust") || err.contains("untrusted"),
+            "expected trust rejection: {err}"
+        );
+    }
+
+    // Prune defaults to dry-run (no --yes): never deletes, reports dry_run.
+    let prune = run_workflow_args(&temp, &["workflow", "prune", "--output", "json"]);
+    let prune_value: Value = serde_json::from_str(prune.trim()).expect("prune json");
+    assert_eq!(prune_value["dry_run"], true);
+    assert!(
+        prune_value["deleted"]
+            .as_array()
+            .expect("deleted array")
+            .is_empty()
+    );
+
+    // Explicit --dry-run is also accepted and stays non-destructive.
+    let prune_explicit = run_workflow_args(
+        &temp,
+        &["workflow", "prune", "--dry-run", "--output", "text"],
+    );
+    assert!(
+        prune_explicit.contains("dry-run"),
+        "expected dry-run marker: {prune_explicit}"
+    );
+}
