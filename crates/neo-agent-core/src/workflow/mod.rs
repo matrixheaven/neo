@@ -4,6 +4,7 @@ pub mod capability;
 pub mod definition;
 mod error;
 pub mod journal;
+pub mod launch;
 pub mod limits;
 mod lua;
 pub mod output;
@@ -46,6 +47,10 @@ pub use error::{WorkflowError, WorkflowErrorCode};
 pub use journal::{
     JournalRecord, JournalWriter, canonical_input_hash, find_incomplete_invocations, journal_path,
     read_journal, read_run_metadata, run_dir, write_run_metadata,
+};
+pub use launch::{
+    LaunchAuthorizationMode, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
+    WorkflowLaunchOutcome, compile_lua_source,
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;

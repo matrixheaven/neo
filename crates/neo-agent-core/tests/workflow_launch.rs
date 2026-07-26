@@ -406,3 +406,380 @@ async fn durable_create_failure_rolls_reservation_back() {
     assert!(config.workflow_capability.inspect());
     assert!(config.background_tasks.list(false, 10).await.is_empty());
 }
+
+// --- Task 11: centralized launch coordination ---
+
+fn base_launch_request(
+    name: &str,
+    launch_source: &str,
+) -> neo_agent_core::workflow::WorkflowLaunchRequest {
+    neo_agent_core::workflow::WorkflowLaunchRequest {
+        name: name.to_owned(),
+        description: format!("{name} workflow"),
+        phases: vec![neo_agent_core::workflow::WorkflowPhase {
+            id: "work".to_owned(),
+            description: "Do the work".to_owned(),
+        }],
+        script: "neo.phase('work')".to_owned(),
+        args: json!({"target": name}),
+        launch_source: launch_source.to_owned(),
+        parent_run_id: None,
+    }
+}
+
+fn intent_for(
+    request: neo_agent_core::workflow::WorkflowLaunchRequest,
+    session: &std::path::Path,
+    workspace: &std::path::Path,
+    nonce: &str,
+    actor: neo_agent_core::workflow::WorkflowActor,
+    mode: PermissionMode,
+) -> neo_agent_core::workflow::WorkflowLaunchIntent {
+    neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
+        request,
+        session.display().to_string(),
+        workspace.display().to_string(),
+        nonce,
+        actor,
+        mode,
+        None,
+        None,
+        "",
+    )
+}
+
+/// All launch adapters (dynamic tool, named slash, headless) must call the
+/// single stateless coordinator — never a private create/register/start path.
+#[tokio::test]
+async fn all_launch_adapters_reach_one_coordinator() {
+    use neo_agent_core::workflow::{
+        LaunchAuthorizationMode, WorkflowActor, WorkflowLaunchCoordinator, WorkflowLaunchHosts,
+        WorkflowRuntime,
+    };
+
+    let session = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::default();
+    runtime
+        .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
+        .unwrap();
+    let background_tasks = neo_agent_core::BackgroundTaskManager::new();
+
+    // Adapter 1: dynamic tool path (session capability).
+    let capability_dynamic = neo_agent_core::workflow::WorkflowCapability::default();
+    capability_dynamic.grant();
+    let nonce_dynamic = capability_dynamic.launch_nonce().expect("nonce");
+    let dynamic_intent = intent_for(
+        base_launch_request("dynamic", "/workflow (auto)"),
+        session.path(),
+        workspace.path(),
+        &nonce_dynamic,
+        WorkflowActor::Model,
+        PermissionMode::Auto,
+    );
+    let dynamic = WorkflowLaunchCoordinator
+        .launch(
+            &dynamic_intent,
+            WorkflowLaunchHosts {
+                runtime: &runtime,
+                capability: &capability_dynamic,
+                background_tasks: &background_tasks,
+                session_dir: session.path(),
+            },
+            LaunchAuthorizationMode::SessionCapability,
+        )
+        .await
+        .expect("dynamic adapter");
+    assert!(!capability_dynamic.inspect());
+
+    // Adapter 2: named slash path (session capability, human actor).
+    let capability_named = neo_agent_core::workflow::WorkflowCapability::default();
+    capability_named.grant();
+    let nonce_named = capability_named.launch_nonce().expect("nonce");
+    let named_intent = intent_for(
+        base_launch_request("named", "named:demo"),
+        session.path(),
+        workspace.path(),
+        &nonce_named,
+        WorkflowActor::Human,
+        PermissionMode::Yolo,
+    );
+    let named = WorkflowLaunchCoordinator
+        .launch(
+            &named_intent,
+            WorkflowLaunchHosts {
+                runtime: &runtime,
+                capability: &capability_named,
+                background_tasks: &background_tasks,
+                session_dir: session.path(),
+            },
+            LaunchAuthorizationMode::SessionCapability,
+        )
+        .await
+        .expect("named adapter");
+    assert!(!capability_named.inspect());
+
+    // Adapter 3: headless CLI path (no session capability).
+    let capability_headless = neo_agent_core::workflow::WorkflowCapability::default();
+    let headless_intent = intent_for(
+        base_launch_request("headless", "headless:neo workflow run"),
+        session.path(),
+        workspace.path(),
+        "headless-nonce",
+        WorkflowActor::Human,
+        PermissionMode::Auto,
+    );
+    let headless = WorkflowLaunchCoordinator
+        .launch(
+            &headless_intent,
+            WorkflowLaunchHosts {
+                runtime: &runtime,
+                capability: &capability_headless,
+                background_tasks: &background_tasks,
+                session_dir: session.path(),
+            },
+            LaunchAuthorizationMode::Headless,
+        )
+        .await
+        .expect("headless adapter");
+    // Headless must not require or consume a grant.
+    assert!(!capability_headless.inspect());
+
+    let tasks = background_tasks.list(false, 10).await;
+    assert_eq!(tasks.len(), 3);
+    for outcome in [&dynamic, &named, &headless] {
+        assert!(
+            background_tasks
+                .workflow_handle(&outcome.task_id)
+                .await
+                .is_some(),
+            "adapter outcome must be registered via coordinator"
+        );
+    }
+}
+
+/// Any source/args/session/lineage hash mismatch creates no run and leaves the
+/// prior binding intact.
+#[tokio::test]
+async fn exact_intent_hash_mismatch_creates_no_run() {
+    use neo_agent_core::workflow::{
+        LaunchAuthorizationMode, WorkflowActor, WorkflowErrorCode, WorkflowLaunchCoordinator,
+        WorkflowLaunchHosts, WorkflowRuntime,
+    };
+
+    let session = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::default();
+    runtime
+        .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
+        .unwrap();
+    let background_tasks = neo_agent_core::BackgroundTaskManager::new();
+    let capability = neo_agent_core::workflow::WorkflowCapability::default();
+    capability.grant();
+    let nonce = capability.launch_nonce().expect("nonce");
+
+    let intent_a = intent_for(
+        base_launch_request("alpha", "test"),
+        session.path(),
+        workspace.path(),
+        &nonce,
+        WorkflowActor::Model,
+        PermissionMode::Auto,
+    );
+    let mut intent_b_request = base_launch_request("beta", "test");
+    intent_b_request.args = json!({"target": "mutated"});
+    let intent_b = intent_for(
+        intent_b_request,
+        session.path(),
+        workspace.path(),
+        &nonce,
+        WorkflowActor::Model,
+        PermissionMode::Auto,
+    );
+    assert_ne!(intent_a.digest(), intent_b.digest());
+
+    // Bind to intent A first (validated dynamic proposal).
+    capability.bind(&intent_a.digest()).expect("bind A");
+    assert_eq!(
+        capability.bound_digest().as_deref(),
+        Some(intent_a.digest().as_str())
+    );
+
+    // Launch with mismatched intent B must not create a run.
+    let err = WorkflowLaunchCoordinator
+        .launch(
+            &intent_b,
+            WorkflowLaunchHosts {
+                runtime: &runtime,
+                capability: &capability,
+                background_tasks: &background_tasks,
+                session_dir: session.path(),
+            },
+            LaunchAuthorizationMode::SessionCapability,
+        )
+        .await
+        .expect_err("mismatch must fail");
+    assert_eq!(err.code(), WorkflowErrorCode::LaunchAuthorizationMismatch);
+    assert!(background_tasks.list(false, 10).await.is_empty());
+    // Prior binding preserved; reusable for the original intent.
+    assert!(capability.inspect());
+    assert_eq!(
+        capability.bound_digest().as_deref(),
+        Some(intent_a.digest().as_str())
+    );
+
+    // Same-intent launch still succeeds and consumes.
+    let outcome = WorkflowLaunchCoordinator
+        .launch(
+            &intent_a,
+            WorkflowLaunchHosts {
+                runtime: &runtime,
+                capability: &capability,
+                background_tasks: &background_tasks,
+                session_dir: session.path(),
+            },
+            LaunchAuthorizationMode::SessionCapability,
+        )
+        .await
+        .expect("matching intent launches");
+    assert!(!capability.inspect());
+    assert!(
+        background_tasks
+            .workflow_handle(&outcome.task_id)
+            .await
+            .is_some()
+    );
+}
+
+/// Compile, schema, and storage failures create no run and do not consume
+/// reusable authorization.
+#[tokio::test]
+async fn compile_schema_and_storage_failure_preserve_reusable_capability() {
+    use neo_agent_core::workflow::{
+        CompiledSchema, LaunchAuthorizationMode, WorkflowActor, WorkflowErrorCode,
+        WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLimits, WorkflowRuntime,
+    };
+
+    let session = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let background_tasks = neo_agent_core::BackgroundTaskManager::new();
+
+    // 1) Lua compile failure.
+    {
+        let runtime = WorkflowRuntime::default();
+        let capability = neo_agent_core::workflow::WorkflowCapability::default();
+        capability.grant();
+        let nonce = capability.launch_nonce().expect("nonce");
+        let mut request = base_launch_request("compile-fail", "test");
+        request.script = "function (".to_owned();
+        let intent = intent_for(
+            request,
+            session.path(),
+            workspace.path(),
+            &nonce,
+            WorkflowActor::Model,
+            PermissionMode::Auto,
+        );
+        let err = WorkflowLaunchCoordinator
+            .launch(
+                &intent,
+                WorkflowLaunchHosts {
+                    runtime: &runtime,
+                    capability: &capability,
+                    background_tasks: &background_tasks,
+                    session_dir: session.path(),
+                },
+                LaunchAuthorizationMode::SessionCapability,
+            )
+            .await
+            .expect_err("compile failure");
+        assert_eq!(err.code(), WorkflowErrorCode::LuaCompileFailed);
+        assert!(capability.inspect(), "compile failure must not consume");
+        assert!(capability.is_unbound() || capability.bound_digest().is_none());
+        assert!(background_tasks.list(false, 10).await.is_empty());
+    }
+
+    // 2) Input schema validation failure.
+    {
+        let runtime = WorkflowRuntime::default();
+        let capability = neo_agent_core::workflow::WorkflowCapability::default();
+        capability.grant();
+        let nonce = capability.launch_nonce().expect("nonce");
+        let schema = CompiledSchema::compile(&json!({
+            "type": "object",
+            "properties": { "target": { "type": "integer" } },
+            "required": ["target"],
+            "additionalProperties": false
+        }))
+        .expect("compile schema");
+        let mut request = base_launch_request("schema-fail", "test");
+        request.args = json!({"target": "not-an-integer"});
+        let intent = neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
+            request,
+            session.path().display().to_string(),
+            workspace.path().display().to_string(),
+            nonce,
+            WorkflowActor::Model,
+            PermissionMode::Auto,
+            None,
+            Some(schema),
+            "schema-binding",
+        );
+        let err = WorkflowLaunchCoordinator
+            .launch(
+                &intent,
+                WorkflowLaunchHosts {
+                    runtime: &runtime,
+                    capability: &capability,
+                    background_tasks: &background_tasks,
+                    session_dir: session.path(),
+                },
+                LaunchAuthorizationMode::SessionCapability,
+            )
+            .await
+            .expect_err("schema failure");
+        assert_eq!(err.code(), WorkflowErrorCode::InputSchemaInvalid);
+        assert!(capability.inspect(), "schema failure must not consume");
+        assert!(background_tasks.list(false, 10).await.is_empty());
+    }
+
+    // 3) Storage admission denial during durable create.
+    {
+        let limits = WorkflowLimits {
+            global_storage_bytes: 1,
+            ..WorkflowLimits::default()
+        };
+        let runtime = WorkflowRuntime::new(limits);
+        runtime
+            .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
+            .unwrap();
+        let capability = neo_agent_core::workflow::WorkflowCapability::default();
+        capability.grant();
+        let nonce = capability.launch_nonce().expect("nonce");
+        let intent = intent_for(
+            base_launch_request("storage-fail", "test"),
+            session.path(),
+            workspace.path(),
+            &nonce,
+            WorkflowActor::Model,
+            PermissionMode::Auto,
+        );
+        let err = WorkflowLaunchCoordinator
+            .launch(
+                &intent,
+                WorkflowLaunchHosts {
+                    runtime: &runtime,
+                    capability: &capability,
+                    background_tasks: &background_tasks,
+                    session_dir: session.path(),
+                },
+                LaunchAuthorizationMode::SessionCapability,
+            )
+            .await
+            .expect_err("storage failure");
+        assert_eq!(err.code(), WorkflowErrorCode::StorageAdmissionDenied);
+        // Bound may remain for same-intent retry; must not be consumed.
+        assert!(capability.inspect(), "storage failure must not consume");
+        assert!(background_tasks.list(false, 10).await.is_empty());
+    }
+}

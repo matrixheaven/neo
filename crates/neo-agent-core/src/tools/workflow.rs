@@ -4,8 +4,11 @@ use serde_json::json;
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, schema};
 use crate::WorkflowApprovalPresentation;
-use crate::workflow::capability::WorkflowCapabilityReservation;
-use crate::workflow::{WorkflowError, WorkflowLaunchRequest, WorkflowPhase};
+use crate::workflow::{
+    LaunchAuthorizationMode, WorkflowActor, WorkflowError, WorkflowErrorCode,
+    WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent, WorkflowLaunchRequest,
+    WorkflowPhase,
+};
 
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -127,68 +130,20 @@ pub(crate) fn approval_presentation(
 
 pub struct RunWorkflowTool;
 
-async fn rollback_registration_failure(
-    runtime: &crate::workflow::WorkflowRuntime,
-    reservation: WorkflowCapabilityReservation,
-    handle: &crate::workflow::WorkflowHandle,
-    register_error: impl std::fmt::Display,
-) -> ToolResult {
-    match runtime.rollback_created_run(&handle.run_id).await {
-        Ok(()) => ToolResult::error(format!("workflow registration failed: {register_error}")),
-        Err(rollback_error) => {
-            let capability_consumed = reservation.commit();
-            let terminal_error = runtime
-                .fail_worker_start(&handle.run_id, &rollback_error)
-                .await
-                .err();
-            let suffix = terminal_error.as_ref().map_or_else(String::new, |error| {
-                format!("; failed to persist terminal state: {error}")
-            });
-            ToolResult::error(format!(
-                "task_id: {}\nkind: workflow\nstatus: failed\nerror: registration failed: {register_error}; rollback failed: {rollback_error}{suffix}",
-                handle.run_id.0
-            ))
-            .with_details(json!({
-                "task_id": handle.run_id.0.clone(),
-                "kind": "workflow_launch_failure",
-                "status": "failed",
-                "capability_consumed": capability_consumed,
-                "registration_error": register_error.to_string(),
-                "rollback_error": rollback_error.to_string(),
-                "terminal_error": terminal_error.map(|error| error.to_string()),
-            }))
+fn map_launch_error(error: WorkflowError) -> ToolResult {
+    match error.code() {
+        WorkflowErrorCode::InvalidInput
+        | WorkflowErrorCode::InvalidDefinition
+        | WorkflowErrorCode::InvalidManifest
+        | WorkflowErrorCode::InvalidSchema
+        | WorkflowErrorCode::InputSchemaInvalid
+        | WorkflowErrorCode::LuaCompileFailed => invalid_input_result(error.to_string()),
+        WorkflowErrorCode::LaunchAuthorizationMissing => ToolResult::error(error.to_string()),
+        WorkflowErrorCode::LaunchAuthorizationMismatch => {
+            ToolResult::error(format!("workflow launch failed: {error}"))
         }
+        _ => ToolResult::error(format!("workflow launch failed: {error}")),
     }
-}
-
-async fn rollback_capability_change(
-    runtime: &crate::workflow::WorkflowRuntime,
-    background_tasks: &crate::tools::BackgroundTaskManager,
-    handle: &crate::workflow::WorkflowHandle,
-) -> ToolResult {
-    let task_id = handle.run_id.0.clone();
-    background_tasks.remove_workflow(&task_id).await;
-    if let Err(rollback_error) = runtime.rollback_created_run(&handle.run_id).await {
-        let terminal_error = runtime
-            .fail_worker_start(&handle.run_id, &rollback_error)
-            .await
-            .err();
-        let suffix = terminal_error.as_ref().map_or_else(String::new, |error| {
-            format!("; failed to persist terminal state: {error}")
-        });
-        return ToolResult::error(format!(
-            "task_id: {task_id}\nkind: workflow\nstatus: failed\nerror: workflow capability changed during launch; rollback failed: {rollback_error}{suffix}"
-        ))
-        .with_details(json!({
-            "task_id": task_id,
-            "kind": "workflow_launch_failure",
-            "status": "failed",
-            "reservation_consumed": true,
-            "rollback_error": rollback_error.to_string(),
-            "terminal_error": terminal_error.map(|error| error.to_string()),
-        }));
-    }
-    ToolResult::error("workflow capability changed during launch".to_owned())
 }
 
 impl Tool for RunWorkflowTool {
@@ -229,67 +184,45 @@ impl Tool for RunWorkflowTool {
                 .live_permission_mode
                 .read()
                 .map_or(child_config.permission_mode, |mode| *mode);
-            let request = input.launch_request(permission_mode);
-            if let Err(error) = ctx.workflow_runtime.validate_launch_request(&request) {
-                return Ok(invalid_input_result(error.to_string()));
-            }
 
-            let Some(reservation) = ctx.workflow_capability.reserve() else {
+            let Some(launch_nonce) = ctx.workflow_capability.launch_nonce() else {
                 return Ok(ToolResult::error(
                     "RunWorkflow requires a launch capability. Use the exact /workflow slash command first."
                         .to_owned(),
                 ));
             };
 
-            let handle = match ctx.workflow_runtime.create_run(&session_dir, request).await {
-                Ok(handle) => handle,
-                Err(WorkflowError::InvalidInput(message)) => {
-                    return Ok(invalid_input_result(message));
-                }
-                Err(error) => {
-                    return Ok(ToolResult::error(format!(
-                        "workflow launch failed: {error}"
-                    )));
-                }
-            };
-            let task_id = handle.run_id.0.clone();
-            if let Err(register_error) = ctx
-                .background_tasks
-                .start_workflow(task_id.clone(), input.description.clone(), handle.clone())
+            let request = input.launch_request(permission_mode);
+            let intent = WorkflowLaunchIntent::from_parts(
+                request,
+                session_dir.display().to_string(),
+                ctx.cwd.display().to_string(),
+                launch_nonce,
+                WorkflowActor::Model,
+                permission_mode,
+                None,
+                None,
+                "",
+            );
+
+            let outcome = match WorkflowLaunchCoordinator
+                .launch(
+                    &intent,
+                    WorkflowLaunchHosts {
+                        runtime: &ctx.workflow_runtime,
+                        capability: &ctx.workflow_capability,
+                        background_tasks: &ctx.background_tasks,
+                        session_dir: &session_dir,
+                    },
+                    LaunchAuthorizationMode::SessionCapability,
+                )
                 .await
             {
-                return Ok(rollback_registration_failure(
-                    &ctx.workflow_runtime,
-                    reservation,
-                    &handle,
-                    register_error,
-                )
-                .await);
-            }
+                Ok(outcome) => outcome,
+                Err(error) => return Ok(map_launch_error(error)),
+            };
 
-            if !reservation.commit() {
-                return Ok(rollback_capability_change(
-                    &ctx.workflow_runtime,
-                    &ctx.background_tasks,
-                    &handle,
-                )
-                .await);
-            }
-
-            ctx.workflow_runtime
-                .emit_started(&handle.run_id)
-                .await
-                .map_err(|error| ToolError::InvalidInput {
-                    tool: self.name().to_owned(),
-                    message: error.to_string(),
-                })?;
-
-            if let Err(error) = ctx.workflow_runtime.start_worker(&handle.run_id).await {
-                return Ok(
-                    report_worker_failure(&ctx.workflow_runtime, &handle, &error, &task_id).await,
-                );
-            }
-
+            let task_id = outcome.task_id;
             Ok(ToolResult::ok(format!(
                 "task_id: {task_id}\nkind: workflow\nstatus: running\nautomatic_notification: true\nnext_step: Use TaskOutput with this task_id to inspect the workflow."
             ))
@@ -302,27 +235,6 @@ impl Tool for RunWorkflowTool {
             })))
         })
     }
-}
-
-async fn report_worker_failure(
-    runtime: &crate::workflow::WorkflowRuntime,
-    handle: &crate::workflow::WorkflowHandle,
-    error: &crate::workflow::WorkflowError,
-    task_id: &str,
-) -> ToolResult {
-    let terminal_error = runtime.fail_worker_start(&handle.run_id, error).await.err();
-    let suffix = terminal_error.map_or_else(String::new, |terminal_error| {
-        format!("; failed to persist terminal state: {terminal_error}")
-    });
-    ToolResult::error(format!(
-        "task_id: {task_id}\nkind: workflow\nstatus: failed\nerror: worker startup failed: {error}{suffix}"
-    ))
-    .with_details(json!({
-        "task_id": task_id,
-        "kind": "workflow",
-        "status": "failed",
-        "error": error.to_string(),
-    }))
 }
 
 #[cfg(test)]
