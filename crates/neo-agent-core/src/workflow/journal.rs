@@ -518,6 +518,10 @@ pub struct JournalV2Writer {
 
 impl JournalV2Writer {
     /// Open or create a V2 journal bound to `run_id`.
+    ///
+    /// Applies torn-tail recovery (normalize valid unterminated final record or
+    /// quarantine+truncate invalid EOF suffix) before indexing. Fail-closed
+    /// corruption is not repaired.
     pub fn open(path: &Path, run_id: WorkflowId) -> Result<Self, WorkflowError> {
         if let Some(parent) = path.parent() {
             atomic_file::ensure_safe_directory_tree(parent)
@@ -542,7 +546,30 @@ impl JournalV2Writer {
                 .map_err(|e| WorkflowError::Journal(e.to_string()))?;
         }
 
-        let index = if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
+        let report = if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
+            crate::workflow::recovery::recover_journal_v2(path, Some(&run_id))?
+        } else {
+            crate::workflow::recovery::JournalRecoveryReport {
+                action: crate::workflow::recovery::JournalRecoveryAction::None,
+                index: JournalScanIndex {
+                    run_id: Some(run_id.clone()),
+                    ..Default::default()
+                },
+                recovery_record_appended: false,
+            }
+        };
+        Self::open_recovered(path, run_id, &report)
+    }
+
+    /// Open a journal after recovery has already been applied (no second recovery pass).
+    pub fn open_recovered(
+        path: &Path,
+        run_id: WorkflowId,
+        report: &crate::workflow::recovery::JournalRecoveryReport,
+    ) -> Result<Self, WorkflowError> {
+        let index = if report.index.run_id.is_some() || report.index.record_count > 0 {
+            report.index.clone()
+        } else if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
             scan_journal_v2(path, Some(&run_id))?
         } else {
             JournalScanIndex {

@@ -3,6 +3,7 @@ mod error;
 pub mod journal;
 pub mod limits;
 mod lua;
+pub mod recovery;
 pub mod runtime;
 mod state;
 

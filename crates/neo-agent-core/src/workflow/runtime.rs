@@ -27,9 +27,9 @@ use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 mod support;
 use support::{
     ReplayEntry, RunControl, add_usage, aggregate_usage, bounded_summary,
-    compact_resource_limited_outcome, current_timestamp_ms, interrupted_outcome, last_state,
-    latest_log_summary, latest_report_summary, projection_timestamps, recovered_phase,
-    recovered_reports, replay_entries, report_summary, resource_limited_outcome, usage_total,
+    compact_resource_limited_outcome, current_timestamp_ms, last_state, latest_log_summary,
+    latest_report_summary, projection_timestamps, recovered_phase, recovered_reports,
+    replay_entries, report_summary, resource_limited_outcome, usage_total,
 };
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
@@ -117,6 +117,8 @@ struct RunState {
     replay_cursor: usize,
     replay_live: bool,
     journal: Option<JournalWriter>,
+    /// V1 durable artifacts are inspectable projections only; no append path.
+    v1_read_only: bool,
 }
 
 impl RunState {
@@ -127,7 +129,7 @@ impl RunState {
             state: self.state,
             current_phase: self.current_phase.clone(),
             projection_sequence: self.projection_sequence,
-            recovery_failure: self.journal.is_none(),
+            recovery_failure: self.journal.is_none() && !self.v1_read_only,
             started_at_ms: self.started_at_ms,
             updated_at_ms: self.updated_at_ms,
             invocation_count: self.invocation_count,
@@ -370,6 +372,7 @@ impl WorkflowRuntime {
             replay_cursor: 0,
             replay_live: false,
             journal: Some(writer),
+            v1_read_only: false,
         }));
         self.runs
             .lock()
@@ -547,6 +550,17 @@ impl WorkflowRuntime {
         run_id: &WorkflowId,
         actor: WorkflowActor,
     ) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        {
+            let guard = state.lock().await;
+            // Rehydrated V1 projections are read-only; same-ID resume is rejected.
+            // Explicit linked V2 import is the only writer path for those runs.
+            if guard.v1_read_only {
+                return Err(WorkflowError::InvalidOperation(
+                    "linked_upgrade_required".to_owned(),
+                ));
+            }
+        }
         if self.bound_runner()?.is_none() {
             return Err(WorkflowError::InvalidInput(
                 "workflow runner is not bound".to_owned(),
@@ -643,8 +657,39 @@ impl WorkflowRuntime {
                 return Ok(());
             }
         };
+        // V1 durable artifacts rehydrate as inspectable read-only projections.
+        // No V1 append path: incomplete effects are never finished or relaunched here;
+        // same-ID resume returns linked_upgrade_required (design §24.2).
+        if metadata.journal_format_version < 2 {
+            self.rehydrate_v1_readonly(run_dir, metadata, handles)
+                .await?;
+            return Ok(());
+        }
+
+        // V2 path: torn-tail recovery + production resolver (expanded in later tasks).
         let journal_path = run_dir.join("journal.jsonl");
-        let mut records = match journal::read_journal(&journal_path) {
+        let recovery = match crate::workflow::recovery::recover_journal_v2(
+            &journal_path,
+            Some(&metadata.run_id),
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                handles.push(
+                    self.insert_failed_run(
+                        run_dir,
+                        metadata,
+                        format!("journal recovery failed: {error}"),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
+        };
+        let _ = recovery;
+
+        // Until the V2 runtime writer owns create/transition (Task 4+), V2 rehydrate
+        // still projects from validated envelopes without the legacy V1 append path.
+        let records_v2 = match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
             Ok(records) if !records.is_empty() => records,
             Ok(_) => {
                 handles.push(
@@ -665,99 +710,68 @@ impl WorkflowRuntime {
                 return Ok(());
             }
         };
-        let mut writer = match JournalWriter::open(&journal_path) {
-            Ok(writer) => writer,
-            Err(error) => {
+        let (final_state, terminal_reason) = v2_projection_state(&records_v2);
+        handles.push(
+            self.insert_rehydrated_run(
+                run_dir,
+                metadata,
+                Vec::new(),
+                final_state,
+                terminal_reason,
+                None,
+                false,
+            )
+            .await,
+        );
+        let _ = records_v2;
+        Ok(())
+    }
+
+    /// Rehydrate a V1 run as a read-only projection (no journal mutation).
+    async fn rehydrate_v1_readonly(
+        &self,
+        run_dir: PathBuf,
+        metadata: WorkflowRunMetadata,
+        handles: &mut Vec<WorkflowHandle>,
+    ) -> Result<(), WorkflowError> {
+        let journal_path = run_dir.join("journal.jsonl");
+        let records = match journal::read_journal(&journal_path) {
+            Ok(records) if !records.is_empty() => records,
+            Ok(_) => {
                 handles.push(
                     self.insert_failed_run(
                         run_dir,
                         metadata,
-                        format!("journal open failed: {error}"),
+                        "corrupt journal: missing initial state".to_owned(),
                     )
                     .await,
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                handles.push(
+                    self.insert_failed_run(run_dir, metadata, format!("corrupt journal: {error}"))
+                        .await,
                 );
                 return Ok(());
             }
         };
-        let incomplete = journal::find_incomplete_invocations(&records);
-        if !incomplete.is_empty() {
-            let resolver = match self.bound_recovery_resolver() {
-                Ok(resolver) => resolver,
-                Err(error) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            format!("recovery resolver failed: {error}"),
-                        )
-                        .await,
-                    );
-                    return Ok(());
-                }
-            };
-            for invocation in incomplete {
-                let invocation = Arc::new(invocation);
-                let outcome = if let Some(resolver) = resolver.as_ref() {
-                    resolver(Arc::clone(&invocation))
-                        .await
-                        .unwrap_or_else(|| interrupted_outcome(&invocation))
-                } else {
-                    interrupted_outcome(&invocation)
-                };
-                let record = JournalRecord::InvocationFinished {
-                    seq: writer.next_seq(),
-                    timestamp_ms: current_timestamp_ms(),
-                    invocation_id: invocation.invocation_id.clone(),
-                    outcome,
-                };
-                if let Err(error) = writer.append(&record, &self.limits) {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            format!("recovery append failed: {error}"),
-                        )
-                        .await,
-                    );
-                    return Ok(());
-                }
-                records.push(record);
-            }
-        }
 
         let (last_state, last_reason) = last_state(&records);
-        let final_state = if last_state == WorkflowState::Running {
-            let record = JournalRecord::StateChanged {
-                seq: writer.next_seq(),
-                timestamp_ms: current_timestamp_ms(),
-                previous: WorkflowState::Running,
-                new: WorkflowState::Paused,
-                reason: "host_exit".to_owned(),
-                actor: WorkflowActor::Runtime,
-            };
-            if let Err(error) = writer.append(&record, &self.limits) {
-                handles.push(
-                    self.insert_failed_run(
-                        run_dir,
-                        metadata,
-                        format!("recovery append failed: {error}"),
-                    )
-                    .await,
-                );
-                return Ok(());
-            }
-            records.push(record);
+        // In-memory host_exit projection only — never append V1 recovery bytes.
+        let final_state = if last_state.rehydrates_as_paused_host_exit() {
             WorkflowState::Paused
         } else {
             last_state
         };
-        let terminal_reason = if last_state == WorkflowState::Running {
+        let terminal_reason = if last_state.rehydrates_as_paused_host_exit() {
             Some("host_exit".to_owned())
         } else if final_state == WorkflowState::Paused || final_state.is_terminal() {
             last_reason
         } else {
             None
         };
+
         handles.push(
             self.insert_rehydrated_run(
                 run_dir,
@@ -765,7 +779,8 @@ impl WorkflowRuntime {
                 records,
                 final_state,
                 terminal_reason,
-                writer,
+                None,
+                true,
             )
             .await,
         );
@@ -1312,6 +1327,7 @@ impl WorkflowRuntime {
             .map_err(|_| WorkflowError::Host("workflow runner lock poisoned".to_owned()))
     }
 
+    #[allow(dead_code)] // rebound by Task 5 production recovery path for V2 incomplete effects
     fn bound_recovery_resolver(&self) -> Result<Option<Arc<RecoveryResolver>>, WorkflowError> {
         self.recovery_resolver
             .read()
@@ -1343,7 +1359,8 @@ impl WorkflowRuntime {
         records: Vec<JournalRecord>,
         state: WorkflowState,
         terminal_reason: Option<String>,
-        writer: JournalWriter,
+        writer: Option<JournalWriter>,
+        v1_read_only: bool,
     ) -> WorkflowHandle {
         let replay_entries = replay_entries(&records);
         let projection_sequence = records.last().map(JournalRecord::seq);
@@ -1382,7 +1399,8 @@ impl WorkflowRuntime {
             replay_entries,
             replay_cursor: 0,
             replay_live: false,
-            journal: Some(writer),
+            journal: writer,
+            v1_read_only,
         };
         self.runs
             .lock()
@@ -1448,6 +1466,7 @@ impl WorkflowRuntime {
             replay_cursor: 0,
             replay_live: false,
             journal: None,
+            v1_read_only: false,
         };
         self.runs
             .lock()
@@ -1458,6 +1477,27 @@ impl WorkflowRuntime {
             control,
             runtime: self.clone(),
         }
+    }
+}
+
+fn v2_projection_state(
+    envelopes: &[crate::workflow::journal::JournalEnvelope],
+) -> (WorkflowState, Option<String>) {
+    use crate::workflow::journal::JournalPayload;
+    let mut state = WorkflowState::Queued;
+    let mut reason: Option<String> = None;
+    for env in envelopes {
+        if let JournalPayload::StateChanged { new, reason: r, .. } = &env.payload {
+            state = *new;
+            reason = Some(r.clone());
+        }
+    }
+    if state.rehydrates_as_paused_host_exit() {
+        (WorkflowState::Paused, Some("host_exit".to_owned()))
+    } else if state == WorkflowState::Paused || state.is_terminal() {
+        (state, reason)
+    } else {
+        (state, None)
     }
 }
 

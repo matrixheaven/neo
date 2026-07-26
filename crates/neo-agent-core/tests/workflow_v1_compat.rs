@@ -5,8 +5,8 @@
 //! They must remain decodable without a V1 writer path.
 
 use neo_agent_core::workflow::{
-    WorkflowId, WorkflowRunMetadata, WorkflowState, find_incomplete_invocations, read_journal,
-    read_run_metadata,
+    WorkflowErrorCode, WorkflowId, WorkflowRunMetadata, WorkflowRuntime, WorkflowState,
+    find_incomplete_invocations, read_journal, read_run_metadata,
 };
 use std::path::{Path, PathBuf};
 
@@ -113,4 +113,74 @@ fn assert_fixture_bytes_unchanged(dir: &Path) {
         journal_bytes.ends_with(b"\n"),
         "journal fixture must end with newline"
     );
+}
+
+#[tokio::test]
+async fn v1_nonterminal_resume_requires_linked_upgrade_without_append() {
+    let fixture = incomplete_dir();
+    let tmp = tempfile::tempdir().unwrap();
+    let session_dir = tmp.path();
+    let run_id = "wf_00000000000000000000000000000001";
+    let run_dir = session_dir.join("workflows").join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    // Copy fixture bytes into a session workflows layout.
+    for name in ["run.json", "journal.jsonl"] {
+        std::fs::copy(fixture.join(name), run_dir.join(name)).unwrap();
+    }
+    let journal_before = std::fs::read(run_dir.join("journal.jsonl")).unwrap();
+    let meta_before = std::fs::read(run_dir.join("run.json")).unwrap();
+
+    let runtime = WorkflowRuntime::new(neo_agent_core::workflow::WorkflowLimits::default());
+    let handles = runtime.rehydrate(session_dir).await.expect("rehydrate v1");
+    assert_eq!(handles.len(), 1);
+    let handle = &handles[0];
+    assert_eq!(handle.run_id.as_str(), run_id);
+
+    let snapshot = handle.snapshot().await;
+    assert_eq!(
+        snapshot.state,
+        WorkflowState::Paused,
+        "nonterminal V1 must project as paused host_exit without journal rewrite"
+    );
+    assert_eq!(snapshot.terminal_reason.as_deref(), Some("host_exit"));
+    assert!(
+        !snapshot.recovery_failure,
+        "V1 read-only projection is not a recovery failure"
+    );
+
+    // Rehydrate must not append interrupted finishes or host_exit records.
+    let journal_after_rehydrate = std::fs::read(run_dir.join("journal.jsonl")).unwrap();
+    assert_eq!(
+        journal_before, journal_after_rehydrate,
+        "V1 rehydrate must not append any journal bytes"
+    );
+    assert_eq!(
+        meta_before,
+        std::fs::read(run_dir.join("run.json")).unwrap(),
+        "V1 run.json must remain byte-stable"
+    );
+
+    // Same-ID resume is rejected; linked upgrade is the only writer path.
+    let err = handle
+        .resume(neo_agent_core::workflow::WorkflowActor::Human)
+        .await
+        .expect_err("V1 same-ID resume must fail");
+    assert_eq!(err.code(), WorkflowErrorCode::InvalidOperation);
+    assert!(
+        err.to_string().contains("linked_upgrade_required"),
+        "error must carry linked_upgrade_required: {err}"
+    );
+
+    let journal_after_resume = std::fs::read(run_dir.join("journal.jsonl")).unwrap();
+    assert_eq!(
+        journal_before, journal_after_resume,
+        "failed resume must not append any V1 journal bytes"
+    );
+
+    // Incomplete invocation remains durable and un-finished (never relaunched).
+    let records = read_journal(&run_dir.join("journal.jsonl")).unwrap();
+    let incomplete = find_incomplete_invocations(&records);
+    assert_eq!(incomplete.len(), 1);
+    assert_eq!(incomplete[0].invocation_id, "inv_open");
 }

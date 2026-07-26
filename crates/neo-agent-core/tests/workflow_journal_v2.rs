@@ -5,6 +5,9 @@ use neo_agent_core::workflow::journal::{
     JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalPayloadRef, JournalV2Writer,
     canonical_input_hash, collect_journal_v2, scan_journal_v2, scan_journal_v2_page,
 };
+use neo_agent_core::workflow::recovery::{
+    JournalRecoveryAction, quarantine_tail_path, recover_journal_v2, recovery_quarantine_dir,
+};
 use neo_agent_core::workflow::{
     WorkflowActor, WorkflowArtifactId, WorkflowChildRef, WorkflowErrorCode,
     WorkflowFinalResultMetadata, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome,
@@ -545,4 +548,291 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
     assert!(page.has_more);
     assert_eq!(page.first_seq, Some(0));
     assert_eq!(page.last_seq, Some(2));
+}
+
+fn write_valid_prefix(path: &std::path::Path, id: &WorkflowId) -> String {
+    let env = JournalEnvelope::new(
+        0,
+        1_000,
+        id.clone(),
+        JournalPayload::RunCreated {
+            name: "demo".to_owned(),
+            description: None,
+            launch_source: Some("/workflow".to_owned()),
+        },
+    );
+    let line = serde_json::to_string(&env).unwrap();
+    std::fs::write(path, format!("{line}\n")).unwrap();
+    line
+}
+
+#[test]
+fn journal_recovery_normalizes_valid_unterminated_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.jsonl");
+    let id = run_id();
+    let line = write_valid_prefix(&path, &id);
+
+    // Second valid envelope without terminating newline (torn after JSON, before \n).
+    let second = JournalEnvelope::new(
+        1,
+        1_001,
+        id.clone(),
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Queued,
+            new: WorkflowState::Running,
+            reason: "launch".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+    );
+    let second_line = serde_json::to_string(&second).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(second_line.as_bytes());
+    // Explicitly no trailing newline.
+    assert!(!bytes.ends_with(b"\n") || bytes.ends_with(format!("{second_line}").as_bytes()));
+    // Ensure file does not end with newline after append of second_line alone.
+    std::fs::write(&path, &bytes).unwrap();
+    let on_disk = std::fs::read(&path).unwrap();
+    assert!(
+        !on_disk.ends_with(b"\n"),
+        "fixture must end without newline"
+    );
+    assert!(on_disk.starts_with(format!("{line}\n").as_bytes()));
+
+    let report = recover_journal_v2(&path, Some(&id)).expect("normalize recovery");
+    assert!(matches!(
+        report.action,
+        JournalRecoveryAction::NormalizedUnterminated { seq: 1 }
+    ));
+    let recovered = std::fs::read(&path).unwrap();
+    assert!(
+        recovered.ends_with(b"\n"),
+        "normalized journal must end with newline"
+    );
+    assert_eq!(
+        &recovered[..recovered.len() - 1],
+        on_disk.as_slice(),
+        "normalize must only append a newline"
+    );
+
+    let envelopes = collect_journal_v2(&path, Some(&id)).unwrap();
+    assert_eq!(envelopes.len(), 2);
+    assert_eq!(envelopes[1].seq, 1);
+    assert_eq!(report.index.next_seq, 2);
+}
+
+#[test]
+fn journal_recovery_quarantines_torn_tail_before_truncate() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path();
+    let path = run_dir.join("journal.jsonl");
+    let id = run_id();
+    let _ = write_valid_prefix(&path, &id);
+    let prefix = std::fs::read(&path).unwrap();
+    let prefix_len = prefix.len() as u64;
+
+    let torn = b"{\"version\":2,\"seq\":1,\"timestamp_ms\":1001,\"run_id\":\"";
+    let mut bytes = prefix.clone();
+    bytes.extend_from_slice(torn);
+    std::fs::write(&path, &bytes).unwrap();
+    let original = std::fs::read(&path).unwrap();
+
+    // Quarantine must succeed before truncate.
+    let report = recover_journal_v2(&path, Some(&id)).expect("quarantine recovery");
+    let JournalRecoveryAction::TornTailQuarantined {
+        quarantine_sha256,
+        quarantine_path,
+        removed_bytes,
+        last_validated_offset,
+    } = report.action
+    else {
+        panic!("expected torn-tail quarantine, got {:?}", report.action);
+    };
+
+    assert_eq!(last_validated_offset, prefix_len);
+    assert_eq!(removed_bytes, torn.len() as u64);
+    assert!(quarantine_path.is_file(), "quarantine file must exist");
+    assert_eq!(
+        quarantine_path,
+        quarantine_tail_path(run_dir, &quarantine_sha256)
+    );
+    let quarantined = std::fs::read(&quarantine_path).unwrap();
+    assert_eq!(quarantined, torn);
+
+    let after = std::fs::read(&path).unwrap();
+    // Prefix preserved; recovery record may be appended after truncate.
+    assert!(
+        after.starts_with(&prefix),
+        "valid prefix must survive truncation"
+    );
+    assert!(
+        !after.windows(torn.len()).any(|w| w == torn),
+        "torn suffix must not remain in journal"
+    );
+    assert!(report.recovery_record_appended);
+
+    // Quarantine failure must leave original bytes unchanged.
+    let path2 = run_dir.join("journal_fail.jsonl");
+    std::fs::write(&path2, &original).unwrap();
+    // Make recovery-quarantine a file so directory create fails for this journal's sibling path.
+    // recover uses path.parent()/recovery-quarantine — poison that path after first success
+    // by replacing the directory with a file for a second journal under a nested run dir.
+    let run2 = run_dir.join("run2");
+    std::fs::create_dir_all(&run2).unwrap();
+    let path3 = run2.join("journal.jsonl");
+    std::fs::write(&path3, &original).unwrap();
+    // Create a file where the quarantine directory should be.
+    let qdir = recovery_quarantine_dir(&run2);
+    std::fs::write(&qdir, b"not-a-directory").unwrap();
+    let before_fail = std::fs::read(&path3).unwrap();
+    let err = recover_journal_v2(&path3, Some(&id)).expect_err("quarantine must fail");
+    assert!(
+        err.to_string().contains("quarantine") || err.to_string().contains("directory"),
+        "unexpected error: {err}"
+    );
+    let after_fail = std::fs::read(&path3).unwrap();
+    assert_eq!(
+        before_fail, after_fail,
+        "quarantine failure must leave journal byte-for-byte unchanged"
+    );
+    let _ = path2;
+}
+
+#[test]
+fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = run_id();
+
+    // Newline-terminated invalid JSON at EOF — fail closed, no mutation.
+    {
+        let path = dir.path().join("newline_bad.jsonl");
+        let prefix_line = write_valid_prefix(&path, &id);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{not-json}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err = recover_journal_v2(&path, Some(&id)).expect_err("must fail closed");
+        assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let _ = prefix_line;
+    }
+
+    // Interior malformed (bad complete line between good lines).
+    {
+        let path = dir.path().join("interior_bad.jsonl");
+        let env0 = JournalEnvelope::new(
+            0,
+            1_000,
+            id.clone(),
+            JournalPayload::RunCreated {
+                name: "demo".to_owned(),
+                description: None,
+                launch_source: None,
+            },
+        );
+        let env2 = JournalEnvelope::new(
+            1,
+            1_002,
+            id.clone(),
+            JournalPayload::StateChanged {
+                previous: WorkflowState::Queued,
+                new: WorkflowState::Running,
+                reason: "x".to_owned(),
+                actor: WorkflowActor::Runtime,
+            },
+        );
+        let content = format!(
+            "{}\n{{bad}}\n{}\n",
+            serde_json::to_string(&env0).unwrap(),
+            serde_json::to_string(&env2).unwrap()
+        );
+        std::fs::write(&path, &content).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err = recover_journal_v2(&path, Some(&id)).expect_err("interior must fail closed");
+        assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // Sequence mismatch on complete lines — fail closed.
+    {
+        let path = dir.path().join("seq_gap.jsonl");
+        let env0 = JournalEnvelope::new(
+            0,
+            1_000,
+            id.clone(),
+            JournalPayload::RunCreated {
+                name: "demo".to_owned(),
+                description: None,
+                launch_source: None,
+            },
+        );
+        let gap = JournalEnvelope::new(
+            2,
+            1_002,
+            id.clone(),
+            JournalPayload::StateChanged {
+                previous: WorkflowState::Queued,
+                new: WorkflowState::Running,
+                reason: "gap".to_owned(),
+                actor: WorkflowActor::Runtime,
+            },
+        );
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&env0).unwrap(),
+            serde_json::to_string(&gap).unwrap()
+        );
+        std::fs::write(&path, &content).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err = recover_journal_v2(&path, Some(&id)).expect_err("seq gap must fail closed");
+        assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
+        assert!(err.to_string().contains("sequence gap"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // Run-id mismatch.
+    {
+        let path = dir.path().join("run_mismatch.jsonl");
+        let other = WorkflowId::from_existing("wf_000000000000000000000000000000bb");
+        let env = JournalEnvelope::new(
+            0,
+            1_000,
+            other,
+            JournalPayload::RunCreated {
+                name: "demo".to_owned(),
+                description: None,
+                launch_source: None,
+            },
+        );
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&env).unwrap())).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err = recover_journal_v2(&path, Some(&id)).expect_err("run id must fail closed");
+        assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
+        assert!(err.to_string().contains("run id mismatch"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    // Hash mismatch on complete line.
+    {
+        let path = dir.path().join("hash_bad.jsonl");
+        let mut env = JournalEnvelope::new(
+            0,
+            1_000,
+            id.clone(),
+            JournalPayload::InvocationStarted {
+                invocation_id: "inv_1".to_owned(),
+                call_index: 0,
+                kind: WorkflowInvocationKind::Delegate,
+                canonical_input: Some(json!({"task": "x"})),
+            },
+        )
+        .with_canonical_input_hash("0".repeat(64));
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&env).unwrap())).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err = recover_journal_v2(&path, Some(&id)).expect_err("hash must fail closed");
+        assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        env.canonical_input_hash = Some("1".repeat(64));
+        let _ = env;
+    }
 }
