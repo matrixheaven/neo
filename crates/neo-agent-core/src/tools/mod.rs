@@ -136,9 +136,10 @@ pub use ask_user::{
     QuestionResponse,
 };
 pub use background_tasks::{
-    BackgroundTaskKind, BackgroundTaskManager, BackgroundTaskSnapshot, BackgroundTaskStatus,
-    CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskPauseTool,
-    TaskResumeTool, TaskStopTool, cap_output_details, cap_plain_output, format_collected_answers,
+    BackgroundTaskKind, BackgroundTaskListPage, BackgroundTaskListQuery, BackgroundTaskManager,
+    BackgroundTaskSnapshot, BackgroundTaskStatus, CommandOutput, ManagedBackgroundCommand,
+    TaskListTool, TaskOutputTool, TaskPauseTool, TaskResumeTool, TaskStopTool,
+    WorkflowTaskProjection, cap_output_details, cap_plain_output, format_collected_answers,
     task_list_result,
 };
 pub use bash::{

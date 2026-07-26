@@ -2133,3 +2133,250 @@ fn workflow_save_is_no_clobber_and_prune_defaults_to_dry_run() {
         "expected dry-run marker: {prune_explicit}"
     );
 }
+
+// Task 21: paged /tasks workflow dashboard projection
+#[tokio::test]
+async fn tasks_workflow_pagination_and_filters_are_stable() {
+    use neo_agent_core::tools::{
+        BackgroundTaskKind, BackgroundTaskListQuery, BackgroundTaskManager, BackgroundTaskStatus,
+    };
+    use neo_agent_core::workflow::{
+        WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase, WorkflowRuntime,
+    };
+
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).expect("sessions");
+
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let manager = BackgroundTaskManager::new();
+
+    // Create 55 workflows across two definitions so pagination exceeds the old 50 cap.
+    let mut run_ids = Vec::new();
+    for index in 0..55 {
+        let name = if index % 2 == 0 {
+            "deep-research"
+        } else {
+            "code-review"
+        };
+        let handle = runtime
+            .create_run(
+                &sessions,
+                WorkflowLaunchRequest {
+                    name: name.to_owned(),
+                    description: format!("{name} run {index}"),
+                    phases: vec![WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    }],
+                    script: "neo.phase('work')".to_owned(),
+                    args: serde_json::json!({}),
+                    launch_source: if index % 3 == 0 {
+                        "builtin".to_owned()
+                    } else {
+                        "user".to_owned()
+                    },
+                    parent_run_id: None,
+                },
+            )
+            .await
+            .expect("create run");
+        let task_id = handle.run_id.0.clone();
+        run_ids.push(task_id.clone());
+        manager
+            .start_workflow(task_id, format!("{name} run {index}"), handle)
+            .await
+            .expect("register");
+    }
+
+    // Pause one run so state filter has a distinct target.
+    let paused_id = &run_ids[0];
+    manager
+        .pause_workflow(paused_id, neo_agent_core::workflow::WorkflowActor::Human)
+        .await
+        .expect("pause");
+
+    // Page 1: first 20 of 55, stable ordering, cursor bound.
+    let page1 = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            limit: 20,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("page1");
+    assert_eq!(page1.items.len(), 20, "page1 size");
+    assert!(page1.has_more, "page1 has_more");
+    assert!(page1.next_cursor.is_some(), "page1 cursor");
+    assert_eq!(page1.total_matched, 55);
+    let page1_ids: Vec<_> = page1
+        .items
+        .iter()
+        .map(|item| item.task_id.clone())
+        .collect();
+
+    // Wrong query cursor is rejected (query-bound).
+    let wrong = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: true,
+            kind: Some(BackgroundTaskKind::Workflow),
+            limit: 20,
+            cursor: page1.next_cursor.clone(),
+            ..BackgroundTaskListQuery::default()
+        })
+        .await;
+    assert!(
+        wrong.is_err(),
+        "cursor from a different query must be rejected"
+    );
+
+    // Page 2 continues without overlap.
+    let page2 = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            limit: 20,
+            cursor: page1.next_cursor.clone(),
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("page2");
+    assert_eq!(page2.items.len(), 20);
+    assert!(page2.has_more);
+    let page2_ids: Vec<_> = page2
+        .items
+        .iter()
+        .map(|item| item.task_id.clone())
+        .collect();
+    for id in &page1_ids {
+        assert!(
+            !page2_ids.contains(id),
+            "page2 must not repeat page1 id {id}"
+        );
+    }
+
+    // Final page drains remainder.
+    let page3 = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            limit: 20,
+            cursor: page2.next_cursor.clone(),
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("page3");
+    assert_eq!(page3.items.len(), 15);
+    assert!(!page3.has_more);
+    assert!(page3.next_cursor.is_none());
+
+    // Full enumeration via pages exceeds old hard 50.
+    let mut all = Vec::new();
+    all.extend(page1_ids);
+    all.extend(page2_ids);
+    all.extend(page3.items.iter().map(|item| item.task_id.clone()));
+    assert_eq!(all.len(), 55);
+    // Stability: re-query first page yields identical order.
+    let page1_again = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            limit: 20,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("page1 again");
+    let again_ids: Vec<_> = page1_again
+        .items
+        .iter()
+        .map(|item| item.task_id.clone())
+        .collect();
+    assert_eq!(again_ids, all[..20]);
+
+    // Definition filter.
+    let research = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            definition_name: Some("deep-research".to_owned()),
+            limit: 100,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("definition filter");
+    assert!(research.total_matched >= 27);
+    assert!(research.items.iter().all(|item| {
+        item.workflow
+            .as_ref()
+            .is_some_and(|w| w.definition_name == "deep-research")
+    }));
+
+    // Handle filter uses allocated human handles (deep-research, deep-research-2, ...).
+    let first_handle = research.items[0]
+        .workflow
+        .as_ref()
+        .and_then(|w| w.human_handle.clone())
+        .expect("human handle");
+    let by_handle = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            handle: Some(first_handle.clone()),
+            limit: 10,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("handle filter");
+    assert_eq!(by_handle.total_matched, 1);
+    assert_eq!(
+        by_handle.items[0]
+            .workflow
+            .as_ref()
+            .and_then(|w| w.human_handle.as_deref()),
+        Some(first_handle.as_str())
+    );
+
+    // State filter (paused).
+    let paused = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            state: Some(BackgroundTaskStatus::Paused),
+            limit: 10,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("state filter");
+    assert!(paused.total_matched >= 1);
+    assert!(
+        paused
+            .items
+            .iter()
+            .all(|item| item.status == BackgroundTaskStatus::Paused)
+    );
+
+    // Source scope filter.
+    let builtin = manager
+        .list_page(BackgroundTaskListQuery {
+            active_only: false,
+            kind: Some(BackgroundTaskKind::Workflow),
+            source_scope: Some("builtin".to_owned()),
+            limit: 100,
+            ..BackgroundTaskListQuery::default()
+        })
+        .await
+        .expect("scope filter");
+    assert!(builtin.total_matched >= 1);
+    assert!(builtin.items.iter().all(|item| {
+        item.workflow
+            .as_ref()
+            .and_then(|w| w.source_scope.as_deref())
+            .is_some_and(|scope| scope.contains("builtin"))
+    }));
+
+    // Projection metadata present.
+    let sample = &page1.items[0];
+    let meta = sample.workflow.as_ref().expect("workflow meta");
+    assert!(!meta.definition_name.is_empty());
+    assert!(meta.human_handle.is_some());
+    assert!(meta.run_id == sample.task_id || !meta.run_id.is_empty());
+}

@@ -8,8 +8,45 @@ use neo_tui::tasks_browser::{
 };
 
 #[must_use]
+#[allow(dead_code)] // retained for unit tests / non-paged callers
 pub fn snapshots_to_browser_snapshot(snapshots: &[BackgroundTaskSnapshot]) -> TaskBrowserSnapshot {
     TaskBrowserSnapshot::new(snapshots.iter().map(snapshot_to_item).collect())
+}
+
+/// Build a browser snapshot from a paged list response (design §38).
+#[must_use]
+pub fn list_page_to_browser_snapshot(
+    page: &neo_agent_core::tools::BackgroundTaskListPage,
+) -> TaskBrowserSnapshot {
+    TaskBrowserSnapshot {
+        items: page.items.iter().map(snapshot_to_item).collect(),
+        next_cursor: page.next_cursor.clone(),
+        has_more: page.has_more,
+        query_hash: Some(page.query_hash.clone()),
+        total_matched: Some(page.total_matched),
+    }
+}
+
+fn workflow_browser_meta(
+    meta: &neo_agent_core::tools::WorkflowTaskProjection,
+) -> neo_tui::tasks_browser::TaskBrowserWorkflowMeta {
+    neo_tui::tasks_browser::TaskBrowserWorkflowMeta {
+        run_id: meta.run_id.clone(),
+        human_handle: meta.human_handle.clone(),
+        definition_name: meta.definition_name.clone(),
+        definition_revision: meta.definition_revision.clone(),
+        source_scope: meta.source_scope.clone(),
+        current_phase: meta.current_phase.clone(),
+        parent_run_id: meta.parent_run_id.clone(),
+        admission_wait_reason: meta.admission_wait_reason.clone(),
+        started_child_count: meta.started_child_count,
+        queued_child_count: meta.queued_child_count,
+        terminal_child_count: meta.terminal_child_count,
+        actual_usage_total: meta.actual_usage_total,
+        has_final_result: meta.has_final_result,
+        artifact_count: meta.artifact_count,
+        pending_request_id: meta.pending_request_id.clone(),
+    }
 }
 
 #[must_use]
@@ -26,6 +63,15 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
         || snapshot.description.clone(),
         |agent| agent.task_title.clone(),
     );
+    let human_handle = snapshot
+        .workflow
+        .as_ref()
+        .and_then(|w| w.human_handle.clone());
+    let title = if let Some(handle) = human_handle.as_ref() {
+        handle.clone()
+    } else {
+        title
+    };
     TaskBrowserItem {
         id: snapshot.task_id.clone(),
         kind,
@@ -36,6 +82,9 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
         detail_lines: detail_lines(snapshot, status),
         preview_lines: preview_lines(snapshot),
         can_stop: snapshot.status.is_active(),
+        human_handle,
+        list_cursor: None,
+        workflow: snapshot.workflow.as_ref().map(workflow_browser_meta),
     }
 }
 
@@ -127,13 +176,68 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
             lines
         }
         BackgroundTaskKind::Workflow => {
-            vec![
+            let mut lines = vec![
                 format!("id:          {}", snapshot.task_id),
                 format!("kind:        {}", snapshot.kind.as_str()),
                 format!("status:      {}", status.label()),
                 format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
                 format!("description: {}", snapshot.description),
-            ]
+            ];
+            if let Some(meta) = &snapshot.workflow {
+                if let Some(handle) = &meta.human_handle {
+                    lines.push(format!("handle:      {handle}"));
+                }
+                lines.push(format!("definition:  {}", meta.definition_name));
+                if let Some(rev) = &meta.definition_revision {
+                    let short = if rev.len() > 12 {
+                        &rev[..12]
+                    } else {
+                        rev.as_str()
+                    };
+                    lines.push(format!("revision:    {short}"));
+                }
+                if let Some(scope) = &meta.source_scope {
+                    lines.push(format!("origin:      {scope}"));
+                }
+                if let Some(phase) = &meta.current_phase {
+                    lines.push(format!("phase:       {phase}"));
+                }
+                lines.push(format!(
+                    "children:    started={} queued={} terminal={}",
+                    meta.started_child_count, meta.queued_child_count, meta.terminal_child_count
+                ));
+                if let Some(reason) = &meta.admission_wait_reason {
+                    lines.push(format!("queue:       {reason}"));
+                }
+                if let Some(usage) = meta.actual_usage_total {
+                    lines.push(format!("usage:       {usage} tokens"));
+                }
+                lines.push(format!(
+                    "result:      {}",
+                    if meta.has_final_result {
+                        "present"
+                    } else {
+                        "none"
+                    }
+                ));
+                lines.push(format!("artifacts:   {}", meta.artifact_count));
+                if let Some(parent) = &meta.parent_run_id {
+                    lines.push(format!("parent:      {parent}"));
+                }
+                if let Some(request_id) = &meta.pending_request_id {
+                    lines.push(format!("awaiting:    {request_id}"));
+                }
+                if let Some(reason) = &meta.terminal_reason {
+                    lines.push(format!("terminal:    {reason}"));
+                }
+                if let Some(log) = &meta.latest_log_summary {
+                    lines.push(format!("log:         {log}"));
+                }
+                if let Some(report) = &meta.latest_report_summary {
+                    lines.push(format!("report:      {report}"));
+                }
+            }
+            lines
         }
     }
 }
@@ -200,7 +304,29 @@ fn preview_lines(snapshot: &BackgroundTaskSnapshot) -> Vec<String> {
             }
         }
         BackgroundTaskKind::Workflow => {
-            vec![format!("status: {}", snapshot.status.as_str())]
+            if let Some(meta) = &snapshot.workflow {
+                let mut lines = Vec::new();
+                if let Some(handle) = &meta.human_handle {
+                    lines.push(format!("handle: {handle}"));
+                }
+                if let Some(phase) = &meta.current_phase {
+                    lines.push(format!("phase: {phase}"));
+                }
+                lines.push(format!(
+                    "children: {}/{}/{}",
+                    meta.started_child_count, meta.queued_child_count, meta.terminal_child_count
+                ));
+                if let Some(reason) = &meta.admission_wait_reason {
+                    lines.push(format!("queue: {reason}"));
+                }
+                if let Some(usage) = meta.actual_usage_total {
+                    lines.push(format!("usage: {usage}"));
+                }
+                lines.push(format!("status: {}", snapshot.status.as_str()));
+                lines
+            } else {
+                vec![format!("status: {}", snapshot.status.as_str())]
+            }
         }
     }
 }
@@ -306,6 +432,7 @@ mod tests {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         }
     }
 
@@ -358,6 +485,7 @@ mod tests {
             answers: Some(vec!["yes".to_owned()]),
             delegate: None,
             swarm: None,
+            workflow: None,
         };
 
         let item = snapshot_to_item(&snapshot);
@@ -380,6 +508,7 @@ mod tests {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         };
 
         let item = snapshot_to_item(&snapshot);
@@ -449,6 +578,7 @@ mod tests {
             answers: None,
             delegate: Some(agent),
             swarm: None,
+            workflow: None,
         };
         let item = snapshot_to_item(&snapshot);
         assert_eq!(item.kind, TaskBrowserKind::Delegate);
@@ -520,6 +650,7 @@ mod tests {
             answers: None,
             delegate: None,
             swarm: Some(swarm),
+            workflow: None,
         };
         let item = snapshot_to_item(&snapshot);
         assert_eq!(item.kind, TaskBrowserKind::DelegateSwarm);
@@ -621,6 +752,7 @@ mod tests {
             answers: None,
             delegate: None,
             swarm: Some(swarm),
+            workflow: None,
         }
     }
 

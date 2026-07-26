@@ -6,9 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::Engine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -99,6 +101,35 @@ impl ManagedBackgroundCommand {
     }
 }
 
+/// Workflow-specific projection fields for `/tasks` and TaskList (design §38).
+///
+/// Projection only — never a second durable owner. Values come from
+/// `WorkflowRuntime` snapshots / TaskOutput materials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowTaskProjection {
+    pub run_id: String,
+    pub human_handle: Option<String>,
+    pub definition_name: String,
+    pub definition_revision: Option<String>,
+    /// Launch origin / source scope label (builtin|user|project|dynamic|launch_source).
+    pub source_scope: Option<String>,
+    pub current_phase: Option<String>,
+    pub parent_run_id: Option<String>,
+    pub admission_wait_reason: Option<String>,
+    pub started_child_count: u64,
+    pub queued_child_count: u64,
+    pub terminal_child_count: u64,
+    pub actual_usage_total: Option<u64>,
+    pub has_final_result: bool,
+    pub artifact_count: usize,
+    pub pending_request_id: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub updated_at_ms: Option<u64>,
+    pub terminal_reason: Option<String>,
+    pub latest_log_summary: Option<String>,
+    pub latest_report_summary: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct BackgroundTaskSnapshot {
     pub task_id: String,
@@ -110,6 +141,43 @@ pub struct BackgroundTaskSnapshot {
     pub answers: Option<Vec<String>>,
     pub delegate: Option<crate::multi_agent::AgentSnapshot>,
     pub swarm: Option<crate::multi_agent::SwarmSnapshot>,
+    /// Present when [`BackgroundTaskKind::Workflow`].
+    pub workflow: Option<WorkflowTaskProjection>,
+}
+
+/// Stable list query for the `/tasks` dashboard and TaskList paging.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackgroundTaskListQuery {
+    /// When true, only non-terminal tasks.
+    pub active_only: bool,
+    /// Optional kind filter (e.g. workflow-only view).
+    pub kind: Option<BackgroundTaskKind>,
+    /// Exact human handle match (workflows).
+    pub handle: Option<String>,
+    /// Exact definition name match (workflows).
+    pub definition_name: Option<String>,
+    /// Source scope / launch origin substring match (workflows).
+    pub source_scope: Option<String>,
+    /// Status filter.
+    pub state: Option<BackgroundTaskStatus>,
+    /// When Some(true), only AwaitingUser workflows; Some(false) excludes them.
+    pub awaiting_user: Option<bool>,
+    /// Parent run id lineage filter (workflows).
+    pub lineage_parent: Option<String>,
+    /// Page size (clamped 1..=500). Defaults to 50 when zero.
+    pub limit: usize,
+    /// Opaque query-bound cursor from a previous page.
+    pub cursor: Option<String>,
+}
+
+/// One page of background task projections.
+#[derive(Clone)]
+pub struct BackgroundTaskListPage {
+    pub items: Vec<BackgroundTaskSnapshot>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub query_hash: String,
+    pub total_matched: usize,
 }
 
 enum BackgroundTaskState {
@@ -147,6 +215,8 @@ struct BackgroundTaskRecord {
     started_at: Instant,
     state: BackgroundTaskState,
     detached: bool,
+    /// Session-local human handle for workflow tasks (stable after registration).
+    human_handle: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -222,6 +292,7 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::BashRunning(command),
                 detached: true,
+                human_handle: None,
             },
         );
         Ok(ToolResult::ok(format!(
@@ -263,6 +334,7 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::QuestionWaiting,
                 detached: true,
+                human_handle: None,
             },
         );
         ToolResult::ok(format!(
@@ -322,6 +394,7 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state,
                 detached: true,
+                human_handle: None,
             },
         );
         task_id
@@ -375,6 +448,7 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::DelegateSwarmRunning { snapshot },
                 detached: true,
+                human_handle: None,
             },
         );
         task_id
@@ -502,6 +576,7 @@ impl BackgroundTaskManager {
         description: String,
         handle: crate::workflow::WorkflowHandle,
     ) -> Result<(), ToolError> {
+        let human_handle = self.allocate_human_handle(&handle).await;
         let mut tasks = self.inner.lock().await;
         if tasks.contains_key(&task_id) {
             return Err(ToolError::InvalidInput {
@@ -516,9 +591,38 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::Workflow { handle },
                 detached: false,
+                human_handle: Some(human_handle),
             },
         );
         Ok(())
+    }
+
+    /// Allocate a stable session-local human handle from the definition name
+    /// (`deep-research`, `deep-research-2`, ...). Never uses the UUID as the handle.
+    async fn allocate_human_handle(&self, handle: &crate::workflow::WorkflowHandle) -> String {
+        let base = match handle.output().await {
+            Ok(output) => sanitize_handle_base(&output.metadata.name),
+            Err(_) => "workflow".to_owned(),
+        };
+        let tasks = self.inner.lock().await;
+        let taken: std::collections::HashSet<String> = tasks
+            .values()
+            .filter_map(|record| record.human_handle.clone())
+            .collect();
+        if !taken.contains(&base) {
+            return base;
+        }
+        let mut index = 2u32;
+        loop {
+            let candidate = format!("{base}-{index}");
+            if !taken.contains(&candidate) {
+                return candidate;
+            }
+            index = index.saturating_add(1);
+            if index == u32::MAX {
+                return format!("{base}-{}", handle.run_id.as_str());
+            }
+        }
     }
 
     /// Remove a workflow registration while rolling back a launch transaction.
@@ -633,6 +737,186 @@ impl BackgroundTaskManager {
         })))
     }
 
+    /// Linked-run fork via the sole runtime owner (design §34 / §38.2).
+    ///
+    /// Registers the child as a background workflow task. Does not mutate the parent.
+    pub async fn fork_workflow(
+        &self,
+        task_id: &str,
+        session_dir: &Path,
+        runtime: &crate::workflow::WorkflowRuntime,
+        capability: &crate::workflow::WorkflowCapability,
+        checkpoint_seq: Option<u64>,
+        actor: crate::workflow::WorkflowActor,
+    ) -> Result<ToolResult, ToolError> {
+        let _ = actor;
+        let parent = match self.workflow_control_handle("TaskFork", task_id).await {
+            Ok(handle) => handle,
+            Err(result) => return Ok(result),
+        };
+        let parent_output = parent
+            .output()
+            .await
+            .map_err(|error| ToolError::InvalidInput {
+                tool: "TaskFork".to_owned(),
+                message: format!("read parent workflow failed: {error}"),
+            })?;
+        if !parent_output.state.is_terminal()
+            && parent_output.state != crate::workflow::WorkflowState::Paused
+            && parent_output.state != crate::workflow::WorkflowState::AwaitingUser
+        {
+            // Allow fork from terminal, paused, or awaiting; running-only is fail-closed.
+            if matches!(
+                parent_output.state,
+                crate::workflow::WorkflowState::Running | crate::workflow::WorkflowState::Queued
+            ) {
+                return Ok(ToolResult::error(
+                    "fork requires a stable checkpoint (paused, awaiting user, or terminal)",
+                )
+                .with_details(json!({
+                    "task_id": task_id,
+                    "kind": "workflow",
+                    "action": "TaskFork",
+                    "outcome": "unstable_state",
+                    "state": parent_output.state.as_str(),
+                })));
+            }
+        }
+
+        capability.grant();
+        let Some(reservation) = capability.reserve() else {
+            return Ok(ToolResult::error(
+                "failed to reserve launch authorization for workflow fork",
+            )
+            .with_details(json!({
+                "task_id": task_id,
+                "action": "TaskFork",
+                "outcome": "authorization_missing",
+            })));
+        };
+
+        let checkpoint = if let Some(seq) = checkpoint_seq {
+            let materials = runtime
+                .task_output_materials(&parent.run_id)
+                .await
+                .map_err(|error| ToolError::InvalidInput {
+                    tool: "TaskFork".to_owned(),
+                    message: format!("materials for checkpoint failed: {error}"),
+                })?;
+            let envelopes = crate::workflow::journal::collect_journal_v2(
+                &materials.journal_path,
+                Some(&parent.run_id),
+            )
+            .map_err(|error| ToolError::InvalidInput {
+                tool: "TaskFork".to_owned(),
+                message: format!("journal read for checkpoint failed: {error}"),
+            })?;
+            let digest = crate::workflow::runtime::compute_prefix_digest_v2(&envelopes, seq)
+                .map_err(|error| ToolError::InvalidInput {
+                    tool: "TaskFork".to_owned(),
+                    message: format!("checkpoint digest failed: {error}"),
+                })?;
+            Some(
+                crate::workflow::WorkflowCheckpoint::new(parent.run_id.clone(), seq, digest)
+                    .map_err(|error| ToolError::InvalidInput {
+                        tool: "TaskFork".to_owned(),
+                        message: format!("invalid checkpoint: {error}"),
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let launch = crate::workflow::WorkflowLaunchRequest {
+            name: parent_output.metadata.name.clone(),
+            description: parent_output.metadata.description.clone(),
+            phases: parent_output.metadata.phases.clone(),
+            script: parent_output.metadata.script.clone(),
+            args: parent_output.metadata.args.clone(),
+            launch_source: format!("tasks:fork ({})", parent.run_id.as_str()),
+            parent_run_id: Some(parent.run_id.clone()),
+        };
+        let child = runtime
+            .create_linked_run(
+                session_dir,
+                crate::workflow::runtime::LinkedRunRequest {
+                    parent_run_id: parent.run_id.clone(),
+                    checkpoint,
+                    link_reason: "tasks_fork".to_owned(),
+                    launch,
+                },
+                Some(reservation),
+            )
+            .await
+            .map_err(|error| ToolError::InvalidInput {
+                tool: "TaskFork".to_owned(),
+                message: format!("fork failed: {error}"),
+            })?;
+        let child_task_id = child.run_id.0.clone();
+        self.start_workflow(
+            child_task_id.clone(),
+            parent_output.metadata.description.clone(),
+            child,
+        )
+        .await?;
+        Ok(ToolResult::ok(format!(
+            "workflow {} forked to {child_task_id}",
+            parent.run_id.0
+        ))
+        .with_details(json!({
+            "task_id": task_id,
+            "kind": "workflow",
+            "action": "TaskFork",
+            "parent_run_id": parent.run_id.0,
+            "run_id": child_task_id,
+            "status": "forked",
+        })))
+    }
+
+    /// Prune-safe removal of a terminal workflow task registration.
+    ///
+    /// Only removes the background-task projection for terminal runs. Durable
+    /// journal/storage deletion remains the headless `workflow prune` path;
+    /// this method never deletes run directories.
+    pub async fn prune_workflow_if_safe(
+        &self,
+        task_id: &str,
+        actor: crate::workflow::WorkflowActor,
+    ) -> Result<ToolResult, ToolError> {
+        let _ = actor;
+        let handle = match self.workflow_control_handle("TaskPrune", task_id).await {
+            Ok(handle) => handle,
+            Err(result) => return Ok(result),
+        };
+        let snapshot = handle.snapshot().await;
+        if !snapshot.state.is_terminal() {
+            return Ok(ToolResult::error(format!(
+                "prune-safe only applies to terminal workflows; `{}` is {}",
+                task_id,
+                snapshot.state.as_str()
+            ))
+            .with_details(json!({
+                "task_id": task_id,
+                "kind": "workflow",
+                "action": "TaskPrune",
+                "outcome": "not_terminal",
+                "state": snapshot.state.as_str(),
+            })));
+        }
+        let removed = self.remove_workflow(task_id).await;
+        Ok(ToolResult::ok(format!(
+            "workflow {} prune-safe registration removed (durable run retained)",
+            handle.run_id.0
+        ))
+        .with_details(json!({
+            "task_id": task_id,
+            "kind": "workflow",
+            "action": "TaskPrune",
+            "status": if removed { "removed" } else { "missing" },
+            "durable_deleted": false,
+        })))
+    }
+
     async fn workflow_control_handle(
         &self,
         tool: &str,
@@ -694,6 +978,7 @@ impl BackgroundTaskManager {
                 started_at: Instant::now(),
                 state: BackgroundTaskState::BashRunning(command),
                 detached: false,
+                human_handle: None,
             },
         );
         Ok(task_id)
@@ -720,21 +1005,101 @@ impl BackgroundTaskManager {
     }
 
     pub async fn list(&self, active_only: bool, limit: usize) -> Vec<BackgroundTaskSnapshot> {
+        let page = self
+            .list_page(BackgroundTaskListQuery {
+                active_only,
+                limit,
+                ..BackgroundTaskListQuery::default()
+            })
+            .await
+            .unwrap_or_else(|_| BackgroundTaskListPage {
+                items: Vec::new(),
+                has_more: false,
+                next_cursor: None,
+                query_hash: String::new(),
+                total_matched: 0,
+            });
+        page.items
+    }
+
+    /// Stable paged task list for `/tasks` and discovery (design §38.1).
+    ///
+    /// Sort: most recently updated, then created, then task/run id (all descending
+    /// where timestamps apply). Cursors bind to the query hash and reject mismatches.
+    pub async fn list_page(
+        &self,
+        query: BackgroundTaskListQuery,
+    ) -> Result<BackgroundTaskListPage, ToolError> {
+        let limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.clamp(1, 500)
+        };
+        let query_hash = list_query_hash(&query);
+        let start_offset = if let Some(raw) = query.cursor.as_deref() {
+            let cursor = decode_list_cursor(raw)?;
+            if cursor.v != LIST_CURSOR_VERSION {
+                return Err(ToolError::InvalidInput {
+                    tool: "TaskList".to_owned(),
+                    message: format!(
+                        "unsupported list cursor version {} (expected {LIST_CURSOR_VERSION})",
+                        cursor.v
+                    ),
+                });
+            }
+            if cursor.query_hash != query_hash {
+                return Err(ToolError::InvalidInput {
+                    tool: "TaskList".to_owned(),
+                    message: "list cursor query/filter does not match the request".to_owned(),
+                });
+            }
+            cursor.offset
+        } else {
+            0
+        };
+
         let mut task_ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
         task_ids.extend(self.persisted_task_ids().await);
         task_ids.sort();
         task_ids.dedup();
-        let mut snapshots = Vec::new();
+
+        let mut matched = Vec::new();
         for task_id in task_ids {
-            if let Ok(snapshot) = self.snapshot_with_persisted_wait(&task_id, false).await
-                && (!active_only || snapshot.status.is_active())
-            {
-                snapshots.push(snapshot);
+            let Ok(snapshot) = self.snapshot_with_persisted_wait(&task_id, false).await else {
+                continue;
+            };
+            if !matches_list_query(&snapshot, &query) {
+                continue;
             }
+            matched.push(snapshot);
         }
-        snapshots.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-        snapshots.truncate(limit);
-        snapshots
+
+        matched.sort_by(|left, right| compare_list_order(left, right));
+        let total_matched = matched.len();
+        let end = (start_offset + limit).min(total_matched);
+        let items = if start_offset >= total_matched {
+            Vec::new()
+        } else {
+            matched[start_offset..end].to_vec()
+        };
+        let has_more = end < total_matched;
+        let next_cursor = if has_more {
+            Some(encode_list_cursor(&ListCursorPayload {
+                v: LIST_CURSOR_VERSION,
+                query_hash: query_hash.clone(),
+                offset: end,
+            })?)
+        } else {
+            None
+        };
+
+        Ok(BackgroundTaskListPage {
+            items,
+            has_more,
+            next_cursor,
+            query_hash,
+            total_matched,
+        })
     }
 
     /// Metadata-only enumeration for discovery (`TaskList`).
@@ -788,19 +1153,11 @@ impl BackgroundTaskManager {
             let handle = handle.clone();
             let description = record.description.clone();
             let elapsed = record.started_at.elapsed();
+            let human_handle = record.human_handle.clone();
             drop(tasks);
-            let workflow = handle.snapshot().await;
-            return Some(BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
-                kind: BackgroundTaskKind::Workflow,
-                status: workflow_status(workflow.state),
-                description,
-                elapsed,
-                output: None,
-                answers: None,
-                delegate: None,
-                swarm: None,
-            });
+            return Some(
+                Self::workflow_snapshot(task_id, description, elapsed, human_handle, &handle).await,
+            );
         }
         let mut snapshot = Self::snapshot_from_record(record, task_id);
         snapshot.output = None;
@@ -832,6 +1189,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: None,
                 swarm: None,
+                workflow: None,
             });
         }
         Some(BackgroundTaskSnapshot {
@@ -844,6 +1202,7 @@ impl BackgroundTaskManager {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         })
     }
 
@@ -872,6 +1231,7 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: None,
+                    workflow: None,
                 }),
             },
         )
@@ -925,6 +1285,7 @@ impl BackgroundTaskManager {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         }))
     }
 
@@ -1030,6 +1391,7 @@ impl BackgroundTaskManager {
                         answers: None,
                         delegate: None,
                         swarm: None,
+                        workflow: None,
                     }))
                 }
                 BackgroundTaskState::QuestionFinished { status, answers } => {
@@ -1043,6 +1405,7 @@ impl BackgroundTaskManager {
                         answers: answers.clone(),
                         delegate: None,
                         swarm: None,
+                        workflow: None,
                     }))
                 }
                 BackgroundTaskState::DelegateFinished { status, snapshot } => {
@@ -1106,6 +1469,7 @@ impl BackgroundTaskManager {
                         answers: None,
                         delegate: Some(snapshot),
                         swarm: None,
+                        workflow: None,
                     };
                     return Ok(snapshot_result(&snap, max_output_bytes));
                 }
@@ -1129,6 +1493,7 @@ impl BackgroundTaskManager {
                         answers: None,
                         delegate: None,
                         swarm: Some(snapshot),
+                        workflow: None,
                     };
                     return Ok(snapshot_result(&snap, max_output_bytes));
                 }
@@ -1177,6 +1542,7 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: None,
+                    workflow: None,
                 };
                 let mut result = snapshot_result(&snapshot, max_output_bytes);
                 result.details = Some(json!({
@@ -1207,6 +1573,7 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: None,
+                    workflow: None,
                 };
                 self.inner.lock().await.insert(
                     task_id.to_owned(),
@@ -1215,6 +1582,7 @@ impl BackgroundTaskManager {
                         started_at,
                         state: BackgroundTaskState::BashFinished { status, output },
                         detached: true,
+                        human_handle: None,
                     },
                 );
                 Ok(snapshot_result(&snapshot, max_output_bytes))
@@ -1319,6 +1687,7 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: None,
+                    workflow: None,
                 }),
             },
         )
@@ -1413,6 +1782,7 @@ impl BackgroundTaskManager {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         }))
     }
 
@@ -1460,19 +1830,11 @@ impl BackgroundTaskManager {
             let handle = handle.clone();
             let description = record.description.clone();
             let elapsed = record.started_at.elapsed();
+            let human_handle = record.human_handle.clone();
             drop(tasks);
-            let workflow = handle.snapshot().await;
-            return Some(BackgroundTaskSnapshot {
-                task_id: task_id.to_owned(),
-                kind: BackgroundTaskKind::Workflow,
-                status: workflow_status(workflow.state),
-                description,
-                elapsed,
-                output: None,
-                answers: None,
-                delegate: None,
-                swarm: None,
-            });
+            return Some(
+                Self::workflow_snapshot(task_id, description, elapsed, human_handle, &handle).await,
+            );
         }
         Some(Self::snapshot_from_record(record, task_id))
     }
@@ -1502,6 +1864,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: None,
                 swarm: None,
+                workflow: None,
             });
         }
         let live_output = command.client.output().await;
@@ -1516,6 +1879,7 @@ impl BackgroundTaskManager {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         })
     }
 
@@ -1538,6 +1902,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: None,
                 swarm: None,
+                workflow: None,
             },
             BackgroundTaskState::QuestionWaiting => BackgroundTaskSnapshot {
                 task_id,
@@ -1549,6 +1914,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: None,
                 swarm: None,
+                workflow: None,
             },
             BackgroundTaskState::QuestionFinished { status, answers } => BackgroundTaskSnapshot {
                 task_id,
@@ -1560,6 +1926,7 @@ impl BackgroundTaskManager {
                 answers: answers.clone(),
                 delegate: None,
                 swarm: None,
+                workflow: None,
             },
             BackgroundTaskState::DelegateRunning { snapshot } => BackgroundTaskSnapshot {
                 task_id,
@@ -1571,6 +1938,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: Some(snapshot.clone()),
                 swarm: None,
+                workflow: None,
             },
             BackgroundTaskState::DelegateFinished { status, snapshot } => BackgroundTaskSnapshot {
                 task_id,
@@ -1582,6 +1950,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: Some(snapshot.clone()),
                 swarm: None,
+                workflow: None,
             },
             BackgroundTaskState::DelegateSwarmRunning { snapshot } => BackgroundTaskSnapshot {
                 task_id,
@@ -1593,6 +1962,7 @@ impl BackgroundTaskManager {
                 answers: None,
                 delegate: None,
                 swarm: Some(snapshot.clone()),
+                workflow: None,
             },
             BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
                 BackgroundTaskSnapshot {
@@ -1605,6 +1975,7 @@ impl BackgroundTaskManager {
                     answers: None,
                     delegate: None,
                     swarm: Some(snapshot.clone()),
+                    workflow: None,
                 }
             }
             BackgroundTaskState::Workflow { .. } => unreachable!("handled workflow snapshot"),
@@ -1626,6 +1997,304 @@ fn task_kind_from_state(state: &BackgroundTaskState) -> BackgroundTaskKind {
         | BackgroundTaskState::DelegateSwarmFinished { .. } => BackgroundTaskKind::DelegateSwarm,
         BackgroundTaskState::Workflow { .. } => BackgroundTaskKind::Workflow,
     }
+}
+
+impl BackgroundTaskManager {
+    async fn workflow_snapshot(
+        task_id: &str,
+        description: String,
+        elapsed: Duration,
+        human_handle: Option<String>,
+        handle: &crate::workflow::WorkflowHandle,
+    ) -> BackgroundTaskSnapshot {
+        let snapshot = handle.snapshot().await;
+        let output = handle.output().await.ok();
+        let summary = handle
+            .task_output(crate::workflow::TaskOutputRequest::summary(16_384))
+            .await
+            .ok()
+            .and_then(|page| page.summary);
+        let projection =
+            project_workflow(&snapshot, output.as_ref(), summary.as_ref(), human_handle);
+        BackgroundTaskSnapshot {
+            task_id: task_id.to_owned(),
+            kind: BackgroundTaskKind::Workflow,
+            status: workflow_status(snapshot.state),
+            description,
+            elapsed,
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: None,
+            workflow: Some(projection),
+        }
+    }
+}
+
+fn sanitize_handle_base(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        let mapped = match ch {
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            'a'..='z' | '0'..='9' => ch,
+            '-' | '_' => ch,
+            _ => '-',
+        };
+        if index == 0 && !mapped.is_ascii_alphanumeric() {
+            continue;
+        }
+        out.push(mapped);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    while out.ends_with('-') || out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "workflow".to_owned()
+    } else {
+        out
+    }
+}
+
+fn project_workflow(
+    snapshot: &crate::workflow::WorkflowSnapshot,
+    output: Option<&crate::workflow::WorkflowOutput>,
+    summary: Option<&crate::workflow::WorkflowOutputSummary>,
+    human_handle: Option<String>,
+) -> WorkflowTaskProjection {
+    let definition_name = output
+        .map(|o| o.metadata.name.clone())
+        .or_else(|| summary.map(|s| s.name.clone()))
+        .unwrap_or_else(|| snapshot.title.clone());
+    let definition_revision = output
+        .map(|o| o.metadata.script_sha256.clone())
+        .or_else(|| summary.map(|s| s.revision.clone()));
+    let source_scope = output
+        .map(|o| o.metadata.launch_source.clone())
+        .or_else(|| summary.map(|s| s.origin.clone()));
+    let parent_run_id = output
+        .and_then(|o| o.metadata.parent_run_id.as_ref().map(|id| id.0.clone()))
+        .or_else(|| {
+            summary.and_then(|s| {
+                s.lineage
+                    .as_ref()
+                    .and_then(|v| v.get("parent_run_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+        });
+    let actual_usage_total = snapshot
+        .actual_usage
+        .as_ref()
+        .or_else(|| summary.and_then(|s| s.actual_usage.as_ref()))
+        .map(|usage| {
+            u64::from(usage.input_tokens)
+                .saturating_add(u64::from(usage.output_tokens))
+                .saturating_add(u64::from(usage.input_cache_read_tokens))
+                .saturating_add(u64::from(usage.input_cache_write_tokens))
+        });
+    let admission_wait_reason = summary
+        .and_then(|s| s.admission_wait_reason.clone())
+        .or_else(|| {
+            if snapshot.state == crate::workflow::WorkflowState::Queued {
+                Some("waiting_for_worker_permit".to_owned())
+            } else {
+                None
+            }
+        });
+    WorkflowTaskProjection {
+        run_id: snapshot.id.0.clone(),
+        human_handle: human_handle.or_else(|| summary.and_then(|s| s.human_handle.clone())),
+        definition_name,
+        definition_revision,
+        source_scope,
+        current_phase: snapshot
+            .current_phase
+            .clone()
+            .or_else(|| summary.and_then(|s| s.current_phase.clone())),
+        parent_run_id,
+        admission_wait_reason,
+        started_child_count: summary.map(|s| s.started_child_count).unwrap_or(0),
+        queued_child_count: summary.map(|s| s.queued_child_count).unwrap_or(0),
+        terminal_child_count: summary.map(|s| s.terminal_child_count).unwrap_or(0),
+        actual_usage_total,
+        has_final_result: summary.map(|s| s.final_result.is_some()).unwrap_or(false),
+        artifact_count: summary.map(|s| s.artifact_metadata.len()).unwrap_or(0),
+        pending_request_id: summary
+            .and_then(|s| s.pending_user.as_ref().map(|p| p.request_id.clone())),
+        started_at_ms: snapshot.started_at_ms,
+        updated_at_ms: snapshot.updated_at_ms,
+        terminal_reason: snapshot
+            .terminal_reason
+            .clone()
+            .or_else(|| summary.and_then(|s| s.terminal_reason.clone())),
+        latest_log_summary: snapshot.latest_log_summary.clone(),
+        latest_report_summary: snapshot.latest_report_summary.clone(),
+    }
+}
+
+const LIST_CURSOR_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListCursorPayload {
+    v: u32,
+    query_hash: String,
+    offset: usize,
+}
+
+fn list_query_hash(query: &BackgroundTaskListQuery) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"active=");
+    hasher.update([u8::from(query.active_only)]);
+    hasher.update(b"|kind=");
+    if let Some(kind) = query.kind {
+        hasher.update(kind.as_str().as_bytes());
+    }
+    hasher.update(b"|handle=");
+    if let Some(handle) = &query.handle {
+        hasher.update(handle.as_bytes());
+    }
+    hasher.update(b"|def=");
+    if let Some(name) = &query.definition_name {
+        hasher.update(name.as_bytes());
+    }
+    hasher.update(b"|scope=");
+    if let Some(scope) = &query.source_scope {
+        hasher.update(scope.as_bytes());
+    }
+    hasher.update(b"|state=");
+    if let Some(state) = query.state {
+        hasher.update(state.as_str().as_bytes());
+    }
+    hasher.update(b"|await=");
+    match query.awaiting_user {
+        Some(true) => hasher.update(b"1"),
+        Some(false) => hasher.update(b"0"),
+        None => hasher.update(b"-"),
+    }
+    hasher.update(b"|lineage=");
+    if let Some(parent) = &query.lineage_parent {
+        hasher.update(parent.as_bytes());
+    }
+    // limit is part of page size, not filter identity for cursor binding
+    format!("{:x}", hasher.finalize())
+}
+
+fn encode_list_cursor(payload: &ListCursorPayload) -> Result<String, ToolError> {
+    let bytes = serde_json::to_vec(payload).map_err(|error| ToolError::InvalidInput {
+        tool: "TaskList".to_owned(),
+        message: format!("list cursor encode failed: {error}"),
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_list_cursor(raw: &str) -> Result<ListCursorPayload, ToolError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.trim().as_bytes())
+        .map_err(|error| ToolError::InvalidInput {
+            tool: "TaskList".to_owned(),
+            message: format!("invalid list cursor encoding: {error}"),
+        })?;
+    serde_json::from_slice(&bytes).map_err(|error| ToolError::InvalidInput {
+        tool: "TaskList".to_owned(),
+        message: format!("invalid list cursor payload: {error}"),
+    })
+}
+
+fn matches_list_query(snapshot: &BackgroundTaskSnapshot, query: &BackgroundTaskListQuery) -> bool {
+    if query.active_only && !snapshot.status.is_active() {
+        return false;
+    }
+    if let Some(kind) = query.kind {
+        if snapshot.kind != kind {
+            return false;
+        }
+    }
+    if let Some(state) = query.state {
+        if snapshot.status != state {
+            return false;
+        }
+    }
+    if let Some(awaiting) = query.awaiting_user {
+        let is_waiting = snapshot.status == BackgroundTaskStatus::WaitingForUser;
+        if awaiting != is_waiting {
+            return false;
+        }
+    }
+    if let Some(handle) = &query.handle {
+        let matched = snapshot
+            .workflow
+            .as_ref()
+            .and_then(|w| w.human_handle.as_deref())
+            == Some(handle.as_str());
+        if !matched {
+            return false;
+        }
+    }
+    if let Some(name) = &query.definition_name {
+        let matched = snapshot
+            .workflow
+            .as_ref()
+            .is_some_and(|w| w.definition_name == *name);
+        if !matched {
+            return false;
+        }
+    }
+    if let Some(scope) = &query.source_scope {
+        let matched = snapshot
+            .workflow
+            .as_ref()
+            .and_then(|w| w.source_scope.as_deref())
+            .is_some_and(|origin| origin == scope || origin.contains(scope));
+        if !matched {
+            return false;
+        }
+    }
+    if let Some(parent) = &query.lineage_parent {
+        let matched = snapshot
+            .workflow
+            .as_ref()
+            .and_then(|w| w.parent_run_id.as_deref())
+            == Some(parent.as_str());
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+fn compare_list_order(
+    left: &BackgroundTaskSnapshot,
+    right: &BackgroundTaskSnapshot,
+) -> std::cmp::Ordering {
+    let left_updated = left
+        .workflow
+        .as_ref()
+        .and_then(|w| w.updated_at_ms)
+        .unwrap_or(0);
+    let right_updated = right
+        .workflow
+        .as_ref()
+        .and_then(|w| w.updated_at_ms)
+        .unwrap_or(0);
+    // Non-workflow tasks use elapsed as a reverse proxy for recency when no ms stamps exist.
+    let left_created = left
+        .workflow
+        .as_ref()
+        .and_then(|w| w.started_at_ms)
+        .unwrap_or_else(|| u64::MAX.saturating_sub(left.elapsed.as_millis() as u64));
+    let right_created = right
+        .workflow
+        .as_ref()
+        .and_then(|w| w.started_at_ms)
+        .unwrap_or_else(|| u64::MAX.saturating_sub(right.elapsed.as_millis() as u64));
+
+    right_updated
+        .cmp(&left_updated)
+        .then_with(|| right_created.cmp(&left_created))
+        .then_with(|| left.task_id.cmp(&right.task_id))
 }
 
 fn workflow_status(state: crate::workflow::WorkflowState) -> BackgroundTaskStatus {
@@ -2656,6 +3325,7 @@ mod tests {
             answers: None,
             delegate: None,
             swarm: None,
+            workflow: None,
         };
         let result = task_list_result(&[snapshot], true);
         assert!(result.content.contains("active_background_tasks: 1"));

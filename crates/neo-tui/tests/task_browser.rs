@@ -17,6 +17,9 @@ fn item(id: &str, status: TaskBrowserStatus) -> TaskBrowserItem {
         detail_lines: vec![format!("id:          {id}")],
         preview_lines: vec![format!("output for {id}")],
         can_stop: status.is_active(),
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
     }
 }
 
@@ -32,6 +35,8 @@ fn task_browser_tab_toggles_filter() {
     let mut state = TaskBrowserState::new();
     assert_eq!(state.handle_action(TaskBrowserAction::ToggleFilter), None);
     assert_eq!(state.filter(), TaskBrowserFilter::Active);
+    assert_eq!(state.handle_action(TaskBrowserAction::ToggleFilter), None);
+    assert_eq!(state.filter(), TaskBrowserFilter::Workflow);
     assert_eq!(state.handle_action(TaskBrowserAction::ToggleFilter), None);
     assert_eq!(state.filter(), TaskBrowserFilter::All);
 }
@@ -216,7 +221,8 @@ fn task_browser_empty_active_renderer_points_to_all_filter() {
     let rendered = render_plain(&state, 120, 18).join("\n");
 
     assert!(rendered.contains("filter=ACTIVE"));
-    assert!(rendered.contains("No active tasks. Tab = show all."));
+    assert!(rendered.contains("No active tasks."));
+    assert!(rendered.contains("Tab = show all"));
 }
 
 #[test]
@@ -290,6 +296,9 @@ fn task_browser_narrow_renderer_keeps_lines_within_width() {
             "this is a very long output line that must be clipped to terminal width".to_owned(),
         ],
         can_stop: true,
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
     }]));
 
     let lines = render_plain(&state, 48, 12);
@@ -317,4 +326,106 @@ fn task_browser_tiny_renderer_preserves_header_and_footer() {
         "tiny lines must fit width:\n{}",
         lines.join("\n")
     );
+}
+
+#[test]
+fn task_browser_workflow_detail_and_cursor_rules() {
+    use neo_tui::tasks_browser::TaskBrowserWorkflowMeta;
+
+    let mut workflow = item("wf-run-1", TaskBrowserStatus::Running);
+    workflow.kind = TaskBrowserKind::Workflow;
+    workflow.human_handle = Some("deep-research".to_owned());
+    workflow.title = "deep-research".to_owned();
+    workflow.detail_lines = vec![
+        "id:          wf-run-1".to_owned(),
+        "handle:      deep-research".to_owned(),
+        "definition:  deep-research".to_owned(),
+        "phase:       plan".to_owned(),
+        "children:    started=2 queued=1 terminal=0".to_owned(),
+        "queue:       waiting_for_worker_permit".to_owned(),
+        "usage:       120 tokens".to_owned(),
+        "result:      none".to_owned(),
+        "artifacts:   1".to_owned(),
+    ];
+    workflow.workflow = Some(TaskBrowserWorkflowMeta {
+        run_id: "wf-run-1".to_owned(),
+        human_handle: Some("deep-research".to_owned()),
+        definition_name: "deep-research".to_owned(),
+        definition_revision: Some("abc123".to_owned()),
+        source_scope: Some("builtin".to_owned()),
+        current_phase: Some("plan".to_owned()),
+        parent_run_id: None,
+        admission_wait_reason: Some("waiting_for_worker_permit".to_owned()),
+        started_child_count: 2,
+        queued_child_count: 1,
+        terminal_child_count: 0,
+        actual_usage_total: Some(120),
+        has_final_result: false,
+        artifact_count: 1,
+        pending_request_id: None,
+    });
+
+    let mut state = TaskBrowserState::new();
+    let page = TaskBrowserSnapshot {
+        items: vec![workflow.clone()],
+        next_cursor: Some("cursor-page-2".to_owned()),
+        has_more: true,
+        query_hash: Some("hash-a".to_owned()),
+        total_matched: Some(1),
+    };
+    assert!(state.apply_snapshot_checked(&page).is_ok());
+    assert_eq!(state.list_next_cursor(), Some("cursor-page-2"));
+    assert!(state.list_has_more());
+    let selected = state.selected_item().expect("selected");
+    assert_eq!(selected.human_handle.as_deref(), Some("deep-research"));
+    assert!(
+        selected
+            .detail_lines
+            .iter()
+            .any(|line| line.contains("phase:"))
+    );
+    assert!(
+        selected
+            .detail_lines
+            .iter()
+            .any(|line| line.contains("children:"))
+    );
+    assert!(
+        selected
+            .detail_lines
+            .iter()
+            .any(|line| line.contains("usage:"))
+    );
+
+    // Query-bound cursor: advancing page then applying mismatched hash fails.
+    assert_eq!(
+        state.handle_action(TaskBrowserAction::RequestNextPage),
+        None
+    );
+    assert!(state.list_refresh_requested());
+    assert_eq!(state.list_cursor(), Some("cursor-page-2"));
+    let mismatched = TaskBrowserSnapshot {
+        items: vec![workflow],
+        next_cursor: None,
+        has_more: false,
+        query_hash: Some("hash-b".to_owned()),
+        total_matched: Some(1),
+    };
+    let err = state
+        .apply_snapshot_checked(&mismatched)
+        .expect_err("mismatched query hash must fail");
+    assert!(
+        err.contains("query/filter"),
+        "unexpected cursor error: {err}"
+    );
+
+    // Matching hash is accepted.
+    let matched = TaskBrowserSnapshot {
+        items: Vec::new(),
+        next_cursor: None,
+        has_more: false,
+        query_hash: Some("hash-a".to_owned()),
+        total_matched: Some(0),
+    };
+    assert!(state.apply_snapshot_checked(&matched).is_ok());
 }

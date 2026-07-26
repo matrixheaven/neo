@@ -61,6 +61,9 @@ fn task_browser_item(id: &str, status: TaskBrowserStatus) -> TaskBrowserItem {
         detail_lines: vec![format!("id:          {id}")],
         preview_lines: vec!["running tests".to_owned()],
         can_stop: status.is_active(),
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
     }
 }
 

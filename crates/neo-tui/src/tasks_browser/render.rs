@@ -10,8 +10,8 @@ use super::{
 
 const MIN_WIDE_WIDTH: usize = 72;
 const WIDE_GAP: usize = 1;
-const FOOTER: &str = " ↑↓ select   Enter/O output   S stop   R refresh   Tab filter   Q/Esc close";
-const COMPACT_FOOTER: &str = " Q/Esc close   Tab filter   S stop   R refresh";
+const FOOTER: &str = " ↑↓ select   Enter/O output   S stop   P/U pause/resume   [/] page   R refresh   Tab filter   Q/Esc close";
+const COMPACT_FOOTER: &str = " Q/Esc close   Tab filter   S stop   [/] page   R refresh";
 
 pub struct TaskBrowserRenderer<'a> {
     state: &'a TaskBrowserState,
@@ -134,7 +134,14 @@ impl<'a> TaskBrowserRenderer<'a> {
         if interrupted > 0 {
             let _ = write!(header, "  {interrupted} interrupted");
         }
-        let _ = write!(header, "  {} total", visible.len());
+        if let Some(total) = self.state.snapshot().total_matched {
+            let _ = write!(header, "  {} matched", total);
+        } else {
+            let _ = write!(header, "  {} total", visible.len());
+        }
+        if self.state.list_has_more() {
+            let _ = write!(header, "  more…");
+        }
         truncate_width(&header, width, "...", false)
     }
 
@@ -165,7 +172,8 @@ impl<'a> TaskBrowserRenderer<'a> {
         if visible.is_empty() {
             let empty = match self.state.filter() {
                 TaskBrowserFilter::All => "No background tasks in this session.",
-                TaskBrowserFilter::Active => "No active tasks. Tab = show all.",
+                TaskBrowserFilter::Active => "No active tasks. Tab = show all / workflow.",
+                TaskBrowserFilter::Workflow => "No workflow tasks. Tab = show all.",
             };
             body.extend(wrap_words(empty, width.saturating_sub(4)));
         } else {
@@ -220,13 +228,30 @@ impl<'a> TaskBrowserRenderer<'a> {
         } else {
             " "
         };
-        let raw = format!(
-            "{pointer} {} {}  {:<9} {}",
-            item.status.marker(),
-            item.id,
-            item.status.label(),
-            item.title
-        );
+        let id_label = item.human_handle.as_deref().unwrap_or(item.id.as_str());
+        let phase = item
+            .workflow
+            .as_ref()
+            .and_then(|w| w.current_phase.as_deref())
+            .unwrap_or("");
+        let raw = if phase.is_empty() {
+            format!(
+                "{pointer} {} {}  {:<9} {}",
+                item.status.marker(),
+                id_label,
+                item.status.label(),
+                item.title
+            )
+        } else {
+            format!(
+                "{pointer} {} {}  {:<9} {} [{}]",
+                item.status.marker(),
+                id_label,
+                item.status.label(),
+                item.title,
+                phase
+            )
+        };
         truncate_width(&raw, width, "...", false)
     }
 }

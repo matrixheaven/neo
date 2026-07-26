@@ -360,15 +360,33 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
-        let tasks = config.background_tasks.list(false, 50).await;
-        let snapshot = task_browser::snapshots_to_browser_snapshot(&tasks);
         let mut state = self
             .tui
             .chrome()
             .task_browser_state()
             .cloned()
             .unwrap_or_default();
-        state.apply_snapshot(&snapshot);
+        let intent = state.list_intent();
+        let query = neo_agent_core::tools::BackgroundTaskListQuery {
+            active_only: intent.active_only,
+            kind: intent
+                .workflow_only
+                .then_some(neo_agent_core::tools::BackgroundTaskKind::Workflow),
+            limit: if intent.limit == 0 { 50 } else { intent.limit },
+            cursor: intent.cursor,
+            ..neo_agent_core::tools::BackgroundTaskListQuery::default()
+        };
+        match config.background_tasks.list_page(query).await {
+            Ok(page) => {
+                let snapshot = task_browser::list_page_to_browser_snapshot(&page);
+                if let Err(message) = state.apply_snapshot_checked(&snapshot) {
+                    state.set_footer_message(message);
+                }
+            }
+            Err(error) => {
+                state.set_footer_message(error.to_string());
+            }
+        }
         self.last_task_browser_refresh = Some(Instant::now());
         self.tui.chrome_mut().push_task_browser_overlay(state);
     }
