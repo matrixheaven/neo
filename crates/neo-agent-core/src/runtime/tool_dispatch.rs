@@ -567,6 +567,7 @@ fn emit_synthesized_finished(
             id: tool_call.id.to_string(),
             name: tool_call.name.to_string(),
             result: result.clone(),
+            workflow_origin: None,
         });
     }
 }
@@ -1026,6 +1027,7 @@ fn finalize_authorized_batch<'a>(
                 id: tool_call.id.to_string(),
                 name: tool_call.name.to_string(),
                 result: result.clone(),
+                workflow_origin: None,
             });
         }
     }
@@ -1153,6 +1155,40 @@ async fn recheck_authorized_batch(
     })
 }
 
+fn stamp_workflow_origin(
+    mut event: crate::AgentEvent,
+    origin: Option<&crate::workflow::WorkflowExecutionOrigin>,
+) -> crate::AgentEvent {
+    let Some(origin) = origin else {
+        return event;
+    };
+    match &mut event {
+        crate::AgentEvent::ToolExecutionStarted {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::ToolExecutionQueued {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::ToolExecutionFinished {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::ToolExecutionUpdate {
+            workflow_origin, ..
+        } => {
+            if workflow_origin.is_none() {
+                *workflow_origin = Some(origin.clone());
+            }
+        }
+        crate::AgentEvent::ApprovalRequested { request } => {
+            if request.workflow_origin.is_none() {
+                request.workflow_origin = Some(origin.clone());
+            }
+        }
+        _ => {}
+    }
+    event
+}
+
 /// Run one workflow-hosted call through the canonical batch dispatcher while
 /// forwarding its existing event stream to the session owner.
 pub(super) async fn execute_workflow_tool_call(
@@ -1161,6 +1197,7 @@ pub(super) async fn execute_workflow_tool_call(
     context: AgentContext,
     turn: u32,
     event_handler: Option<ToolEventCallback>,
+    workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
 ) -> (
     Result<ToolBatchOutcome, AgentRuntimeError>,
     AgentContext,
@@ -1168,8 +1205,20 @@ pub(super) async fn execute_workflow_tool_call(
 ) {
     let config = deps.config;
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let origin_for_dispatch = workflow_origin.clone();
     let dispatch = async move {
         let mut emitter = EventEmitter::new(sender, context);
+        // Stamp origin on the live config so permission builders attach it
+        // when constructing ApprovalRequest values.
+        let mut deps = deps;
+        let owned_config = origin_for_dispatch.map(|origin| {
+            let mut config = deps.config.clone();
+            config.workflow_execution_origin = Some(origin);
+            config
+        });
+        if let Some(ref config) = owned_config {
+            deps.config = config;
+        }
         let outcome =
             execute_tool_calls(deps, turn, std::slice::from_ref(tool_call), &mut emitter).await;
         if let Ok(batch) = &outcome
@@ -1184,10 +1233,12 @@ pub(super) async fn execute_workflow_tool_call(
         }
         (outcome, emitter.context)
     };
+    let origin_for_forward = workflow_origin.clone();
     let forward = async move {
         let mut events = Vec::new();
         while let Some(event) = receiver.recv().await {
             if let Ok(event) = event {
+                let event = stamp_workflow_origin(event, origin_for_forward.as_ref());
                 if let Some(handler) = event_handler.as_ref() {
                     handler(event.clone());
                 }
@@ -1241,6 +1292,7 @@ fn emit_tool_execution_finished(
         id: tool_call.id.to_string(),
         name: tool_call.name.to_string(),
         result: result.clone(),
+        workflow_origin: None,
     });
 }
 
@@ -1352,6 +1404,7 @@ async fn execute_one_authorized_tool(
             id: tool_call.id.to_string(),
             name: tool_call.name.to_string(),
             arguments: arguments.as_ref().clone(),
+            workflow_origin: None,
         });
     }
     let result = execute_prepared_tool(
@@ -1398,6 +1451,7 @@ async fn execute_prepared_tool(
                         id: tool_call.id.to_string(),
                         name: tool_call.name.to_string(),
                         partial_result: $prepared.prepared_update(),
+                        workflow_origin: None,
                     });
                     let progress_sink = sink;
                     let progress_id = tool_call.id.to_string();
@@ -1408,6 +1462,7 @@ async fn execute_prepared_tool(
                             id: progress_id.clone(),
                             name: progress_name.clone(),
                             partial_result: update,
+                            workflow_origin: None,
                         });
                     };
                     $prepared.commit(context, cancel_token, &mut on_progress)
@@ -1527,6 +1582,7 @@ async fn execute_authorized_parallel(
                 id: tool_call.id.to_string(),
                 name: tool_call.name.to_string(),
                 arguments: arguments.as_ref().clone(),
+                workflow_origin: None,
             });
         }
         running.push(async move {

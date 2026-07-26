@@ -528,6 +528,26 @@ pub enum WorkflowActor {
     Runtime,
 }
 
+/// Typed execution origin attached to approvals, tool events, and task projections
+/// that originate from a workflow run (design §36).
+///
+/// Metadata only — does not duplicate full workflow state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowExecutionOrigin {
+    pub run_id: WorkflowId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_handle: Option<String>,
+    pub definition_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_item_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowInvocationKind {
@@ -539,6 +559,8 @@ pub enum WorkflowInvocationKind {
     VerifyCommand,
     Report,
     Fail,
+    /// Generic host-dispatched tool via `neo.tool` / canonical ToolRegistry.
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

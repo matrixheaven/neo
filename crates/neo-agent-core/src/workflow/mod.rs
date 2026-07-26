@@ -77,10 +77,10 @@ pub use runtime::{
 };
 pub use state::{
     WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowChildRef,
-    WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowId, WorkflowInterruptionReason,
-    WorkflowInvocationId, WorkflowInvocationKind, WorkflowInvocationOutcome,
-    WorkflowLineageMetadata, WorkflowName, WorkflowOutcomeStatus, WorkflowPhase,
-    WorkflowPinnedSource, WorkflowRequestId, WorkflowRevision, WorkflowRunId, WorkflowRunMetadata,
-    WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState, WorkflowStepRecord,
+    WorkflowExecutionOrigin, WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowId,
+    WorkflowInterruptionReason, WorkflowInvocationId, WorkflowInvocationKind,
+    WorkflowInvocationOutcome, WorkflowLineageMetadata, WorkflowName, WorkflowOutcomeStatus,
+    WorkflowPhase, WorkflowPinnedSource, WorkflowRequestId, WorkflowRevision, WorkflowRunId,
+    WorkflowRunMetadata, WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState, WorkflowStepRecord,
     validate_portable_name,
 };

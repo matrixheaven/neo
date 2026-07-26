@@ -47,6 +47,7 @@ fn background_bash_request() -> ApprovalRequest {
                 action: ApprovalAction::Reject,
             },
         ],
+        workflow_origin: None,
     }
 }
 
@@ -219,6 +220,7 @@ async fn jsonl_session_preserves_newline_when_large_unflushed_event_is_followed_
                             action: ApprovalAction::Reject,
                         },
                     ],
+                    workflow_origin: None,
                 },
             })
             .await
@@ -274,6 +276,7 @@ async fn jsonl_session_reads_concatenated_records_from_interrupted_append() {
                     action: ApprovalAction::Reject,
                 },
             ],
+            workflow_origin: None,
         },
     };
     let continued = AgentEvent::MessageAppended {
@@ -1409,6 +1412,7 @@ fn session_persists_queue_transition_but_not_live_queue_updates() {
         id: "call-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: json!({"command": "printf ready"}),
+        workflow_origin: None,
     };
     let update = AgentEvent::ToolExecutionQueueUpdated {
         turn: 1,
@@ -1542,6 +1546,7 @@ async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
             id: "call-queue".to_owned(),
             name: "Bash".to_owned(),
             arguments: json!({"command": "printf ready"}),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionQueueUpdated {
             turn: 1,
@@ -1554,6 +1559,7 @@ async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
             id: "call-queue".to_owned(),
             name: "Bash".to_owned(),
             arguments: json!({"command": "printf ready"}),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1565,6 +1571,7 @@ async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
                 "stdout": "ready",
                 "stderr": "",
             })),
+            workflow_origin: None,
         },
         AgentEvent::MessageAppended {
             message: AgentMessage::assistant(

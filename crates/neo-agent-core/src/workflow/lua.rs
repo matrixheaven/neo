@@ -14,8 +14,8 @@ use super::schema::CompiledSchema;
 use super::state::WorkflowRevision;
 use super::user_input::AwaitUserInput;
 use super::{
-    WorkflowError, WorkflowHandle, WorkflowInvocationKind, WorkflowInvocationOutcome,
-    WorkflowLimits, WorkflowOutcomeStatus,
+    WorkflowError, WorkflowErrorCode, WorkflowHandle, WorkflowInvocationKind,
+    WorkflowInvocationOutcome, WorkflowLimits, WorkflowOutcomeStatus,
 };
 use crate::multi_agent::{
     AgentRole, AgentRunMode, ChildPlan, ChildWorktreePolicy, DelegateContext, DelegateRequest,
@@ -23,7 +23,8 @@ use crate::multi_agent::{
 };
 use crate::runtime::WorkflowDispatchHandle;
 use crate::tools::{
-    ToolError, validate_child_plans, validate_delegate_request, validate_swarm_request,
+    ToolError, is_workflow_tool_denied, validate_child_plans, validate_delegate_request,
+    validate_swarm_request,
 };
 
 const VERIFY_WRAPPER: &str = r"
@@ -275,6 +276,13 @@ struct VerifyCommandInput {
     cwd: Option<PathBuf>,
     #[serde(default)]
     failure_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolHostInput {
+    name: String,
+    input: serde_json::Value,
 }
 
 /// Maximum nesting depth for Lua-to-JSON conversion.
@@ -840,6 +848,85 @@ impl LuaWorkflowRunner {
             })
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
         neo.set("fail", fail)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+
+        let dispatch = self.dispatch.clone();
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
+        let tool = lua
+            .create_async_function(move |lua, value: Value| {
+                let dispatch = dispatch.clone();
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
+                async move {
+                    check_fatal(&fatal)?;
+                    let (input, canonical_input): (ToolHostInput, _) =
+                        decode_input(&lua, value, "tool")?;
+                    require_non_empty("tool name", &input.name)?;
+                    if !input.input.is_object() {
+                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                            "tool input must be a JSON object".to_owned(),
+                        )));
+                    }
+                    if !dispatch.registry.contains(&input.name) {
+                        return Err(mlua::Error::external(WorkflowError::InvalidInput(format!(
+                            "unknown tool: {}",
+                            input.name
+                        ))));
+                    }
+                    if is_workflow_tool_denied(&input.name) {
+                        return Err(mlua::Error::external(WorkflowError::coded(
+                            WorkflowErrorCode::ToolNotWorkflowEligible,
+                            format!("tool `{}` is not workflow-eligible", input.name),
+                        )));
+                    }
+                    // Same-run recursive TaskOutput would re-enter the workflow
+                    // output lock/path; reject before durable start.
+                    if input.name == "TaskOutput" {
+                        let task_id = input
+                            .input
+                            .get("task_id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        if task_id == handle.run_id.as_str() {
+                            return Err(mlua::Error::external(WorkflowError::coded(
+                                WorkflowErrorCode::ToolNotWorkflowEligible,
+                                "TaskOutput cannot target the current workflow run".to_owned(),
+                            )));
+                        }
+                    }
+                    let tool_name = input.name.clone();
+                    let tool_input = input.input.clone();
+                    let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let origin = handle.execution_origin(None).await;
+                    let outcome = Box::pin(handle.invoke(
+                        index,
+                        WorkflowInvocationKind::Tool,
+                        canonical_input,
+                        false,
+                        move |invocation| async move {
+                            dispatch
+                                .run_one_with_origin(
+                                    invocation,
+                                    &tool_name,
+                                    tool_input,
+                                    Some(origin),
+                                )
+                                .await
+                        },
+                    ))
+                    .await
+                    .map_err(mlua::Error::external)?;
+                    boundary.store(0, Ordering::Relaxed);
+                    immutable_outcome(&lua, &outcome)
+                }
+            })
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("tool", tool)
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         let handle = self.handle.clone();

@@ -1265,6 +1265,7 @@ mod tests {
                 id: "bash-queued".to_owned(),
                 name: "Bash".to_owned(),
                 arguments: json!({"command": "cargo test"}),
+                workflow_origin: None,
             },
         );
         let _ = ctx.multi_agent.apply_child_event(

@@ -179,12 +179,16 @@ pub enum AgentEvent {
         id: String,
         name: String,
         arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     ToolExecutionQueued {
         turn: u32,
         id: String,
         name: String,
         arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     ToolExecutionQueueUpdated {
         turn: u32,
@@ -197,12 +201,16 @@ pub enum AgentEvent {
         id: String,
         name: String,
         result: ToolResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     ToolExecutionUpdate {
         turn: u32,
         id: String,
         name: String,
         partial_result: ToolResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     SkillInvocation {
         names: Vec<String>,

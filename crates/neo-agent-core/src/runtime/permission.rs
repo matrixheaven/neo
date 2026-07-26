@@ -705,6 +705,13 @@ fn workflow_approval_options() -> Vec<ApprovalOption> {
     ]
 }
 
+fn with_workflow_origin(mut request: ApprovalRequest, config: &AgentConfig) -> ApprovalRequest {
+    if request.workflow_origin.is_none() {
+        request.workflow_origin = config.workflow_execution_origin.clone();
+    }
+    request
+}
+
 fn build_workflow_approval_request(
     turn: u32,
     tool_call: &AgentToolCall,
@@ -720,6 +727,7 @@ fn build_workflow_approval_request(
             workflow,
         },
         options: workflow_approval_options(),
+        workflow_origin: None,
     })
 }
 
@@ -762,6 +770,7 @@ fn build_plan_approval_request(
             summary,
         },
         options: plan_approval_options(&input),
+        workflow_origin: None,
     }
 }
 
@@ -787,6 +796,7 @@ fn build_goal_approval_request(
             phases: args.phases,
         },
         options: goal_approval_options(),
+        workflow_origin: None,
     }
 }
 
@@ -852,6 +862,7 @@ fn build_ordinary_approval_request(
             write_presentation,
         ),
         options: ordinary_approval_options(session_scope, prefix_rule),
+        workflow_origin: None,
     }
 }
 
@@ -1075,7 +1086,7 @@ fn approval_request(
     input: &ApprovalInput<'_>,
 ) -> Result<ApprovalRequest, ToolResult> {
     let arguments = &input.prepared_call.arguments;
-    match input.operation {
+    let request = match input.operation {
         PermissionOperation::PlanTransition => Ok(build_plan_approval_request(
             config,
             input.turn,
@@ -1100,7 +1111,8 @@ fn approval_request(
             input.session_scope.clone(),
             input.prefix_rule.clone(),
         )),
-    }
+    }?;
+    Ok(with_workflow_origin(request, config))
 }
 
 async fn resolve_approval(

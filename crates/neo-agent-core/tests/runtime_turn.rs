@@ -3213,6 +3213,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         events.last(),
@@ -3384,6 +3385,7 @@ fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentCon
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         events.last(),
@@ -3473,6 +3475,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::ok("fast"),
+        workflow_origin: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -3484,6 +3487,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         events.last(),
@@ -3563,6 +3567,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::ok("first"),
+        workflow_origin: None,
     }));
     assert!(!events.iter().any(|event| {
         matches!(
@@ -3797,6 +3802,7 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
             id: "tool_1".to_owned(),
             name: "echo".to_owned(),
             arguments: json!({ "text": "blocked" }),
+            workflow_origin: None,
         }),
         "a hook-blocked call never starts execution"
     );
@@ -3805,18 +3811,21 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
         id: "tool_2".to_owned(),
         name: "echo".to_owned(),
         arguments: json!({ "text": "stop" }),
+        workflow_origin: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::error("blocked by policy").terminate(),
+        workflow_origin: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_2".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::ok("stop").terminate(),
+        workflow_origin: None,
     }));
     assert_eq!(harness.requests().len(), 1);
     assert_eq!(
@@ -3897,6 +3906,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
             details: Some(serde_json::json!({"kind": "permission", "decision": "required", "operation": "tool", "subject": "echo", "side_effect_occurred": false})),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -3959,6 +3969,7 @@ fn echo_tool_approval_request(id: &str, workspace: impl Into<String>) -> Approva
             details: vec!["tool: echo".to_owned()],
         },
         options: echo_tool_options(workspace),
+        workflow_origin: None,
     }
 }
 
@@ -4033,6 +4044,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::ok("approved"),
+        workflow_origin: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4259,6 +4271,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
             })),
             terminate: false,
         },
+        workflow_origin: None,
     }));
 }
 
@@ -4447,6 +4460,7 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         id: "tool_1".to_owned(),
         name: "echo".to_owned(),
         result: ToolResult::ok("async approved"),
+        workflow_origin: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4511,6 +4525,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
             })),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4567,6 +4582,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
         },
+        workflow_origin: None,
     }));
     assert_eq!(
         events.last(),
@@ -6067,6 +6083,7 @@ async fn runtime_auto_mode_denies_ask_user_question() {
         result: ToolResult::error(
             "AskUserQuestion is disabled while auto permission mode is active"
         ),
+        workflow_origin: None,
     }));
     assert!(
         question_rx.try_recv().is_err(),

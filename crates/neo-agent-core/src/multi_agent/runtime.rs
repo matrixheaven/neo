@@ -4051,6 +4051,7 @@ mod tests {
             arguments: serde_json::json!({
                 "edits": [{"path":"a.rs","old":"a","new":"A"}]
             }),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4069,6 +4070,7 @@ mod tests {
                 "added": 9,
                 "removed": 4
             })),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4097,6 +4099,7 @@ mod tests {
                 "added": 1,
                 "removed": 1
             })),
+            workflow_origin: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &progress)
@@ -4126,6 +4129,7 @@ mod tests {
                     {"path":"c.rs","status":"not_attempted"}
                 ]
             })),
+            workflow_origin: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &finished)
@@ -4163,6 +4167,7 @@ mod tests {
                 "added": 1,
                 "removed": 1
             })),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4194,6 +4199,7 @@ mod tests {
                     {"path": "src/b.rs", "content": "pub fn b() {}"}
                 ]
             }),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4218,6 +4224,7 @@ mod tests {
                 "added": 1,
                 "removed": 0
             })),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4249,6 +4256,7 @@ mod tests {
                     {"path": "src/b.rs", "status": "not_attempted"}
                 ]
             })),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4279,6 +4287,7 @@ mod tests {
                     {"path": "src/last.rs", "content": large_content}
                 ]
             }),
+            workflow_origin: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &started)
@@ -4313,6 +4322,7 @@ mod tests {
                     {"path": "src/last.rs", "status": "committed"}
                 ]
             })),
+            workflow_origin: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &finished)
@@ -4347,6 +4357,7 @@ mod tests {
                 "added": 10,
                 "removed": 5
             })),
+            workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4514,6 +4525,7 @@ mod tests {
                 id: format!("tool-{index}"),
                 name: "Read".to_owned(),
                 arguments: serde_json::json!({"path": format!("file-{index}")}),
+                workflow_origin: None,
             });
         }
         record(AgentEvent::ThinkingDelta {

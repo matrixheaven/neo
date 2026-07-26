@@ -143,6 +143,9 @@ pub struct ApprovalRequest {
     pub operation: PermissionOperation,
     pub presentation: ApprovalPresentation,
     pub options: Vec<ApprovalOption>,
+    /// Present when this approval was requested by a workflow-hosted tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -270,6 +273,7 @@ mod tests {
                     },
                 },
             ],
+            workflow_origin: None,
         }
     }
 

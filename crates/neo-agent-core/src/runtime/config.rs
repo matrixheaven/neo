@@ -167,6 +167,12 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver,
+    /// Active workflow execution origin for host-dispatched tool calls.
+    /// Set only for the duration of a workflow-hosted tool batch so approvals
+    /// and tool events receive typed provenance.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workflow_execution_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     /// Shared manual `/compact` request. `Some(instruction)` means a manual
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by the TUI and taken by runtime compaction.
@@ -280,6 +286,7 @@ impl AgentConfig {
             ),
             workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver::default(
             ),
+            workflow_execution_origin: None,
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
             multi_agent: MultiAgentRuntime::new(),
             instruction_registry: None,

@@ -466,6 +466,7 @@ fn compact_progress_preserves_live_shell_output() {
             id: "bash-live".to_owned(),
             name: "Bash".to_owned(),
             arguments: json!({"command": "cargo test"}),
+            workflow_origin: None,
         },
     );
     let progress = runtime
@@ -477,6 +478,7 @@ fn compact_progress_preserves_live_shell_output() {
                 id: "bash-live".to_owned(),
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("Compiling neo"),
+                workflow_origin: None,
             },
         )
         .expect("live progress");
@@ -1054,6 +1056,7 @@ fn child_activity_trim_preserves_visible_ongoing_tool_and_latest_text() {
             id: "bash-live".to_owned(),
             name: "Bash".to_owned(),
             arguments: json!({"cmd": "cargo nextest run -p neo-tui --test multi_agent_transcript"}),
+            workflow_origin: None,
         },
     );
     for index in 0..32 {
@@ -1798,6 +1801,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
                 id: id.to_owned(),
                 name: "Read".to_owned(),
                 arguments: json!({ "path": path }),
+                workflow_origin: None,
             },
         );
     }
@@ -1809,6 +1813,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
             id: "read_fail".to_owned(),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::error("missing file"),
+            workflow_origin: None,
         },
     );
 
@@ -1857,6 +1862,7 @@ fn child_activity_projects_edit_write_file_rows() {
                         { "path": "src/b.rs", "old": "e", "new": "f" }
                     ]
                 }),
+                workflow_origin: None,
             },
         )
         .expect("Edit start update");
@@ -1893,6 +1899,7 @@ fn child_activity_projects_edit_write_file_rows() {
                         { "path": "src/b.rs", "status": "committed", "added": 2, "removed": 2 }
                     ]
                 })),
+                workflow_origin: None,
             },
         )
         .expect("Edit finish update");
@@ -1921,6 +1928,7 @@ fn child_activity_projects_edit_write_file_rows() {
                         { "path": "docs/skipped.md", "content": "skipped" }
                     ]
                 }),
+                workflow_origin: None,
             },
         )
         .expect("Write start update");
@@ -1941,6 +1949,7 @@ fn child_activity_projects_edit_write_file_rows() {
                         { "path": "docs/skipped.md", "operation": "created", "line_count": 1, "added": 1, "removed": 0 }
                     ]
                 })),
+                workflow_origin: None,
             },
         )
         .expect("Write prepared update");
@@ -1958,6 +1967,7 @@ fn child_activity_projects_edit_write_file_rows() {
                     "total": 3,
                     "latest_path": "docs/new.md"
                 })),
+                workflow_origin: None,
             },
         )
         .expect("Write progress update");
@@ -1988,6 +1998,7 @@ fn child_activity_projects_edit_write_file_rows() {
                         { "path": "docs/skipped.md", "operation": "created", "status": "not_attempted" }
                     ]
                 })),
+                workflow_origin: None,
             },
         )
         .expect("Write finish update");
@@ -2028,6 +2039,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 id: "call_bash".to_owned(),
                 name: "Bash".to_owned(),
                 arguments: json!({ "command": "cargo nextest run -p neo-tui" }),
+                workflow_origin: None,
             },
         )
         .expect("started update");
@@ -2060,6 +2072,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 id: "call_bash".to_owned(),
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("Compiling neo-tui v0.1.0"),
+                workflow_origin: None,
             },
         )
         .expect("live output update");
@@ -2082,6 +2095,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 id: "call_bash".to_owned(),
                 name: "Bash".to_owned(),
                 result: ToolResult::ok("Finished test profile"),
+                workflow_origin: None,
             },
         )
         .expect("finished update");
@@ -2118,6 +2132,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                     id: "call-1".to_owned(),
                     name: "Bash".to_owned(),
                     arguments: json!({"command": "cargo test"}),
+                    workflow_origin: None,
                 },
                 AgentEvent::ToolExecutionQueueUpdated {
                     turn: 1,
@@ -2133,18 +2148,21 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                 id: "call-1".to_owned(),
                 name: "Bash".to_owned(),
                 arguments: json!({"command": "cargo test"}),
+                workflow_origin: None,
             },
             AgentEvent::ToolExecutionUpdate {
                 turn: 1,
                 id: "call-1".to_owned(),
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("test output"),
+                workflow_origin: None,
             },
             AgentEvent::ToolExecutionFinished {
                 turn: 1,
                 id: "call-1".to_owned(),
                 name: "Bash".to_owned(),
                 result: ToolResult::ok("done"),
+                workflow_origin: None,
             },
         ]);
         for event in events {

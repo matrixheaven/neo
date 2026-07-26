@@ -146,6 +146,7 @@ pub(super) fn make_shell_admission_callback(
                 id: id.clone(),
                 name: name.clone(),
                 arguments: arguments.as_ref().clone(),
+                workflow_origin: None,
             });
         }
         ShellAdmissionEvent::Position { position, waiting } => {
@@ -162,6 +163,7 @@ pub(super) fn make_shell_admission_callback(
                 id: id.clone(),
                 name: name.clone(),
                 arguments: arguments.as_ref().clone(),
+                workflow_origin: None,
             });
             if name == "Bash"
                 && let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str)
@@ -512,6 +514,7 @@ pub(super) fn make_tool_update_callback(
                 details: None,
                 terminate: false,
             },
+            workflow_origin: None,
         });
     })
 }

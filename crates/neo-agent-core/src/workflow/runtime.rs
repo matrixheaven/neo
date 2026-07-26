@@ -28,9 +28,9 @@ use super::schema::{
     CompiledSchema, StructuredOutputSource, accept_structured_output, validate_final_lua_result,
 };
 use super::state::{
-    WorkflowActor, WorkflowFinalResultMetadata, WorkflowId, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRevision,
-    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
+    WorkflowActor, WorkflowExecutionOrigin, WorkflowFinalResultMetadata, WorkflowId,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase,
+    WorkflowRevision, WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
 use super::user_input::{AwaitUserInput, PendingUserInput, request_id_for_call_index};
 use crate::AgentTokenUsage;
@@ -1807,9 +1807,14 @@ impl WorkflowRuntime {
                 )
                 .await?;
                 let runtime = multi_agent.clone();
-                let deps = deps.clone();
+                // Parent eligibility ∩ child tool_allow (ceiling may only reduce).
+                let child_role = plan.role.unwrap_or(role);
+                let mut deps = deps.clone().with_role(child_role);
+                deps.tools =
+                    std::sync::Arc::new(deps.tools.for_workflow_child(plan.tool_allow.as_deref()));
                 let swarm_id_run = swarm_id.clone();
                 let item_label = child.item.clone();
+                let child_context = plan.context;
                 in_flight.push(async move {
                     let output = runtime
                         .run_started_swarm_child_turn(
@@ -1817,7 +1822,7 @@ impl WorkflowRuntime {
                             child.agent,
                             &swarm_id_run,
                             &item_label,
-                            crate::multi_agent::DelegateContext::None,
+                            child_context,
                             |_| {},
                         )
                         .await;
@@ -3630,6 +3635,28 @@ impl WorkflowHandle {
 
     pub async fn output(&self) -> Result<WorkflowOutput, WorkflowError> {
         self.runtime.output(&self.run_id).await
+    }
+
+    /// Build typed provenance for a host-dispatched tool or child effect.
+    pub async fn execution_origin(&self, swarm_item_id: Option<String>) -> WorkflowExecutionOrigin {
+        let output = self.output().await.ok();
+        let (definition_name, definition_revision, phase_id) = match output.as_ref() {
+            Some(out) => (
+                out.metadata.name.clone(),
+                Some(out.metadata.script_sha256.clone()),
+                out.current_phase.clone(),
+            ),
+            None => (String::new(), None, None),
+        };
+        WorkflowExecutionOrigin {
+            run_id: self.run_id.clone(),
+            human_handle: None,
+            definition_name,
+            definition_revision,
+            phase_id,
+            invocation_id: None,
+            swarm_item_id,
+        }
     }
 
     pub async fn pause(&self, actor: WorkflowActor) -> Result<(), WorkflowError> {

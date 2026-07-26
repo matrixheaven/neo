@@ -827,6 +827,138 @@ impl ToolRegistry {
             self.canonical_prepared_write && filtered.tools.contains_key("Write");
         filtered
     }
+
+    /// Whether a tool with this exact registered name is present.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// Exact registered tool names in sorted order.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    /// Drop tools rejected by the centralized workflow deny classifier.
+    ///
+    /// Ordinary tools remain. This is the parent workflow eligibility ceiling
+    /// applied before any child `tool_allow` intersection.
+    #[must_use]
+    pub fn workflow_eligible_subset(&self) -> Self {
+        let mut filtered = Self::default();
+        for (name, tool) in &self.tools {
+            if is_workflow_tool_denied(name) {
+                continue;
+            }
+            filtered.tools.insert(name.clone(), Arc::clone(tool));
+        }
+        filtered.canonical_prepared_edit =
+            self.canonical_prepared_edit && filtered.tools.contains_key("Edit");
+        filtered.canonical_prepared_write =
+            self.canonical_prepared_write && filtered.tools.contains_key("Write");
+        filtered
+    }
+
+    /// Intersect this registry with an optional exact-name capability ceiling.
+    ///
+    /// When `tool_allow` is `None`, every registered tool is retained. When
+    /// present, only exact names listed in the ceiling that are also already
+    /// registered here remain — the ceiling may only reduce authority.
+    #[must_use]
+    pub fn with_tool_allow_ceiling(&self, tool_allow: Option<&[String]>) -> Self {
+        let Some(allow) = tool_allow else {
+            return self.clone_registry();
+        };
+        let allow: std::collections::BTreeSet<&str> = allow.iter().map(String::as_str).collect();
+        let mut filtered = Self::default();
+        for (name, tool) in &self.tools {
+            if allow.contains(name.as_str()) {
+                filtered.tools.insert(name.clone(), Arc::clone(tool));
+            }
+        }
+        filtered.canonical_prepared_edit =
+            self.canonical_prepared_edit && filtered.tools.contains_key("Edit");
+        filtered.canonical_prepared_write =
+            self.canonical_prepared_write && filtered.tools.contains_key("Write");
+        filtered
+    }
+
+    /// Effective tools for a workflow child: parent eligibility then optional ceiling.
+    #[must_use]
+    pub fn for_workflow_child(&self, tool_allow: Option<&[String]>) -> Self {
+        self.workflow_eligible_subset()
+            .with_tool_allow_ceiling(tool_allow)
+    }
+
+    fn clone_registry(&self) -> Self {
+        let mut cloned = Self::default();
+        for (name, tool) in &self.tools {
+            cloned.tools.insert(name.clone(), Arc::clone(tool));
+        }
+        cloned.canonical_prepared_edit = self.canonical_prepared_edit;
+        cloned.canonical_prepared_write = self.canonical_prepared_write;
+        cloned
+    }
+
+    /// Whether `name` is registered and not denied for workflow-hosted dispatch.
+    #[must_use]
+    pub fn is_workflow_eligible(&self, name: &str) -> bool {
+        self.contains(name) && !is_workflow_tool_denied(name)
+    }
+}
+
+/// One centralized semantic deny classifier for workflow-hosted `neo.tool`.
+///
+/// Uses exact canonical tool identity only — never fuzzy name matching.
+/// Ordinary registered tools are eligible by default (return `false` here).
+#[must_use]
+pub fn is_workflow_tool_denied(name: &str) -> bool {
+    matches!(
+        name,
+        "RunWorkflow"
+            | "Delegate"
+            | "DelegateSwarm"
+            | "TaskPause"
+            | "TaskResume"
+            | "TaskStop"
+            | "TaskAnswer"
+            | "AskUserQuestion"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "StartGoal"
+            | "ExitGoalMode"
+            | "UpdateGoalStatus"
+            | "GetGoalStatus"
+            // Design lists "Todo"; registered identity is TodoList.
+            | "Todo"
+            | "TodoList"
+            | "ListDelegates"
+            | "WaitDelegate"
+            | "InterruptDelegate"
+            | "MessageDelegate"
+    )
+}
+
+/// Whether a registered tool name is eligible for workflow `neo.tool` dispatch.
+///
+/// Unregistered names are not eligible. Denied control tools are not eligible.
+/// Everything else that is registered is eligible by default.
+#[must_use]
+pub fn is_workflow_tool_eligible(registry: &ToolRegistry, name: &str) -> bool {
+    registry.is_workflow_eligible(name)
+}
+
+/// Intersect parent-available tools with a child ceiling.
+///
+/// `parent` is the parent authority (already role-filtered / workflow-eligible
+/// as appropriate). `tool_allow` may only reduce that set.
+#[must_use]
+pub fn intersect_child_tool_allow(
+    parent: &ToolRegistry,
+    tool_allow: Option<&[String]>,
+) -> ToolRegistry {
+    parent.with_tool_allow_ceiling(tool_allow)
 }
 
 /// Names of the standard builtin tools registered by

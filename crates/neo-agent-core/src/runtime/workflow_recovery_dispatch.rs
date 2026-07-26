@@ -133,7 +133,9 @@ async fn lookup_in_snapshot(
         | WorkflowInvocationKind::Verify
         | WorkflowInvocationKind::VerifyCommand
         | WorkflowInvocationKind::Report
-        | WorkflowInvocationKind::Fail => LookupResult::None,
+        | WorkflowInvocationKind::Fail
+        // Generic tools are not auto-retried; incomplete ends as host-exit.
+        | WorkflowInvocationKind::Tool => LookupResult::None,
     }
 }
 

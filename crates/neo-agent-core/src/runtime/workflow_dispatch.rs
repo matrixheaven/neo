@@ -663,6 +663,18 @@ impl WorkflowDispatchHandle {
         tool_name: &str,
         tool_input: serde_json::Value,
     ) -> WorkflowInvocationOutcome {
+        self.run_one_with_origin(invocation, tool_name, tool_input, None)
+            .await
+    }
+
+    /// Dispatch one tool with optional typed workflow provenance on approvals/events.
+    pub async fn run_one_with_origin(
+        &self,
+        invocation: WorkflowInvocationContext,
+        tool_name: &str,
+        tool_input: serde_json::Value,
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
+    ) -> WorkflowInvocationOutcome {
         let resolver = match self.resolver() {
             Ok(resolver) => resolver,
             Err(error) => return failed_outcome(error),
@@ -681,11 +693,18 @@ impl WorkflowDispatchHandle {
             Ok(raw_arguments) => raw_arguments,
             Err(error) => return failed_outcome(error.to_string()),
         };
+        let invocation_id = invocation.invocation_id.clone();
         let call = AgentToolCall {
             id: Arc::from(invocation.invocation_id),
             name: Arc::from(tool_name.to_owned()),
             raw_arguments: Arc::from(raw_arguments),
         };
+        let mut origin = workflow_origin;
+        if let Some(origin) = origin.as_mut()
+            && origin.invocation_id.is_none()
+        {
+            origin.invocation_id = Some(invocation_id);
+        }
         let (batch, context, events) = execute_workflow_tool_call(
             super::tool_dispatch::ToolExecutionDeps {
                 config: &snapshot.config,
@@ -699,6 +718,7 @@ impl WorkflowDispatchHandle {
             snapshot.context,
             turn,
             event_handler,
+            origin,
         )
         .await;
         if let Err(error) = resolver.commit_context(&session, &context, &events) {
