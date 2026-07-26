@@ -911,3 +911,250 @@ type = "boolean"
     let pinned = WorkflowDefinitionRegistry::pin_source(&resolved);
     assert_eq!(pinned.lua_source, resolved.lua_source);
 }
+
+/// Platform path/link contract: PathBuf joins, no separator hardcoding, regular
+/// files only, symlink/reparse escapes rejected, save stays under scope.
+///
+/// Native evidence target for Task 25 (macOS / Linux / Windows).
+#[test]
+fn registry_platform_path_and_link_semantics() {
+    let (root, neo_home, workspace) = registry_fixture();
+    let user_dir = WorkflowDefinitionRegistry::user_workflows_dir(&neo_home);
+    let project_dir = WorkflowDefinitionRegistry::project_workflows_dir(&workspace);
+
+    // Scope roots are built only via Path/PathBuf (no string path separators).
+    assert_eq!(user_dir, PathBuf::from(&neo_home).join("workflows"));
+    assert_eq!(
+        project_dir,
+        PathBuf::from(&workspace).join(".neo").join("workflows")
+    );
+    assert!(user_dir.is_dir());
+    assert!(project_dir.is_dir());
+
+    // Regular pair discovery uses exact suffixes and content-addressed revision.
+    write_pair(
+        &user_dir,
+        "platform-plain",
+        "Platform Plain",
+        "regular platform pair",
+        "return { ok = true }\n",
+    );
+    let registry = make_registry(neo_home.clone(), workspace.clone(), true, Vec::new());
+    let resolved = registry
+        .resolve("platform-plain")
+        .expect("regular pair resolves");
+    assert_eq!(resolved.source_origin, WorkflowSourceOrigin::User);
+    assert_eq!(resolved.revision.as_str().len(), 64);
+
+    // Wrong suffix and double-extension files never become definitions.
+    fs::write(user_dir.join("notes.txt"), b"not a workflow").expect("txt");
+    fs::write(
+        user_dir.join("almost.workflow.toml.bak"),
+        b"definition_format_version = 2\n",
+    )
+    .expect("bak");
+    registry.invalidate();
+    assert_eq!(
+        registry.resolve("notes").expect_err("wrong suffix").code(),
+        WorkflowErrorCode::DefinitionNotFound
+    );
+    assert_eq!(
+        registry
+            .resolve("almost")
+            .expect_err("double extension")
+            .code(),
+        WorkflowErrorCode::DefinitionNotFound
+    );
+
+    // Save lands only under the scope root; portable names cannot escape.
+    let saved = registry
+        .save(
+            WorkflowSaveScope::User,
+            &WorkflowSaveRequest {
+                name: "platform-save".to_owned(),
+                display_name: "Platform Save".to_owned(),
+                description: "scope containment".to_owned(),
+                phases: vec![WorkflowPhase {
+                    id: "run".to_owned(),
+                    description: "execute".to_owned(),
+                }],
+                lua_source: "return { ok = true }\n".to_owned(),
+                input_schema: None,
+                output_schema: minimal_output_schema(),
+            },
+            false,
+        )
+        .expect("save under user scope");
+    assert_eq!(saved.source_origin, WorkflowSourceOrigin::User);
+    let lua = user_dir.join(format!("platform-save{SOURCE_SUFFIX}"));
+    let toml = user_dir.join(format!("platform-save{MANIFEST_SUFFIX}"));
+    assert!(lua.is_file(), "lua must be a regular file under user dir");
+    assert!(
+        toml.is_file(),
+        "manifest must be a regular file under user dir"
+    );
+    assert!(
+        !root.path().join("platform-save.lua").exists(),
+        "must not write outside neo_home/workflows"
+    );
+    assert!(
+        !root.path().join("platform-save.workflow.toml").exists(),
+        "must not write outside neo_home/workflows"
+    );
+
+    // Path-like save names fail closed (no parent escape via name grammar).
+    for bad in ["../escape", "a/b", "a\\b", ".."] {
+        let err = registry
+            .save(
+                WorkflowSaveScope::User,
+                &WorkflowSaveRequest {
+                    name: bad.to_owned(),
+                    display_name: "Bad".to_owned(),
+                    description: "escape".to_owned(),
+                    phases: vec![WorkflowPhase {
+                        id: "run".to_owned(),
+                        description: "execute".to_owned(),
+                    }],
+                    lua_source: "return { ok = true }\n".to_owned(),
+                    input_schema: None,
+                    output_schema: minimal_output_schema(),
+                },
+                false,
+            )
+            .expect_err("path-like name rejected");
+        assert!(
+            matches!(
+                err.code(),
+                WorkflowErrorCode::InvalidDefinition | WorkflowErrorCode::InvalidInput
+            ),
+            "unexpected code for {bad:?}: {err}"
+        );
+    }
+
+    // Unix: symlinked definition files and symlinked scope directories are rejected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside = root.path().join("outside-platform.lua");
+        fs::write(&outside, b"return { ok = true }\n").expect("outside");
+        let good_sha = source_sha256_hex(b"return { ok = true }\n");
+        let manifest = format!(
+            r#"
+definition_format_version = 2
+name = "platform-link"
+display_name = "Platform Link"
+description = "symlink source"
+source_sha256 = "{good_sha}"
+
+[[phases]]
+id = "run"
+description = "execute"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok"]
+
+[output_schema.properties.ok]
+type = "boolean"
+"#
+        );
+        fs::write(
+            user_dir.join(format!("platform-link{MANIFEST_SUFFIX}")),
+            manifest,
+        )
+        .expect("manifest");
+        symlink(
+            &outside,
+            user_dir.join(format!("platform-link{SOURCE_SUFFIX}")),
+        )
+        .expect("symlink lua");
+
+        registry.invalidate();
+        let err = registry
+            .resolve("platform-link")
+            .expect_err("symlinked source rejected");
+        assert_eq!(err.code(), WorkflowErrorCode::InvalidDefinition);
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("symlink") || msg.contains("refusing"),
+            "error should name symlink risk: {err}"
+        );
+
+        // Symlinked workflows directory is not followed.
+        let linked_home = root.path().join("platform_linked_home");
+        fs::create_dir_all(&linked_home).expect("linked home");
+        let real_workflows = linked_home.join("real_workflows");
+        fs::create_dir_all(&real_workflows).expect("real");
+        write_pair(
+            &real_workflows,
+            "hidden-platform",
+            "Hidden",
+            "via dir symlink",
+            "return { ok = true }\n",
+        );
+        symlink(&real_workflows, linked_home.join("workflows")).expect("dir symlink");
+        let via_dir = make_registry(linked_home, workspace.clone(), false, Vec::new());
+        assert_eq!(
+            via_dir
+                .resolve("hidden-platform")
+                .expect_err("dir symlink not followed")
+                .code(),
+            WorkflowErrorCode::DefinitionNotFound
+        );
+    }
+
+    // Windows: when symlink privilege is available, reparse/symlink definition
+    // files are rejected the same way. Without privilege, regular-file path
+    // containment above remains the native proof for this host.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::symlink_file;
+        let outside = root.path().join("outside-platform.lua");
+        fs::write(&outside, b"return { ok = true }\n").expect("outside");
+        let good_sha = source_sha256_hex(b"return { ok = true }\n");
+        let manifest = format!(
+            r#"
+definition_format_version = 2
+name = "platform-link-win"
+display_name = "Platform Link Win"
+description = "symlink source"
+source_sha256 = "{good_sha}"
+
+[[phases]]
+id = "run"
+description = "execute"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok"]
+
+[output_schema.properties.ok]
+type = "boolean"
+"#
+        );
+        fs::write(
+            user_dir.join(format!("platform-link-win{MANIFEST_SUFFIX}")),
+            manifest,
+        )
+        .expect("manifest");
+        let link = user_dir.join(format!("platform-link-win{SOURCE_SUFFIX}"));
+        match symlink_file(&outside, &link) {
+            Ok(()) => {
+                registry.invalidate();
+                let err = registry
+                    .resolve("platform-link-win")
+                    .expect_err("symlinked source rejected on Windows");
+                assert_eq!(err.code(), WorkflowErrorCode::InvalidDefinition);
+            }
+            Err(e) => {
+                // Developer Mode / admin required for file symlinks on some hosts.
+                eprintln!(
+                    "windows symlink unavailable on this host ({e}); regular path containment verified"
+                );
+            }
+        }
+    }
+}

@@ -836,3 +836,124 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         let _ = env;
     }
 }
+
+/// Platform journal contract: PathBuf quarantine layout, append durability via
+/// sync_all, torn-tail quarantine before truncate, quarantine failure leaves
+/// the journal byte-for-byte intact.
+///
+/// Native evidence target for Task 25 (macOS / Linux / Windows).
+#[test]
+fn journal_platform_sync_and_quarantine_semantics() {
+    use std::path::PathBuf;
+
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("workflows").join("platform-run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let path = run_dir.join("journal.jsonl");
+    let id = run_id();
+
+    // Open creates parent safely and returns a writer bound to Path (not strings).
+    let mut writer = JournalV2Writer::open(&path, id.clone()).expect("open empty journal");
+    assert!(path.is_file());
+    let created = JournalEnvelope::new(
+        0,
+        1_000,
+        id.clone(),
+        JournalPayload::RunCreated {
+            name: "platform-sync".to_owned(),
+            description: Some("sync proof".to_owned()),
+            launch_source: Some("/workflow".to_owned()),
+        },
+    );
+    writer.append(&created, &limits()).expect("append");
+    drop(writer);
+
+    // After append+sync_all, a fresh open must see the durable record.
+    let reread = collect_journal_v2(&path, Some(&id)).expect("reread after sync");
+    assert_eq!(reread.len(), 1);
+    assert_eq!(reread[0].seq, 0);
+
+    // Quarantine paths are PathBuf joins under the run directory.
+    let qdir = recovery_quarantine_dir(&run_dir);
+    assert_eq!(qdir, PathBuf::from(&run_dir).join("recovery-quarantine"));
+    let sample_sha = "a".repeat(64);
+    let qpath = quarantine_tail_path(&run_dir, &sample_sha);
+    assert_eq!(
+        qpath,
+        PathBuf::from(&run_dir)
+            .join("recovery-quarantine")
+            .join(format!("{sample_sha}.tail"))
+    );
+
+    // Torn tail: quarantine content-addressed suffix, truncate, keep valid prefix.
+    let prefix = std::fs::read(&path).unwrap();
+    let prefix_len = prefix.len() as u64;
+    let torn = br#"{"version":2,"seq":1,"timestamp_ms":1001,"run_id":"torn"#;
+    let mut bytes = prefix.clone();
+    bytes.extend_from_slice(torn);
+    std::fs::write(&path, &bytes).unwrap();
+    let original_with_torn = std::fs::read(&path).unwrap();
+
+    let report = recover_journal_v2(&path, Some(&id)).expect("torn-tail recovery");
+    let JournalRecoveryAction::TornTailQuarantined {
+        quarantine_sha256,
+        quarantine_path,
+        removed_bytes,
+        last_validated_offset,
+    } = report.action
+    else {
+        panic!("expected TornTailQuarantined, got {:?}", report.action);
+    };
+    assert_eq!(last_validated_offset, prefix_len);
+    assert_eq!(removed_bytes, torn.len() as u64);
+    assert_eq!(
+        quarantine_path,
+        quarantine_tail_path(&run_dir, &quarantine_sha256)
+    );
+    assert!(quarantine_path.is_file());
+    assert_eq!(std::fs::read(&quarantine_path).unwrap(), torn);
+
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        after.starts_with(&prefix),
+        "valid prefix must survive on this platform"
+    );
+    assert!(
+        !after.windows(torn.len()).any(|w| w == torn),
+        "torn suffix must leave the journal"
+    );
+    assert!(report.recovery_record_appended);
+
+    // Quarantine failure (parent path is a file) must leave journal untouched.
+    let nested = run_dir.join("nested-fail");
+    std::fs::create_dir_all(&nested).unwrap();
+    let fail_path = nested.join("journal.jsonl");
+    std::fs::write(&fail_path, &original_with_torn).unwrap();
+    let q_poison = recovery_quarantine_dir(&nested);
+    std::fs::write(&q_poison, b"not-a-directory").unwrap();
+    let before = std::fs::read(&fail_path).unwrap();
+    let err = recover_journal_v2(&fail_path, Some(&id)).expect_err("quarantine must fail");
+    assert!(
+        err.to_string().to_lowercase().contains("quarantine")
+            || err.to_string().to_lowercase().contains("directory")
+            || err.to_string().to_lowercase().contains("not a directory")
+            || err.to_string().contains("File exists")
+            || err.to_string().contains("AlreadyExists"),
+        "unexpected quarantine failure wording: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&fail_path).unwrap(),
+        before,
+        "quarantine failure must leave journal byte-for-byte intact"
+    );
+
+    // Interior newline-terminated corruption still fails closed with no mutation.
+    let corrupt_path = run_dir.join("interior.jsonl");
+    let mut corrupt = prefix.clone();
+    corrupt.extend_from_slice(b"{not-json}\n");
+    std::fs::write(&corrupt_path, &corrupt).unwrap();
+    let before_corrupt = std::fs::read(&corrupt_path).unwrap();
+    let cerr = recover_journal_v2(&corrupt_path, Some(&id)).expect_err("interior corrupt");
+    assert_eq!(cerr.code(), WorkflowErrorCode::JournalCorrupt);
+    assert_eq!(std::fs::read(&corrupt_path).unwrap(), before_corrupt);
+}

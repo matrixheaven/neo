@@ -264,3 +264,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/evidence-bundle-draft-scoped-static-checks.json | 2026-07-25-windows-session-index-access-denied evidence scoped-static-checks |
 | 2026-07-25 | artifact | docs/aegis/work/2026-07-25-windows-session-index-access-denied/gate-input-pack.json | 2026-07-25-windows-session-index-access-denied gate input pack |
 | 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/proof-bundle.md | 2026-07-25-windows-session-index-access-denied proof bundle |
+| 2026-07-26 | adr | docs/aegis/adr/ADR-0006-local-workflow-platform.md | ADR-0006 - Local workflow platform (definitions, V2 journal, host-direct launch) |
+| 2026-07-26 | baseline | docs/aegis/baseline/2026-07-26-workflow-platform-contract.md | Local Workflow Platform Contract Baseline |

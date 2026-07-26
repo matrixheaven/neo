@@ -465,3 +465,163 @@ async fn staged_orphan_is_not_listed() {
     let content = store.get(&staged.artifact_id).unwrap();
     assert_eq!(content.bytes, b"orphan-bytes");
 }
+
+/// Platform artifact contract: content-addressed PathBuf layout, atomic
+/// create-new replace semantics, integrity revalidation, symlink/reparse
+/// rejection, and path-escape logical names fail closed.
+///
+/// Native evidence target for Task 25 (macOS / Linux / Windows).
+#[test]
+fn artifact_replace_and_integrity_are_platform_safe() {
+    use std::path::PathBuf;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run_id = WorkflowId::generate();
+    let run_dir = dir.path().join("workflows").join(run_id.as_str());
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    let store = ArtifactStore::open(&run_dir, run_id.clone()).expect("open store");
+    let art_dir = store.artifacts_dir_path().to_path_buf();
+    assert_eq!(art_dir, PathBuf::from(&run_dir).join("artifacts"));
+    assert!(art_dir.is_dir());
+
+    let payload = b"platform-artifact-body-v1";
+    let staged = store
+        .stage(
+            &WorkflowLimits::default(),
+            "platform-evidence",
+            ArtifactKind::Text,
+            &ArtifactValue::Text(String::from_utf8(payload.to_vec()).unwrap()),
+            None,
+        )
+        .expect("stage");
+    let content_path = art_dir.join(&staged.sha256);
+    assert!(content_path.is_file(), "content-addressed file must exist");
+    assert_eq!(std::fs::read(&content_path).unwrap(), payload);
+
+    // Idempotent re-stage of identical bytes is safe (no clobber of wrong content).
+    let again = store
+        .stage(
+            &WorkflowLimits::default(),
+            "platform-evidence",
+            ArtifactKind::Text,
+            &ArtifactValue::Text(String::from_utf8(payload.to_vec()).unwrap()),
+            None,
+        )
+        .expect("idempotent stage");
+    assert_eq!(again.sha256, staged.sha256);
+    assert_eq!(std::fs::read(&content_path).unwrap(), payload);
+
+    // Journal membership then integrity-validated read.
+    let journal_path = run_dir.join("journal.jsonl");
+    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let env = JournalEnvelope::new(
+        0,
+        1,
+        run_id.clone(),
+        JournalPayload::ArtifactCommitted {
+            artifact_id: staged.artifact_id.clone(),
+            sha256: staged.sha256.clone(),
+            byte_len: staged.byte_len,
+            media_type: Some(staged.media_type.clone()),
+            logical_name: Some(staged.logical_name.clone()),
+        },
+    );
+    writer
+        .append(&env, &WorkflowLimits::default())
+        .expect("append ArtifactCommitted");
+    drop(writer);
+
+    let envelopes = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    let mut store = store;
+    store.rehydrate_from_envelopes(&envelopes).unwrap();
+    let content = store.get(&staged.artifact_id).expect("validated get");
+    assert_eq!(content.bytes, payload);
+
+    // Tamper after commit → typed corrupt (never silent wrong bytes).
+    std::fs::write(&content_path, b"tampered-platform-bytes").unwrap();
+    let corrupt = store.get(&staged.artifact_id).expect_err("tamper");
+    assert_eq!(corrupt.code(), WorkflowErrorCode::ArtifactCorrupt);
+
+    // Missing file after commit → typed missing.
+    std::fs::remove_file(&content_path).unwrap();
+    let missing = store.get(&staged.artifact_id).expect_err("missing");
+    assert_eq!(missing.code(), WorkflowErrorCode::ArtifactMissing);
+
+    // Path-like logical names fail closed (no separator-based escape).
+    for bad in ["../escape", "a/b", "a\\b", "..", "name/with/slash"] {
+        let err = store
+            .stage(
+                &WorkflowLimits::default(),
+                bad,
+                ArtifactKind::Text,
+                &ArtifactValue::Text("nope".into()),
+                None,
+            )
+            .expect_err("path-like logical name rejected");
+        assert_eq!(
+            err.code(),
+            WorkflowErrorCode::InvalidInput,
+            "unexpected code for {bad:?}: {err}"
+        );
+    }
+
+    // Symlink at content-addressed path is not accepted as a regular artifact.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = dir.path().join("outside-artifact.bin");
+        std::fs::write(&outside, payload).unwrap();
+        // Restore a path that matches the digest name but is a symlink.
+        let _ = std::fs::remove_file(&content_path);
+        symlink(&outside, &content_path).expect("symlink artifact path");
+        let link_err = store
+            .get(&staged.artifact_id)
+            .expect_err("symlink artifact rejected");
+        assert_eq!(
+            link_err.code(),
+            WorkflowErrorCode::ArtifactCorrupt,
+            "symlink must be treated as corrupt: {link_err}"
+        );
+        // Clean for any later assertions.
+        let _ = std::fs::remove_file(&content_path);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::symlink_file;
+        let outside = dir.path().join("outside-artifact.bin");
+        std::fs::write(&outside, payload).unwrap();
+        let _ = std::fs::remove_file(&content_path);
+        match symlink_file(&outside, &content_path) {
+            Ok(()) => {
+                let link_err = store
+                    .get(&staged.artifact_id)
+                    .expect_err("symlink artifact rejected on Windows");
+                assert_eq!(link_err.code(), WorkflowErrorCode::ArtifactCorrupt);
+                let _ = std::fs::remove_file(&content_path);
+            }
+            Err(e) => {
+                eprintln!(
+                    "windows symlink unavailable on this host ({e}); atomic write + integrity verified"
+                );
+            }
+        }
+    }
+
+    // Fresh content-addressed write after cleanup remains durable regular file.
+    let restored = store
+        .stage(
+            &WorkflowLimits::default(),
+            "platform-evidence",
+            ArtifactKind::Text,
+            &ArtifactValue::Text(String::from_utf8(payload.to_vec()).unwrap()),
+            None,
+        )
+        .expect("re-stage after cleanup");
+    assert_eq!(restored.sha256, staged.sha256);
+    assert!(art_dir.join(&restored.sha256).is_file());
+    let meta = std::fs::symlink_metadata(art_dir.join(&restored.sha256)).unwrap();
+    assert!(meta.is_file(), "restored artifact must be a regular file");
+    assert!(!meta.file_type().is_symlink());
+}

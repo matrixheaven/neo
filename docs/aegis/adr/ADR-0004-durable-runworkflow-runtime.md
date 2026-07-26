@@ -56,3 +56,10 @@ Retire foreground execution, WorkflowHostRecorder, run_script, host_api.rs, dire
 ## Boundary
 
 This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.
+
+## Superseded By
+
+- Status: superseded
+- Date: 2026-07-26
+- ADR: docs/aegis/adr/ADR-0006-local-workflow-platform.md
+- Reason: ADR-0004 recorded the durable RunWorkflow substrate. The platform expansion has landed with registry, V2 recovery, artifacts, host-direct launch, operator surfaces, builtins, and native cross-platform verification; current authority is the platform contract baseline, not the substrate-only ADR.
