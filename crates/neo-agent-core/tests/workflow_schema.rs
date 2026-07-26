@@ -164,7 +164,7 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-},
+            },
         )
         .await
         .expect("create run");
@@ -274,7 +274,7 @@ async fn running_workflow_handle(
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-},
+            },
         )
         .await
         .expect("create run");

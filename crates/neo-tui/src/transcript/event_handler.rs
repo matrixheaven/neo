@@ -311,6 +311,7 @@ impl TranscriptPane {
                 id,
                 name,
                 arguments,
+                workflow_origin: _,
             } => {
                 self.start_tool_execution(*turn, id, name.clone(), arguments);
                 true
@@ -320,6 +321,7 @@ impl TranscriptPane {
                 id,
                 name,
                 arguments,
+                workflow_origin: _,
             } => {
                 self.queue_tool_execution(*turn, id, name.clone(), arguments);
                 true
@@ -343,6 +345,7 @@ impl TranscriptPane {
                 id,
                 name,
                 partial_result,
+                workflow_origin: _,
             } => {
                 if self.transcript.has_shell_run(id) {
                     self.update_shell_run(id, partial_result.clone());
@@ -357,6 +360,7 @@ impl TranscriptPane {
                 id,
                 name,
                 result,
+                workflow_origin: _,
             } => {
                 self.finish_tool_execution(*turn, id.clone(), name.clone(), result.clone());
                 true

@@ -406,6 +406,7 @@ impl TranscriptPane {
                         name: tool_call.name.to_string(),
                         arguments: serde_json::from_str(&tool_call.raw_arguments)
                             .unwrap_or_default(),
+                        workflow_origin: None,
                     });
                 }
             }
@@ -433,6 +434,7 @@ impl TranscriptPane {
                         details: None,
                         terminate: false,
                     },
+                    workflow_origin: None,
                 });
             }
             AgentMessage::System { content } => {
