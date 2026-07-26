@@ -1,0 +1,18 @@
+{
+  "model_turns": [
+    { "text": "{\"ok\":\"nope\"}", "input_tokens": 10, "output_tokens": 20 },
+    { "text": "{\"ok\":true}", "input_tokens": 5, "output_tokens": 7 }
+  ],
+  "delegate_outcomes": [
+    {
+      "first_raw": "{\"ok\":\"nope\"}",
+      "repair_raw": "{\"ok\":true}",
+      "ok": true,
+      "summary": "repaired"
+    }
+  ],
+  "expected_result": { "ok": true },
+  "expected_invocation_trace": [
+    { "kind": "delegate" }
+  ]
+}

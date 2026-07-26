@@ -1,0 +1,23 @@
+{
+  "awaited_answers": [
+    { "value": { "ok": true } }
+  ],
+  "seed_artifacts": [
+    {
+      "logical_name": "plan",
+      "kind": "json",
+      "value": { "steps": ["a", "b"] }
+    }
+  ],
+  "expected_result": { "ok": true },
+  "expected_artifacts": [
+    {
+      "logical_name": "plan",
+      "kind": "json",
+      "value": { "steps": ["a", "b"] }
+    }
+  ],
+  "expected_invocation_trace": [
+    { "kind": "phase" }
+  ]
+}

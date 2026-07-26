@@ -19,8 +19,8 @@ use neo_agent_core::workflow::{
     WorkflowActor, WorkflowCheckpoint, WorkflowDefinitionRegistry, WorkflowError, WorkflowId,
     WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent, WorkflowLaunchRequest,
     WorkflowListScope, WorkflowOutput, WorkflowRunMetadata, WorkflowSaveRequest, WorkflowSaveScope,
-    WorkflowSourceOrigin, WorkflowState, compile_lua_source, compute_definition_revision, journal,
-    preview_mark_sweep, resolve_paired_definition,
+    WorkflowSourceOrigin, WorkflowState, check_definition, journal, load_fixture,
+    preview_mark_sweep, resolve_paired_definition, run_fixture,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,7 +47,7 @@ pub async fn execute(command: WorkflowCommand, config: &AppConfig) -> anyhow::Re
             target,
             case,
             output,
-        } => test_fixture(&target, &case, output),
+        } => test_fixture(config, &target, &case, output).await,
         WorkflowCommand::Run {
             name,
             args_json,
@@ -257,90 +257,91 @@ fn show(
 /// Read-only definition validation. Does not create runs or mutate the registry.
 fn check(config: &AppConfig, target: &str, output: WorkflowOutputFormat) -> anyhow::Result<String> {
     let report = match load_definition_for_validation(config, target) {
-        Ok(definition) => {
-            let mut diagnostics = Vec::new();
-            if let Err(error) = compile_lua_source(&definition.lua_source) {
-                diagnostics.push(json!({
-                    "severity": "error",
-                    "code": error.code().as_str(),
-                    "message": error.to_string(),
-                }));
-            }
-            let recomputed = compute_definition_revision(
-                &definition.canonical_manifest_json,
-                definition.lua_source.as_bytes(),
-            );
-            if recomputed.as_str() != definition.revision.as_str() {
-                diagnostics.push(json!({
-                    "severity": "error",
-                    "code": "revision_mismatch",
-                    "message": "stored revision does not match recomputed content hash",
-                }));
-            }
-            let ok = diagnostics.iter().all(|diag| diag["severity"] != "error");
-            json!({
-                "ok": ok,
-                "name": definition.name.as_str(),
-                "revision": definition.revision.as_str(),
-                "source_origin": definition.source_origin.as_str(),
-                "diagnostics": diagnostics,
-            })
-        }
-        Err(error) => json!({
-            "ok": false,
-            "name": target,
-            "diagnostics": [{
-                "severity": "error",
-                "code": "load_failed",
-                "message": error.to_string(),
+        Ok(definition) => check_definition(&definition),
+        Err(error) => neo_agent_core::workflow::WorkflowCheckReport {
+            ok: false,
+            name: target.to_owned(),
+            revision: None,
+            source_origin: None,
+            source_locator: None,
+            diagnostics: vec![neo_agent_core::workflow::CheckDiagnostic {
+                severity: neo_agent_core::workflow::CheckSeverity::Error,
+                code: "load_failed".to_owned(),
+                message: error.to_string(),
             }],
-        }),
+        },
     };
+    let body = report.to_json();
 
     match output {
         WorkflowOutputFormat::Text => {
-            let ok = report["ok"].as_bool().unwrap_or(false);
-            if ok {
+            if report.ok {
                 Ok(format!(
                     "ok\t{}\t{}\n",
-                    report["name"].as_str().unwrap_or(target),
-                    report["revision"].as_str().unwrap_or("")
+                    report.name,
+                    report.revision.as_deref().unwrap_or("")
                 ))
             } else {
-                let message = report["diagnostics"]
-                    .as_array()
-                    .and_then(|items| items.first())
-                    .and_then(|item| item["message"].as_str())
+                let message = report
+                    .diagnostics
+                    .iter()
+                    .find(|d| d.severity == neo_agent_core::workflow::CheckSeverity::Error)
+                    .map(|d| d.message.as_str())
                     .unwrap_or("check failed");
                 bail!("workflow check failed: {message}");
             }
         }
-        WorkflowOutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(&report)?)),
+        WorkflowOutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(&body)?)),
     }
 }
 
-fn test_fixture(target: &str, case: &Path, output: WorkflowOutputFormat) -> anyhow::Result<String> {
-    // Full harness lands in Task 22. Refuse live execution rather than
-    // silently switching modes.
-    let report = json!({
-        "ok": false,
-        "name": target,
+/// Deterministic fixture harness. Never switches to live providers or shell.
+async fn test_fixture(
+    config: &AppConfig,
+    target: &str,
+    case: &Path,
+    output: WorkflowOutputFormat,
+) -> anyhow::Result<String> {
+    let fixture = load_fixture(case).map_err(map_workflow_error)?;
+    if fixture.mode.supports_live() {
+        bail!("fixture harness has no live execution mode");
+    }
+
+    let definition = load_definition_for_validation(config, target)?;
+    let report = run_fixture(&definition, &fixture, config.workflow_definitions.limits())
+        .await
+        .map_err(map_workflow_error)?;
+
+    let body = json!({
+        "ok": report.ok,
+        "name": report.name,
         "case": case.display().to_string(),
-        "diagnostics": [{
-            "severity": "error",
-            "code": "harness_unavailable",
-            "message": "deterministic fixture harness is not available; use neo workflow check for static validation",
-        }],
+        "run_id": report.run_id,
+        "state": report.state,
+        "final_result": report.final_result,
+        "diagnostics": report.diagnostics,
+        "invocation_kinds": report.invocation_kinds,
+        "schema_repair_starts": report.schema_repair_starts,
     });
+
     match output {
         WorkflowOutputFormat::Text => {
-            bail!(
-                "workflow test harness unavailable for `{}` case `{}`",
-                target,
-                case.display()
-            );
+            if report.ok {
+                Ok(format!(
+                    "ok\t{}\t{}\t{}\n",
+                    report.name, report.run_id, report.state
+                ))
+            } else {
+                let message = report
+                    .diagnostics
+                    .first()
+                    .and_then(|d| d.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("fixture failed");
+                bail!("workflow test failed: {message}");
+            }
         }
-        WorkflowOutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(&report)?)),
+        WorkflowOutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(&body)?)),
     }
 }
 

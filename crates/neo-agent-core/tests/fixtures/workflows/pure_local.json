@@ -1,0 +1,12 @@
+{
+  "args": { "label": "fixture" },
+  "expected_result": { "ok": true, "label": "fixture" },
+  "expected_invocation_trace": [
+    { "kind": "phase" },
+    { "kind": "log" },
+    { "kind": "report" }
+  ],
+  "expected_reports": [
+    { "step": "done" }
+  ]
+}
