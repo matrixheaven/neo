@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-27 | spec | docs/aegis/specs/2026-07-27-assistant-native-workflow-tool-design.md | Neo Assistant-Native Workflow Tool Design |
 | 2026-07-26 | plan | docs/aegis/plans/2026-07-26-final-review-residuals.md | Neo 2026-07-26 Final-Review Residuals Implementation Plan |
 | 2026-07-26 | spec | docs/aegis/specs/2026-07-26-final-review-residuals-design.md | Neo 2026-07-26 Final-Review Residuals Design |
 | 2026-07-25 | handoff | docs/aegis/handoffs/2026-07-25-workflow-platform.md | Neo Workflow Platform P0-P2 Handoff Prompt |
