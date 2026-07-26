@@ -299,6 +299,7 @@ async fn disabled_apis_are_unavailable_but_pcall_remains() {
                     local allowed = {
                         phase=true, log=true, delegate=true, swarm=true,
                         verify=true, verify_command=true, report=true, fail=true,
+                        tool=true, await_user=true,
                         json_array=true, json_object=true,
                     }
                     local count = 0
@@ -308,7 +309,7 @@ async fn disabled_apis_are_unavailable_but_pcall_remains() {
                             count = count + 1
                         end
                     end
-                    return count == 10
+                    return count == 12
                 end)(),
             }
             "#,

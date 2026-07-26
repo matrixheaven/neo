@@ -18,7 +18,8 @@ fn valid_input(name: &str) -> Value {
         "description": "Run a reviewed workflow",
         "phases": [{"id": "work", "description": "Do the work"}],
         "script": "neo.phase('work')",
-        "args": {"target": "core"}
+        "args": {"target": "core"},
+        "output_schema": {"type": "object"}
     })
 }
 
@@ -242,7 +243,7 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
     let session = tempfile::tempdir().unwrap();
     let mut input = valid_input("projected");
     input["script"] = Value::String(
-        "neo.phase('work')\nneo.log('verification running')\nneo.report('scoped checks passed')"
+        "neo.phase('work')\nneo.log('verification running')\nneo.report('scoped checks passed')\nreturn {}"
             .to_owned(),
     );
     let harness = harness_for_calls(&[("launch", input)]);

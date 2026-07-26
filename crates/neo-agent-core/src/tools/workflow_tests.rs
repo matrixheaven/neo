@@ -13,7 +13,14 @@ fn workflow_schema_is_exact_and_rejects_model_limits() {
 
     assert_eq!(
         names,
-        std::collections::BTreeSet::from(["name", "description", "phases", "script", "args"])
+        std::collections::BTreeSet::from([
+            "name",
+            "description",
+            "phases",
+            "script",
+            "args",
+            "output_schema",
+        ])
     );
     assert_eq!(schema["additionalProperties"], false);
 
@@ -23,6 +30,7 @@ fn workflow_schema_is_exact_and_rejects_model_limits() {
         "phases": [{"id": "work", "description": "work"}],
         "script": "neo.phase('work')",
         "args": {},
+        "output_schema": {"type": "object"},
         "limits": {"token_cap": 1}
     }))
     .expect_err("model-supplied limits were accepted");
@@ -36,7 +44,8 @@ fn approval_presentation_counts_trailing_newline() {
         "description": "line count test",
         "phases": [{"id": "work", "description": "work"}],
         "script": "first\nsecond\n",
-        "args": {}
+        "args": {},
+        "output_schema": {"type": "object"}
     }))
     .unwrap();
 
@@ -56,7 +65,8 @@ async fn dynamic_tool_adapter_launches_only_through_coordinator() {
         "description": "coordinator path",
         "phases": [{"id": "work", "description": "work"}],
         "script": "neo.phase('work')",
-        "args": {}
+        "args": {},
+        "output_schema": {"type": "object"}
     }))
     .unwrap();
     runtime
