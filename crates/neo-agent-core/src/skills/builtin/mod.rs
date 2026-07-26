@@ -14,8 +14,15 @@ const SUB_SKILL: &str = include_str!("sub-skill.md");
 const SELF_EVO: &str = include_str!("self-evo.md");
 const MCP_CONFIG: &str = include_str!("mcp-config.md");
 const CREATE_SKILL: &str = include_str!("create-skill.md");
+const CREATE_WORKFLOW: &str = include_str!("create-workflow.md");
 
-const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO, MCP_CONFIG, CREATE_SKILL];
+const BUILTIN_SOURCES: &[&str] = &[
+    SUB_SKILL,
+    SELF_EVO,
+    MCP_CONFIG,
+    CREATE_SKILL,
+    CREATE_WORKFLOW,
+];
 const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +199,71 @@ mod tests {
         ] {
             assert!(self_evo.body.contains(required), "{required:?}");
         }
+    }
+
+    #[test]
+    fn create_workflow_builtin_is_auto_invokable_host_reference() {
+        use std::collections::BTreeSet;
+
+        let skills = builtin_skills().expect("built-ins load");
+        let create_workflow = skills
+            .iter()
+            .find(|skill| skill.name == "create-workflow")
+            .expect("create-workflow built-in");
+
+        let (frontmatter, _) = crate::skills::split_frontmatter(CREATE_WORKFLOW)
+            .expect("create-workflow must have raw frontmatter");
+        let frontmatter: serde_yaml::Mapping =
+            serde_yaml::from_str(frontmatter).expect("create-workflow frontmatter must be YAML");
+        let fields = frontmatter
+            .keys()
+            .map(|field| field.as_str().expect("frontmatter keys must be strings"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            BTreeSet::from(["description", "disableModelInvocation", "name"]),
+            "create-workflow must use only canonical built-in frontmatter fields"
+        );
+        assert!(
+            !create_workflow.manifest.disable_model_invocation,
+            "create-workflow must be discoverable via available_skills"
+        );
+        assert!(create_workflow.manifest.auto_invokable());
+
+        for required in [
+            "paired",
+            "neo.delegate",
+            "neo.swarm",
+            "neo.tool",
+            "neo.await_user",
+            "output_schema",
+            "source_sha256",
+            "neo workflow check",
+            "WorkflowRuntime",
+            "only** workflow language",
+            "Do not author Rhai",
+            "code-review",
+            "deep-research",
+            "large-refactor",
+        ] {
+            assert!(
+                create_workflow.body.contains(required),
+                "create-workflow must contain host contract phrase {required:?}"
+            );
+        }
+        for forbidden in ["agent()", "parallel(", "let meta", "complete("] {
+            // Product dialect must not teach Grok Rhai host calls as valid Neo APIs.
+            // Mentions inside "do not" sentences are fine only if the banned call
+            // form is not presented as usage; keep the skill free of call-shaped
+            // Grok snippets outside explicit rejection lines.
+            let _ = forbidden;
+        }
+        assert!(
+            !create_workflow.body.contains("agent(prompt")
+                && !create_workflow.body.contains("parallel([")
+                && !create_workflow.body.contains("complete(#{"),
+            "create-workflow must not teach Grok Rhai call shapes"
+        );
     }
 
     #[test]
