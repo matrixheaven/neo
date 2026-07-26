@@ -23,10 +23,10 @@ fn ordinary_registered_tools_are_workflow_eligible_by_default() {
     // Newly registered ordinary tool — no allowlist entry required.
     struct Probe;
     impl Tool for Probe {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "ProbeTool"
         }
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "probe"
         }
         fn input_schema(&self) -> serde_json::Value {

@@ -157,7 +157,7 @@ async fn resolver_is_read_only_and_never_dispatches() {
         adopted
             .details
             .get("recovery_adopted")
-            .and_then(|v| v.as_bool()),
+            .and_then(serde_json::value::Value::as_bool),
         Some(true)
     );
     // Adoption is read-only: no new agents/tasks created.

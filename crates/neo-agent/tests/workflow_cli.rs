@@ -106,7 +106,7 @@ fn workflow_check_json_is_stable_and_read_only() {
     let value: serde_json::Value = serde_json::from_str(stdout1.trim()).expect("json report");
     assert_eq!(value["ok"], serde_json::json!(true));
     assert_eq!(value["name"], serde_json::json!("check-demo"));
-    assert!(value["revision"].as_str().unwrap().len() == 64);
+    assert_eq!(value["revision"].as_str().unwrap().len(), 64);
     assert!(
         value["diagnostics"].as_array().unwrap().is_empty()
             || value["diagnostics"]
@@ -130,14 +130,9 @@ fn workflow_check_json_is_stable_and_read_only() {
                 if p.file_name().and_then(|n| n.to_str()) == Some("workflows") && path != home {
                     // user definitions live at $NEO_HOME/workflows; run storage is nested.
                     if p.join("run.json").exists()
-                        || fs::read_dir(&p)
-                            .map(|mut d| {
-                                d.any(|e| {
-                                    e.map(|e| e.path().join("run.json").exists())
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
+                        || fs::read_dir(&p).is_ok_and(|mut d| {
+                            d.any(|e| e.is_ok_and(|e| e.path().join("run.json").exists()))
+                        })
                     {
                         found_run = true;
                     }

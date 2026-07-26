@@ -563,6 +563,8 @@ fn background_request() -> ApprovalRequest {
                 action: ApprovalAction::Reject,
             },
         ],
+
+        workflow_origin: None,
     }
 }
 
@@ -603,6 +605,8 @@ fn plan_revision_request() -> ApprovalRequest {
                 },
             },
         ],
+
+        workflow_origin: None,
     }
 }
 
@@ -699,6 +703,8 @@ fn approval_digits_while_editing_feedback_do_not_reselect_options() {
                 action: ApprovalAction::RejectPlan,
             },
         ],
+
+        workflow_origin: None,
     });
 
     // Select suggestion A (index 1) and enter feedback editing.
@@ -1159,6 +1165,8 @@ fn transcript_pane_renders_bash_result_as_terminal_output_without_structural_lab
         id: "bash-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "printf out; printf err >&2" }),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1172,6 +1180,8 @@ fn transcript_pane_renders_bash_result_as_terminal_output_without_structural_lab
             "stderr_truncated": false,
             "truncated": false
         })),
+
+        workflow_origin: None,
     });
 
     let joined = render_transcript(100, 12, &mut runtime).join("\n");
@@ -1191,6 +1201,8 @@ fn transcript_pane_running_tool_call_is_rendered_before_finish() {
         id: "tool-1".to_owned(),
         name: "List".to_owned(),
         arguments: serde_json::json!({ "path": "crates/neo-tui/src" }),
+
+        workflow_origin: None,
     });
 
     let entries = runtime.transcript().entries();
@@ -1226,12 +1238,16 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("read README"),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
         message: neo_agent_core::AgentMessage::tool_result(
@@ -1315,12 +1331,16 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
         id: "tool-1".to_owned(),
         name: "List".to_owned(),
         arguments: serde_json::json!({ "path": "." }),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool-1".to_owned(),
         name: "List".to_owned(),
         result: neo_agent_core::ToolResult::ok("README.md"),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,

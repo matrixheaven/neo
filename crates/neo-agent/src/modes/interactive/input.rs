@@ -463,15 +463,14 @@ impl InteractiveController {
                 }
             }
             other => {
-                let needs_refresh = self
-                    .tui
-                    .chrome_mut()
-                    .task_browser_state_mut()
-                    .map(|state| {
-                        let _ = state.handle_action(other);
-                        state.list_refresh_requested()
-                    })
-                    .unwrap_or(false);
+                let needs_refresh =
+                    self.tui
+                        .chrome_mut()
+                        .task_browser_state_mut()
+                        .is_some_and(|state| {
+                            let _ = state.handle_action(other);
+                            state.list_refresh_requested()
+                        });
                 if needs_refresh {
                     self.refresh_task_browser().await;
                 }
@@ -496,7 +495,7 @@ impl InteractiveController {
             .tui
             .chrome()
             .task_browser_state()
-            .map(|state| state.list_intent())
+            .map(neo_tui::tasks_browser::TaskBrowserState::list_intent)
             .unwrap_or_default();
         let query = neo_agent_core::tools::BackgroundTaskListQuery {
             active_only: intent.active_only,

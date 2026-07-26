@@ -37,6 +37,8 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         id: "spacing-tool-id".to_owned(),
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "spacing-tool-command" }),
+
+        workflow_origin: None,
     });
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, "spacing-user", "spacing-thinking", 1);
@@ -49,6 +51,8 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         id: "spacing-tool-id".to_owned(),
         name: "Bash".to_owned(),
         result: ToolResult::ok("spacing-tool-result"),
+
+        workflow_origin: None,
     });
     pane.start_assistant_message();
     pane.append_assistant_delta("spacing-assistant-stable\n\nspacing-assistant-live");
@@ -450,6 +454,8 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
         id: "final-lifecycle-tool".to_owned(),
         name: "Bash".to_owned(),
         result: ToolResult::ok("final-tool-result-sentinel"),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::MessageFinished {
         turn: 1,
@@ -559,12 +565,16 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
         id: "review-tool".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "review-committed-tool" }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "review-tool".to_owned(),
         name: "Read".to_owned(),
         result: ToolResult::ok("review-committed-tool-result"),
+
+        workflow_origin: None,
     });
 
     let committed = pane.render_terminal_update(80, 12);
@@ -695,6 +705,8 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
             id: "overflow-live".to_owned(),
             name: "Bash".to_owned(),
             arguments: serde_json::json!({ "command": "overflow-live-command" }),
+
+            workflow_origin: None,
         });
     let live_body = (0..30)
         .map(|index| format!("overflow-live-sentinel-{index:02}"))
@@ -706,6 +718,8 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
             id: "overflow-live".to_owned(),
             name: "Bash".to_owned(),
             partial_result: ToolResult::ok(live_body),
+
+            workflow_origin: None,
         });
     // Finalized later status must wait behind the frontier and stay unacked
     // while automatic overflow owns the alternate surface.
@@ -736,6 +750,8 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
             id: "overflow-live".to_owned(),
             name: "Bash".to_owned(),
             result: ToolResult::ok("overflow-live-finished"),
+
+            workflow_origin: None,
         });
     let released = tui.render_terminal_frame(usize::from(width), usize::from(height));
     assert!(!tui.automatic_overflow_active());
@@ -837,12 +853,16 @@ fn review_acknowledgement_does_not_advance_normal_history_ledger() {
         id: "review-ack-tool".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
+
+        workflow_origin: None,
     });
     transcript.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "review-ack-tool".to_owned(),
         name: "Read".to_owned(),
         result: ToolResult::ok("contents"),
+
+        workflow_origin: None,
     });
     let mut tui = NeoTui::new(chrome, transcript);
     let normal = tui.render_terminal_frame(80, 12);

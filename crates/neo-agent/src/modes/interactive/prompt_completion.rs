@@ -112,8 +112,7 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
             let value = format!("/skill:{}", skill.name);
             let summary = skill
                 .short_description()
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| skill.manifest.description.clone());
+                .map_or_else(|| skill.manifest.description.clone(), ToOwned::to_owned);
             let description = if skill.display_name() == skill.name {
                 summary
             } else {

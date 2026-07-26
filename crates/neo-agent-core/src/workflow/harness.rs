@@ -640,8 +640,7 @@ async fn commit_fixture_artifact(
         ArtifactKind::Text => ArtifactValue::Text(
             art.value
                 .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| art.value.to_string()),
+                .map_or_else(|| art.value.to_string(), str::to_owned),
         ),
         ArtifactKind::Json => ArtifactValue::Json(art.value.clone()),
     };
@@ -730,7 +729,7 @@ impl Tool for ScriptedTool {
         &self.name
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "fixture-scripted tool outcome"
     }
 
@@ -771,11 +770,11 @@ struct ScriptedDelegateTool {
 }
 
 impl Tool for ScriptedDelegateTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "Delegate"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "fixture-scripted Delegate outcome"
     }
 
@@ -819,11 +818,11 @@ struct ScriptedSwarmTool {
 }
 
 impl Tool for ScriptedSwarmTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "DelegateSwarm"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "fixture-scripted DelegateSwarm outcome"
     }
 
@@ -837,8 +836,7 @@ impl Tool for ScriptedSwarmTool {
             let item_count = input
                 .get("items")
                 .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(1);
+                .map_or(1, Vec::len);
             let mut results = Vec::new();
             let mut all_ok = true;
             for index in 0..item_count {

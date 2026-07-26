@@ -506,7 +506,7 @@ async fn schema_repair_tool_attempt_is_forbidden() {
                         summary: accepted.summary.clone(),
                         interruption: None,
                         details: json!({
-                            "schema_error_code": accepted.error_code.map(|c| c.as_str()),
+                            "schema_error_code": accepted.error_code.map(neo_agent_core::workflow::WorkflowErrorCode::as_str),
                             "repair_attempted": accepted.repair_attempted,
                         }),
                         actual_usage: accepted.actual_usage,

@@ -538,12 +538,11 @@ async fn run_max_output_cap_attempt(
             break;
         }
     }
-    let read = match read {
-        Some(read) => read,
-        None => {
-            try_stop(registry, context, &handle).await;
-            return Err("expected capped terminal read".to_owned());
-        }
+    let read = if let Some(read) = read {
+        read
+    } else {
+        try_stop(registry, context, &handle).await;
+        return Err("expected capped terminal read".to_owned());
     };
     let serialized = serde_json::to_string(&read).map_err(|e| format!("serialize: {e}"))?;
     let truncated = read.content.contains("truncated: true")
@@ -981,8 +980,7 @@ async fn run_incremental_bounded_attempt(
         "subdir-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_nanos())
     ));
     std::fs::create_dir_all(&subdir).map_err(|e| format!("subdir: {e}"))?;
     std::fs::write(subdir.join("marker"), b"ok").map_err(|e| format!("marker: {e}"))?;

@@ -286,8 +286,7 @@ fn check(config: &AppConfig, target: &str, output: WorkflowOutputFormat) -> anyh
                     .diagnostics
                     .iter()
                     .find(|d| d.severity == neo_agent_core::workflow::CheckSeverity::Error)
-                    .map(|d| d.message.as_str())
-                    .unwrap_or("check failed");
+                    .map_or("check failed", |d| d.message.as_str());
                 bail!("workflow check failed: {message}");
             }
         }
@@ -999,9 +998,8 @@ fn find_run_dir_anywhere(config: &AppConfig, run_id: &str) -> anyhow::Result<Opt
     if let Some(found) = scan_bucket_for_run(&workspace_bucket, run_id)? {
         return Ok(Some(found));
     }
-    let sessions_root = neo_home()
-        .map(|home| home.join("sessions"))
-        .unwrap_or_else(|| config.sessions_dir.clone());
+    let sessions_root =
+        neo_home().map_or_else(|| config.sessions_dir.clone(), |home| home.join("sessions"));
     if sessions_root.is_dir() {
         for entry in fs::read_dir(&sessions_root)
             .with_context(|| format!("failed to read {}", sessions_root.display()))?
@@ -1053,9 +1051,8 @@ fn collect_retention_subjects(config: &AppConfig) -> anyhow::Result<Vec<Retentio
     let mut referenced_parents = HashSet::new();
     let mut discovered: Vec<(WorkflowId, WorkflowState, u64, u64)> = Vec::new();
 
-    let sessions_root = neo_home()
-        .map(|home| home.join("sessions"))
-        .unwrap_or_else(|| config.sessions_dir.clone());
+    let sessions_root =
+        neo_home().map_or_else(|| config.sessions_dir.clone(), |home| home.join("sessions"));
     if !sessions_root.is_dir() {
         return Ok(subjects);
     }
@@ -1145,18 +1142,18 @@ fn dir_byte_size(path: &Path) -> anyhow::Result<u64> {
 
 fn file_age_ms(path: &Path, now_ms: u64) -> anyhow::Result<u64> {
     let modified = fs::metadata(path)?.modified()?;
-    let modified_ms = modified
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+    let modified_ms = modified.duration_since(UNIX_EPOCH).map_or(0, |duration| {
+        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+    });
     Ok(now_ms.saturating_sub(modified_ms))
 }
 
 fn current_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn parse_duration_ms(raw: &str) -> anyhow::Result<u64> {
@@ -1206,8 +1203,7 @@ fn split_trailing_unit(raw: &str) -> anyhow::Result<(&str, &str)> {
     let split_at = raw
         .char_indices()
         .find(|(_, ch)| ch.is_ascii_alphabetic())
-        .map(|(idx, _)| idx)
-        .unwrap_or(raw.len());
+        .map_or(raw.len(), |(idx, _)| idx);
     let (number, unit) = raw.split_at(split_at);
     if number.is_empty() {
         bail!("missing number in `{raw}`");

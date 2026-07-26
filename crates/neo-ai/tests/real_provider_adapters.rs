@@ -1815,9 +1815,9 @@ async fn anthropic_missing_tool_name_is_protocol_error_without_tool_lifecycle_ev
         events.iter().all(|event| {
             !matches!(
                 event,
-                Ok(AiStreamEvent::ToolCallStart { .. })
-                    | Ok(AiStreamEvent::ToolCallArgsDelta { .. })
-                    | Ok(AiStreamEvent::ToolCallEnd { .. })
+                Ok(AiStreamEvent::ToolCallStart { .. }
+                    | AiStreamEvent::ToolCallArgsDelta { .. }
+                    | AiStreamEvent::ToolCallEnd { .. })
             )
         }),
         "missing tool name must not emit tool lifecycle events: {events:?}"

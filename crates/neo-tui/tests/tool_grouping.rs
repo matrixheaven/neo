@@ -35,6 +35,8 @@ fn consecutive_reads_collapse_into_one_tree_card() {
             id: format!("read-{id}"),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("one\ntwo\nthree"),
+
+            workflow_origin: None,
         });
     }
 
@@ -72,6 +74,8 @@ fn single_read_still_renders_as_solo_card() {
         id: "read-0".to_owned(),
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("one\ntwo"),
+
+        workflow_origin: None,
     });
 
     let frame = plain_frame(&mut runtime, 80, 12);
@@ -104,6 +108,8 @@ fn single_read_respects_transcript_expansion_state() {
         id: "read-0".to_owned(),
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("1\n2\n3\n4\n5\n6\n7\n8"),
+
+        workflow_origin: None,
     });
 
     let collapsed = plain_frame(&mut runtime, 80, 16).join("\n");
@@ -150,6 +156,8 @@ fn grouped_reads_respect_transcript_expansion_state() {
             id: format!("read-{id}"),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("one\ntwo"),
+
+            workflow_origin: None,
         });
     }
 
@@ -203,6 +211,8 @@ fn non_groupable_tool_between_reads_breaks_the_group() {
             id: id.to_owned(),
             name: name.to_owned(),
             result: neo_agent_core::ToolResult::ok("output"),
+
+            workflow_origin: None,
         });
     }
 
@@ -235,6 +245,8 @@ fn group_header_uses_capitalized_verb_without_duplicating_tool_name() {
             id: format!("read-{id}"),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("one\ntwo"),
+
+            workflow_origin: None,
         });
     }
     let frame = plain_frame(&mut runtime, 80, 20);
@@ -273,6 +285,8 @@ fn list_group_uses_list_verb_not_read() {
             id: format!("list-{id}"),
             name: "List".to_owned(),
             result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
+
+            workflow_origin: None,
         });
     }
     let frame = plain_frame(&mut runtime, 80, 20);
@@ -307,6 +321,8 @@ fn grouped_tool_run_is_flushed_once_before_following_text() {
             id: format!("list-{id}"),
             name: "List".to_owned(),
             result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
+
+            workflow_origin: None,
         });
     }
     runtime.apply_agent_event(AgentEvent::TextDelta {
@@ -348,6 +364,8 @@ fn finished_tool_block_is_separated_from_streaming_assistant_text() {
         id: "list-0".to_owned(),
         name: "List".to_owned(),
         result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
+
+        workflow_origin: None,
     });
     // Now a live assistant message streams in after the tool finished.
     runtime.apply_agent_event(AgentEvent::MessageStarted {
@@ -419,6 +437,8 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
             id: id.to_owned(),
             name: name.to_owned(),
             result: neo_agent_core::ToolResult::ok("output line"),
+
+            workflow_origin: None,
         });
     }
 

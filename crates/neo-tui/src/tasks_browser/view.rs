@@ -157,12 +157,12 @@ impl TaskBrowserSnapshot {
         total_matched: Option<usize>,
         expected_query_hash: Option<&str>,
     ) -> Result<Self, String> {
-        if let (Some(expected), Some(actual)) = (expected_query_hash, query_hash.as_deref()) {
-            if expected != actual {
-                return Err(
-                    "list cursor query/filter does not match the active browser query".to_owned(),
-                );
-            }
+        if let (Some(expected), Some(actual)) = (expected_query_hash, query_hash.as_deref())
+            && expected != actual
+        {
+            return Err(
+                "list cursor query/filter does not match the active browser query".to_owned(),
+            );
         }
         Ok(Self {
             items,

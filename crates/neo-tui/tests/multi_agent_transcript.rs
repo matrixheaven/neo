@@ -1433,6 +1433,8 @@ fn option_b_delegate_transcript_absorbs_matching_tool_header() {
         id: "tool_delegate_single".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 11,
@@ -1465,6 +1467,8 @@ fn option_b_delegate_transcript_absorbs_late_tool_header_after_snapshot() {
         id: "tool_delegate_late".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1487,6 +1491,8 @@ fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
         id: "tool_delegate_matched_result".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 20,
@@ -1502,6 +1508,8 @@ fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
                 "agent_id": "agent_test"
             }),
         ),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1526,6 +1534,8 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
         id: "tool_delegate_failed".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 14,
@@ -1536,6 +1546,8 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
         id: "tool_delegate_failed".to_owned(),
         name: "Delegate".to_owned(),
         result: neo_agent_core::ToolResult::error("delegate failed before snapshot settled"),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1562,6 +1574,8 @@ fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
         id: "tool_delegate_mismatch".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 15,
@@ -1577,6 +1591,8 @@ fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
                 "agent_id": "agent_other"
             }),
         ),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1600,6 +1616,8 @@ fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_ar
         id: "tool_delegate_mismatch_before_snapshot".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 17,
@@ -1611,6 +1629,8 @@ fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_ar
                 "agent_id": "agent_other"
             }),
         ),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 17,
@@ -1644,12 +1664,16 @@ fn option_b_delegate_group_keeps_unmatched_running_tool_header() {
         id: "tool_delegate_partial_pascal".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "6*7"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 22,
         id: "tool_delegate_partial_huygens".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "7*8"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 22,
@@ -1682,12 +1706,16 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
         id: "tool_delegate_mixed_pascal".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "6*7"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 23,
         id: "tool_delegate_mixed_huygens".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "7*8"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 23,
@@ -1703,12 +1731,16 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
                 "agent_id": "agent_first_mixed_group_absorb"
             }),
         ),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 23,
         id: "tool_delegate_mixed_huygens".to_owned(),
         name: "Delegate".to_owned(),
         result: neo_agent_core::ToolResult::error("second delegate failed before starting"),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 40);
@@ -1753,12 +1785,16 @@ fn option_b_delegate_group_absorbs_matching_tool_headers() {
         id: "tool_delegate_pascal".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "6*7"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 12,
         id: "tool_delegate_huygens".to_owned(),
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "7*8"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 12,
@@ -1800,6 +1836,8 @@ fn option_b_swarm_transcript_absorbs_matching_tool_header() {
             "description": "Test swarm",
             "max_concurrency": 2
         }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 13,
@@ -1837,6 +1875,8 @@ fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
             "description": "Test swarm",
             "max_concurrency": 2
         }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 21,
@@ -1852,6 +1892,8 @@ fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
                 "swarm_id": "swarm_test"
             }),
         ),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -1884,6 +1926,8 @@ fn option_b_swarm_absorption_restores_failed_tool_result() {
             "description": "Test swarm",
             "max_concurrency": 2
         }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 18,
@@ -1894,6 +1938,8 @@ fn option_b_swarm_absorption_restores_failed_tool_result() {
         id: "tool_swarm_failed".to_owned(),
         name: "DelegateSwarm".to_owned(),
         result: neo_agent_core::ToolResult::error("swarm failed before returning ids"),
+
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -1925,6 +1971,8 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
             "description": "Test swarm",
             "max_concurrency": 2
         }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 19,
@@ -1936,6 +1984,8 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
                 "swarm_id": "swarm_other"
             }),
         ),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 19,
@@ -3680,7 +3730,7 @@ fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
     let span = |text: &str| {
         detailed
             .iter()
-            .flat_map(|line| line.spans())
+            .flat_map(neo_tui::primitive::Line::spans)
             .find(|span| span.text() == text)
             .expect("styled span")
     };
@@ -3806,7 +3856,7 @@ fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
     assert!(row("Agent4").text().contains("priority-unsynced.rs"));
     assert!(row("Agent5").text().contains("priority-pending.rs"));
     assert!(!row("Agent5").text().contains("total"));
-    assert!(!row("Agent5").text().contains("+"));
+    assert!(!row("Agent5").text().contains('+'));
     let ordinary = row("Agent6").text();
     let ordinary_status = &ordinary[ordinary.find("Used Read").expect("ordinary tool status")..];
     assert_eq!(ordinary_status.chars().count(), 96, "{ordinary_status}");

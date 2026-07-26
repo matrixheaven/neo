@@ -230,9 +230,10 @@ mod tests {
                     return pid;
                 }
             }
-            if Instant::now() >= deadline {
-                panic!("pid file was not written by clipboard helper child");
-            }
+            assert!(
+                Instant::now() < deadline,
+                "pid file was not written by clipboard helper child"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }

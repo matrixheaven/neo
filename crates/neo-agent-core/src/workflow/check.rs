@@ -280,8 +280,7 @@ pub fn builtin_manifest_revision_vectors(
                 .diagnostics
                 .iter()
                 .find(|d| d.severity == CheckSeverity::Error)
-                .map(|d| d.message.as_str())
-                .unwrap_or("builtin check failed");
+                .map_or("builtin check failed", |d| d.message.as_str());
             return Err(WorkflowError::coded(
                 super::error::WorkflowErrorCode::InvalidDefinition,
                 format!("builtin `{}`: {first}", builtin.name),

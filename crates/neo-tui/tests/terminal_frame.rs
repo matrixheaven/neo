@@ -218,6 +218,8 @@ fn running_file_write_advances_transcript_animation_state() {
         id: "write-1".to_owned(),
         name: "Write".to_owned(),
         arguments: serde_json::json!({"path": "notes.txt", "content": "draft"}),
+
+        workflow_origin: None,
     });
     let mut tui = NeoTui::new(chrome, transcript);
     let now = Instant::now();
@@ -239,6 +241,8 @@ fn running_static_tool_does_not_request_an_animation_deadline() {
         id: "read-1".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "notes.txt"}),
+
+        workflow_origin: None,
     });
     let mut tui = NeoTui::new(chrome, transcript);
 
@@ -259,6 +263,8 @@ fn running_sleep_requests_animation_deadline() {
             "duration_seconds": 45,
             "reason": "wait for cooldown"
         }),
+
+        workflow_origin: None,
     });
     let mut tui = NeoTui::new(chrome, transcript);
 
@@ -274,6 +280,8 @@ fn running_sleep_requests_animation_deadline() {
             id: "sleep-anim".to_owned(),
             name: "Sleep".to_owned(),
             result: neo_agent_core::ToolResult::ok("Waited 45 seconds: wait for cooldown"),
+
+            workflow_origin: None,
         });
     let finished = tui.render_terminal_frame_at(80, 12, Instant::now());
     assert!(
@@ -288,6 +296,8 @@ fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
         id: "overflow-live-tool".to_owned(),
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "overflow-living-command" }),
+
+        workflow_origin: None,
     });
     let body = (0..40)
         .map(|index| format!("overflow-source-sentinel-{index:02}"))
@@ -298,6 +308,8 @@ fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
         id: "overflow-live-tool".to_owned(),
         name: "Bash".to_owned(),
         partial_result: neo_agent_core::ToolResult::ok(body),
+
+        workflow_origin: None,
     });
 }
 

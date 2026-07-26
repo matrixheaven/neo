@@ -118,8 +118,7 @@ impl AppConfig {
         let workflow_home = neo_home().unwrap_or_else(|| {
             config_path
                 .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| project_dir.clone())
+                .map_or_else(|| project_dir.clone(), std::path::Path::to_path_buf)
         });
         let workflow_definitions = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
             neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {

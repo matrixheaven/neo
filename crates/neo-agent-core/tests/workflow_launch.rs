@@ -358,7 +358,7 @@ async fn ask_revise_preserves_capability_and_cancel_revokes_without_run() {
         let (events, config) = run(&harness, config).await;
         assert_eq!(config.workflow_capability.inspect(), remains);
         assert!(config.background_tasks.list(false, 10).await.is_empty());
-        assert!(workflow_results(&events)[0].is_error != remains);
+        assert_ne!(workflow_results(&events)[0].is_error, remains);
     }
 }
 
@@ -722,7 +722,7 @@ async fn compile_schema_and_storage_failure_preserve_reusable_capability() {
             neo_agent_core::workflow::WorkflowLaunchBinding {
                 session_identity: session.path().display().to_string(),
                 workspace_identity: workspace.path().display().to_string(),
-                launch_nonce: nonce.to_owned(),
+                launch_nonce: nonce.clone(),
                 actor: WorkflowActor::Model,
                 permission_mode: PermissionMode::Auto,
                 parent_lineage: None,

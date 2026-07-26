@@ -108,12 +108,16 @@ fn finish_test_tool(pane: &mut TranscriptPane) {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("done"),
+
+        workflow_origin: None,
     });
 }
 
@@ -143,6 +147,8 @@ fn shell_test_request(id: &str, command: &str) -> ApprovalRequest {
             cwd: None,
         },
         options: shell_test_options(),
+
+        workflow_origin: None,
     }
 }
 
@@ -263,6 +269,8 @@ fn terminal_tool_ignores_late_running_update() {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
+
+        workflow_origin: None,
     });
 
     assert_eq!(

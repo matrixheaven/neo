@@ -91,8 +91,8 @@ fn shell_command_message_escapes_xml_text_without_escaping_quotes() {
         r#"echo "hello" & <world>"#,
         r#"out "quoted"
 "#,
-        r#"err <x>
-"#,
+        r"err <x>
+",
         Some(0),
         ShellCommandOutcome::Completed,
         false,

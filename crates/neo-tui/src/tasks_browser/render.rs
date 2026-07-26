@@ -135,7 +135,7 @@ impl<'a> TaskBrowserRenderer<'a> {
             let _ = write!(header, "  {interrupted} interrupted");
         }
         if let Some(total) = self.state.snapshot().total_matched {
-            let _ = write!(header, "  {} matched", total);
+            let _ = write!(header, "  {total} matched");
         } else {
             let _ = write!(header, "  {} total", visible.len());
         }

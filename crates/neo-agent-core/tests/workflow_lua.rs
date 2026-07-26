@@ -695,19 +695,19 @@ async fn lua_return_conversion_rejects_sparse_mixed_cyclic_and_non_finite_values
             "sparse",
             r#"local t = {}; t[1] = "a"; t[3] = "c"; return t"#,
         ),
-        ("mixed", r#"return {1, a = 2}"#),
-        ("cyclic", r#"local t = {}; t.self = t; return t"#),
-        ("nan", r#"return (0/0)"#),
-        ("inf", r#"return (1/0)"#),
+        ("mixed", r"return {1, a = 2}"),
+        ("cyclic", r"local t = {}; t.self = t; return t"),
+        ("nan", r"return (0/0)"),
+        ("inf", r"return (1/0)"),
         (
             "json_array_with_object_keys",
-            r#"return neo.json_array({a = 1})"#,
+            r"return neo.json_array({a = 1})",
         ),
         (
             "json_object_with_array_keys",
-            r#"return neo.json_object({1, 2})"#,
+            r"return neo.json_object({1, 2})",
         ),
-        ("multiple_returns", r#"return 1, 2"#),
+        ("multiple_returns", r"return 1, 2"),
     ] {
         let error = fixture
             .runner

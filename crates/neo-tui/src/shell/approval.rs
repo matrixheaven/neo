@@ -210,6 +210,7 @@ mod tests {
                     action: ApprovalAction::RejectPlan,
                 },
             ],
+            workflow_origin: None,
         }
     }
 
@@ -264,6 +265,7 @@ mod tests {
                     action: ApprovalAction::RejectPlan,
                 },
             ],
+            workflow_origin: None,
         });
         assert!(modal.begin_feedback_collection());
         modal.feedback_input.push_str(" typed");

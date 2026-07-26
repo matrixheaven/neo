@@ -200,7 +200,7 @@ async fn dispatch_command(
         Some(Command::ProcessGuard) => {
             anyhow::bail!("process guard must be dispatched before application startup")
         }
-        Some(Command::Update { .. }) | Some(Command::Uninstall { .. }) => {
+        Some(Command::Update { .. } | Command::Uninstall { .. }) => {
             anyhow::bail!("lifecycle command must be dispatched before application startup")
         }
         Some(Command::Run { output, prompt }) => {

@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn workflow_machine_limits_map_all_v2_fields() {
         let (_temp, config_path, project_dir) = temp_project_config(
-            r#"
+            r"
 [runtime.workflow]
 lua_source_bytes = 2048
 manifest_bytes = 1024
@@ -51,7 +51,7 @@ max_active_vms = 2
 max_active_workers = 3
 max_active_executors = 5
 swarm_concurrency = 12
-"#,
+",
         );
         let config = load_config(config_path, project_dir);
         let limits = &config.runtime.workflow;

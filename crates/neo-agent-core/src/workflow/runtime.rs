@@ -919,17 +919,17 @@ impl WorkflowRuntime {
             }
             guard.worker_active = true;
             guard.worker_permit = Some(permit);
-            let session_dir = match guard.run_dir.parent().and_then(Path::parent) {
-                Some(session_dir) => session_dir.to_path_buf(),
-                None => {
+            let session_dir =
+                if let Some(session_dir) = guard.run_dir.parent().and_then(Path::parent) {
+                    session_dir.to_path_buf()
+                } else {
                     guard.worker_active = false;
                     guard.current_invocation = None;
                     self.release_worker_admission_locked(&mut guard);
                     return Err(WorkflowError::Host(
                         "workflow run directory has no session parent".to_owned(),
                     ));
-                }
-            };
+                };
             (
                 WorkflowHandle {
                     run_id: run_id.clone(),
@@ -4071,16 +4071,14 @@ fn child_run_to_outcome(output: &ChildRunOutput) -> WorkflowInvocationOutcome {
 }
 
 fn child_agent_to_outcome(agent: &crate::multi_agent::AgentSnapshot) -> WorkflowInvocationOutcome {
-    let summary = agent
-        .outcome
-        .as_ref()
-        .map(|outcome| outcome.summary.clone())
-        .unwrap_or_else(|| agent.state.as_str().to_owned());
-    let is_error = agent
-        .outcome
-        .as_ref()
-        .map(|outcome| outcome.is_error)
-        .unwrap_or_else(|| agent.state != crate::multi_agent::AgentLifecycleState::Completed);
+    let summary = agent.outcome.as_ref().map_or_else(
+        || agent.state.as_str().to_owned(),
+        |outcome| outcome.summary.clone(),
+    );
+    let is_error = agent.outcome.as_ref().map_or_else(
+        || agent.state != crate::multi_agent::AgentLifecycleState::Completed,
+        |outcome| outcome.is_error,
+    );
     WorkflowInvocationOutcome {
         ok: !is_error && agent.state == crate::multi_agent::AgentLifecycleState::Completed,
         status: match agent.state {
@@ -4181,8 +4179,7 @@ fn decode_user_input_prompt(
             let text = map
                 .get("prompt")
                 .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| prompt_to_string(prompt));
+                .map_or_else(|| prompt_to_string(prompt), str::to_owned);
             let answer_schema = map
                 .get("answer_schema")
                 .cloned()

@@ -706,11 +706,10 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     let path = journal_path(dir.path(), &handle.run_id);
     let input = serde_json::json!({"task": "audit"});
     let existing = collect_journal_v2(&path, None).unwrap();
-    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
-        .map(|e| e.run_id.clone())
-        .unwrap_or_else(|| handle.run_id.clone());
+        .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
     let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
@@ -769,11 +768,10 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
     let path = journal_path(dir.path(), &handle.run_id);
     let input = serde_json::json!({"task": "audit"});
     let existing = collect_journal_v2(&path, None).unwrap();
-    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
-        .map(|e| e.run_id.clone())
-        .unwrap_or_else(|| handle.run_id.clone());
+        .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
     let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
@@ -992,11 +990,10 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let bad_path = journal_path(dir.path(), &bad_id);
     let input = serde_json::json!({"task": "stuck"});
     let existing = collect_journal_v2(&bad_path, None).unwrap();
-    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
-        .map(|e| e.run_id.clone())
-        .unwrap_or_else(|| bad_id.clone());
+        .map_or_else(|| bad_id.clone(), |e| e.run_id.clone());
     let mut writer = JournalV2Writer::open(&bad_path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
@@ -1017,11 +1014,10 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let good_id = good_handle.run_id.clone();
     let good_path = journal_path(dir.path(), &good_id);
     let existing = collect_journal_v2(&good_path, None).unwrap();
-    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
-        .map(|e| e.run_id.clone())
-        .unwrap_or_else(|| good_id.clone());
+        .map_or_else(|| good_id.clone(), |e| e.run_id.clone());
     let mut good_writer = JournalV2Writer::open(&good_path, run_id.clone()).unwrap();
     let changed = JournalEnvelope::new(
         next_seq,

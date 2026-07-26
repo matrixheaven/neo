@@ -440,7 +440,8 @@ mod tests {
             status: ToolStatusKind::Running,
             exit_code: None,
         });
-        component.streaming_started_at = Some(Instant::now() - Duration::from_secs(65));
+        component.streaming_started_at =
+            Some(Instant::now().checked_sub(Duration::from_secs(65)).unwrap());
 
         let header = component.render(120)[0].text();
 

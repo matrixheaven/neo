@@ -50,6 +50,8 @@ fn apply_queued_bash(
         id: id.to_owned(),
         name: "Bash".to_owned(),
         arguments,
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionQueueUpdated {
         turn: 1,
@@ -992,7 +994,7 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
     assert!(
         edit_rows
             .iter()
-            .flat_map(|line| line.spans())
+            .flat_map(neo_tui::primitive::Line::spans)
             .any(|span| { span.text() == "✓ " && span.style().fg == Some(theme.status_ok) })
     );
     let removed = edit_rows
@@ -1344,6 +1346,8 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
         id: "bash-1".to_owned(),
         name: "Bash".to_owned(),
         result: neo_agent_core::ToolResult::ok("1\n2\n3\n4\n5\n6\n7\n8"),
+
+        workflow_origin: None,
     });
 
     let collapsed = runtime
@@ -1440,6 +1444,8 @@ fn bash_shell_failure_summary_survives_empty_tool_result_finish() {
             "truncated": false,
             "outcome": "completed"
         })),
+
+        workflow_origin: None,
     });
 
     let frame = runtime
@@ -1487,18 +1493,24 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         id: "read-0".to_owned(),
         name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("x".repeat(200)),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "bash-0".to_owned(),
         name: "Bash".to_owned(),
         arguments: json!({"command": "y".repeat(200)}),
+
+        workflow_origin: None,
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "bash-0".to_owned(),
         name: "Bash".to_owned(),
         result: neo_agent_core::ToolResult::ok(""),
+
+        workflow_origin: None,
     });
 
     let frame = runtime
@@ -1638,6 +1650,8 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
             id,
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("ok"),
+
+            workflow_origin: None,
         });
     }
 
@@ -2281,6 +2295,8 @@ fn bash_queue_event_renders_position_and_wait_in_original_card() {
         id: "call-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: json!({"command": "cargo test"}),
+
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionQueueUpdated {
         turn: 1,
@@ -2322,6 +2338,8 @@ fn queued_shell_card_keeps_relative_position_across_later_entries() {
         id: "call-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: json!({"command": "cargo test"}),
+
+        workflow_origin: None,
     });
     let rendered = rendered(&mut pane);
     let tool = rendered.find("$ cargo test").expect("tool row");
@@ -2388,7 +2406,7 @@ fn batch_write_card_renders_created_content_and_overwrite_diff() {
     );
     assert!(
         rows.iter()
-            .any(|line| line.contains("1") && line.contains("fn main()")),
+            .any(|line| line.contains('1') && line.contains("fn main()")),
         "created content should have line number: {rows:?}"
     );
 

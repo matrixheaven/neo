@@ -153,7 +153,7 @@ impl ShellRunComponent {
         }
         let (mut stdout, dropped) = self.live_output.finalize();
         if dropped > 0 {
-            stdout.insert(0, format!("... ({} earlier lines)\n", dropped));
+            stdout.insert(0, format!("... ({dropped} earlier lines)\n"));
         }
         let truncated = dropped > 0;
         self.finish(

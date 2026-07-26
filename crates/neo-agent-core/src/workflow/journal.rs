@@ -548,7 +548,7 @@ impl JournalV2Writer {
                 .map_err(|e| WorkflowError::Journal(e.to_string()))?;
         }
 
-        let report = if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
+        let report = if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
             crate::workflow::recovery::recover_journal_v2(path, Some(&run_id))?
         } else {
             crate::workflow::recovery::JournalRecoveryReport {
@@ -571,7 +571,7 @@ impl JournalV2Writer {
     ) -> Result<Self, WorkflowError> {
         let index = if report.index.run_id.is_some() || report.index.record_count > 0 {
             report.index.clone()
-        } else if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
+        } else if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
             scan_journal_v2(path, Some(&run_id))?
         } else {
             JournalScanIndex {

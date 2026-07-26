@@ -509,13 +509,12 @@ impl TaskBrowserState {
     }
 
     fn clear_confirmations(&mut self) -> bool {
-        let any = self.pause_confirmation_task_id.take().is_some()
+        self.pause_confirmation_task_id.take().is_some()
             | self.resume_confirmation_task_id.take().is_some()
             | self.stop_confirmation_task_id.take().is_some()
             | self.answer_confirmation_task_id.take().is_some()
             | self.fork_confirmation_task_id.take().is_some()
-            | self.prune_confirmation_task_id.take().is_some();
-        any
+            | self.prune_confirmation_task_id.take().is_some()
     }
 
     fn reconcile_selection(&mut self) {

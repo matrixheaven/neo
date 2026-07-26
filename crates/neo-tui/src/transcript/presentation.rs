@@ -799,18 +799,24 @@ mod tests {
             id: "read-1".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "one.rs" }),
+
+            workflow_origin: None,
         });
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
             turn: 1,
             id: "read-1".to_owned(),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("one"),
+
+            workflow_origin: None,
         });
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
             turn: 1,
             id: "read-2".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "two.rs" }),
+
+            workflow_origin: None,
         });
 
         let running = pane.render_terminal_update(80, 12);
@@ -823,6 +829,8 @@ mod tests {
             id: "read-2".to_owned(),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("two"),
+
+            workflow_origin: None,
         });
         let finished = pane.render_terminal_update(80, 12);
 

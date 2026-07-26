@@ -960,23 +960,20 @@ fn list_from_projection(
                 }
             }
             for name in names.keys() {
-                match resolve_from_projection(projection, name) {
-                    Ok(resolved) => {
-                        effective.insert(
-                            name.clone(),
-                            RegistryDefinitionSummary {
-                                name: resolved.name.clone(),
-                                display_name: resolved.display_name.clone(),
-                                description: resolved.description.clone(),
-                                revision: resolved.revision.clone(),
-                                source_origin: resolved.source_origin,
-                                source_locator: resolved.source_locator.clone(),
-                            },
-                        );
-                    }
-                    Err(_) => {
-                        // Not effectively launchable (missing, invalid higher, conflict).
-                    }
+                if let Ok(resolved) = resolve_from_projection(projection, name) {
+                    effective.insert(
+                        name.clone(),
+                        RegistryDefinitionSummary {
+                            name: resolved.name.clone(),
+                            display_name: resolved.display_name.clone(),
+                            description: resolved.description.clone(),
+                            revision: resolved.revision.clone(),
+                            source_origin: resolved.source_origin,
+                            source_locator: resolved.source_locator.clone(),
+                        },
+                    );
+                } else {
+                    // Not effectively launchable (missing, invalid higher, conflict).
                 }
             }
             effective.into_values().collect()
@@ -1169,8 +1166,10 @@ fn write_one_atomic(path: &Path, bytes: &[u8], force: bool) -> Result<(), Workfl
         ));
     } else {
         match atomic_file::write_file_atomic_create_new(path, bytes) {
-            Ok(atomic_file::AtomicWriteStatus::Durable)
-            | Ok(atomic_file::AtomicWriteStatus::CommittedUnsynced(_)) => Ok(()),
+            Ok(
+                atomic_file::AtomicWriteStatus::Durable
+                | atomic_file::AtomicWriteStatus::CommittedUnsynced(_),
+            ) => Ok(()),
             Err(err) => Err(err),
         }
     };

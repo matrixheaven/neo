@@ -49,7 +49,7 @@ fn append_logical_multi_gigabyte_journal(
     payload_chars: usize,
 ) {
     let existing = collect_journal_v2(path, Some(run_id)).expect("collect head");
-    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let mut writer = JournalV2Writer::open(path, run_id.clone()).expect("open writer");
     let limits = WorkflowLimits {
         journal_record_bytes: 32 * 1024 * 1024,

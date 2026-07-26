@@ -637,9 +637,7 @@ fn envelope_summary_text(payload: &JournalPayload) -> Option<String> {
 }
 
 fn summarize_envelope(envelope: &JournalEnvelope, include_body: bool) -> JournalRecordSummary {
-    let record_bytes = serde_json::to_vec(envelope)
-        .map(|b| b.len() as u64)
-        .unwrap_or(0);
+    let record_bytes = serde_json::to_vec(envelope).map_or(0, |b| b.len() as u64);
     JournalRecordSummary {
         seq: envelope.seq,
         timestamp_ms: envelope.timestamp_ms,
@@ -822,9 +820,7 @@ pub fn build_summary_page(
         artifacts_next_cursor,
     };
 
-    let returned_bytes = serde_json::to_vec(&summary)
-        .map(|b| b.len() as u64)
-        .unwrap_or(0);
+    let returned_bytes = serde_json::to_vec(&summary).map_or(0, |b| b.len() as u64);
 
     Ok(TaskOutputPage {
         view: TaskOutputView::Summary,
@@ -902,15 +898,12 @@ fn pack_journal_page(
     let mut next_seq = raw.next_seq;
 
     for envelope in &raw.envelopes {
-        let encoded_len = serde_json::to_vec(envelope)
-            .map(|b| b.len() as u64)
-            .unwrap_or(0);
+        let encoded_len = serde_json::to_vec(envelope).map_or(0, |b| b.len() as u64);
         if journal.is_empty() && encoded_len > budget {
             // Single record cannot fit: metadata only + explicit minimum size.
             let summary = summarize_envelope(envelope, false);
-            returned_bytes = serde_json::to_vec(&summary)
-                .map(|b| b.len() as u64)
-                .unwrap_or(summary.record_bytes);
+            returned_bytes =
+                serde_json::to_vec(&summary).map_or(summary.record_bytes, |b| b.len() as u64);
             first_seq = Some(envelope.seq);
             last_seq = Some(envelope.seq);
             next_seq = envelope.seq.saturating_add(1);
@@ -925,9 +918,7 @@ fn pack_journal_page(
             break;
         }
         let summary = summarize_envelope(envelope, true);
-        let summary_bytes = serde_json::to_vec(&summary)
-            .map(|b| b.len() as u64)
-            .unwrap_or(encoded_len);
+        let summary_bytes = serde_json::to_vec(&summary).map_or(encoded_len, |b| b.len() as u64);
         returned_bytes = returned_bytes.saturating_add(summary_bytes);
         if first_seq.is_none() {
             first_seq = Some(envelope.seq);
@@ -986,8 +977,7 @@ pub fn build_result_page(
     let returned_bytes = result
         .as_ref()
         .and_then(|r| serde_json::to_vec(r).ok())
-        .map(|b| b.len() as u64)
-        .unwrap_or(0);
+        .map_or(0, |b| b.len() as u64);
     if returned_bytes > page_budget(request.max_output_bytes) {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::ResourceLimited,
@@ -1039,9 +1029,7 @@ pub fn build_artifacts_page(
     let mut idx = start;
     while idx < all.len() && artifacts.len() < MAX_ARTIFACT_META_PER_PAGE {
         let meta = &all[idx];
-        let meta_bytes = serde_json::to_vec(meta)
-            .map(|b| b.len() as u64)
-            .unwrap_or(128);
+        let meta_bytes = serde_json::to_vec(meta).map_or(128, |b| b.len() as u64);
         if !artifacts.is_empty() && returned_bytes.saturating_add(meta_bytes) > budget {
             break;
         }
@@ -1140,9 +1128,7 @@ pub fn build_artifact_content_page(
         content_bytes,
         has_more,
     };
-    let returned_bytes = serde_json::to_vec(&page)
-        .map(|b| b.len() as u64)
-        .unwrap_or(content_bytes);
+    let returned_bytes = serde_json::to_vec(&page).map_or(content_bytes, |b| b.len() as u64);
 
     Ok(TaskOutputPage {
         view: TaskOutputView::ArtifactContent,
@@ -1219,7 +1205,7 @@ pub fn page_to_tool_result(
 
 #[must_use]
 pub fn measure_tool_result_bytes(content: &str, details: &serde_json::Value) -> usize {
-    let details_len = serde_json::to_vec(details).map(|b| b.len()).unwrap_or(0);
+    let details_len = serde_json::to_vec(details).map_or(0, |b| b.len());
     content.len().saturating_add(details_len)
 }
 
@@ -1256,8 +1242,7 @@ fn format_page_content(page: &TaskOutputPage) -> String {
             let (offset, bytes, more) = page
                 .artifact_content
                 .as_ref()
-                .map(|c| (c.offset, c.content_bytes, c.has_more))
-                .unwrap_or((0, 0, false));
+                .map_or((0, 0, false), |c| (c.offset, c.content_bytes, c.has_more));
             format!(
                 "task_id: {}\nkind: workflow\nstatus: {}\nview: artifact_content\noffset: {}\ncontent_bytes: {}\nhas_more: {}",
                 page.run_id, page.status, offset, bytes, more
@@ -1322,11 +1307,7 @@ fn shrink_page_to_tool_result_cap(
                 page.returned_bytes = page
                     .journal
                     .iter()
-                    .map(|r| {
-                        serde_json::to_vec(r)
-                            .map(|b| b.len() as u64)
-                            .unwrap_or(r.record_bytes)
-                    })
+                    .map(|r| serde_json::to_vec(r).map_or(r.record_bytes, |b| b.len() as u64))
                     .sum();
             }
             TaskOutputView::Artifacts if page.artifacts.len() > 1 => {
@@ -1368,9 +1349,8 @@ fn shrink_page_to_tool_result_cap(
                 let only = page.journal[0].seq;
                 page.first_seq = Some(only);
                 page.last_seq = Some(only);
-                page.returned_bytes = serde_json::to_vec(&page.journal[0])
-                    .map(|b| b.len() as u64)
-                    .unwrap_or(64);
+                page.returned_bytes =
+                    serde_json::to_vec(&page.journal[0]).map_or(64, |b| b.len() as u64);
             }
             _ => {
                 return Err(WorkflowError::coded(

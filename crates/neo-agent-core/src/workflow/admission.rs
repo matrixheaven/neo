@@ -159,6 +159,7 @@ impl WorkflowAdmission {
     ///
     /// When capacity is unavailable the run stays registered in the FIFO queue
     /// and the caller must leave durable state `queued` (no timeout, no failure).
+    #[must_use]
     pub fn try_admit_worker(&self, run_id: &WorkflowId) -> AdmitOutcome {
         let mut state = self.lock();
         let id = run_id.as_str().to_owned();
@@ -183,8 +184,7 @@ impl WorkflowAdmission {
             .worker_queue
             .iter()
             .position(|queued| queued == &id)
-            .map(|index| index + 1)
-            .unwrap_or(1);
+            .map_or(1, |index| index + 1);
 
         let reason = worker_capacity_reason(&state, &self.inner.limits);
         let is_head = state.worker_queue.front().is_some_and(|front| front == &id);

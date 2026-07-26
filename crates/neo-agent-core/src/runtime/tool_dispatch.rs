@@ -1004,10 +1004,10 @@ pub(super) async fn execute_tool_calls(
     ))
 }
 
-fn finalize_authorized_batch<'a>(
+fn finalize_authorized_batch(
     config: &AgentConfig,
     turn: u32,
-    authorized: &[AuthorizedToolCall<'a>],
+    authorized: &[AuthorizedToolCall<'_>],
     mut results: Vec<(AgentToolCall, ToolResult)>,
     executed_any: bool,
     preflight_targets: Option<Vec<PathBuf>>,

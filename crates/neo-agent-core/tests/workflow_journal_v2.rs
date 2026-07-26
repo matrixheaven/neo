@@ -589,7 +589,7 @@ fn journal_recovery_normalizes_valid_unterminated_record() {
     let mut bytes = std::fs::read(&path).unwrap();
     bytes.extend_from_slice(second_line.as_bytes());
     // Explicitly no trailing newline.
-    assert!(!bytes.ends_with(b"\n") || bytes.ends_with(format!("{second_line}").as_bytes()));
+    assert!(!bytes.ends_with(b"\n") || bytes.ends_with(second_line.as_bytes()));
     // Ensure file does not end with newline after append of second_line alone.
     std::fs::write(&path, &bytes).unwrap();
     let on_disk = std::fs::read(&path).unwrap();

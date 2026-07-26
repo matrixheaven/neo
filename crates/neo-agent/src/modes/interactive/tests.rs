@@ -907,9 +907,7 @@ async fn wait_for_file_completion(controller: &mut InteractiveController) {
 async fn wait_for_clipboard_idle(controller: &mut InteractiveController) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while controller.pending_clipboard.is_some() {
-        if Instant::now() >= deadline {
-            panic!("clipboard helper did not finish");
-        }
+        assert!(Instant::now() < deadline, "clipboard helper did not finish");
         let _ = controller.poll_pending_clipboard().await;
         tokio::task::yield_now().await;
     }
@@ -2284,7 +2282,7 @@ async fn event_loop_clipboard_timeout_does_not_block_input() {
     );
     controller.set_clipboard_writer(Arc::new(|_text| {
         Box::pin(async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_mins(1)).await;
             Ok(())
         })
     }));

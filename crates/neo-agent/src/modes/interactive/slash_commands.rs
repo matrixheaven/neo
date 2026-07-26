@@ -764,7 +764,7 @@ fn parse_named_workflow_slash_args(arg: &str) -> Result<(String, serde_json::Val
     if name.is_empty() {
         return Err("workflow name is required".to_owned());
     }
-    let rest = parts.next().map(str::trim).unwrap_or("");
+    let rest = parts.next().map_or("", str::trim);
     let args = if rest.is_empty() {
         serde_json::json!({})
     } else {
