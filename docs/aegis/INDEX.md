@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-25 | plan | docs/aegis/plans/2026-07-25-workflow-platform.md | Neo Workflow Platform Implementation Plan |
 | 2026-07-25 | spec | docs/aegis/specs/2026-07-25-workflow-platform-design.md | Neo Local Workflow Platform Design |
 | 2026-07-25 | handoff | docs/aegis/handoffs/2026-07-25-crates-audit-remediation.md | Neo 2026-07-25 Crates Audit Remediation Handoff Prompt |
 | 2026-07-25 | plan | docs/aegis/plans/2026-07-25-crates-audit-remediation.md | Neo 2026-07-25 Crates Audit Remediation Implementation Plan |
