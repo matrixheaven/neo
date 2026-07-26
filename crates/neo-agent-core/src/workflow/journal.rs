@@ -195,6 +195,8 @@ pub enum JournalPayload {
     },
     UserInputRequested {
         request_id: String,
+        /// Request body: string prompt (legacy) or structured object with
+        /// `prompt`, `answer_schema`, `default`, `title`, `answer_policy`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<serde_json::Value>,
     },

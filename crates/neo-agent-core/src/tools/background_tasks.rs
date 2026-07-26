@@ -598,6 +598,41 @@ impl BackgroundTaskManager {
         )
     }
 
+    /// Typed answer control for durable AwaitingUser runs (design §29.3).
+    ///
+    /// Routes to the single runtime `answer` method. Does not accept answers
+    /// through TUI-owned dialog state.
+    pub async fn answer_workflow(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        value: serde_json::Value,
+        actor: crate::workflow::WorkflowActor,
+    ) -> Result<ToolResult, ToolError> {
+        let handle = match self.workflow_control_handle("TaskAnswer", task_id).await {
+            Ok(handle) => handle,
+            Err(result) => return Ok(result),
+        };
+        handle
+            .answer(request_id, value, actor)
+            .await
+            .map_err(|error| ToolError::InvalidInput {
+                tool: "TaskAnswer".to_owned(),
+                message: format!("answer failed: {error}"),
+            })?;
+        Ok(ToolResult::ok(format!(
+            "workflow {} answered request {request_id}",
+            handle.run_id.0
+        ))
+        .with_details(json!({
+            "task_id": task_id,
+            "kind": "workflow",
+            "status": "queued",
+            "request_id": request_id,
+            "action": "TaskAnswer",
+        })))
+    }
+
     async fn workflow_control_handle(
         &self,
         tool: &str,

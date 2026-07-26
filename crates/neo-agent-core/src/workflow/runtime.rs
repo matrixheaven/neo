@@ -32,6 +32,7 @@ use super::state::{
     WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRevision,
     WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
+use super::user_input::{AwaitUserInput, PendingUserInput, request_id_for_call_index};
 use crate::AgentTokenUsage;
 use crate::multi_agent::{
     AgentId, AgentRole, AgentRunMode, ChildPlan, ChildRunOutput, ChildRuntimeDeps,
@@ -1095,6 +1096,259 @@ impl WorkflowRuntime {
             .await?;
         }
         Ok(())
+    }
+
+    /// Durable `neo.await_user` host boundary (design §29).
+    ///
+    /// Compiles schema/default before any journal effect. On first live call:
+    /// appends `UserInputRequested`, transitions `running -> awaiting_user`,
+    /// releases worker/VM admission, and returns a coded `AwaitingUser` error so
+    /// the worker exits without failing the run. On replay after an answer,
+    /// returns the journaled JSON value.
+    pub async fn await_user(
+        &self,
+        run_id: &WorkflowId,
+        call_index: u64,
+        input: AwaitUserInput,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        let prepared = input.prepare()?;
+        let request_id = request_id_for_call_index(call_index);
+
+        // Replay path: answered request returns durable JSON without re-effect.
+        if let Some(pending) = self.user_input_by_id(run_id, &request_id).await? {
+            if let Some(answer) = pending.answer {
+                return Ok(answer);
+            }
+            // Open request while somehow still running: stay fail-closed.
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::AwaitingUser,
+                format!("user input {request_id} is still open"),
+            ));
+        }
+
+        let state = self.run_state(run_id).await?;
+        {
+            let guard = state.lock().await;
+            if guard.v1_read_only {
+                return Err(WorkflowError::InvalidOperation(
+                    "v1 workflow projections are read-only".to_owned(),
+                ));
+            }
+            if guard.state != WorkflowState::Running {
+                return Err(WorkflowError::InvalidInput(
+                    "await_user requires running state".to_owned(),
+                ));
+            }
+            if guard.control.stop_token.is_cancelled() {
+                return Err(WorkflowError::Cancelled(
+                    "workflow stop requested".to_owned(),
+                ));
+            }
+        }
+
+        // Append+sync UserInputRequested before state transition.
+        let (journal, run_id_owned) = {
+            let guard = state.lock().await;
+            (
+                guard.journal.clone().ok_or_else(|| {
+                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
+                })?,
+                guard.metadata.run_id.clone(),
+            )
+        };
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            // Reject duplicate open request ids.
+            if writer.index().open_user_inputs.contains(&request_id)
+                && !writer.index().answered_user_inputs.contains(&request_id)
+            {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::StaleUserRequest,
+                    format!("user input {request_id} is already open"),
+                ));
+            }
+            JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id_owned,
+                JournalPayload::UserInputRequested {
+                    request_id: request_id.clone(),
+                    prompt: Some(encode_user_input_prompt(&prepared)),
+                },
+            )
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+        {
+            let mut guard = state.lock().await;
+            guard.projection_sequence = Some(sequence);
+            guard.updated_at_ms = Some(timestamp_ms);
+            self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        }
+
+        // Durable state before worker release.
+        self.transition(
+            &state,
+            WorkflowState::AwaitingUser,
+            "user_input",
+            WorkflowActor::Runtime,
+        )
+        .await?;
+
+        Err(WorkflowError::coded(
+            WorkflowErrorCode::AwaitingUser,
+            format!("awaiting user input {request_id}"),
+        ))
+    }
+
+    /// Single runtime answer control path (design §29.3).
+    ///
+    /// Validates state, request id, answer policy, and schema, then appends
+    /// `UserInputAnswered` and transitions `awaiting_user -> queued`. Stale,
+    /// duplicate conflicting, wrong-run, wrong-schema, and human-only model
+    /// answers are rejected without changing state.
+    pub async fn answer(
+        &self,
+        run_id: &WorkflowId,
+        request_id: &str,
+        value: serde_json::Value,
+        actor: WorkflowActor,
+    ) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let pending = self
+            .user_input_by_id(run_id, request_id)
+            .await?
+            .ok_or_else(|| {
+                WorkflowError::coded(
+                    WorkflowErrorCode::StaleUserRequest,
+                    format!("unknown user input request {request_id}"),
+                )
+            })?;
+
+        // Idempotent success only when the durable answer already matches.
+        if let Some(existing) = &pending.answer {
+            if existing == &value {
+                return Ok(());
+            }
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::StaleUserRequest,
+                format!("user input {request_id} already answered with a different value"),
+            ));
+        }
+
+        {
+            let guard = state.lock().await;
+            if guard.v1_read_only {
+                return Err(WorkflowError::InvalidOperation(
+                    "v1 workflow projections are read-only".to_owned(),
+                ));
+            }
+            if guard.state != WorkflowState::AwaitingUser {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::InvalidOperation,
+                    format!(
+                        "answer requires awaiting_user state; current is {}",
+                        guard.state.as_str()
+                    ),
+                ));
+            }
+        }
+
+        // Validate policy + schema before any durable write.
+        pending.validate_answer(&value, actor)?;
+
+        let (journal, run_id_owned) = {
+            let guard = state.lock().await;
+            (
+                guard.journal.clone().ok_or_else(|| {
+                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
+                })?,
+                guard.metadata.run_id.clone(),
+            )
+        };
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            if !writer.index().open_user_inputs.contains(request_id) {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::StaleUserRequest,
+                    format!("user input {request_id} is not open"),
+                ));
+            }
+            if writer.index().answered_user_inputs.contains(request_id) {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::StaleUserRequest,
+                    format!("user input {request_id} already answered"),
+                ));
+            }
+            JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id_owned,
+                JournalPayload::UserInputAnswered {
+                    request_id: request_id.to_owned(),
+                    answer: Some(value.clone()),
+                },
+            )
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+        {
+            let mut guard = state.lock().await;
+            guard.projection_sequence = Some(sequence);
+            guard.updated_at_ms = Some(timestamp_ms);
+            // Reset replay so the next worker pass can return the journaled answer.
+            if let Ok(envelopes) =
+                journal::collect_journal_v2(&guard.journal_path(), Some(&guard.metadata.run_id))
+            {
+                guard.replay_entries = replay_entries_v2(&envelopes);
+            }
+            guard.replay_cursor = 0;
+            guard.replay_live = false;
+            self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        }
+
+        self.transition(&state, WorkflowState::Queued, "user_input_answered", actor)
+            .await?;
+
+        // Admission may promote to running when a runner is bound.
+        if self.bound_runner()?.is_some() {
+            let _ = self.start_worker(run_id).await;
+        }
+        Ok(())
+    }
+
+    /// Rehydrate the open (or historical) user-input request for a run.
+    pub async fn pending_user_input(
+        &self,
+        run_id: &WorkflowId,
+    ) -> Result<Option<PendingUserInput>, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let journal_path = {
+            let guard = state.lock().await;
+            guard.journal_path()
+        };
+        let envelopes = journal::collect_journal_v2(&journal_path, Some(run_id))?;
+        Ok(latest_open_user_input(&envelopes).or_else(|| latest_user_input(&envelopes)))
+    }
+
+    async fn user_input_by_id(
+        &self,
+        run_id: &WorkflowId,
+        request_id: &str,
+    ) -> Result<Option<PendingUserInput>, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let journal_path = {
+            let guard = state.lock().await;
+            guard.journal_path()
+        };
+        let envelopes = journal::collect_journal_v2(&journal_path, Some(run_id))?;
+        Ok(user_input_from_envelopes(&envelopes, request_id))
     }
 
     /// Persist the canonical final result before a `Completed` transition.
@@ -2650,7 +2904,10 @@ impl WorkflowRuntime {
             guard.worker_join = None;
             guard.current_invocation = None;
             self.release_worker_admission_locked(&mut guard);
-            if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
+            if guard.state.is_terminal()
+                || guard.state == WorkflowState::Paused
+                || guard.state == WorkflowState::AwaitingUser
+            {
                 return Ok(());
             }
         }
@@ -2730,6 +2987,21 @@ impl WorkflowRuntime {
                         WorkflowActor::Runtime,
                     )
                     .await
+                }
+                Err(error) if error.code() == WorkflowErrorCode::AwaitingUser => {
+                    // await_user already transitioned to AwaitingUser and released permits.
+                    let current = state.lock().await.state;
+                    if current == WorkflowState::AwaitingUser {
+                        Ok(())
+                    } else {
+                        self.transition(
+                            &state,
+                            WorkflowState::AwaitingUser,
+                            "user_input",
+                            WorkflowActor::Runtime,
+                        )
+                        .await
+                    }
                 }
                 Err(error) => {
                     self.transition(
@@ -3432,6 +3704,31 @@ impl WorkflowHandle {
             .await
     }
 
+    pub async fn await_user(
+        &self,
+        call_index: u64,
+        input: AwaitUserInput,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        self.runtime
+            .await_user(&self.run_id, call_index, input)
+            .await
+    }
+
+    pub async fn answer(
+        &self,
+        request_id: &str,
+        value: serde_json::Value,
+        actor: WorkflowActor,
+    ) -> Result<(), WorkflowError> {
+        self.runtime
+            .answer(&self.run_id, request_id, value, actor)
+            .await
+    }
+
+    pub async fn pending_user_input(&self) -> Result<Option<PendingUserInput>, WorkflowError> {
+        self.runtime.pending_user_input(&self.run_id).await
+    }
+
     pub async fn accept_child_structured_output_with_repair(
         &self,
         invocation_id: &str,
@@ -3641,5 +3938,137 @@ fn observe_outcome(
             }
         }
         _ => {}
+    }
+}
+
+fn encode_user_input_prompt(
+    prepared: &super::user_input::PreparedUserInputRequest,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "prompt".to_owned(),
+        serde_json::Value::String(prepared.prompt.clone()),
+    );
+    obj.insert("answer_schema".to_owned(), prepared.answer_schema.clone());
+    if let Some(default) = &prepared.default {
+        obj.insert("default".to_owned(), default.clone());
+    }
+    if let Some(title) = &prepared.title {
+        obj.insert("title".to_owned(), serde_json::Value::String(title.clone()));
+    }
+    obj.insert(
+        "answer_policy".to_owned(),
+        serde_json::Value::String(prepared.answer_policy.as_str().to_owned()),
+    );
+    serde_json::Value::Object(obj)
+}
+
+fn decode_user_input_prompt(
+    request_id: &str,
+    prompt: Option<&serde_json::Value>,
+) -> PendingUserInput {
+    match prompt {
+        Some(serde_json::Value::Object(map)) => {
+            let text = map
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| prompt_to_string(prompt));
+            let answer_schema = map
+                .get("answer_schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(true));
+            let default = map.get("default").cloned();
+            let title = map.get("title").and_then(|v| v.as_str()).map(str::to_owned);
+            let answer_policy = map
+                .get("answer_policy")
+                .and_then(|v| v.as_str())
+                .and_then(|s| super::user_input::UserAnswerPolicy::parse(s).ok())
+                .unwrap_or_default();
+            PendingUserInput {
+                request_id: request_id.to_owned(),
+                prompt: text,
+                answer_schema,
+                default,
+                title,
+                answer_policy,
+                answer: None,
+            }
+        }
+        other => PendingUserInput {
+            request_id: request_id.to_owned(),
+            prompt: prompt_to_string(other),
+            answer_schema: serde_json::json!(true),
+            default: None,
+            title: None,
+            answer_policy: super::user_input::UserAnswerPolicy::default(),
+            answer: None,
+        },
+    }
+}
+
+fn user_input_from_envelopes(
+    envelopes: &[JournalEnvelope],
+    request_id: &str,
+) -> Option<PendingUserInput> {
+    let mut pending: Option<PendingUserInput> = None;
+    for envelope in envelopes {
+        match &envelope.payload {
+            JournalPayload::UserInputRequested {
+                request_id: rid,
+                prompt,
+            } if rid == request_id => {
+                pending = Some(decode_user_input_prompt(rid, prompt.as_ref()));
+            }
+            JournalPayload::UserInputAnswered {
+                request_id: rid,
+                answer,
+                ..
+            } if rid == request_id => {
+                if let Some(entry) = pending.as_mut() {
+                    entry.answer = answer.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
+fn latest_open_user_input(envelopes: &[JournalEnvelope]) -> Option<PendingUserInput> {
+    let mut open: Option<PendingUserInput> = None;
+    let mut answered = std::collections::HashSet::new();
+    for envelope in envelopes {
+        match &envelope.payload {
+            JournalPayload::UserInputRequested { request_id, prompt } => {
+                open = Some(decode_user_input_prompt(request_id, prompt.as_ref()));
+            }
+            JournalPayload::UserInputAnswered { request_id, .. } => {
+                answered.insert(request_id.clone());
+                if open.as_ref().is_some_and(|p| p.request_id == *request_id) {
+                    open = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    open.filter(|p| !answered.contains(&p.request_id))
+}
+
+fn latest_user_input(envelopes: &[JournalEnvelope]) -> Option<PendingUserInput> {
+    let mut last_id: Option<String> = None;
+    for envelope in envelopes {
+        if let JournalPayload::UserInputRequested { request_id, .. } = &envelope.payload {
+            last_id = Some(request_id.clone());
+        }
+    }
+    last_id.and_then(|id| user_input_from_envelopes(envelopes, &id))
+}
+
+fn prompt_to_string(prompt: Option<&serde_json::Value>) -> String {
+    match prompt {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
     }
 }

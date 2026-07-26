@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::schema::CompiledSchema;
 use super::state::WorkflowRevision;
+use super::user_input::AwaitUserInput;
 use super::{
     WorkflowError, WorkflowHandle, WorkflowInvocationKind, WorkflowInvocationOutcome,
     WorkflowLimits, WorkflowOutcomeStatus,
@@ -839,6 +840,38 @@ impl LuaWorkflowRunner {
             })
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
         neo.set("fail", fail)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+
+        let handle = self.handle.clone();
+        let call_index = Arc::clone(&next_call);
+        let boundary = Arc::clone(instructions);
+        let fatal = Arc::clone(fatal_reason);
+        let await_user = lua
+            .create_async_function(move |lua, value: Value| {
+                let handle = handle.clone();
+                let call_index = Arc::clone(&call_index);
+                let boundary = Arc::clone(&boundary);
+                let fatal = Arc::clone(&fatal);
+                async move {
+                    check_fatal(&fatal)?;
+                    let (input, _canonical): (AwaitUserInput, _) =
+                        decode_input(&lua, value, "await_user")?;
+                    // Schema/default compile before any durable effect.
+                    let _prepared = input.prepare().map_err(mlua::Error::external)?;
+                    let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let answer = handle
+                        .await_user(index, input)
+                        .await
+                        .map_err(mlua::Error::external)?;
+                    boundary.store(0, Ordering::Relaxed);
+                    let lua_value = lua.to_value(&answer).map_err(|error| {
+                        mlua::Error::external(WorkflowError::Host(error.to_string()))
+                    })?;
+                    make_read_only(lua_value, &lua, "await_user answers are read-only")
+                }
+            })
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("await_user", await_user)
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         let json_array = lua

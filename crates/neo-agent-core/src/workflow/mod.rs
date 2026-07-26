@@ -14,12 +14,18 @@ pub mod retention;
 pub mod runtime;
 pub mod schema;
 mod state;
+pub mod user_input;
 
 pub use capability::WorkflowCapability;
 pub use schema::{
     CompiledSchema, SchemaErrorCode, SchemaValidationError, StructuredOutputSource,
     accept_structured_output, attach_response_format_hint, parse_strict_json_value,
     validate_final_lua_result,
+};
+
+pub use user_input::{
+    AwaitUserInput, PendingUserInput, PreparedUserInputRequest, UserAnswerPolicy,
+    request_id_for_call_index,
 };
 
 pub use definition::{
