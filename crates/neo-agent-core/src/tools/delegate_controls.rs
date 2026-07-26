@@ -1118,6 +1118,7 @@ mod tests {
                     role: None,
                     mode: crate::multi_agent::AgentRunMode::Foreground,
                     context: crate::multi_agent::DelegateContext::None,
+                    output_schema: None,
                 },
             )
             .expect("resume starts");
@@ -1168,6 +1169,7 @@ mod tests {
                     role: None,
                     mode: crate::multi_agent::AgentRunMode::Foreground,
                     context: crate::multi_agent::DelegateContext::None,
+                    output_schema: None,
                 },
             )
             .expect("resume starts");
@@ -1210,6 +1212,7 @@ mod tests {
                     role: None,
                     mode: crate::multi_agent::AgentRunMode::Foreground,
                     context: crate::multi_agent::DelegateContext::None,
+                    output_schema: None,
                 },
             )
             .expect("second run starts");
@@ -1226,6 +1229,7 @@ mod tests {
                     role: None,
                     mode: crate::multi_agent::AgentRunMode::Foreground,
                     context: crate::multi_agent::DelegateContext::None,
+                    output_schema: None,
                 },
             )
             .expect("third run starts");

@@ -22,13 +22,18 @@ use super::limits::WorkflowLimits;
 use super::output::{
     CanonicalFinalResult, PreparedFinalBody, prepare_final_body, reconstruct_canonical_final_result,
 };
-use super::schema::{CompiledSchema, validate_final_lua_result};
+use super::schema::{
+    CompiledSchema, StructuredOutputSource, accept_structured_output, validate_final_lua_result,
+};
 use super::state::{
     WorkflowActor, WorkflowFinalResultMetadata, WorkflowId, WorkflowInvocationKind,
     WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRevision,
     WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
 use crate::AgentTokenUsage;
+use crate::multi_agent::{
+    AgentId, ChildRunOutput, ChildRuntimeDeps, MultiAgentRuntime, child_final_assistant_text,
+};
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 
 #[path = "effect.rs"]
@@ -65,6 +70,20 @@ pub enum WorkflowProjectionStage {
     Started,
     Updated,
     Finished,
+}
+
+/// Host acceptance of a child structured output with at most one tools-disabled repair.
+#[derive(Debug, Clone)]
+pub struct ChildSchemaAcceptResult {
+    pub ok: bool,
+    pub value: Option<serde_json::Value>,
+    pub error_code: Option<WorkflowErrorCode>,
+    pub summary: String,
+    pub repair_attempted: bool,
+    pub repair_id: Option<String>,
+    pub first_raw: String,
+    pub repair_raw: Option<String>,
+    pub actual_usage: Option<AgentTokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -1261,6 +1280,302 @@ impl WorkflowRuntime {
             .await
     }
 
+    /// Append `SchemaRepairStarted` before a tools-disabled corrective model call.
+    ///
+    /// Returns the durable `repair_id`. Callers must not dispatch the repair model
+    /// effect until this append has synced. A second start for the same
+    /// `invocation_id` is rejected so crash recovery never repeats the model effect.
+    pub async fn start_schema_repair(
+        &self,
+        run_id: &WorkflowId,
+        invocation_id: &str,
+    ) -> Result<String, WorkflowError> {
+        if self
+            .schema_repair_already_started(run_id, invocation_id)
+            .await?
+        {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::InterruptedHostExit,
+                format!(
+                    "schema repair already started for invocation {invocation_id}; not repeating model effect"
+                ),
+            ));
+        }
+        let state = self.run_state(run_id).await?;
+        let (journal, run_id_owned) = {
+            let guard = state.lock().await;
+            if guard.v1_read_only {
+                return Err(WorkflowError::InvalidOperation(
+                    "v1 workflow projections are read-only".to_owned(),
+                ));
+            }
+            (
+                guard.journal.clone().ok_or_else(|| {
+                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
+                })?,
+                guard.metadata.run_id.clone(),
+            )
+        };
+        let repair_id = format!("repair_{}", uuid::Uuid::new_v4().as_simple());
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id_owned,
+                JournalPayload::SchemaRepairStarted {
+                    repair_id: repair_id.clone(),
+                    invocation_id: invocation_id.to_owned(),
+                },
+            )
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+        let mut guard = state.lock().await;
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        Ok(repair_id)
+    }
+
+    /// Append `SchemaRepairFinished` after the single corrective attempt settles.
+    pub async fn finish_schema_repair(
+        &self,
+        run_id: &WorkflowId,
+        repair_id: &str,
+        ok: bool,
+        summary: impl Into<String>,
+    ) -> Result<(), WorkflowError> {
+        let summary = summary.into();
+        let state = self.run_state(run_id).await?;
+        let (journal, run_id_owned) = {
+            let guard = state.lock().await;
+            (
+                guard.journal.clone().ok_or_else(|| {
+                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
+                })?,
+                guard.metadata.run_id.clone(),
+            )
+        };
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            if !writer.index().open_schema_repairs.contains(repair_id) {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::JournalCorrupt,
+                    format!("schema_repair_finished without start for {repair_id}"),
+                ));
+            }
+            if writer.index().finished_schema_repairs.contains(repair_id) {
+                return Err(WorkflowError::coded(
+                    WorkflowErrorCode::JournalCorrupt,
+                    format!("duplicate schema_repair_finished for {repair_id}"),
+                ));
+            }
+            JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id_owned,
+                JournalPayload::SchemaRepairFinished {
+                    repair_id: repair_id.to_owned(),
+                    ok,
+                    summary: summary.clone(),
+                },
+            )
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+        let mut guard = state.lock().await;
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        Ok(())
+    }
+
+    /// Validate a child output against `schema`, with exactly one tools-disabled repair.
+    ///
+    /// Ordering:
+    /// 1. validate first provider-native/assistant value;
+    /// 2. on failure, append `SchemaRepairStarted` before any corrective model call;
+    /// 3. continue the same child session with tools disabled;
+    /// 4. reject repair tool attempts as `schema_repair_tool_forbidden`;
+    /// 5. append `SchemaRepairFinished` and aggregate both attempts' actual usage.
+    ///
+    /// Crash after start and before finish never re-dispatches the corrective model
+    /// effect: recovery finishes the open repair as interrupted without a model call.
+    pub async fn accept_child_structured_output_with_repair(
+        &self,
+        run_id: &WorkflowId,
+        invocation_id: &str,
+        multi_agent: &MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+        agent_id: &AgentId,
+        schema: &CompiledSchema,
+        first_output: &ChildRunOutput,
+    ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
+        let first_raw = child_final_assistant_text(first_output);
+        let first_usage = accumulate_child_usage(None, &first_output.events);
+        let first_source = StructuredOutputSource::AssistantText(first_raw.clone());
+        match accept_structured_output(schema, first_source) {
+            Ok(value) => {
+                return Ok(ChildSchemaAcceptResult {
+                    ok: true,
+                    value: Some(value),
+                    error_code: None,
+                    summary: "child output matched schema".to_owned(),
+                    repair_attempted: false,
+                    repair_id: None,
+                    first_raw,
+                    repair_raw: None,
+                    actual_usage: first_usage,
+                });
+            }
+            Err(first_err) => {
+                // If a repair was already journaled for this invocation (crash mid-repair),
+                // never repeat the corrective model effect.
+                if self
+                    .schema_repair_already_started(run_id, invocation_id)
+                    .await?
+                {
+                    return Ok(ChildSchemaAcceptResult {
+                        ok: false,
+                        value: None,
+                        error_code: Some(WorkflowErrorCode::InterruptedHostExit),
+                        summary: format!(
+                            "schema repair already started for {invocation_id}; not repeating model effect"
+                        ),
+                        repair_attempted: true,
+                        repair_id: None,
+                        first_raw,
+                        repair_raw: None,
+                        actual_usage: first_usage,
+                    });
+                }
+
+                let repair_id = self.start_schema_repair(run_id, invocation_id).await?;
+
+                let repair = multi_agent
+                    .run_tools_disabled_schema_repair_turn(
+                        deps,
+                        agent_id,
+                        &first_err.to_string(),
+                        schema.schema(),
+                    )
+                    .await
+                    .map_err(|e| WorkflowError::Host(format!("schema repair turn failed: {e}")))?;
+
+                let repair_raw = repair.latest_text.clone().unwrap_or_default();
+                let repair_usage = accumulate_child_usage(first_usage, &repair.events);
+                let actual_usage = repair_usage;
+
+                if repair.tool_attempted {
+                    let summary = "schema_repair_tool_forbidden".to_owned();
+                    self.finish_schema_repair(run_id, &repair_id, false, &summary)
+                        .await?;
+                    return Ok(ChildSchemaAcceptResult {
+                        ok: false,
+                        value: None,
+                        error_code: Some(WorkflowErrorCode::SchemaRepairToolForbidden),
+                        summary,
+                        repair_attempted: true,
+                        repair_id: Some(repair_id),
+                        first_raw,
+                        repair_raw: Some(repair_raw),
+                        actual_usage,
+                    });
+                }
+
+                let second_source = StructuredOutputSource::AssistantText(repair_raw.clone());
+                match accept_structured_output(schema, second_source) {
+                    Ok(value) => {
+                        let summary = "child schema repaired".to_owned();
+                        self.finish_schema_repair(run_id, &repair_id, true, &summary)
+                            .await?;
+                        Ok(ChildSchemaAcceptResult {
+                            ok: true,
+                            value: Some(value),
+                            error_code: None,
+                            summary,
+                            repair_attempted: true,
+                            repair_id: Some(repair_id),
+                            first_raw,
+                            repair_raw: Some(repair_raw),
+                            actual_usage,
+                        })
+                    }
+                    Err(second_err) => {
+                        let summary = format!("schema_invalid after repair: {second_err}");
+                        self.finish_schema_repair(run_id, &repair_id, false, &summary)
+                            .await?;
+                        Ok(ChildSchemaAcceptResult {
+                            ok: false,
+                            value: None,
+                            error_code: Some(WorkflowErrorCode::SchemaInvalid),
+                            summary,
+                            repair_attempted: true,
+                            repair_id: Some(repair_id),
+                            first_raw,
+                            repair_raw: Some(repair_raw),
+                            actual_usage,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a schema repair was already journaled for `invocation_id`.
+    pub async fn schema_repair_already_started(
+        &self,
+        run_id: &WorkflowId,
+        invocation_id: &str,
+    ) -> Result<bool, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        let Some(journal) = guard.journal.as_ref() else {
+            return Ok(false);
+        };
+        let writer = journal
+            .lock()
+            .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+        // Index tracks repair_ids; scan path for invocation linkage.
+        drop(writer);
+        let path = guard.journal_path();
+        let run = guard.metadata.run_id.clone();
+        drop(guard);
+        let envelopes = journal::collect_journal_v2(&path, Some(&run))?;
+        Ok(envelopes.iter().any(|env| {
+            matches!(
+                &env.payload,
+                JournalPayload::SchemaRepairStarted {
+                    invocation_id: inv,
+                    ..
+                } if inv == invocation_id
+            )
+        }))
+    }
+
+    /// Active (run_id, invocation_id) if exactly one run has a live invocation.
+    pub async fn find_active_invocation(&self) -> Option<(WorkflowId, String)> {
+        let runs = self.runs.lock().await;
+        let mut found = None;
+        for state in runs.values() {
+            let guard = state.lock().await;
+            if let Some(inv) = guard.current_invocation.clone() {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((guard.metadata.run_id.clone(), inv));
+            }
+        }
+        found
+    }
+
     /// Transition `Queued -> Running` without spawning a supervised worker.
     ///
     /// Production workers use [`Self::start_worker`]. Direct `LuaWorkflowRunner`
@@ -1432,6 +1747,18 @@ impl WorkflowRuntime {
                     run_dir,
                     metadata,
                     format!("recovery append failed: {error}"),
+                )
+                .await,
+            );
+            return Ok(());
+        }
+        // Open schema repairs never re-dispatch the corrective model effect.
+        if let Err(error) = self.reconcile_open_schema_repairs_v2(&mut writer, &metadata) {
+            handles.push(
+                self.insert_failed_run(
+                    run_dir,
+                    metadata,
+                    format!("schema repair recovery failed: {error}"),
                 )
                 .await,
             );
@@ -2361,6 +2688,36 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    /// Finish open schema repairs as interrupted without re-dispatching the model.
+    fn reconcile_open_schema_repairs_v2(
+        &self,
+        writer: &mut JournalV2Writer,
+        metadata: &WorkflowRunMetadata,
+    ) -> Result<(), WorkflowError> {
+        let open: Vec<String> = writer
+            .index()
+            .open_schema_repairs
+            .iter()
+            .filter(|id| !writer.index().finished_schema_repairs.contains(*id))
+            .cloned()
+            .collect();
+        for repair_id in open {
+            let timestamp_ms = current_timestamp_ms();
+            let envelope = JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                metadata.run_id.clone(),
+                JournalPayload::SchemaRepairFinished {
+                    repair_id,
+                    ok: false,
+                    summary: "interrupted(host_exit); schema repair not repeated".to_owned(),
+                },
+            );
+            writer.append(&envelope, &self.limits)?;
+        }
+        Ok(())
+    }
+
     fn bound_recovery_resolver(&self) -> Result<Option<Arc<RecoveryResolver>>, WorkflowError> {
         self.recovery_resolver
             .read()
@@ -2694,6 +3051,54 @@ impl WorkflowHandle {
             .await
     }
 
+    pub async fn start_schema_repair(&self, invocation_id: &str) -> Result<String, WorkflowError> {
+        self.runtime
+            .start_schema_repair(&self.run_id, invocation_id)
+            .await
+    }
+
+    pub async fn finish_schema_repair(
+        &self,
+        repair_id: &str,
+        ok: bool,
+        summary: impl Into<String>,
+    ) -> Result<(), WorkflowError> {
+        self.runtime
+            .finish_schema_repair(&self.run_id, repair_id, ok, summary)
+            .await
+    }
+
+    pub async fn accept_child_structured_output_with_repair(
+        &self,
+        invocation_id: &str,
+        multi_agent: &MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+        agent_id: &AgentId,
+        schema: &CompiledSchema,
+        first_output: &ChildRunOutput,
+    ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
+        self.runtime
+            .accept_child_structured_output_with_repair(
+                &self.run_id,
+                invocation_id,
+                multi_agent,
+                deps,
+                agent_id,
+                schema,
+                first_output,
+            )
+            .await
+    }
+
+    pub async fn schema_repair_already_started(
+        &self,
+        invocation_id: &str,
+    ) -> Result<bool, WorkflowError> {
+        self.runtime
+            .schema_repair_already_started(&self.run_id, invocation_id)
+            .await
+    }
+
     /// Put this run into Running without a supervised worker (direct Lua execution).
     pub async fn enter_running_for_direct_execution(&self) -> Result<(), WorkflowError> {
         self.runtime
@@ -2761,6 +3166,18 @@ impl WorkflowHandle {
     pub fn stop_token(&self) -> &CancellationToken {
         &self.control.stop_token
     }
+}
+
+fn accumulate_child_usage(
+    total: Option<AgentTokenUsage>,
+    events: &[crate::AgentEvent],
+) -> Option<AgentTokenUsage> {
+    events.iter().fold(total, |total, event| {
+        let crate::AgentEvent::TokenUsage { usage, .. } = event else {
+            return total;
+        };
+        Some(add_usage(total, *usage))
+    })
 }
 
 fn observe_outcome(

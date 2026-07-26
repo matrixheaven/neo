@@ -387,6 +387,7 @@ async fn task_output_reports_delegate_context_mode_from_current_run() {
         role: None,
         mode: AgentRunMode::Background,
         context: DelegateContext::Summary,
+        output_schema: None,
     };
     resume_ctx
         .multi_agent

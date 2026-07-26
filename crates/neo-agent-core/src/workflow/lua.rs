@@ -91,6 +91,7 @@ impl DelegateInput {
             role: self.role,
             mode: AgentRunMode::Foreground,
             context: self.context,
+            output_schema: None,
         }
     }
 }

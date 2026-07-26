@@ -139,6 +139,7 @@ fn agent_snapshot_records_run_metadata_and_resume_origin() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: neo_agent_core::multi_agent::DelegateContext::Inherit,
+        output_schema: None,
     };
     let resumed = runtime
         .start_resume_delegate(first.id.as_str(), &request)
@@ -182,6 +183,7 @@ fn replayed_delegate_snapshot_can_be_resumed_after_session_restore() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::Inherit,
+        output_schema: None,
     };
     let resumed = restored
         .start_resume_delegate(&agent_id, &request)
@@ -288,6 +290,7 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::Inherit,
+        output_schema: None,
     };
     let resumed = restored
         .start_resume_delegate(&agent_id, &request)
@@ -348,6 +351,7 @@ fn compact_delegate_progress_restores_and_resumes() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::Inherit,
+        output_schema: None,
     };
     let resumed = restored
         .start_resume_delegate(&agent_id, &request)
@@ -524,6 +528,7 @@ async fn child_run_appends_events_to_agent_wire() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
 
     let output = runtime
@@ -599,6 +604,7 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
     let first_output = runtime
         .run_child_turn(deps.clone(), &first_request, AgentRunMode::Foreground)
@@ -622,6 +628,7 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
     let resumed = restored
         .start_resume_delegate(&agent_id, &resume_request)
@@ -680,6 +687,7 @@ async fn resumed_child_turn_fails_when_agent_wire_is_missing_or_corrupt() {
             role: None,
             mode: AgentRunMode::Foreground,
             context: DelegateContext::None,
+            output_schema: None,
         };
         let resumed = runtime
             .start_resume_delegate(&agent_id, &request)
@@ -749,6 +757,7 @@ async fn failed_child_run_discards_partial_model_attempt_from_agent_wire() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
 
     let output = runtime
@@ -877,6 +886,7 @@ async fn child_run_uses_parent_cancellation_token() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
 
     let output = MultiAgentRuntime::new()
@@ -3827,6 +3837,7 @@ async fn assert_runtime_child_inherits_and_persists_epoch(
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::Inherit,
+        output_schema: None,
     };
     let output = runtime
         .run_child_turn(deps, &request, AgentRunMode::Foreground)
@@ -3947,6 +3958,7 @@ async fn concurrent_children_singleflight_the_same_source_read() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
+        output_schema: None,
     };
     let first_request = request("first child");
     let second_request = request("second child");

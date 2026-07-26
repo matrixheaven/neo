@@ -17,7 +17,9 @@ pub use progress::{
 };
 pub use runtime::{
     AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateRequest, DelegateSwarmItem,
-    DelegateSwarmRequest, MultiAgentRuntime, apply_swarm_template, seed_child_instruction_baseline,
+    DelegateSwarmRequest, MultiAgentRuntime, SchemaRepairTurnResult, apply_swarm_template,
+    child_final_assistant_text, schema_repair_correction_prompt, schema_repair_tool_attempted,
+    seed_child_instruction_baseline,
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};
 pub use state::{

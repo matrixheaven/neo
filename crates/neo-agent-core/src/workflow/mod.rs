@@ -65,8 +65,9 @@ pub use retention::{
     preview_mark_sweep,
 };
 pub use runtime::{
-    ReplayPrefix, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
-    WorkflowProjectionStage, WorkflowRuntime, compute_replay_prefix,
+    ChildSchemaAcceptResult, ReplayPrefix, WorkflowHandle, WorkflowInvocationContext,
+    WorkflowLaunchRequest, WorkflowOutput, WorkflowProjectionStage, WorkflowRuntime,
+    compute_replay_prefix,
 };
 pub use state::{
     WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowChildRef,

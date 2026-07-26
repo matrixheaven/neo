@@ -20,6 +20,7 @@ use crate::multi_agent::{
     DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
     SwarmSnapshot, apply_agent_progress, apply_swarm_template,
 };
+use crate::workflow::{CompiledSchema, StructuredOutputSource, accept_structured_output};
 
 type SwarmProgressUpdate = (SwarmChildProgress, SwarmAggregate, AgentLifecycleState);
 
@@ -158,12 +159,16 @@ async fn execute_delegate(
     });
     let output = ctx
         .multi_agent
-        .run_started_child_turn(deps, snapshot, request.context, |agent| {
+        .run_started_child_turn(deps.clone(), snapshot, request.context, |agent| {
             ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
         })
         .await;
-    let actual_usage = accumulate_actual_usage(None, &output.events);
-    let completed = output.snapshot;
+    let (result, details_extra) = apply_child_output_schema(ctx, &deps, &request, output).await?;
+    let completed = result.snapshot;
+    let is_schema_error = details_extra
+        .get("schema_error_code")
+        .and_then(serde_json::Value::as_str)
+        .is_some();
     ctx.emit_event(AgentEvent::DelegateFinished {
         turn,
         agent: completed.clone(),
@@ -177,10 +182,21 @@ async fn execute_delegate(
         true,
         false,
     );
-    if let Some(usage) = actual_usage {
-        details["actual_usage"] = json!(usage);
+    if let Some(obj) = details_extra.as_object() {
+        for (k, v) in obj {
+            details[k] = v.clone();
+        }
     }
-    Ok(ToolResult::ok(delegate_result_content(&completed, request.context)).with_details(details))
+    let content = if let Some(value) = details.get("structured_output") {
+        value.to_string()
+    } else {
+        delegate_result_content(&completed, request.context)
+    };
+    if is_schema_error {
+        Ok(ToolResult::error(content).with_details(details))
+    } else {
+        Ok(ToolResult::ok(content).with_details(details))
+    }
 }
 
 async fn start_background_delegate(
@@ -745,6 +761,137 @@ fn child_runtime_deps(ctx: &ToolContext) -> Result<ChildRuntimeDeps, ToolError> 
         deps = deps.with_parent_instruction_state(state.clone());
     }
     Ok(deps)
+}
+
+/// When `output_schema` is set, validate the child result and perform exactly one
+/// tools-disabled repair (journaled when a workflow invocation is active).
+async fn apply_child_output_schema(
+    ctx: &ToolContext,
+    deps: &ChildRuntimeDeps,
+    request: &DelegateRequest,
+    output: crate::multi_agent::ChildRunOutput,
+) -> Result<(crate::multi_agent::ChildRunOutput, serde_json::Value), ToolError> {
+    let Some(schema_doc) = request.output_schema.as_ref() else {
+        let usage = accumulate_actual_usage(None, &output.events);
+        let mut extra = json!({});
+        if let Some(usage) = usage {
+            extra["actual_usage"] = json!(usage);
+        }
+        return Ok((output, extra));
+    };
+    let schema = CompiledSchema::compile(schema_doc).map_err(|err| ToolError::InvalidInput {
+        tool: "Delegate".to_owned(),
+        message: format!("output_schema compile failed: {err}"),
+    })?;
+
+    // Prefer durable workflow path when an invocation is live.
+    if let Some((run_id, invocation_id)) = ctx.workflow_runtime.find_active_invocation().await {
+        let accepted = ctx
+            .workflow_runtime
+            .accept_child_structured_output_with_repair(
+                &run_id,
+                &invocation_id,
+                &ctx.multi_agent,
+                deps.clone(),
+                &output.snapshot.id,
+                &schema,
+                &output,
+            )
+            .await
+            .map_err(|err| ToolError::InvalidInput {
+                tool: "Delegate".to_owned(),
+                message: err.to_string(),
+            })?;
+        let mut extra = json!({
+            "schema_repair_attempted": accepted.repair_attempted,
+            "first_raw": accepted.first_raw,
+        });
+        if let Some(repair_id) = &accepted.repair_id {
+            extra["repair_id"] = json!(repair_id);
+        }
+        if let Some(raw) = &accepted.repair_raw {
+            extra["repair_raw"] = json!(raw);
+        }
+        if let Some(usage) = accepted.actual_usage {
+            extra["actual_usage"] = json!(usage);
+        }
+        if accepted.ok {
+            extra["structured_output"] = accepted.value.clone().unwrap_or(json!(null));
+            // Prefer validated JSON in the tool content path via details.
+            return Ok((output, extra));
+        }
+        if let Some(code) = accepted.error_code {
+            extra["schema_error_code"] = json!(code.as_str());
+        }
+        extra["schema_error"] = json!(accepted.summary);
+        return Ok((output, extra));
+    }
+
+    // Non-workflow: still enforce one local tools-disabled repair without journal.
+    let first_raw = crate::multi_agent::child_final_assistant_text(&output);
+    let first_usage = accumulate_actual_usage(None, &output.events);
+    match accept_structured_output(
+        &schema,
+        StructuredOutputSource::AssistantText(first_raw.clone()),
+    ) {
+        Ok(value) => {
+            let mut extra = json!({
+                "structured_output": value,
+                "schema_repair_attempted": false,
+                "first_raw": first_raw,
+            });
+            if let Some(usage) = first_usage {
+                extra["actual_usage"] = json!(usage);
+            }
+            Ok((output, extra))
+        }
+        Err(first_err) => {
+            let repair = ctx
+                .multi_agent
+                .run_tools_disabled_schema_repair_turn(
+                    deps.clone(),
+                    &output.snapshot.id,
+                    &first_err.to_string(),
+                    schema.schema(),
+                )
+                .await
+                .map_err(|err| ToolError::InvalidInput {
+                    tool: "Delegate".to_owned(),
+                    message: format!("schema repair turn failed: {err}"),
+                })?;
+            let repair_raw = repair.latest_text.clone().unwrap_or_default();
+            let usage = accumulate_actual_usage(first_usage, &repair.events);
+            let mut extra = json!({
+                "schema_repair_attempted": true,
+                "first_raw": first_raw,
+                "repair_raw": repair_raw,
+            });
+            if let Some(usage) = usage {
+                extra["actual_usage"] = json!(usage);
+            }
+            if repair.tool_attempted {
+                extra["schema_error_code"] = json!("schema_repair_tool_forbidden");
+                extra["schema_error"] = json!("schema_repair_tool_forbidden");
+                return Ok((output, extra));
+            }
+            match accept_structured_output(
+                &schema,
+                StructuredOutputSource::AssistantText(
+                    repair.latest_text.clone().unwrap_or_default(),
+                ),
+            ) {
+                Ok(value) => {
+                    extra["structured_output"] = value;
+                    Ok((output, extra))
+                }
+                Err(second_err) => {
+                    extra["schema_error_code"] = json!("schema_invalid");
+                    extra["schema_error"] = json!(second_err.to_string());
+                    Ok((output, extra))
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn validate_delegate_request(
