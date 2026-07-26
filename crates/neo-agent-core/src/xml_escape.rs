@@ -1,7 +1,11 @@
-//! Crate-private XML escaping for model-facing envelopes.
+//! Crate-private XML escaping for model/skill/shell pseudo-XML only.
 //!
 //! Text nodes and attribute values share the same base escapes (`&`, `<`, `>`).
 //! Attribute values also escape `"` so quoted attributes stay well-formed.
+//!
+//! Do **not** use this for browser-facing HTML. Prefer [`crate::html_escape`]
+//! for documents rendered in a browser (export, OAuth callback pages), which
+//! also escapes `'` as `&#39;`.
 
 /// Escape text that appears between XML tags (not inside attributes).
 #[must_use]

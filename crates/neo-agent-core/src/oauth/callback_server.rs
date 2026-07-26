@@ -12,6 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot::{Receiver, Sender};
 
 use super::OAuthError;
+use crate::html_escape;
 
 /// Authorization code received from the OAuth callback.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,7 +326,7 @@ fn error_html(reason: &str) -> String {
          <p>{}</p>\
          </body>\
          </html>",
-        html_escape(reason)
+        html_escape::escape_text(reason)
     )
 }
 
@@ -339,21 +340,6 @@ fn response_bytes(status: u16, status_text: &str, body: &str) -> String {
          {body}",
         body.len()
     )
-}
-
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            ch => out.push(ch),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

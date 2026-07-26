@@ -2,6 +2,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::html_escape;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExportConversation {
     pub title: String,
@@ -61,13 +63,13 @@ pub fn export_html(
         String::from("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     output.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     output.push_str("<title>");
-    output.push_str(&escape_html_text(&conversation.title));
+    output.push_str(&html_escape::escape_text(&conversation.title));
     output.push_str("</title>\n");
     if options.include_default_css {
         output.push_str(DEFAULT_CSS);
     }
     output.push_str("</head>\n<body>\n<main class=\"conversation\">\n<h1>");
-    output.push_str(&escape_html_text(&conversation.title));
+    output.push_str(&html_escape::escape_text(&conversation.title));
     output.push_str("</h1>\n");
 
     for message in &conversation.messages {
@@ -77,7 +79,7 @@ pub fn export_html(
         output.push_str("<article class=\"message message-");
         output.push_str(&message.role);
         output.push_str("\">\n<header>");
-        output.push_str(&escape_html_text(&message.role));
+        output.push_str(&html_escape::escape_text(&message.role));
         output.push_str("</header>\n<div class=\"message-body\">");
         output.push_str(&render_safe_markdown(&message.content));
         output.push_str("</div>\n</article>\n");
@@ -108,10 +110,10 @@ fn render_safe_markdown(markdown: &str) -> String {
     let mut unsafe_link_depth = 0usize;
     let safe_events = parser.filter_map(|event| match event {
         Event::Html(html) | Event::InlineHtml(html) => Some(Event::Html(
-            escape_html_text(&sanitize_text_markdown_links(&html)).into(),
+            html_escape::escape_text(&sanitize_text_markdown_links(&html)).into(),
         )),
         Event::Text(text) => Some(Event::Html(
-            escape_html_text(&sanitize_text_markdown_links(&text)).into(),
+            html_escape::escape_text(&sanitize_text_markdown_links(&text)).into(),
         )),
         Event::Start(Tag::Link {
             link_type,
@@ -157,21 +159,6 @@ fn is_safe_role(role: &str) -> bool {
         && role
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-fn escape_html_text(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for char in input.chars() {
-        match char {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(char),
-        }
-    }
-    escaped
 }
 
 fn sanitize_markdown_url(value: &str) -> Option<String> {
