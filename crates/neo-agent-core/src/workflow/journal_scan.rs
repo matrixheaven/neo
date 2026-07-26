@@ -528,7 +528,6 @@ pub(super) fn observe_v2_envelope(
         JournalPayload::SwarmItemFinished {
             swarm_id,
             item_id,
-            outcome: _,
             ..
         } => {
             let key = swarm_item_key(swarm_id, item_id);

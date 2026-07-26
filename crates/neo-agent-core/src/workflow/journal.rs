@@ -545,9 +545,10 @@ impl JournalV2Writer {
         let index = if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
             scan_journal_v2(path, Some(&run_id))?
         } else {
-            let mut empty = JournalScanIndex::default();
-            empty.run_id = Some(run_id.clone());
-            empty
+            JournalScanIndex {
+                run_id: Some(run_id.clone()),
+                ..Default::default()
+            }
         };
 
         let file = std::fs::OpenOptions::new()

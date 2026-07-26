@@ -46,10 +46,10 @@ impl WorkflowId {
                 format!("invalid workflow run id {raw:?}: expected wf_<uuid-simple>"),
             ));
         }
-        if let Ok(parsed) = Uuid::parse_str(raw) {
-            if parsed.to_string() == raw {
-                return Ok(Self(format!("wf_{}", parsed.as_simple())));
-            }
+        if let Ok(parsed) = Uuid::parse_str(raw)
+            && parsed.to_string() == raw
+        {
+            return Ok(Self(format!("wf_{}", parsed.as_simple())));
         }
         if is_uuid_simple(raw) {
             return Ok(Self(format!("wf_{raw}")));
