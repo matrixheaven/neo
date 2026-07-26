@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-27 | plan | docs/aegis/plans/2026-07-27-assistant-native-workflow-tool.md | Assistant-Native Workflow Tool Implementation Plan |
 | 2026-07-27 | spec | docs/aegis/specs/2026-07-27-assistant-native-workflow-tool-design.md | Neo Assistant-Native Workflow Tool Design |
 | 2026-07-26 | plan | docs/aegis/plans/2026-07-26-final-review-residuals.md | Neo 2026-07-26 Final-Review Residuals Implementation Plan |
 | 2026-07-26 | spec | docs/aegis/specs/2026-07-26-final-review-residuals-design.md | Neo 2026-07-26 Final-Review Residuals Design |
@@ -267,3 +268,13 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-25 | work | docs/aegis/work/2026-07-25-windows-session-index-access-denied/proof-bundle.md | 2026-07-25-windows-session-index-access-denied proof bundle |
 | 2026-07-26 | adr | docs/aegis/adr/ADR-0006-local-workflow-platform.md | ADR-0006 - Local workflow platform (definitions, V2 journal, host-direct launch) |
 | 2026-07-26 | baseline | docs/aegis/baseline/2026-07-26-workflow-platform-contract.md | Local Workflow Platform Contract Baseline |
+| 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/10-intent.md | Assistant-native unified Workflow tool intent |
+| 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/20-checkpoint.md | Assistant-native unified Workflow tool checkpoint |
+| 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/90-evidence.md | Assistant-native unified Workflow tool evidence |
+| 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/99-reflection.md | Assistant-native unified Workflow tool reflection |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/task-intent-draft.json | Assistant-native unified Workflow tool task intent draft |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/baseline-read-set-hint.json | Assistant-native unified Workflow tool baseline read-set hint |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/baseline-usage-draft.json | Assistant-native unified Workflow tool baseline usage draft |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/impact-statement-draft.json | Assistant-native unified Workflow tool impact statement draft |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/todo-checkpoint-draft.json | Assistant-native unified Workflow tool todo checkpoint draft |
+| 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/drift-check-draft.json | Assistant-native unified Workflow tool drift check draft |
