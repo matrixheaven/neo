@@ -1,6 +1,4 @@
 //! Durable external-effect protocol for workflow V2 (design §17.2).
-#![allow(dead_code)] // protocol fields are part of the durable effect surface
-#![allow(dead_code)] // prepared structs expose protocol fields for callers/tests
 //!
 //! Ordering for every host-visible effect:
 //!
@@ -16,6 +14,8 @@
 //! in-memory apply stay in [`super::runtime::WorkflowRuntime`] so that the
 //! runtime remains the sole durable lifecycle owner. Callers must never hold the
 //! async run-state mutex across journal I/O or the external await.
+
+#![allow(dead_code)] // protocol fields are part of the durable effect surface
 
 use crate::workflow::error::WorkflowError;
 use crate::workflow::journal::{
@@ -63,7 +63,6 @@ pub struct PreparedTransition {
 
 /// Whether the journal still has room for a start record plus a compact finish
 /// and a terminal workflow state (design §17.2 reserve rule).
-#[must_use]
 pub fn has_invocation_reservation(
     bytes_written: u64,
     start_envelope: &JournalEnvelope,

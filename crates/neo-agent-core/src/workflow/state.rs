@@ -373,12 +373,13 @@ impl WorkflowState {
         }
         matches!(
             (self, to),
-            (Queued, Running | Paused | Cancelled | ResourceLimited)
-                | (
-                    Running,
-                    AwaitingUser | Paused | Completed | Failed | Cancelled | ResourceLimited
-                )
-                | (AwaitingUser, Queued | Cancelled | ResourceLimited)
+            (
+                Queued,
+                Running | Paused | Cancelled | Failed | ResourceLimited
+            ) | (
+                Running,
+                AwaitingUser | Paused | Completed | Failed | Cancelled | ResourceLimited
+            ) | (AwaitingUser, Queued | Cancelled | ResourceLimited)
                 | (Paused, Queued | Cancelled)
         )
     }
@@ -424,6 +425,7 @@ impl WorkflowState {
             (Queued, Running),
             (Queued, Paused),
             (Queued, Cancelled),
+            (Queued, Failed),
             (Queued, ResourceLimited),
             (Running, AwaitingUser),
             (Running, Paused),
@@ -604,6 +606,9 @@ pub struct WorkflowRunMetadata {
     pub args: serde_json::Value,
     pub launch_source: String,
     pub journal_format_version: u32,
+    /// Pinned final result schema for the production runner (absent on legacy V1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 fn default_args() -> serde_json::Value {

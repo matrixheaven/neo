@@ -17,10 +17,10 @@ use neo_agent_core::workflow::runtime::{LinkedRunRequest, compute_prefix_digest_
 use neo_agent_core::workflow::{
     LaunchAuthorizationMode, MANIFEST_SUFFIX, RetentionPolicy, RetentionSubject, SOURCE_SUFFIX,
     WorkflowActor, WorkflowCheckpoint, WorkflowDefinitionRegistry, WorkflowError, WorkflowId,
-    WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent, WorkflowLaunchRequest,
-    WorkflowListScope, WorkflowOutput, WorkflowRunMetadata, WorkflowSaveRequest, WorkflowSaveScope,
-    WorkflowSourceOrigin, WorkflowState, check_definition, journal, load_fixture,
-    preview_mark_sweep, resolve_paired_definition, run_fixture,
+    WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
+    WorkflowLaunchRequest, WorkflowListScope, WorkflowOutput, WorkflowRunMetadata,
+    WorkflowSaveRequest, WorkflowSaveScope, WorkflowSourceOrigin, WorkflowState, check_definition,
+    journal, load_fixture, preview_mark_sweep, resolve_paired_definition, run_fixture,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -389,17 +389,20 @@ async fn run(
         args,
         launch_source: format!("cli:workflow-run ({})", config.permission_mode.label()),
         parent_run_id: None,
+        output_schema: Some(definition.output_schema.clone()),
     };
     let intent = WorkflowLaunchIntent::from_parts(
         request,
-        session_dir.display().to_string(),
-        config.project_dir.display().to_string(),
-        uuid::Uuid::new_v4().to_string(),
-        WorkflowActor::Human,
-        config.permission_mode,
-        None,
-        definition.compiled_input_schema.clone(),
-        schema_sha256,
+        WorkflowLaunchBinding {
+            session_identity: session_dir.display().to_string(),
+            workspace_identity: config.project_dir.display().to_string(),
+            launch_nonce: uuid::Uuid::new_v4().to_string(),
+            actor: WorkflowActor::Human,
+            permission_mode: config.permission_mode,
+            parent_lineage: None,
+            compiled_input_schema: definition.compiled_input_schema.clone(),
+            schema_sha256,
+        },
     );
 
     let outcome = WorkflowLaunchCoordinator
@@ -576,6 +579,7 @@ async fn fork(
         args,
         launch_source: format!("cli:workflow-fork ({})", config.permission_mode.label()),
         parent_run_id: Some(parent_id.clone()),
+        output_schema: parent_meta.output_schema.clone(),
     };
     let handle = config
         .workflow_runtime

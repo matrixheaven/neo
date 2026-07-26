@@ -96,6 +96,26 @@ pub struct ChildSchemaAcceptResult {
     pub actual_usage: Option<AgentTokenUsage>,
 }
 
+/// Inputs for child structured-output validation plus one tools-disabled repair.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildSchemaRepairRequest<'a> {
+    pub invocation_id: &'a str,
+    pub agent_id: &'a AgentId,
+    pub schema: &'a CompiledSchema,
+    pub first_output: &'a ChildRunOutput,
+}
+
+/// Heterogeneous swarm batch parameters (durable per-item journal records).
+#[derive(Debug, Clone)]
+pub struct SwarmBatchRequest {
+    pub call_index: u64,
+    pub canonical_input: serde_json::Value,
+    pub description: String,
+    pub role: AgentRole,
+    pub max_concurrency: usize,
+    pub plans: Vec<ChildPlan>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkflowInvocationContext {
     pub invocation_id: String,
@@ -111,6 +131,11 @@ pub struct WorkflowLaunchRequest {
     pub args: serde_json::Value,
     pub launch_source: String,
     pub parent_run_id: Option<WorkflowId>,
+    /// Pinned final `output_schema` JSON for the production Lua runner.
+    ///
+    /// Required for V2 definition-backed launches; optional only for legacy
+    /// fixture/harness paths that attach schemas via [`LuaWorkflowRunner::with_final_schema`].
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Explicit linked-run / V2-upgrade launch (design §34). Requires fresh authorization.
@@ -138,6 +163,7 @@ fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> W
         args: request.args,
         launch_source: request.launch_source,
         journal_format_version: journal::JOURNAL_FORMAT_V2,
+        output_schema: request.output_schema,
     }
 }
 
@@ -471,10 +497,9 @@ impl WorkflowRuntime {
         };
 
         let control = Arc::new(RunControl::new());
-        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).map_err(|error| {
+        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).inspect_err(|_error| {
             self.admission.release_storage_owner(run_id.as_str());
             let _ = std::fs::remove_dir_all(&run_dir);
-            error
         })?;
         let state = Arc::new(Mutex::new(RunState {
             metadata,
@@ -1739,47 +1764,38 @@ impl WorkflowRuntime {
     pub async fn invoke_swarm_batch(
         &self,
         run_id: &WorkflowId,
-        call_index: u64,
-        canonical_input: serde_json::Value,
-        description: String,
-        role: AgentRole,
-        max_concurrency: usize,
-        plans: Vec<ChildPlan>,
+        request: SwarmBatchRequest,
         multi_agent: MultiAgentRuntime,
         deps: ChildRuntimeDeps,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
-        let plans_for_effect = plans;
-        let description_for_effect = description;
         let multi_agent_for_effect = multi_agent;
         let deps_for_effect = deps;
-        let role_for_effect = role;
-        let max_concurrency_for_effect = max_concurrency.max(1);
+        let max_concurrency_for_effect = request.max_concurrency.max(1);
         let runtime = self.clone();
         let run_id_for_effect = run_id.clone();
+        let effect_request = SwarmBatchRequest {
+            call_index: request.call_index,
+            canonical_input: request.canonical_input.clone(),
+            description: request.description,
+            role: request.role,
+            max_concurrency: max_concurrency_for_effect,
+            plans: request.plans,
+        };
         self.invoke(
             run_id,
-            call_index,
+            request.call_index,
             WorkflowInvocationKind::Swarm,
-            canonical_input,
+            request.canonical_input,
             true,
             move |_invocation| {
                 let runtime = runtime;
                 let run_id = run_id_for_effect;
-                let plans = plans_for_effect;
-                let description = description_for_effect;
                 let multi_agent = multi_agent_for_effect;
                 let deps = deps_for_effect;
+                let request = effect_request;
                 async move {
                     match runtime
-                        .run_swarm_batch_effect(
-                            &run_id,
-                            description,
-                            role_for_effect,
-                            max_concurrency_for_effect,
-                            plans,
-                            multi_agent,
-                            deps,
-                        )
+                        .run_swarm_batch_effect(&run_id, request, multi_agent, deps)
                         .await
                     {
                         Ok(outcome) => outcome,
@@ -1802,13 +1818,17 @@ impl WorkflowRuntime {
     async fn run_swarm_batch_effect(
         &self,
         run_id: &WorkflowId,
-        description: String,
-        role: AgentRole,
-        max_concurrency: usize,
-        plans: Vec<ChildPlan>,
+        request: SwarmBatchRequest,
         multi_agent: MultiAgentRuntime,
         deps: ChildRuntimeDeps,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
+        let SwarmBatchRequest {
+            description,
+            role,
+            max_concurrency,
+            plans,
+            ..
+        } = request;
         let swarm_id = multi_agent.new_swarm_id();
         // Queue all items durably before any dispatch.
         for plan in &plans {
@@ -1840,7 +1860,7 @@ impl WorkflowRuntime {
                 Some(max_concurrency),
                 &active_plans,
             )
-            .map_err(|message| WorkflowError::InvalidInput(message))?;
+            .map_err(WorkflowError::InvalidInput)?;
 
         // Map item_id -> child snapshot for ordered results.
         let mut item_outcomes: Vec<(String, WorkflowInvocationOutcome)> = Vec::new();
@@ -2200,30 +2220,31 @@ impl WorkflowRuntime {
     pub async fn accept_child_structured_output_with_repair(
         &self,
         run_id: &WorkflowId,
-        invocation_id: &str,
         multi_agent: &MultiAgentRuntime,
         deps: ChildRuntimeDeps,
-        agent_id: &AgentId,
-        schema: &CompiledSchema,
-        first_output: &ChildRunOutput,
+        request: ChildSchemaRepairRequest<'_>,
     ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
+        let ChildSchemaRepairRequest {
+            invocation_id,
+            agent_id,
+            schema,
+            first_output,
+        } = request;
         let first_raw = child_final_assistant_text(first_output);
         let first_usage = accumulate_child_usage(None, &first_output.events);
         let first_source = StructuredOutputSource::AssistantText(first_raw.clone());
         match accept_structured_output(schema, first_source) {
-            Ok(value) => {
-                return Ok(ChildSchemaAcceptResult {
-                    ok: true,
-                    value: Some(value),
-                    error_code: None,
-                    summary: "child output matched schema".to_owned(),
-                    repair_attempted: false,
-                    repair_id: None,
-                    first_raw,
-                    repair_raw: None,
-                    actual_usage: first_usage,
-                });
-            }
+            Ok(value) => Ok(ChildSchemaAcceptResult {
+                ok: true,
+                value: Some(value),
+                error_code: None,
+                summary: "child output matched schema".to_owned(),
+                repair_attempted: false,
+                repair_id: None,
+                first_raw,
+                repair_raw: None,
+                actual_usage: first_usage,
+            }),
             Err(first_err) => {
                 // If a repair was already journaled for this invocation (crash mid-repair),
                 // never repeat the corrective model effect.
@@ -3722,6 +3743,7 @@ impl WorkflowRuntime {
             args: serde_json::json!({}),
             launch_source: "rehydrate".to_owned(),
             journal_format_version: journal::JOURNAL_FORMAT_V1,
+            output_schema: None,
         };
         self.insert_failed_run(run_dir, metadata, format!("corrupt run metadata: {error}"))
             .await
@@ -3944,23 +3966,12 @@ impl WorkflowHandle {
 
     pub async fn accept_child_structured_output_with_repair(
         &self,
-        invocation_id: &str,
         multi_agent: &MultiAgentRuntime,
         deps: ChildRuntimeDeps,
-        agent_id: &AgentId,
-        schema: &CompiledSchema,
-        first_output: &ChildRunOutput,
+        request: ChildSchemaRepairRequest<'_>,
     ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
         self.runtime
-            .accept_child_structured_output_with_repair(
-                &self.run_id,
-                invocation_id,
-                multi_agent,
-                deps,
-                agent_id,
-                schema,
-                first_output,
-            )
+            .accept_child_structured_output_with_repair(&self.run_id, multi_agent, deps, request)
             .await
     }
 
@@ -4030,27 +4041,12 @@ impl WorkflowHandle {
     /// the multi-agent batch owner with durable per-item journal records.
     pub async fn invoke_swarm_batch(
         &self,
-        call_index: u64,
-        canonical_input: serde_json::Value,
-        description: String,
-        role: AgentRole,
-        max_concurrency: usize,
-        plans: Vec<ChildPlan>,
+        request: SwarmBatchRequest,
         multi_agent: MultiAgentRuntime,
         deps: ChildRuntimeDeps,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
         self.runtime
-            .invoke_swarm_batch(
-                &self.run_id,
-                call_index,
-                canonical_input,
-                description,
-                role,
-                max_concurrency,
-                plans,
-                multi_agent,
-                deps,
-            )
+            .invoke_swarm_batch(&self.run_id, request, multi_agent, deps)
             .await
     }
 
@@ -4190,7 +4186,7 @@ fn decode_user_input_prompt(
             let answer_schema = map
                 .get("answer_schema")
                 .cloned()
-                .unwrap_or_else(|| serde_json::json!(true));
+                .unwrap_or(serde_json::Value::Bool(true));
             let default = map.get("default").cloned();
             let title = map.get("title").and_then(|v| v.as_str()).map(str::to_owned);
             let answer_policy = map

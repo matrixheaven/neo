@@ -1179,10 +1179,8 @@ fn stamp_workflow_origin(
                 *workflow_origin = Some(origin.clone());
             }
         }
-        crate::AgentEvent::ApprovalRequested { request } => {
-            if request.workflow_origin.is_none() {
-                request.workflow_origin = Some(origin.clone());
-            }
+        crate::AgentEvent::ApprovalRequested { request } if request.workflow_origin.is_none() => {
+            request.workflow_origin = Some(origin.clone());
         }
         _ => {}
     }
@@ -1943,15 +1941,15 @@ mod tests {
             "Edit"
         }
 
-        fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
             "custom edit"
         }
 
-        fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-        fn execute<'a>(
+fn execute<'a>(
             &'a self,
             _ctx: &'a ToolContext,
             _input: serde_json::Value,
@@ -1967,15 +1965,15 @@ mod tests {
             "Write"
         }
 
-        fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
             "custom write"
         }
 
-        fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-        fn execute<'a>(
+fn execute<'a>(
             &'a self,
             _ctx: &'a ToolContext,
             _input: serde_json::Value,
@@ -1989,15 +1987,15 @@ mod tests {
             "Terminal"
         }
 
-        fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
             "test terminal"
         }
 
-        fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-        fn execute<'a>(
+fn execute<'a>(
             &'a self,
             ctx: &'a ToolContext,
             _input: serde_json::Value,

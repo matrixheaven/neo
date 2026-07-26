@@ -12,10 +12,11 @@ use neo_agent_core::runtime::{
 use neo_agent_core::tools::{
     ProcessSupervisor, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult,
 };
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
 use neo_agent_core::workflow::{
-    JournalRecord, WorkflowActor, WorkflowInvocationContext, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus,
-    WorkflowRuntime, WorkflowState,
+    WorkflowActor, WorkflowInvocationContext, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus, WorkflowRuntime, WorkflowState,
+    journal_path,
 };
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentTokenUsage,
@@ -199,15 +200,15 @@ impl Tool for SpoofedPermissionDecisionTool {
         "SpoofedPermissionDecision"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "returns display details that resemble a permission denial"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async {
             Ok(
                 ToolResult::error("tool-defined permission-looking error").with_details(json!({
@@ -227,15 +228,15 @@ impl Tool for NonterminalSwarmOutcomeTool {
         "DelegateSwarm"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "returns malformed canonical swarm completion details"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async {
             Ok(ToolResult::ok("not actually terminal").with_details(json!({
                 "kind": "delegate_swarm",
@@ -262,15 +263,15 @@ impl Tool for CanonicalChildOutcomeTool {
         self.name
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "returns one canonical child outcome"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         let details = self.details.clone();
         let is_error = self.is_error;
         Box::pin(async move {
@@ -647,6 +648,10 @@ async fn instruction_replan_blocks_effect_without_model_turn() {
         .create_run(temp.path(), workflow_launch_request())
         .await
         .expect("workflow");
+    workflow
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
     let dispatch = handle.clone();
     let canonical_input = json!({"command": "echo must-not-run", "cwd": nested});
     let tool_input = canonical_input.clone();
@@ -672,18 +677,21 @@ async fn instruction_replan_blocks_effect_without_model_turn() {
         snapshot.terminal_reason.as_deref(),
         Some("instruction_replan_required")
     );
-    let output = workflow.output().await.expect("workflow output");
-    let invocation_id = output
-        .invocations
+    let envelopes = collect_journal_v2(
+        &journal_path(temp.path(), &workflow.run_id),
+        Some(&workflow.run_id),
+    )
+    .expect("journal");
+    let invocation_id = envelopes
         .iter()
-        .find_map(|record| match record {
-            JournalRecord::InvocationStarted { invocation_id, .. } => Some(invocation_id.clone()),
+        .find_map(|record| match &record.payload {
+            JournalPayload::InvocationStarted { invocation_id, .. } => Some(invocation_id.clone()),
             _ => None,
         })
         .expect("journaled invocation id");
-    assert!(output.invocations.iter().any(|record| matches!(
-        record,
-        JournalRecord::StateChanged {
+    assert!(envelopes.iter().any(|record| matches!(
+        &record.payload,
+        JournalPayload::StateChanged {
             new: WorkflowState::Paused,
             reason,
             actor: WorkflowActor::Runtime,
@@ -722,15 +730,15 @@ impl Tool for EchoTool {
         "WorkflowEcho"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "workflow resolver probe"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         let value = self.0;
         Box::pin(async move { Ok(ToolResult::ok(value)) })
     }
@@ -1106,9 +1114,10 @@ fn workflow_launch_request() -> WorkflowLaunchRequest {
         args: json!({}),
         launch_source: "test".to_owned(),
         parent_run_id: None,
-    }
-}
+        output_schema: None,
 
+    }
+    }
 #[tokio::test]
 async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1134,6 +1143,10 @@ async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
         .create_run(dir.path(), workflow_launch_request())
         .await
         .expect("workflow");
+    workflow
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
 
     let outcome = workflow
         .invoke(
@@ -1171,9 +1184,14 @@ async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
     );
     let output = workflow.output().await.expect("output");
     assert_eq!(output.actual_usage, Some(usage));
-    assert!(output.invocations.iter().any(|record| matches!(
-        record,
-        JournalRecord::InvocationFinished {
+    let envelopes = collect_journal_v2(
+        &journal_path(dir.path(), &workflow.run_id),
+        Some(&workflow.run_id),
+    )
+    .expect("journal");
+    assert!(envelopes.iter().any(|record| matches!(
+        &record.payload,
+        JournalPayload::InvocationFinished {
             outcome: journaled,
             ..
         } if journaled.actual_usage == Some(usage)
@@ -1329,15 +1347,15 @@ impl Tool for BlockingTool {
         "WorkflowBlocking"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "waits for workflow cancellation"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             self.entered.notify_one();
             ctx.cancel_token.cancelled().await;
@@ -1496,11 +1514,11 @@ impl Tool for ConcurrentEventTool {
         "ConcurrentWorkflowEvent"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "emits one context event after a concurrency barrier"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {"message": {"type": "string"}},
@@ -1508,7 +1526,7 @@ impl Tool for ConcurrentEventTool {
         })
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             self.barrier.wait().await;
             ctx.emit_event(AgentEvent::FollowUpQueued {

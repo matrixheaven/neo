@@ -835,7 +835,8 @@ impl BackgroundTaskManager {
             args: parent_output.metadata.args.clone(),
             launch_source: format!("tasks:fork ({})", parent.run_id.as_str()),
             parent_run_id: Some(parent.run_id.clone()),
-        };
+            output_schema: None,
+};
         let child = runtime
             .create_linked_run(
                 session_dir,
@@ -917,7 +918,7 @@ impl BackgroundTaskManager {
         })))
     }
 
-    async fn workflow_control_handle(
+async fn workflow_control_handle(
         &self,
         tool: &str,
         task_id: &str,
@@ -1074,7 +1075,7 @@ impl BackgroundTaskManager {
             matched.push(snapshot);
         }
 
-        matched.sort_by(|left, right| compare_list_order(left, right));
+        matched.sort_by(compare_list_order);
         let total_matched = matched.len();
         let end = (start_offset + limit).min(total_matched);
         let items = if start_offset >= total_matched {
@@ -1132,7 +1133,7 @@ impl BackgroundTaskManager {
         snapshots
     }
 
-    async fn metadata_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+async fn metadata_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
         if let Some(snapshot) = self.metadata_from_memory(task_id).await {
             return Some(snapshot);
         }
@@ -1142,7 +1143,7 @@ impl BackgroundTaskManager {
             .flatten()
     }
 
-    async fn metadata_from_memory(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+async fn metadata_from_memory(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
         if let Some(snapshot) = self.metadata_bash_snapshot(task_id).await {
             return Some(snapshot);
         }
@@ -1167,7 +1168,7 @@ impl BackgroundTaskManager {
         Some(snapshot)
     }
 
-    async fn metadata_bash_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+async fn metadata_bash_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
         let mut tasks = self.inner.lock().await;
         let record = tasks.get_mut(task_id)?;
         let BackgroundTaskState::BashRunning(command) = &record.state else {
@@ -1206,7 +1207,7 @@ impl BackgroundTaskManager {
         })
     }
 
-    async fn persisted_metadata_snapshot(
+async fn persisted_metadata_snapshot(
         &self,
         task_id: &str,
     ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
@@ -1237,7 +1238,7 @@ impl BackgroundTaskManager {
         )
     }
 
-    async fn inspect_persisted_task_metadata(
+async fn inspect_persisted_task_metadata(
         task_id: &str,
         final_path: &Path,
         running_path: &Path,
@@ -1594,7 +1595,7 @@ impl BackgroundTaskManager {
         self.snapshot_with_persisted_wait(task_id, true).await
     }
 
-    async fn snapshot_with_persisted_wait(
+async fn snapshot_with_persisted_wait(
         &self,
         task_id: &str,
         wait_for_final: bool,
@@ -1610,7 +1611,7 @@ impl BackgroundTaskManager {
             })
     }
 
-    async fn persisted_task_ids(&self) -> Vec<String> {
+async fn persisted_task_ids(&self) -> Vec<String> {
         let Some(root) = &self.persistence_dir else {
             return Vec::new();
         };
@@ -1634,7 +1635,7 @@ impl BackgroundTaskManager {
         ids
     }
 
-    async fn persisted_snapshot(
+async fn persisted_snapshot(
         &self,
         task_id: &str,
         wait_for_final: bool,
@@ -1667,7 +1668,7 @@ impl BackgroundTaskManager {
         }
     }
 
-    async fn settled_persisted_snapshot(
+async fn settled_persisted_snapshot(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1693,7 +1694,7 @@ impl BackgroundTaskManager {
         )
     }
 
-    async fn inspect_persisted_task(
+async fn inspect_persisted_task(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1706,7 +1707,7 @@ impl BackgroundTaskManager {
         Self::inspect_after_first_running(root, task_id, final_path, running_path, running).await
     }
 
-    async fn inspect_after_first_running(
+async fn inspect_after_first_running(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1724,7 +1725,7 @@ impl BackgroundTaskManager {
         }
     }
 
-    async fn read_persisted_running(task_id: &str, running_path: &Path) -> Result<bool, ToolError> {
+async fn read_persisted_running(task_id: &str, running_path: &Path) -> Result<bool, ToolError> {
         match tokio::fs::read(running_path).await {
             Ok(bytes) => {
                 let running: PersistedTaskIdentity = serde_json::from_slice(&bytes)
@@ -1742,7 +1743,7 @@ impl BackgroundTaskManager {
         }
     }
 
-    async fn read_persisted_final(
+async fn read_persisted_final(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1819,7 +1820,7 @@ impl BackgroundTaskManager {
             })
     }
 
-    async fn snapshot_inner(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+async fn snapshot_inner(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
         if let Some(snapshot) = self.take_bash_running_snapshot(task_id).await {
             return Some(snapshot);
         }
@@ -1839,7 +1840,7 @@ impl BackgroundTaskManager {
         Some(Self::snapshot_from_record(record, task_id))
     }
 
-    async fn take_bash_running_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+async fn take_bash_running_snapshot(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
         let mut tasks = self.inner.lock().await;
         let record = tasks.get_mut(task_id)?;
         let BackgroundTaskState::BashRunning(command) = &record.state else {
@@ -1883,7 +1884,7 @@ impl BackgroundTaskManager {
         })
     }
 
-    fn snapshot_from_record(
+fn snapshot_from_record(
         record: &BackgroundTaskRecord,
         task_id: &str,
     ) -> BackgroundTaskSnapshot {
@@ -2207,15 +2208,15 @@ fn matches_list_query(snapshot: &BackgroundTaskSnapshot, query: &BackgroundTaskL
     if query.active_only && !snapshot.status.is_active() {
         return false;
     }
-    if let Some(kind) = query.kind {
-        if snapshot.kind != kind {
-            return false;
-        }
+    if let Some(kind) = query.kind
+        && snapshot.kind != kind
+    {
+        return false;
     }
-    if let Some(state) = query.state {
-        if snapshot.status != state {
-            return false;
-        }
+    if let Some(state) = query.state
+        && snapshot.status != state
+    {
+        return false;
     }
     if let Some(awaiting) = query.awaiting_user {
         let is_waiting = snapshot.status == BackgroundTaskStatus::WaitingForUser;
@@ -2386,7 +2387,7 @@ impl Tool for TaskListTool {
         "TaskList"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "List background tasks and their current status.\n\n\
          Use this tool to discover which background tasks exist and where each one stands. It is the entry point for inspecting background work: it returns a task ID, status, kind, description, and elapsed time for every task it reports.\n\n\
          Guidelines:\n\
@@ -2404,11 +2405,11 @@ impl Tool for TaskListTool {
          - elapsed: Time since the task was started (e.g. \"2m 30s\")."
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         schema::<TaskListInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: TaskListInput = parse_input(self.name(), input)?;
             let active_only = input.active_only.unwrap_or(true);
@@ -2429,7 +2430,7 @@ impl Tool for TaskOutputTool {
         "TaskOutput"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "Retrieve output from a running or completed background task.\n\n\
          Use this after `Bash` with background mode or `AskUserQuestion` with `background=true` when you need to inspect progress or explicitly wait for completion.\n\n\
          Guidelines:\n\
@@ -2449,11 +2450,11 @@ impl Tool for TaskOutputTool {
          - output: A preview of the task's stdout/stderr, capped at max_output_bytes."
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         schema::<TaskOutputInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: TaskOutputInput = parse_input(self.name(), input)?;
             let max_output_bytes = input
@@ -2554,7 +2555,7 @@ impl Tool for TaskStopTool {
         "TaskStop"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "Stop a running background task.\n\n\
          Only use this when a task must genuinely be cancelled — for a task that is finishing normally, wait for its completion notification or inspect it with `TaskOutput` instead of stopping it.\n\n\
          Guidelines:\n\
@@ -2568,11 +2569,11 @@ impl Tool for TaskStopTool {
          is cancelled and the output collected so far is included."
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         schema::<TaskStopInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: TaskStopInput = parse_input(self.name(), input)?;
@@ -2683,7 +2684,7 @@ impl Tool for TaskPauseTool {
         "TaskPause"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "Pause a running workflow task at the next durable invocation boundary.\n\n\
          Only workflow tasks can be paused. Other task kinds return an unsupported error.\n\n\
          The active delegate/swarm/bash child finishes before the workflow pauses.\n\
@@ -2691,11 +2692,11 @@ impl Tool for TaskPauseTool {
          Use TaskResume to continue the paused workflow."
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         schema::<TaskPauseInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: TaskPauseInput = parse_input(self.name(), input)?;
             ctx.background_tasks
@@ -2712,18 +2713,18 @@ impl Tool for TaskResumeTool {
         "TaskResume"
     }
 
-    fn description(&self) -> &'static str {
+fn description(&self) -> &'static str {
         "Resume a paused workflow task.\n\n\
          Only paused workflow tasks can be resumed. Other task kinds return an unsupported error.\n\
          This control never triggers from predicted cost, tokens, agent count, or task scale.\n\
          The workflow re-executes its Lua source and replays matching invocations."
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+fn input_schema(&self) -> serde_json::Value {
         schema::<TaskPauseInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: TaskPauseInput = parse_input(self.name(), input)?;
             ctx.background_tasks
@@ -3008,9 +3009,10 @@ pub fn format_collected_answers(questions: &[QuestionEventData], answers: &[Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::journal::{JournalPayload, collect_journal_v2};
     use crate::workflow::{
-        JournalRecord, WorkflowActor, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
-        WorkflowRuntime, WorkflowState, read_journal,
+        WorkflowActor, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase, WorkflowRuntime,
+        WorkflowState,
     };
     use crate::{ShellLimits, ShellRuntime, ToolAccess};
 
@@ -3081,7 +3083,8 @@ mod tests {
                     args: json!({}),
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
-                },
+                    output_schema: None,
+},
             )
             .await
             .expect("create workflow");
@@ -3139,30 +3142,39 @@ mod tests {
             "cancelled"
         );
 
-        let records = read_journal(&crate::workflow::journal_path(
-            session.path(),
-            &crate::workflow::WorkflowId(task_id),
-        ))
+        let records = collect_journal_v2(
+            &crate::workflow::journal_path(session.path(), &crate::workflow::WorkflowId(task_id)),
+            None,
+        )
         .expect("journal");
         assert!(records.iter().any(|record| matches!(
-            record,
-            JournalRecord::StateChanged {
+            &record.payload,
+            JournalPayload::StateChanged {
                 new: WorkflowState::Paused,
                 actor: WorkflowActor::Model,
                 ..
             }
         )));
+        // Resume is Paused -> Queued (Human), then start_worker Queued -> Running (Runtime).
         assert!(records.iter().any(|record| matches!(
-            record,
-            JournalRecord::StateChanged {
-                new: WorkflowState::Running,
+            &record.payload,
+            JournalPayload::StateChanged {
+                new: WorkflowState::Queued,
                 actor: WorkflowActor::Human,
                 ..
             }
         )));
+        assert!(records.iter().any(|record| matches!(
+            &record.payload,
+            JournalPayload::StateChanged {
+                new: WorkflowState::Running,
+                actor: WorkflowActor::Runtime,
+                ..
+            }
+        )));
         assert!(matches!(
-            records.last(),
-            Some(JournalRecord::StateChanged {
+            records.last().map(|r| &r.payload),
+            Some(JournalPayload::StateChanged {
                 new: WorkflowState::Cancelled,
                 actor: WorkflowActor::Human,
                 ..
@@ -3188,7 +3200,8 @@ mod tests {
                     args: json!({}),
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
-                },
+                    output_schema: None,
+},
             )
             .await
             .expect("create workflow");

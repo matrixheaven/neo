@@ -72,6 +72,14 @@ pub struct CompiledSchema {
     schema: Value,
 }
 
+impl fmt::Debug for CompiledSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompiledSchema")
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CompiledSchema {
     /// Compile a JSON Schema Draft 2020-12 document.
     ///

@@ -773,6 +773,18 @@ async fn apply_child_output_schema(
     output: crate::multi_agent::ChildRunOutput,
 ) -> Result<(crate::multi_agent::ChildRunOutput, serde_json::Value), ToolError> {
     let Some(schema_doc) = request.output_schema.as_ref() else {
+        // Workflow-origin children always require output_schema (closed decision).
+        if ctx
+            .workflow_runtime
+            .find_active_invocation()
+            .await
+            .is_some()
+        {
+            return Err(ToolError::InvalidInput {
+                tool: "Delegate".to_owned(),
+                message: "output_schema is required for workflow children".to_owned(),
+            });
+        }
         let usage = accumulate_actual_usage(None, &output.events);
         let mut extra = json!({});
         if let Some(usage) = usage {
@@ -791,12 +803,14 @@ async fn apply_child_output_schema(
             .workflow_runtime
             .accept_child_structured_output_with_repair(
                 &run_id,
-                &invocation_id,
                 &ctx.multi_agent,
                 deps.clone(),
-                &output.snapshot.id,
-                &schema,
-                &output,
+                crate::workflow::ChildSchemaRepairRequest {
+                    invocation_id: &invocation_id,
+                    agent_id: &output.snapshot.id,
+                    schema: &schema,
+                    first_output: &output,
+                },
             )
             .await
             .map_err(|err| ToolError::InvalidInput {

@@ -1560,7 +1560,7 @@ impl MockSseServer {
         Self { url, requests }
     }
 
-    fn requests(&self) -> Vec<RecordedRequest> {
+fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().expect("lock requests").clone()
     }
 }
@@ -2177,7 +2177,8 @@ async fn tasks_workflow_pagination_and_filters_are_stable() {
                         "user".to_owned()
                     },
                     parent_run_id: None,
-                },
+                    output_schema: None,
+},
             )
             .await
             .expect("create run");

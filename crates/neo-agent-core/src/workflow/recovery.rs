@@ -466,9 +466,10 @@ fn append_torn_tail_recovery_record(
     // Determine next seq from the truncated prefix without going through open()
     // recovery recursion: scan the (now clean) file.
     let index = if last_validated_offset == 0 {
-        let mut empty = JournalScanIndex::default();
-        empty.run_id = Some(run_id.clone());
-        empty
+        JournalScanIndex {
+            run_id: Some(run_id.clone()),
+            ..Default::default()
+        }
     } else {
         scan_journal_v2(path, Some(run_id))?
     };

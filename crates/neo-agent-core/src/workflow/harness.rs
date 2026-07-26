@@ -348,6 +348,7 @@ pub async fn run_fixture_retained(
                 args: definition_args,
                 launch_source: "workflow-fixture".to_owned(),
                 parent_run_id: None,
+                output_schema: Some(definition.output_schema.clone()),
             },
         )
         .await?;

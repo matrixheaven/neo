@@ -163,7 +163,8 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
                 args: json!({}),
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
-            },
+                output_schema: None,
+},
         )
         .await
         .expect("create run");
@@ -272,7 +273,8 @@ async fn running_workflow_handle(
                 args: json!({}),
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
-            },
+                output_schema: None,
+},
         )
         .await
         .expect("create run");
@@ -346,12 +348,14 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
                 move |ctx| async move {
                     let accepted = handle
                         .accept_child_structured_output_with_repair(
-                            &ctx.invocation_id,
                             &multi,
                             deps,
-                            &agent_id,
-                            &schema,
-                            &first,
+                            neo_agent_core::workflow::ChildSchemaRepairRequest {
+                                invocation_id: &ctx.invocation_id,
+                                agent_id: &agent_id,
+                                schema: &schema,
+                                first_output: &first,
+                            },
                         )
                         .await
                         .expect("accept with repair");
@@ -417,14 +421,8 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
             _ => "other",
         })
         .collect();
-    assert!(
-        kinds.iter().any(|k| *k == "schema_repair_started"),
-        "{kinds:?}"
-    );
-    assert!(
-        kinds.iter().any(|k| *k == "schema_repair_finished_ok"),
-        "{kinds:?}"
-    );
+    assert!(kinds.contains(&"schema_repair_started"), "{kinds:?}");
+    assert!(kinds.contains(&"schema_repair_finished_ok"), "{kinds:?}");
     let repair_starts = kinds
         .iter()
         .filter(|k| **k == "schema_repair_started")
@@ -491,12 +489,14 @@ async fn schema_repair_tool_attempt_is_forbidden() {
                 move |ctx| async move {
                     let accepted = handle
                         .accept_child_structured_output_with_repair(
-                            &ctx.invocation_id,
                             &multi,
                             deps,
-                            &agent_id,
-                            &schema,
-                            &first,
+                            neo_agent_core::workflow::ChildSchemaRepairRequest {
+                                invocation_id: &ctx.invocation_id,
+                                agent_id: &agent_id,
+                                schema: &schema,
+                                first_output: &first,
+                            },
                         )
                         .await
                         .expect("accept");
@@ -599,12 +599,14 @@ async fn crash_during_repair_never_repeats_model_effect() {
 
     let accepted = handle
         .accept_child_structured_output_with_repair(
-            "inv_crash_repair",
             &multi,
             deps,
-            &first.snapshot.id,
-            &schema,
-            &first,
+            neo_agent_core::workflow::ChildSchemaRepairRequest {
+                invocation_id: "inv_crash_repair",
+                agent_id: &first.snapshot.id,
+                schema: &schema,
+                first_output: &first,
+            },
         )
         .await
         .expect("accept after crash");

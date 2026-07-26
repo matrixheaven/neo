@@ -25,8 +25,10 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         args: json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
+        output_schema: None,
+
     }
-}
+    }
 
 async fn wait_running(handle: &neo_agent_core::workflow::WorkflowHandle) {
     for _ in 0..200 {
@@ -48,7 +50,7 @@ fn append_logical_multi_gigabyte_journal(
     payload_chars: usize,
 ) {
     let existing = collect_journal_v2(path, Some(run_id)).expect("collect head");
-    let mut next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
     let mut writer = JournalV2Writer::open(path, run_id.clone()).expect("open writer");
     let limits = WorkflowLimits {
         journal_record_bytes: 32 * 1024 * 1024,
@@ -58,7 +60,7 @@ fn append_logical_multi_gigabyte_journal(
     let filler = "x".repeat(payload_chars);
     for i in 0..record_count {
         let envelope = JournalEnvelope::new(
-            next_seq,
+            next_seq + i,
             1_000 + i,
             run_id.clone(),
             JournalPayload::StateChanged {
@@ -69,7 +71,6 @@ fn append_logical_multi_gigabyte_journal(
             },
         );
         writer.append(&envelope, &limits).expect("append record");
-        next_seq += 1;
     }
 }
 

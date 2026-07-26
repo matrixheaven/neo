@@ -531,13 +531,11 @@ pub fn import_seed_artifact(
 
 fn artifact_value_from_bytes(
     bytes: &[u8],
-    media_type: Option<&str>,
+    _media_type: Option<&str>,
 ) -> Result<(ArtifactKind, ArtifactValue), WorkflowError> {
-    let prefer_json = media_type.is_some_and(|m| m.contains("json"));
-    if prefer_json || serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
-            return Ok((ArtifactKind::Json, ArtifactValue::Json(value)));
-        }
+    // Valid JSON is always preferred when parseable (media_type is advisory only).
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return Ok((ArtifactKind::Json, ArtifactValue::Json(value)));
     }
     let text = std::str::from_utf8(bytes).map_err(|e| {
         WorkflowError::coded(

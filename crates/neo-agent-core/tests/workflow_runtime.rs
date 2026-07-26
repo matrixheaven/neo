@@ -5,11 +5,14 @@ use std::time::Duration;
 
 use neo_agent_core::AgentTokenUsage;
 use neo_agent_core::runtime::WorkflowDispatchResolver;
+use neo_agent_core::workflow::journal::{
+    JournalEnvelope, JournalPayload, JournalV2Writer, collect_journal_v2,
+};
 use neo_agent_core::workflow::{
-    JournalRecord, JournalWriter, WorkflowActor, WorkflowChildRef, WorkflowHandle,
-    WorkflowInterruptionReason, WorkflowInvocationKind, WorkflowInvocationOutcome,
-    WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime,
-    WorkflowState, canonical_input_hash, journal_path, read_journal,
+    WorkflowActor, WorkflowChildRef, WorkflowHandle, WorkflowInterruptionReason,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
+    WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash,
+    journal_path,
 };
 use tokio::sync::Notify;
 
@@ -25,14 +28,25 @@ fn launch_request() -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
+        output_schema: None,
+
     }
-}
+    }
 
 async fn create_run(runtime: &WorkflowRuntime, session_dir: &Path) -> WorkflowHandle {
     runtime
         .create_run(session_dir, launch_request())
         .await
         .expect("create run")
+}
+
+async fn create_running_run(runtime: &WorkflowRuntime, session_dir: &Path) -> WorkflowHandle {
+    let handle = create_run(runtime, session_dir).await;
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running for direct invoke");
+    handle
 }
 
 fn completed(summary: &str) -> WorkflowInvocationOutcome {
@@ -131,11 +145,11 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         snapshot.actual_usage.expect("snapshot usage").input_tokens,
         37
     );
-    let records = read_journal(&journal_path(dir.path(), &handle.run_id)).unwrap();
+    let records = collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let compact_outcome = records
         .iter()
-        .find_map(|record| match record {
-            JournalRecord::InvocationFinished { outcome, .. }
+        .find_map(|record| match &record.payload {
+            JournalPayload::InvocationFinished { outcome, .. }
                 if outcome.status == WorkflowOutcomeStatus::ResourceLimited =>
             {
                 Some(outcome)
@@ -164,8 +178,8 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         ]
     );
     assert!(records.iter().any(|record| matches!(
-        record,
-        JournalRecord::StateChanged {
+        &record.payload,
+        JournalPayload::StateChanged {
             new: WorkflowState::ResourceLimited,
             ..
         }
@@ -176,15 +190,8 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         output.actual_usage.expect("live output usage").input_tokens,
         37
     );
-    let output_outcome = output
-        .invocations
-        .iter()
-        .find_map(|record| match record {
-            JournalRecord::InvocationFinished { outcome, .. } => Some(outcome),
-            _ => None,
-        })
-        .expect("live output invocation");
-    assert_eq!(output_outcome.child_refs, compact_outcome.child_refs);
+    // WorkflowOutput no longer embeds full invocation history (use TaskOutput).
+    assert!(output.invocations.is_empty());
 
     let recovered_runtime = WorkflowRuntime::new(limits);
     let recovered = recovered_runtime.rehydrate(dir.path()).await.unwrap();
@@ -198,14 +205,20 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         23
     );
     let recovered_output = recovered[0].output().await.unwrap();
-    let recovered_outcome = recovered_output
-        .invocations
+    assert!(recovered_output.invocations.is_empty());
+    let recovered_records =
+        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
+    let recovered_outcome = recovered_records
         .iter()
-        .find_map(|record| match record {
-            JournalRecord::InvocationFinished { outcome, .. } => Some(outcome),
+        .find_map(|record| match &record.payload {
+            JournalPayload::InvocationFinished { outcome, .. }
+                if outcome.status == WorkflowOutcomeStatus::ResourceLimited =>
+            {
+                Some(outcome)
+            }
             _ => None,
         })
-        .expect("recovered output invocation");
+        .expect("recovered journal invocation");
     assert_eq!(recovered_outcome.child_refs, compact_outcome.child_refs);
 }
 
@@ -247,7 +260,22 @@ async fn durable_create_waits_for_explicit_worker_start() {
                 let run_dir = neo_agent_core::workflow::run_dir(&root, &metadata.run_id);
                 async move {
                     assert!(run_dir.join("run.json").exists());
-                    assert_eq!(read_journal(&run_dir.join("journal.jsonl"))?.len(), 1);
+                    // Durable create + worker_start leave RunCreated and Running transition
+                    // before any host-effect invocation.
+                    let envelopes = collect_journal_v2(&run_dir.join("journal.jsonl"), None)?;
+                    assert!(
+                        !envelopes.is_empty(),
+                        "expected durable journal head before worker body"
+                    );
+                    assert!(
+                        envelopes.iter().any(|env| {
+                            matches!(
+                                env.payload,
+                                neo_agent_core::workflow::journal::JournalPayload::RunCreated { .. }
+                            )
+                        }),
+                        "RunCreated must be durable before worker body"
+                    );
                     started.notify_one();
                     release.notified().await;
                     Ok(())
@@ -257,12 +285,21 @@ async fn durable_create_waits_for_explicit_worker_start() {
         .unwrap();
 
     let handle = create_run(&runtime, dir.path()).await;
-    assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
+    // Durable create leaves the run Queued; workers start only via start_worker.
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Queued);
+    let run_dir_pre = neo_agent_core::workflow::run_dir(dir.path(), &handle.run_id);
+    assert!(run_dir_pre.join("run.json").exists());
     runtime.start_worker(&handle.run_id).await.unwrap();
     started.notified().await;
     assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
     release.notify_one();
-    wait_for_state(&handle, WorkflowState::Completed).await;
+    // Fixture runner returns Ok without FinalResultRecorded → Failed(missing_final_result).
+    wait_for_state(&handle, WorkflowState::Failed).await;
+    let snapshot = handle.snapshot().await;
+    assert_eq!(
+        snapshot.terminal_reason.as_deref(),
+        Some("missing_final_result")
+    );
 }
 
 #[tokio::test]
@@ -312,7 +349,7 @@ async fn manually_paused_run_rehydrates_without_host_exit_notification() {
 async fn rehydration_keeps_verify_messages_out_of_latest_log_summary() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     handle
         .invoke(
             0,
@@ -373,12 +410,12 @@ async fn worker_start_failure_is_durably_terminalized() {
 
     assert_eq!(handle.snapshot().await.state, WorkflowState::Failed);
     assert!(
-        read_journal(&journal_path(dir.path(), &handle.run_id))
+        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| matches!(
-                record,
-                JournalRecord::StateChanged {
+                &record.payload,
+                JournalPayload::StateChanged {
                     new: WorkflowState::Failed,
                     ..
                 }
@@ -390,7 +427,7 @@ async fn worker_start_failure_is_durably_terminalized() {
 async fn invoke_persists_start_before_effect_and_finish_after_effect() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
     let observed_start = Arc::new(AtomicBool::new(false));
 
@@ -405,11 +442,16 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
                 let observed_start = Arc::clone(&observed_start);
                 move |invocation| async move {
                     observed_start.store(
-                        matches!(
-                            read_journal(&path).unwrap().last(),
-                            Some(JournalRecord::InvocationStarted { invocation_id, .. })
-                                if invocation_id == &invocation.invocation_id
-                        ),
+                        collect_journal_v2(&path, None)
+                            .unwrap()
+                            .last()
+                            .is_some_and(|env| {
+                                matches!(
+                                    &env.payload,
+                                    JournalPayload::InvocationStarted { invocation_id, .. }
+                                        if invocation_id == &invocation.invocation_id
+                                )
+                            }),
                         Ordering::Release,
                     );
                     completed_with_usage(3, 2)
@@ -421,15 +463,19 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
 
     assert!(outcome.ok);
     assert!(observed_start.load(Ordering::Acquire));
-    let records = read_journal(&path).unwrap();
-    assert!(matches!(
-        records[1],
-        JournalRecord::InvocationStarted { .. }
-    ));
-    assert!(matches!(
-        records[2],
-        JournalRecord::InvocationFinished { .. }
-    ));
+    let records = collect_journal_v2(&path, None).unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r.payload, JournalPayload::InvocationStarted { .. })),
+        "missing InvocationStarted: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r.payload, JournalPayload::InvocationFinished { .. })),
+        "missing InvocationFinished: {records:?}"
+    );
     let output = handle.output().await.unwrap();
     assert_eq!(output.actual_usage.unwrap().input_tokens, 3);
     serde_json::to_value(output).expect("WorkflowOutput serializes");
@@ -439,7 +485,7 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
 async fn instruction_replan_interruption_durably_pauses_workflow() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
 
     let outcome = handle
@@ -473,22 +519,22 @@ async fn instruction_replan_interruption_durably_pauses_workflow() {
         snapshot.terminal_reason.as_deref(),
         Some("instruction_replan_required")
     );
-    assert!(read_journal(&path).unwrap().iter().any(|record| matches!(
-        record,
-        JournalRecord::StateChanged {
-            new: WorkflowState::Paused,
-            reason,
-            actor: WorkflowActor::Runtime,
-            ..
-        } if reason == "instruction_replan_required"
-    )));
+    assert!(collect_journal_v2(&path, None).unwrap().iter().any(
+        |record| matches!(&record.payload, JournalPayload::StateChanged {
+                new: WorkflowState::Paused,
+                reason,
+                actor: WorkflowActor::Runtime,
+                ..
+            } if reason == "instruction_replan_required"
+        )
+    ));
 }
 
 #[tokio::test]
 async fn projected_instruction_reason_without_typed_interruption_does_not_pause() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
 
     handle
         .invoke(
@@ -516,12 +562,12 @@ async fn projected_instruction_reason_without_typed_interruption_does_not_pause(
 
     assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
     assert!(
-        !read_journal(&journal_path(dir.path(), &handle.run_id))
+        !collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| matches!(
-                record,
-                JournalRecord::StateChanged {
+                &record.payload,
+                JournalPayload::StateChanged {
                     new: WorkflowState::Paused,
                     ..
                 }
@@ -533,7 +579,7 @@ async fn projected_instruction_reason_without_typed_interruption_does_not_pause(
 async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     let effects = Arc::new(AtomicUsize::new(0));
     handle
         .invoke(
@@ -598,7 +644,8 @@ async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live()
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    // Runner exits without final_result → Failed under V2 completion rules.
+    wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 2);
 }
 
@@ -606,7 +653,7 @@ async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live()
 async fn replay_mismatch_starts_live_effect() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     handle
         .invoke(
             0,
@@ -647,7 +694,8 @@ async fn replay_mismatch_starts_live_effect() {
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    // Runner exits without final_result → Failed under V2 completion rules.
+    wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 1);
 }
 
@@ -655,24 +703,29 @@ async fn replay_mismatch_starts_live_effect() {
 async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
-    let handle = create_run(&runtime, dir.path()).await;
+    let handle = create_running_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
-    let mut writer = JournalWriter::open(&path).unwrap();
     let input = serde_json::json!({"task": "audit"});
-    writer
-        .append(
-            &JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms: 2,
-                invocation_id: "inv_incomplete".to_owned(),
-                call_index: 0,
-                kind: WorkflowInvocationKind::Delegate,
-                canonical_input: input.clone(),
-                canonical_input_hash: canonical_input_hash(&input),
-            },
-            &WorkflowLimits::default(),
-        )
-        .unwrap();
+    let existing = collect_journal_v2(&path, None).unwrap();
+    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let run_id = existing
+        .first()
+        .map(|e| e.run_id.clone())
+        .unwrap_or_else(|| handle.run_id.clone());
+    let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
+    let started = JournalEnvelope::new(
+        next_seq,
+        2,
+        run_id,
+        JournalPayload::InvocationStarted {
+            invocation_id: "inv_incomplete".to_owned(),
+            call_index: 0,
+            kind: WorkflowInvocationKind::Delegate,
+            canonical_input: Some(input.clone()),
+        },
+    )
+    .with_canonical_input_hash(canonical_input_hash(&input));
+    writer.append(&started, &WorkflowLimits::default()).unwrap();
     drop(handle);
     drop(runtime);
 
@@ -704,7 +757,8 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    wait_for_state(&recovered_handle, WorkflowState::Completed).await;
+    // Runner exits without final_result → Failed under V2 completion rules.
+    wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 0);
 }
 
@@ -714,22 +768,27 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
     let handle = create_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
-    let mut writer = JournalWriter::open(&path).unwrap();
     let input = serde_json::json!({"task": "audit"});
-    writer
-        .append(
-            &JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms: 2,
-                invocation_id: "child_7".to_owned(),
-                call_index: 0,
-                kind: WorkflowInvocationKind::Delegate,
-                canonical_input: input.clone(),
-                canonical_input_hash: canonical_input_hash(&input),
-            },
-            &WorkflowLimits::default(),
-        )
-        .unwrap();
+    let existing = collect_journal_v2(&path, None).unwrap();
+    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let run_id = existing
+        .first()
+        .map(|e| e.run_id.clone())
+        .unwrap_or_else(|| handle.run_id.clone());
+    let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
+    let started = JournalEnvelope::new(
+        next_seq,
+        2,
+        run_id,
+        JournalPayload::InvocationStarted {
+            invocation_id: "child_7".to_owned(),
+            call_index: 0,
+            kind: WorkflowInvocationKind::Delegate,
+            canonical_input: Some(input.clone()),
+        },
+    )
+    .with_canonical_input_hash(canonical_input_hash(&input));
+    writer.append(&started, &WorkflowLimits::default()).unwrap();
     drop(handle);
     drop(runtime);
 
@@ -741,8 +800,8 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
         })
         .unwrap();
     recovered.rehydrate(dir.path()).await.unwrap();
-    assert!(read_journal(&path).unwrap().iter().any(|record| {
-        matches!(record, JournalRecord::InvocationFinished { invocation_id, outcome, .. }
+    assert!(collect_journal_v2(&path, None).unwrap().iter().any(|record| {
+        matches!(&record.payload, JournalPayload::InvocationFinished { invocation_id, outcome, .. }
             if invocation_id == "child_7" && outcome.summary == "adopted child")
     }));
 }
@@ -793,13 +852,13 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
     handle.pause(WorkflowActor::Human).await.unwrap();
     wait_for_state(&handle, WorkflowState::Paused).await;
     assert!(
-        read_journal(&journal_path(dir.path(), &handle.run_id))
+        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| {
                 matches!(
-                    record,
-                    JournalRecord::StateChanged {
+                    &record.payload,
+                    JournalPayload::StateChanged {
                         new: WorkflowState::Paused,
                         actor: WorkflowActor::Human,
                         ..
@@ -809,7 +868,9 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
     );
     let run_id = handle.run_id.clone();
     handle.resume(WorkflowActor::Human).await.unwrap();
-    wait_for_state(&handle, WorkflowState::Completed).await;
+    // V2 requires a durable final_result for Completed; this runner only
+    // exercises pause/resume occupancy, so the worker exits Failed.
+    wait_for_state(&handle, WorkflowState::Failed).await;
     assert_eq!(handle.run_id, run_id);
     assert_eq!(worker_starts.load(Ordering::Acquire), 2);
     assert_eq!(effects.load(Ordering::Acquire), 1);
@@ -876,17 +937,17 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
     wait_for_state(&handle, WorkflowState::Cancelled).await;
     assert!(effect_settled.load(Ordering::Acquire));
 
-    let records = read_journal(&journal_path(dir.path(), &handle.run_id)).unwrap();
+    let records = collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let finish = records
         .iter()
-        .position(|record| matches!(record, JournalRecord::InvocationFinished { .. }))
+        .position(|record| matches!(&record.payload, JournalPayload::InvocationFinished { .. }))
         .unwrap();
     let terminal = records
         .iter()
         .position(|record| {
             matches!(
-                record,
-                JournalRecord::StateChanged {
+                &record.payload,
+                JournalPayload::StateChanged {
                     new: WorkflowState::Cancelled,
                     actor: WorkflowActor::Human,
                     ..
@@ -930,40 +991,53 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let bad_handle = create_run(&runtime, dir.path()).await;
     let bad_id = bad_handle.run_id.clone();
     let bad_path = journal_path(dir.path(), &bad_id);
-    let mut writer = JournalWriter::open(&bad_path).unwrap();
     let input = serde_json::json!({"task": "stuck"});
-    writer
-        .append(
-            &JournalRecord::InvocationStarted {
-                seq: writer.next_seq(),
-                timestamp_ms: 2,
-                invocation_id: "inv_stuck".to_owned(),
-                call_index: 0,
-                kind: WorkflowInvocationKind::Delegate,
-                canonical_input: input.clone(),
-                canonical_input_hash: canonical_input_hash(&input),
-            },
-            &WorkflowLimits::default(),
-        )
-        .unwrap();
+    let existing = collect_journal_v2(&bad_path, None).unwrap();
+    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let run_id = existing
+        .first()
+        .map(|e| e.run_id.clone())
+        .unwrap_or_else(|| bad_id.clone());
+    let mut writer = JournalV2Writer::open(&bad_path, run_id.clone()).unwrap();
+    let started = JournalEnvelope::new(
+        next_seq,
+        2,
+        run_id,
+        JournalPayload::InvocationStarted {
+            invocation_id: "inv_stuck".to_owned(),
+            call_index: 0,
+            kind: WorkflowInvocationKind::Delegate,
+            canonical_input: Some(input.clone()),
+        },
+    )
+    .with_canonical_input_hash(canonical_input_hash(&input));
+    writer.append(&started, &WorkflowLimits::default()).unwrap();
 
     // Healthy sibling: already terminal so rehydrate needs no recovery append.
     let good_handle = create_run(&runtime, dir.path()).await;
     let good_id = good_handle.run_id.clone();
     let good_path = journal_path(dir.path(), &good_id);
-    let mut good_writer = JournalWriter::open(&good_path).unwrap();
+    let existing = collect_journal_v2(&good_path, None).unwrap();
+    let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(0);
+    let run_id = existing
+        .first()
+        .map(|e| e.run_id.clone())
+        .unwrap_or_else(|| good_id.clone());
+    let mut good_writer = JournalV2Writer::open(&good_path, run_id.clone()).unwrap();
+    let changed = JournalEnvelope::new(
+        next_seq,
+        2,
+        run_id,
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Running,
+            // Cancelled is terminal without requiring final_result_recorded.
+            new: WorkflowState::Cancelled,
+            reason: "done".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+    );
     good_writer
-        .append(
-            &JournalRecord::StateChanged {
-                seq: good_writer.next_seq(),
-                timestamp_ms: 2,
-                previous: WorkflowState::Running,
-                new: WorkflowState::Completed,
-                reason: "done".to_owned(),
-                actor: WorkflowActor::Runtime,
-            },
-            &WorkflowLimits::default(),
-        )
+        .append(&changed, &WorkflowLimits::default())
         .unwrap();
     drop(bad_handle);
     drop(good_handle);
@@ -1001,19 +1075,22 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let healthy = by_id
         .get(&good_id.0)
         .expect("healthy sibling handle present");
-    assert_eq!(healthy.state, WorkflowState::Completed);
+    assert_eq!(healthy.state, WorkflowState::Cancelled);
     assert!(!healthy.recovery_failure);
 
     // Recovery must not invent a finish record when the recovery append failed.
-    assert!(!read_journal(&bad_path).unwrap().iter().any(|record| {
-        matches!(
-            record,
-            JournalRecord::InvocationFinished {
-                invocation_id,
-                ..
-            } if invocation_id == "inv_stuck"
-        )
-    }));
+    assert!(
+        !collect_journal_v2(&bad_path, None)
+            .unwrap()
+            .iter()
+            .any(|record| {
+                matches!(&record.payload, JournalPayload::InvocationFinished {
+                        invocation_id,
+                        ..
+                    } if invocation_id == "inv_stuck"
+                )
+            })
+    );
 }
 
 #[tokio::test]
@@ -1061,13 +1138,13 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
     assert_eq!(snapshot.state, WorkflowState::Failed);
     assert_eq!(snapshot.terminal_reason.as_deref(), Some("worker_panicked"));
 
-    let records = read_journal(&path).unwrap();
+    let records = collect_journal_v2(&path, None).unwrap();
     let finished_idx = records
         .iter()
         .position(|record| {
             matches!(
-                record,
-                JournalRecord::InvocationFinished {
+                &record.payload,
+                JournalPayload::InvocationFinished {
                     outcome: WorkflowInvocationOutcome {
                         status: WorkflowOutcomeStatus::Interrupted,
                         ..
@@ -1080,9 +1157,7 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
     let failed_idx = records
         .iter()
         .position(|record| {
-            matches!(
-                record,
-                JournalRecord::StateChanged {
+            matches!(&record.payload, JournalPayload::StateChanged {
                     new: WorkflowState::Failed,
                     reason,
                     ..
@@ -1095,8 +1170,8 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
         "invocation outcome must be durable before workflow terminalization"
     );
 
-    match &records[finished_idx] {
-        JournalRecord::InvocationFinished { outcome, .. } => {
+    match &records[finished_idx].payload {
+        JournalPayload::InvocationFinished { outcome, .. } => {
             assert!(!outcome.ok);
             assert_eq!(outcome.status, WorkflowOutcomeStatus::Interrupted);
             assert_eq!(
@@ -1108,12 +1183,8 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
     }
 
     // No open invocation remains after panic supervision.
-    assert!(!records.iter().any(|record| matches!(
-        record,
-        JournalRecord::InvocationStarted { invocation_id, .. }
-            if !records.iter().any(|finish| matches!(
-                finish,
-                JournalRecord::InvocationFinished {
+    assert!(!records.iter().any(|record| matches!(&record.payload, JournalPayload::InvocationStarted { invocation_id, .. }
+            if !records.iter().any(|finish| matches!(&finish.payload, JournalPayload::InvocationFinished {
                     invocation_id: finished_id,
                     ..
                 } if finished_id == invocation_id

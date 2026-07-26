@@ -46,11 +46,10 @@ impl UserAnswerPolicy {
     /// Whether `actor` is allowed to submit an answer under this policy.
     #[must_use]
     pub fn allows_actor(self, actor: WorkflowActor) -> bool {
-        match (self, actor) {
-            (_, WorkflowActor::Human) => true,
-            (Self::HumanOrModel, WorkflowActor::Model) => true,
-            _ => false,
-        }
+        matches!(
+            (self, actor),
+            (_, WorkflowActor::Human) | (Self::HumanOrModel, WorkflowActor::Model)
+        )
     }
 }
 

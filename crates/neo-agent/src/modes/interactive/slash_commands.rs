@@ -299,18 +299,21 @@ impl InteractiveController {
             args: prepared.args.clone(),
             launch_source: format!("named:{}", prepared.definition.name.as_str()),
             parent_run_id: None,
+            output_schema: Some(prepared.definition.output_schema.clone()),
         };
 
         let mut intent = neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
             request,
-            prepared.session_dir.display().to_string(),
-            prepared.workspace.display().to_string(),
-            launch_nonce,
-            neo_agent_core::workflow::WorkflowActor::Human,
-            prepared.permission_mode,
-            None,
-            prepared.definition.compiled_input_schema.clone(),
-            schema_sha256,
+            neo_agent_core::workflow::WorkflowLaunchBinding {
+                session_identity: prepared.session_dir.display().to_string(),
+                workspace_identity: prepared.workspace.display().to_string(),
+                launch_nonce,
+                actor: neo_agent_core::workflow::WorkflowActor::Human,
+                permission_mode: prepared.permission_mode,
+                parent_lineage: None,
+                compiled_input_schema: prepared.definition.compiled_input_schema.clone(),
+                schema_sha256,
+            },
         );
         // Prefer the registry content revision over the script-byte fallback.
         intent.definition_revision = prepared.definition.revision.clone();

@@ -215,7 +215,26 @@ impl WorkflowDispatchResolver {
                 let dispatch = resolver
                     .handle_for_session(&session_dir)
                     .map_err(WorkflowError::Host)?;
-                LuaWorkflowRunner::new(dispatch, handle, limits)
+                let mut runner = LuaWorkflowRunner::new(dispatch, handle, limits);
+                if let Some(schema_doc) = metadata.output_schema.as_ref() {
+                    let schema =
+                        crate::workflow::CompiledSchema::compile(schema_doc).map_err(|err| {
+                            WorkflowError::coded(
+                                crate::workflow::WorkflowErrorCode::InvalidSchema,
+                                format!("pinned output_schema compile failed: {err}"),
+                            )
+                        })?;
+                    let revision =
+                        crate::workflow::WorkflowRevision::parse(&metadata.script_sha256)
+                            .ok()
+                            .or_else(|| {
+                                Some(crate::workflow::WorkflowRevision::from_bytes(
+                                    metadata.script.as_bytes(),
+                                ))
+                            });
+                    runner = runner.with_final_schema(schema, revision);
+                }
+                runner
                     .execute(&metadata.script, metadata.args)
                     .await
                     .map(|_| ())

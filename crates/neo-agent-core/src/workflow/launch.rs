@@ -54,48 +54,56 @@ pub struct WorkflowLaunchIntent {
     pub parent_run_id: Option<WorkflowId>,
     /// Optional precompiled input schema for argument validation.
     pub compiled_input_schema: Option<CompiledSchema>,
+    /// Final output schema JSON pinned onto the run for production validation.
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// Session/workspace binding fields for [`WorkflowLaunchIntent::from_parts`].
+#[derive(Clone)]
+pub struct WorkflowLaunchBinding {
+    pub session_identity: String,
+    pub workspace_identity: String,
+    pub launch_nonce: String,
+    pub actor: WorkflowActor,
+    pub permission_mode: PermissionMode,
+    pub parent_lineage: Option<WorkflowLineageMetadata>,
+    pub compiled_input_schema: Option<CompiledSchema>,
+    /// SHA-256 of canonical schema material (empty when no schema binding).
+    pub schema_sha256: String,
 }
 
 impl WorkflowLaunchIntent {
     /// Build an intent from a resolved launch request plus identity binding fields.
     #[must_use]
-    pub fn from_parts(
-        request: WorkflowLaunchRequest,
-        session_identity: impl Into<String>,
-        workspace_identity: impl Into<String>,
-        launch_nonce: impl Into<String>,
-        actor: WorkflowActor,
-        permission_mode: PermissionMode,
-        parent_lineage: Option<WorkflowLineageMetadata>,
-        compiled_input_schema: Option<CompiledSchema>,
-        schema_sha256: impl Into<String>,
-    ) -> Self {
+    pub fn from_parts(request: WorkflowLaunchRequest, binding: WorkflowLaunchBinding) -> Self {
         let source_sha256 = source_sha256_hex(request.script.as_bytes());
         let args_sha256 = canonical_input_hash(&request.args);
-        let lineage_digest = parent_lineage
+        let lineage_digest = binding
+            .parent_lineage
             .as_ref()
             .map_or_else(String::new, lineage_digest_hex);
         let definition_revision = WorkflowRevision::from_bytes(request.script.as_bytes());
         Self {
-            session_identity: session_identity.into(),
-            workspace_identity: workspace_identity.into(),
-            launch_nonce: launch_nonce.into(),
+            session_identity: binding.session_identity,
+            workspace_identity: binding.workspace_identity,
+            launch_nonce: binding.launch_nonce,
             launch_source: request.launch_source.clone(),
             definition_revision,
             source_sha256,
             args: request.args.clone(),
             args_sha256,
-            schema_sha256: schema_sha256.into(),
+            schema_sha256: binding.schema_sha256,
             lineage_digest,
-            actor,
-            permission_mode,
-            parent_lineage,
+            actor: binding.actor,
+            permission_mode: binding.permission_mode,
+            parent_lineage: binding.parent_lineage,
             name: request.name,
             description: request.description,
             phases: request.phases,
             script: request.script,
             parent_run_id: request.parent_run_id,
-            compiled_input_schema,
+            compiled_input_schema: binding.compiled_input_schema,
+            output_schema: request.output_schema,
         }
     }
 
@@ -135,6 +143,7 @@ impl WorkflowLaunchIntent {
             args: self.args.clone(),
             launch_source: self.launch_source.clone(),
             parent_run_id: self.parent_run_id.clone(),
+            output_schema: self.output_schema.clone(),
         }
     }
 }
@@ -416,35 +425,29 @@ mod tests {
             args: json!({"target": "core"}),
             launch_source: "test".to_owned(),
             parent_run_id: None,
+            output_schema: None,
+        }
+    }
+
+    fn sample_binding() -> WorkflowLaunchBinding {
+        WorkflowLaunchBinding {
+            session_identity: "session-a".to_owned(),
+            workspace_identity: "workspace-a".to_owned(),
+            launch_nonce: "nonce-1".to_owned(),
+            actor: WorkflowActor::Model,
+            permission_mode: PermissionMode::Auto,
+            parent_lineage: None,
+            compiled_input_schema: None,
+            schema_sha256: String::new(),
         }
     }
 
     #[test]
     fn intent_digest_is_stable_and_args_sensitive() {
-        let a = WorkflowLaunchIntent::from_parts(
-            sample_request(),
-            "session-a",
-            "workspace-a",
-            "nonce-1",
-            WorkflowActor::Model,
-            PermissionMode::Auto,
-            None,
-            None,
-            "",
-        );
+        let a = WorkflowLaunchIntent::from_parts(sample_request(), sample_binding());
         let mut request_b = sample_request();
         request_b.args = json!({"target": "other"});
-        let b = WorkflowLaunchIntent::from_parts(
-            request_b,
-            "session-a",
-            "workspace-a",
-            "nonce-1",
-            WorkflowActor::Model,
-            PermissionMode::Auto,
-            None,
-            None,
-            "",
-        );
+        let b = WorkflowLaunchIntent::from_parts(request_b, sample_binding());
         assert_eq!(a.digest(), a.digest());
         assert_ne!(a.digest(), b.digest());
     }
@@ -452,17 +455,7 @@ mod tests {
     #[test]
     fn preflight_rejects_invalid_lua_without_side_effects() {
         let runtime = WorkflowRuntime::default();
-        let mut intent = WorkflowLaunchIntent::from_parts(
-            sample_request(),
-            "session-a",
-            "workspace-a",
-            "nonce-1",
-            WorkflowActor::Model,
-            PermissionMode::Auto,
-            None,
-            None,
-            "",
-        );
+        let mut intent = WorkflowLaunchIntent::from_parts(sample_request(), sample_binding());
         intent.script = "function (".to_owned();
         intent.source_sha256 = source_sha256_hex(intent.script.as_bytes());
         let err = WorkflowLaunchCoordinator

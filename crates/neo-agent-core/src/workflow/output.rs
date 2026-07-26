@@ -1173,19 +1173,19 @@ fn resolve_artifact_id(
     if let Some(id) = &request.artifact_id {
         return Ok(id.clone());
     }
-    if let Some(cursor) = cursor {
-        if let Some(raw) = &cursor.artifact_id {
-            // Prefer full JSON identity; fall back to sha-only against this run.
-            if let Ok(id) = serde_json::from_str::<WorkflowArtifactId>(raw) {
-                return Ok(id);
-            }
-            return WorkflowArtifactId::new(materials.run_id.clone(), raw.clone()).map_err(|e| {
-                WorkflowError::coded(
-                    WorkflowErrorCode::InvalidInput,
-                    format!("cursor artifact_id invalid: {e}"),
-                )
-            });
+    if let Some(cursor) = cursor
+        && let Some(raw) = &cursor.artifact_id
+    {
+        // Prefer full JSON identity; fall back to sha-only against this run.
+        if let Ok(id) = serde_json::from_str::<WorkflowArtifactId>(raw) {
+            return Ok(id);
         }
+        return WorkflowArtifactId::new(materials.run_id.clone(), raw.clone()).map_err(|e| {
+            WorkflowError::coded(
+                WorkflowErrorCode::InvalidInput,
+                format!("cursor artifact_id invalid: {e}"),
+            )
+        });
     }
     Err(WorkflowError::coded(
         WorkflowErrorCode::InvalidInput,
@@ -1348,7 +1348,7 @@ fn shrink_page_to_tool_result_cap(
                             const MAX: usize = 128;
                             if summary.len() > MAX {
                                 summary.truncate(MAX);
-                                summary.push_str("…");
+                                summary.push('…');
                             }
                         }
                         rec.record_bytes = 0;
@@ -1360,7 +1360,7 @@ fn shrink_page_to_tool_result_cap(
                             const MAX: usize = 128;
                             if summary.len() > MAX {
                                 summary.truncate(MAX);
-                                summary.push_str("…");
+                                summary.push('…');
                             }
                         }
                     }

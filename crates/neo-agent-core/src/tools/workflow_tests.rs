@@ -65,14 +65,16 @@ async fn dynamic_tool_adapter_launches_only_through_coordinator() {
 
     let intent = WorkflowLaunchIntent::from_parts(
         input.launch_request(crate::PermissionMode::Auto),
-        session.path().display().to_string(),
-        session.path().display().to_string(),
-        nonce,
-        WorkflowActor::Model,
-        crate::PermissionMode::Auto,
-        None,
-        None,
-        "",
+        crate::workflow::WorkflowLaunchBinding {
+            session_identity: session.path().display().to_string(),
+            workspace_identity: session.path().display().to_string(),
+            launch_nonce: nonce,
+            actor: WorkflowActor::Model,
+            permission_mode: crate::PermissionMode::Auto,
+            parent_lineage: None,
+            compiled_input_schema: None,
+            schema_sha256: String::new(),
+        },
     );
     let outcome = WorkflowLaunchCoordinator
         .launch(

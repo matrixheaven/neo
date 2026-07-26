@@ -25,8 +25,9 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
+        output_schema: None,
     }
-}
+    }
 
 fn completed_with_usage(summary: &str, usage: AgentTokenUsage) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {

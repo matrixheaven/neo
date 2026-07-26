@@ -424,8 +424,9 @@ fn base_launch_request(
         args: json!({"target": name}),
         launch_source: launch_source.to_owned(),
         parent_run_id: None,
+        output_schema: None,
     }
-}
+    }
 
 fn intent_for(
     request: neo_agent_core::workflow::WorkflowLaunchRequest,
@@ -437,14 +438,16 @@ fn intent_for(
 ) -> neo_agent_core::workflow::WorkflowLaunchIntent {
     neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
         request,
-        session.display().to_string(),
-        workspace.display().to_string(),
-        nonce,
-        actor,
-        mode,
-        None,
-        None,
-        "",
+        neo_agent_core::workflow::WorkflowLaunchBinding {
+            session_identity: session.display().to_string(),
+            workspace_identity: workspace.display().to_string(),
+            launch_nonce: nonce.to_owned(),
+            actor,
+            permission_mode: mode,
+            parent_lineage: None,
+            compiled_input_schema: None,
+            schema_sha256: String::new(),
+        },
     )
 }
 
@@ -716,14 +719,16 @@ async fn compile_schema_and_storage_failure_preserve_reusable_capability() {
         request.args = json!({"target": "not-an-integer"});
         let intent = neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
             request,
-            session.path().display().to_string(),
-            workspace.path().display().to_string(),
-            nonce,
-            WorkflowActor::Model,
-            PermissionMode::Auto,
-            None,
-            Some(schema),
-            "schema-binding",
+            neo_agent_core::workflow::WorkflowLaunchBinding {
+                session_identity: session.path().display().to_string(),
+                workspace_identity: workspace.path().display().to_string(),
+                launch_nonce: nonce.to_owned(),
+                actor: WorkflowActor::Model,
+                permission_mode: PermissionMode::Auto,
+                parent_lineage: None,
+                compiled_input_schema: Some(schema),
+                schema_sha256: "schema-binding".to_owned(),
+            },
         );
         let err = WorkflowLaunchCoordinator
             .launch(

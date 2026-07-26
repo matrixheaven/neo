@@ -831,11 +831,11 @@ impl<'a> SessionEventWriter<'a> {
         Self::Jsonl(writer)
     }
 
-    fn memory() -> Self {
+fn memory() -> Self {
         Self::Memory
     }
 
-    async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
+async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
         match self {
             Self::Jsonl(writer) => writer
                 .append_event(event)
@@ -845,7 +845,7 @@ impl<'a> SessionEventWriter<'a> {
         }
     }
 
-    async fn flush(&mut self) -> anyhow::Result<()> {
+async fn flush(&mut self) -> anyhow::Result<()> {
         match self {
             Self::Jsonl(writer) => writer.flush().await.map_err(anyhow::Error::from),
             Self::Memory => Ok(()),
@@ -1606,7 +1606,7 @@ mod tests {
         );
     }
 
-    fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
+fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
         ApprovalRequest {
             turn: 1,
             id: id.to_owned(),
@@ -1627,10 +1627,11 @@ mod tests {
                     action: ApprovalAction::Reject,
                 },
             ],
+            workflow_origin: None,
         }
     }
 
-    fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
+fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
         ApprovalRequest {
             turn: 1,
             id: id.to_owned(),
@@ -1655,6 +1656,7 @@ mod tests {
                     },
                 },
             ],
+            workflow_origin: None,
         }
     }
 
@@ -3018,7 +3020,7 @@ mod tests {
         assert_eq!(model.model, "gpt-4.1");
     }
 
-    fn fake_model() -> ModelSpec {
+fn fake_model() -> ModelSpec {
         ModelSpec {
             provider: ProviderId("test-provider".to_owned()),
             model: "test-model".to_owned(),
@@ -3027,7 +3029,7 @@ mod tests {
         }
     }
 
-    fn chat_message_text(message: &ChatMessage) -> String {
+fn chat_message_text(message: &ChatMessage) -> String {
         let content = match message {
             ChatMessage::System { content }
             | ChatMessage::User { content }
@@ -3044,7 +3046,7 @@ mod tests {
             .join("")
     }
 
-    fn test_config(project_dir: &std::path::Path) -> AppConfig {
+fn test_config(project_dir: &std::path::Path) -> AppConfig {
         AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
@@ -3108,6 +3110,7 @@ mod tests {
             id: "workflow-idle".to_owned(),
             name: "Bash".to_owned(),
             arguments: serde_json::json!({"command": "cargo --version"}),
+            workflow_origin: None,
         };
         let (ingress, events) = tokio::sync::mpsc::unbounded_channel();
         let (persisted, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
@@ -3225,7 +3228,8 @@ mod tests {
                         args: serde_json::json!({}),
                         launch_source: "test".to_owned(),
                         parent_run_id: None,
-                    },
+                        output_schema: None,
+},
                 )
                 .await
                 .expect("seed workflow");
@@ -3345,7 +3349,8 @@ mod tests {
                     args: serde_json::json!({}),
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
-                },
+                    output_schema: None,
+},
             )
             .await
             .expect("seed workflow");
@@ -3516,7 +3521,8 @@ mod tests {
                     args: serde_json::json!({}),
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
-                },
+                    output_schema: None,
+},
             )
             .await
             .expect("seed workflow");
@@ -3621,7 +3627,7 @@ mod tests {
         );
     }
 
-    fn test_mcp_server(
+fn test_mcp_server(
         id: &str,
         transport: McpTransport,
         url: Option<&str>,

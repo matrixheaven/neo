@@ -34,8 +34,10 @@ fn launch_request() -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "test".to_owned(),
         parent_run_id: None,
+        output_schema: None,
+
     }
-}
+    }
 
 async fn wait_for_terminal(handle: &neo_agent_core::workflow::WorkflowHandle) {
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -145,14 +147,15 @@ async fn terminal_workflow_notification_waits_for_natural_turn() {
     assert_eq!(notifications.len(), 1);
     let notification = &notifications[0];
     let notification_id = notification.id.clone();
-    assert_eq!(notification.state, WorkflowState::Completed);
+    // Empty Ok runner has no final_result → V2 terminalizes Failed, not Completed.
+    assert_eq!(notification.state, WorkflowState::Failed);
     assert_eq!(notification.run_id, handle.run_id);
     assert_eq!(
         notification.id,
         WorkflowNotification::new(
             &session_dir,
             handle.run_id.clone(),
-            WorkflowState::Completed,
+            WorkflowState::Failed,
             notification.reason.clone(),
         )
         .id,
@@ -305,8 +308,9 @@ async fn same_process_rehydrate_preserves_live_run_and_control() {
         .expect("idempotent rehydrate")
         .pop()
         .expect("existing workflow handle");
-    assert_eq!(recovered.snapshot().await.state, WorkflowState::Running);
-    assert_eq!(original.snapshot().await.state, WorkflowState::Running);
+    // Durable create leaves runs Queued until an explicit worker start.
+    assert_eq!(recovered.snapshot().await.state, WorkflowState::Queued);
+    assert_eq!(original.snapshot().await.state, WorkflowState::Queued);
 
     recovered
         .stop(WorkflowActor::Human)

@@ -5,9 +5,9 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, schema};
 use crate::WorkflowApprovalPresentation;
 use crate::workflow::{
-    LaunchAuthorizationMode, WorkflowActor, WorkflowError, WorkflowErrorCode,
-    WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent, WorkflowLaunchRequest,
-    WorkflowPhase,
+    DynamicWorkflowDefinitionInput, LaunchAuthorizationMode, WorkflowActor, WorkflowError,
+    WorkflowErrorCode, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
+    WorkflowLaunchRequest, WorkflowPhase, resolve_dynamic_definition,
 };
 
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
@@ -24,6 +24,8 @@ pub(crate) struct RunWorkflowInput {
     #[serde(default = "empty_args")]
     #[schemars(description = "Read-only object exposed to Lua as args.")]
     args: serde_json::Value,
+    #[schemars(description = "Required JSON Schema for the final Lua return value.")]
+    output_schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
@@ -65,6 +67,9 @@ impl RunWorkflowInput {
         if !self.args.is_object() {
             return Err("args must be an object".to_owned());
         }
+        if self.output_schema.is_null() {
+            return Err("output_schema is required".to_owned());
+        }
         Ok(self)
     }
 
@@ -87,6 +92,7 @@ impl RunWorkflowInput {
             args: self.args.clone(),
             launch_source: format!("/workflow ({})", permission_mode.label()),
             parent_run_id: None,
+            output_schema: Some(self.output_schema.clone()),
         }
     }
 }
@@ -192,18 +198,57 @@ impl Tool for RunWorkflowTool {
                 ));
             };
 
-            let request = input.launch_request(permission_mode);
-            let intent = WorkflowLaunchIntent::from_parts(
+            // Resolve through the canonical dynamic definition path so final
+            // output_schema is compiled before any durable run is created.
+            let phases: Vec<WorkflowPhase> = input
+                .phases
+                .iter()
+                .map(|phase| WorkflowPhase {
+                    id: phase.id.clone(),
+                    description: phase.description.clone(),
+                })
+                .collect();
+            let resolved = match resolve_dynamic_definition(
+                DynamicWorkflowDefinitionInput {
+                    name: input.name.clone(),
+                    display_name: None,
+                    description: input.description.clone(),
+                    phases: phases.clone(),
+                    script: input.script.clone(),
+                    input_schema: None,
+                    output_schema: input.output_schema.clone(),
+                },
+                &ctx.workflow_runtime.limits(),
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => return Ok(map_launch_error(error)),
+            };
+            let schema_sha256 = crate::workflow::canonical_input_hash(&resolved.output_schema);
+
+            let request = WorkflowLaunchRequest {
+                name: resolved.name.as_str().to_owned(),
+                description: resolved.description.clone(),
+                phases,
+                script: resolved.lua_source.clone(),
+                args: input.args.clone(),
+                launch_source: format!("/workflow ({})", permission_mode.label()),
+                parent_run_id: None,
+                output_schema: Some(resolved.output_schema.clone()),
+            };
+            let mut intent = WorkflowLaunchIntent::from_parts(
                 request,
-                session_dir.display().to_string(),
-                ctx.cwd.display().to_string(),
-                launch_nonce,
-                WorkflowActor::Model,
-                permission_mode,
-                None,
-                None,
-                "",
+                crate::workflow::WorkflowLaunchBinding {
+                    session_identity: session_dir.display().to_string(),
+                    workspace_identity: ctx.cwd.display().to_string(),
+                    launch_nonce,
+                    actor: WorkflowActor::Model,
+                    permission_mode,
+                    parent_lineage: None,
+                    compiled_input_schema: resolved.compiled_input_schema.clone(),
+                    schema_sha256,
+                },
             );
+            intent.definition_revision = resolved.revision.clone();
 
             let outcome = match WorkflowLaunchCoordinator
                 .launch(

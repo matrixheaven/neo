@@ -385,10 +385,12 @@ fn verify_source_sha256(declared: &str, source_bytes: &[u8]) -> Result<String, W
     Ok(expected_sha)
 }
 
+type MaterializedManifestFields = (String, String, Vec<WorkflowPhase>, Option<Value>, Value);
+
 fn materialize_file_manifest_fields(
     raw: FileWorkflowToml,
     limits: &WorkflowLimits,
-) -> Result<(String, String, Vec<WorkflowPhase>, Option<Value>, Value), WorkflowError> {
+) -> Result<MaterializedManifestFields, WorkflowError> {
     let display_name = raw.display_name.trim().to_owned();
     if display_name.is_empty() {
         return Err(WorkflowError::coded(

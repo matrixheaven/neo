@@ -72,8 +72,8 @@ pub use journal::{
     read_journal, read_run_metadata, run_dir, write_run_metadata,
 };
 pub use launch::{
-    LaunchAuthorizationMode, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
-    WorkflowLaunchOutcome, compile_lua_source,
+    LaunchAuthorizationMode, WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts,
+    WorkflowLaunchIntent, WorkflowLaunchOutcome, compile_lua_source,
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
@@ -91,13 +91,13 @@ pub use retention::{
     preview_mark_sweep,
 };
 pub use runtime::{
-    ChildIsolationRequest, ChildSchemaAcceptResult, ParentChildAuthority, ReplayPrefix,
-    ResolvedChildContext, ResolvedChildIsolation, ResolvedWorktreeBinding, WorkflowHandle,
-    WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput, WorkflowProjectionStage,
-    WorkflowRuntime, child_isolation_provenance, cleanup_isolated_worktree, compute_replay_prefix,
-    host_bounded_context_summary, permission_rank, resolve_child_context, resolve_child_isolation,
-    resolve_child_model, resolve_child_permission, resolve_child_tool_ceiling,
-    resolve_child_worktree,
+    ChildIsolationRequest, ChildSchemaAcceptResult, ChildSchemaRepairRequest, ParentChildAuthority,
+    ReplayPrefix, ResolvedChildContext, ResolvedChildIsolation, ResolvedWorktreeBinding,
+    SwarmBatchRequest, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest,
+    WorkflowOutput, WorkflowProjectionStage, WorkflowRuntime, child_isolation_provenance,
+    cleanup_isolated_worktree, compute_replay_prefix, host_bounded_context_summary,
+    permission_rank, resolve_child_context, resolve_child_isolation, resolve_child_model,
+    resolve_child_permission, resolve_child_tool_ceiling, resolve_child_worktree,
 };
 pub use state::{
     WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowChildRef,

@@ -143,7 +143,7 @@ struct RegistryProjection {
 
 #[derive(Debug, Clone)]
 enum ScopeEntry {
-    Ready(ResolvedWorkflowDefinition),
+    Ready(Box<ResolvedWorkflowDefinition>),
     /// Higher-scope invalid content must not fall back.
     Invalid {
         error: WorkflowError,
@@ -369,10 +369,12 @@ impl WorkflowDefinitionRegistry {
         validate_save_target(&root, &manifest_path)?;
 
         match evaluate_no_clobber(
-            &source_path,
-            &manifest_path,
-            source_bytes,
-            &manifest_bytes,
+            NoClobberPair {
+                source_path: &source_path,
+                manifest_path: &manifest_path,
+                source_bytes,
+                manifest_bytes: &manifest_bytes,
+            },
             force,
             &limits,
             origin,
@@ -381,7 +383,7 @@ impl WorkflowDefinitionRegistry {
         )? {
             NoClobberDecision::Idempotent(existing) => {
                 self.invalidate();
-                return Ok(existing);
+                return Ok(*existing);
             }
             NoClobberDecision::Write => {}
         }
@@ -421,7 +423,7 @@ impl WorkflowDefinitionRegistry {
         .map(|_| resolved)
     }
 
-    fn lock(&self) -> MutexGuard<'_, RegistryInner> {
+fn lock(&self) -> MutexGuard<'_, RegistryInner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -552,23 +554,25 @@ fn stamp_scope_dir(origin: WorkflowSourceOrigin, root: &Path) -> ScopeStamp {
 fn scan_all(
     config: &WorkflowDefinitionRegistryConfig,
 ) -> Result<RegistryProjection, WorkflowError> {
-    let mut scopes = ScopeMaps::default();
-    scopes.builtin = scan_builtins(&config.builtins, &config.limits);
-    scopes.user = scan_directory_scope(
-        &WorkflowDefinitionRegistry::user_workflows_dir(&config.neo_home),
-        WorkflowSourceOrigin::User,
-        &config.limits,
-    );
-    if config.project_trusted {
-        scopes.project = scan_directory_scope(
+    let project = if config.project_trusted {
+        scan_directory_scope(
             &WorkflowDefinitionRegistry::project_workflows_dir(&config.workspace),
             WorkflowSourceOrigin::Project,
             &config.limits,
-        );
+        )
     } else {
         // Untrusted / disabled project discovery produces no project candidates.
-        scopes.project = BTreeMap::new();
-    }
+        BTreeMap::new()
+    };
+    let scopes = ScopeMaps {
+        builtin: scan_builtins(&config.builtins, &config.limits),
+        user: scan_directory_scope(
+            &WorkflowDefinitionRegistry::user_workflows_dir(&config.neo_home),
+            WorkflowSourceOrigin::User,
+            &config.limits,
+        ),
+        project,
+    };
     Ok(RegistryProjection {
         scopes,
         stamps: expected_stamps(config),
@@ -602,7 +606,7 @@ fn scan_builtins(
                 Some(format!("builtin://{}", name.as_str())),
                 limits,
             ) {
-                Ok(resolved) => ScopeEntry::Ready(resolved),
+                Ok(resolved) => ScopeEntry::Ready(Box::new(resolved)),
                 Err(error) => ScopeEntry::Invalid { error },
             },
             Err(error) => ScopeEntry::Invalid { error },
@@ -735,8 +739,7 @@ fn scan_directory_scope(
                 error: WorkflowError::coded(
                     WorkflowErrorCode::InvalidDefinition,
                     format!(
-                        "incomplete definition pair for `{stem}`: missing {} next to {}",
-                        format!("{stem}{SOURCE_SUFFIX}"),
+                        "incomplete definition pair for `{stem}`: missing {stem}{SOURCE_SUFFIX} next to {}",
                         manifest_path.display()
                     ),
                 ),
@@ -745,8 +748,7 @@ fn scan_directory_scope(
                 error: WorkflowError::coded(
                     WorkflowErrorCode::InvalidDefinition,
                     format!(
-                        "incomplete definition pair for `{stem}`: missing {} next to {}",
-                        format!("{stem}{MANIFEST_SUFFIX}"),
+                        "incomplete definition pair for `{stem}`: missing {stem}{MANIFEST_SUFFIX} next to {}",
                         source_path.display()
                     ),
                 ),
@@ -768,10 +770,10 @@ fn pair_stem_from_path(path: &Path) -> Option<String> {
     if let Some(stem) = file_name.strip_suffix(MANIFEST_SUFFIX) {
         return Some(stem.to_owned());
     }
-    if let Some(stem) = file_name.strip_suffix(SOURCE_SUFFIX) {
-        if !file_name.ends_with(MANIFEST_SUFFIX) {
-            return Some(stem.to_owned());
-        }
+    if let Some(stem) = file_name.strip_suffix(SOURCE_SUFFIX)
+        && !file_name.ends_with(MANIFEST_SUFFIX)
+    {
+        return Some(stem.to_owned());
     }
     None
 }
@@ -807,7 +809,7 @@ fn load_pair_entry(
         locator,
         limits,
     ) {
-        Ok(resolved) => ScopeEntry::Ready(resolved),
+        Ok(resolved) => ScopeEntry::Ready(Box::new(resolved)),
         Err(error) => ScopeEntry::Invalid { error },
     }
 }
@@ -919,7 +921,7 @@ fn resolve_from_projection(
         let scope_map = projection.scopes.get(origin);
         if let Some(entry) = scope_map.get(name) {
             return match entry {
-                ScopeEntry::Ready(resolved) => Ok(resolved.clone()),
+                ScopeEntry::Ready(resolved) => Ok(resolved.as_ref().clone()),
                 ScopeEntry::Invalid { error } => Err(error.clone()),
                 ScopeEntry::Conflict { detail } => Err(WorkflowError::coded(
                     WorkflowErrorCode::DefinitionConflict,
@@ -1006,44 +1008,48 @@ fn list_scope(
 
 enum NoClobberDecision {
     Write,
-    Idempotent(ResolvedWorkflowDefinition),
+    Idempotent(Box<ResolvedWorkflowDefinition>),
+}
+
+struct NoClobberPair<'a> {
+    source_path: &'a Path,
+    manifest_path: &'a Path,
+    source_bytes: &'a [u8],
+    manifest_bytes: &'a [u8],
 }
 
 fn evaluate_no_clobber(
-    source_path: &Path,
-    manifest_path: &Path,
-    source_bytes: &[u8],
-    manifest_bytes: &[u8],
+    pair: NoClobberPair<'_>,
     force: bool,
     limits: &WorkflowLimits,
     origin: WorkflowSourceOrigin,
     locator: Option<String>,
     name: &str,
 ) -> Result<NoClobberDecision, WorkflowError> {
-    let source_exists = path_exists_as_any(source_path)?;
-    let manifest_exists = path_exists_as_any(manifest_path)?;
+    let source_exists = path_exists_as_any(pair.source_path)?;
+    let manifest_exists = path_exists_as_any(pair.manifest_path)?;
     if !source_exists && !manifest_exists {
         return Ok(NoClobberDecision::Write);
     }
 
     // Existing content: compare exact pair bytes when both present and regular.
     if source_exists && manifest_exists {
-        let existing_source = read_if_regular(source_path)?;
-        let existing_manifest = read_if_regular(manifest_path)?;
+        let existing_source = read_if_regular(pair.source_path)?;
+        let existing_manifest = read_if_regular(pair.manifest_path)?;
         if let (Some(existing_source), Some(existing_manifest)) =
             (existing_source, existing_manifest)
-            && existing_source == source_bytes
-            && existing_manifest == manifest_bytes
+            && existing_source == pair.source_bytes
+            && existing_manifest == pair.manifest_bytes
         {
             let existing = resolve_paired_definition(
                 name,
-                manifest_bytes,
-                source_bytes,
+                pair.manifest_bytes,
+                pair.source_bytes,
                 origin,
                 locator,
                 limits,
             )?;
-            return Ok(NoClobberDecision::Idempotent(existing));
+            return Ok(NoClobberDecision::Idempotent(Box::new(existing)));
         }
     }
 
@@ -1146,11 +1152,9 @@ fn write_pair_atomic(
     // Source first.
     write_one_atomic(source_path, source_bytes, force)?;
     // Manifest last (content hash gate for discovery).
-    write_one_atomic(manifest_path, manifest_bytes, force).map_err(|err| {
-        // Best-effort: leave source in place; discovery will reject incomplete
-        // or hash-mismatched pairs. Do not roll back via destructive delete.
-        err
-    })
+    // Best-effort: leave source in place; discovery will reject incomplete
+    // or hash-mismatched pairs. Do not roll back via destructive delete.
+    write_one_atomic(manifest_path, manifest_bytes, force)
 }
 
 fn write_one_atomic(path: &Path, bytes: &[u8], force: bool) -> Result<(), WorkflowError> {
