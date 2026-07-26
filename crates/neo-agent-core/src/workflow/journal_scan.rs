@@ -526,9 +526,7 @@ pub(super) fn observe_v2_envelope(
             index.open_swarm_items.insert(key);
         }
         JournalPayload::SwarmItemFinished {
-            swarm_id,
-            item_id,
-            ..
+            swarm_id, item_id, ..
         } => {
             let key = swarm_item_key(swarm_id, item_id);
             if !index.open_swarm_items.contains(&key) {
