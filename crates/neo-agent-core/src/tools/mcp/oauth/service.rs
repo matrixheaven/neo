@@ -71,11 +71,8 @@ impl McpOAuthService {
             return Ok(Some(tokens.access_token));
         }
 
-        match self.refresh(identity, &tokens).await {
-            Ok(tokens) => Ok(Some(tokens.access_token)),
-            Err(err @ (McpOAuthError::MissingTokens | McpOAuthError::NeedsAuth(_))) => Err(err),
-            Err(err) => Err(McpOAuthError::NeedsAuth(err.to_string())),
-        }
+        let tokens = self.refresh(identity, &tokens).await?;
+        Ok(Some(tokens.access_token))
     }
 
     async fn refresh(
@@ -650,7 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_token_stale_without_refresh_token_needs_auth() {
+    async fn missing_refresh_token_still_needs_auth() {
         let (_dir, service, identity) = service();
         let mut tokens = token_record("expired-token");
         tokens.refresh_token = None;
@@ -663,6 +660,37 @@ mod tests {
         assert!(
             matches!(err, McpOAuthError::NeedsAuth(message) if message == "access token expired and no refresh token is available")
         );
+    }
+
+    #[tokio::test]
+    async fn store_failure_during_oauth_refresh_is_not_needs_auth() {
+        let (_dir, service, identity) = service();
+        let mut tokens = token_record("expired-token");
+        tokens.expires_in = Some(1);
+        tokens.token_received_at = unix_now_secs().saturating_sub(120);
+        service.store().save_tokens(&identity, &tokens).unwrap();
+        service
+            .store()
+            .save_client(&identity, &client_record())
+            .unwrap();
+        service
+            .store()
+            .save_discovery(
+                &identity,
+                &McpOAuthDiscoveryRecord {
+                    authorization_server_metadata: serde_json::json!({"not": "authorization-metadata"}),
+                    discovered_at: "2026-06-29T00:00:00Z".to_owned(),
+                },
+            )
+            .unwrap();
+
+        let err = service.access_token(&identity).await.unwrap_err();
+
+        assert!(
+            matches!(err, McpOAuthError::Store(ref message) if message.contains("invalid OAuth discovery metadata")),
+            "store/transport failures must remain typed Store, not NeedsAuth: {err:?}"
+        );
+        assert!(!err.is_needs_auth());
     }
 
     #[tokio::test]
