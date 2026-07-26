@@ -12,16 +12,20 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
+use super::artifacts::{ArtifactKind, ArtifactMetadata, ArtifactStore, ArtifactValue};
 use super::error::WorkflowError;
 use super::journal::{
-    self, IncompleteInvocation, JournalEnvelope, JournalRecord, JournalV2Writer,
+    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord, JournalV2Writer,
     canonical_input_hash, find_incomplete_invocations_v2,
 };
 use super::limits::WorkflowLimits;
+use super::output::{
+    CanonicalFinalResult, PreparedFinalBody, prepare_final_body, reconstruct_canonical_final_result,
+};
 use super::state::{
     WorkflowActor, WorkflowFinalResultMetadata, WorkflowId, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRunMetadata,
-    WorkflowSnapshot, WorkflowState,
+    WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRevision,
+    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
 };
 use crate::AgentTokenUsage;
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
@@ -100,6 +104,12 @@ pub struct WorkflowOutput {
     pub actual_usage: Option<AgentTokenUsage>,
     pub terminal_reason: Option<String>,
     pub reports: Vec<serde_json::Value>,
+    /// Canonical final result (inline or artifact-backed). Never synthesized from reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_result: Option<CanonicalFinalResult>,
+    /// Bounded metadata for journal-committed artifacts only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactMetadata>,
 }
 
 struct RunState {
@@ -131,6 +141,8 @@ struct RunState {
     /// journal I/O so the async run mutex never crosses file sync.
     journal: Option<SharedJournal>,
     final_result: Option<WorkflowFinalResultMetadata>,
+    /// Run-scoped immutable artifact store (visibility requires journal commit).
+    artifacts: ArtifactStore,
     /// V1 durable artifacts are inspectable projections only; no append path.
     v1_read_only: bool,
 }
@@ -400,6 +412,11 @@ impl WorkflowRuntime {
         };
 
         let control = Arc::new(RunControl::new());
+        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).map_err(|error| {
+            self.admission.release_storage_owner(run_id.as_str());
+            let _ = std::fs::remove_dir_all(&run_dir);
+            error
+        })?;
         let state = Arc::new(Mutex::new(RunState {
             metadata,
             state: WorkflowState::Queued,
@@ -425,6 +442,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: Some(Arc::new(StdMutex::new(writer))),
             final_result: None,
+            artifacts,
             v1_read_only: false,
         }));
         self.runs
@@ -605,6 +623,22 @@ impl WorkflowRuntime {
         } else {
             Vec::new()
         };
+        let final_result = match &guard.final_result {
+            Some(meta) => {
+                let artifact = meta
+                    .artifact_id
+                    .as_ref()
+                    .and_then(|id| guard.artifacts.find_by_id(id).cloned());
+                Some(reconstruct_canonical_final_result(
+                    meta,
+                    artifact.as_ref(),
+                    guard.actual_usage,
+                    Vec::new(),
+                    guard.terminal_reason.clone(),
+                )?)
+            }
+            None => None,
+        };
         Ok(WorkflowOutput {
             metadata: guard.metadata.clone(),
             state: guard.state,
@@ -614,6 +648,8 @@ impl WorkflowRuntime {
             actual_usage: guard.actual_usage,
             terminal_reason: guard.terminal_reason.clone(),
             reports: guard.reports.clone(),
+            final_result,
+            artifacts: guard.artifacts.list_metadata().to_vec(),
         })
     }
 
@@ -776,6 +812,162 @@ impl WorkflowRuntime {
         guard.updated_at_ms = Some(timestamp_ms);
         self.emit_projection(&guard, WorkflowProjectionStage::Updated);
         Ok(())
+    }
+
+    /// Stage immutable artifact bytes, append `ArtifactCommitted` last, then expose metadata.
+    ///
+    /// Ordering: serialize → limits → temp/sync/hash/rename/dir-sync → journal append → mark visible.
+    pub async fn commit_artifact(
+        &self,
+        run_id: &WorkflowId,
+        logical_name: &str,
+        kind: ArtifactKind,
+        value: ArtifactValue,
+        media_type: Option<&str>,
+    ) -> Result<ArtifactMetadata, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        // Artifact I/O must not hold the async run mutex (design §23 / §35).
+        let (journal, store) = {
+            let guard = state.lock().await;
+            if guard.v1_read_only {
+                return Err(WorkflowError::InvalidOperation(
+                    "v1 workflow projections are read-only".to_owned(),
+                ));
+            }
+            if guard.state.is_terminal() {
+                return Err(WorkflowError::InvalidInput(
+                    "cannot commit artifact on terminal run".to_owned(),
+                ));
+            }
+            let journal = guard.journal.clone().ok_or_else(|| {
+                WorkflowError::Journal("workflow journal is unavailable".to_owned())
+            })?;
+            (journal, guard.artifacts.clone())
+        };
+
+        let staged = store.stage(&self.limits, logical_name, kind, &value, media_type)?;
+
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id.clone(),
+                JournalPayload::ArtifactCommitted {
+                    artifact_id: staged.artifact_id.clone(),
+                    sha256: staged.sha256.clone(),
+                    byte_len: staged.byte_len,
+                    media_type: Some(staged.media_type.clone()),
+                    logical_name: Some(staged.logical_name.clone()),
+                },
+            )
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+
+        let mut guard = state.lock().await;
+        guard.artifacts.mark_committed(staged.metadata())?;
+        let meta = guard
+            .artifacts
+            .find_by_id(&staged.artifact_id)
+            .cloned()
+            .ok_or_else(|| {
+                WorkflowError::coded(
+                    super::error::WorkflowErrorCode::ArtifactMissing,
+                    "artifact missing after commit",
+                )
+            })?;
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        Ok(meta)
+    }
+
+    /// Persist exactly one top-level Lua return as the canonical final result.
+    ///
+    /// Oversized values are content-addressed artifacts; usage/terminal reason stay on output.
+    pub async fn persist_canonical_final_result(
+        &self,
+        run_id: &WorkflowId,
+        value: serde_json::Value,
+        schema_revision: Option<WorkflowRevision>,
+    ) -> Result<CanonicalFinalResult, WorkflowError> {
+        let prepared = prepare_final_body(value, &self.limits)?;
+        let metadata = match prepared {
+            PreparedFinalBody::Inline(value) => WorkflowFinalResultMetadata {
+                value: Some(value),
+                artifact_id: None,
+                schema_revision: schema_revision.clone(),
+            },
+            PreparedFinalBody::NeedsArtifact {
+                logical_name,
+                kind,
+                value,
+                media_type,
+                ..
+            } => {
+                let artifact = self
+                    .commit_artifact(run_id, &logical_name, kind, value, Some(&media_type))
+                    .await?;
+                WorkflowFinalResultMetadata {
+                    value: None,
+                    artifact_id: Some(artifact.artifact_id.clone()),
+                    schema_revision: schema_revision.clone(),
+                }
+            }
+        };
+        self.record_final_result(run_id, metadata.clone()).await?;
+
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        let artifact = metadata
+            .artifact_id
+            .as_ref()
+            .and_then(|id| guard.artifacts.find_by_id(id).cloned());
+        reconstruct_canonical_final_result(
+            &metadata,
+            artifact.as_ref(),
+            guard.actual_usage,
+            Vec::new(),
+            guard.terminal_reason.clone(),
+        )
+    }
+
+    /// List journal-visible artifact metadata for a run.
+    pub async fn list_artifacts(
+        &self,
+        run_id: &WorkflowId,
+    ) -> Result<Vec<ArtifactMetadata>, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        Ok(guard.artifacts.list_metadata().to_vec())
+    }
+
+    /// Read a journal-visible artifact with integrity revalidation.
+    pub async fn get_artifact(
+        &self,
+        run_id: &WorkflowId,
+        artifact_id: &super::state::WorkflowArtifactId,
+    ) -> Result<super::artifacts::ArtifactContent, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        guard.artifacts.get(artifact_id)
+    }
+
+    /// Read a byte range of a journal-visible artifact.
+    pub async fn read_artifact_range(
+        &self,
+        run_id: &WorkflowId,
+        artifact_id: &super::state::WorkflowArtifactId,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<super::artifacts::ArtifactContentRange, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        guard.artifacts.read_range(artifact_id, offset, max_bytes)
     }
 
     async fn rehydrate_run_entry(
@@ -1829,6 +2021,7 @@ impl WorkflowRuntime {
         let (started_at_ms, updated_at_ms) = projection_timestamps(&records);
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
+        let artifacts = ArtifactStore::empty(run_id.clone(), &run_dir);
         let run_state = RunState {
             current_phase: recovered_phase(&records),
             invocation_count: records
@@ -1869,6 +2062,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: None,
             final_result: None,
+            artifacts,
             v1_read_only: true,
         };
         self.runs
@@ -1897,6 +2091,10 @@ impl WorkflowRuntime {
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
         let final_result = final_result_v2(&envelopes);
+        let mut artifacts = ArtifactStore::open(&run_dir, run_id.clone())
+            .unwrap_or_else(|_| ArtifactStore::empty(run_id.clone(), &run_dir));
+        // Best-effort rehydrate: corrupt/missing files stay invisible and typed on get.
+        let _ = artifacts.rehydrate_from_envelopes(&envelopes);
         let run_state = RunState {
             current_phase: recovered_phase_v2(&envelopes),
             invocation_count: invocation_count_v2(&envelopes),
@@ -1922,6 +2120,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: writer,
             final_result,
+            artifacts,
             v1_read_only: false,
         };
         self.runs
@@ -1965,6 +2164,7 @@ impl WorkflowRuntime {
     ) -> WorkflowHandle {
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
+        let artifacts = ArtifactStore::empty(run_id.clone(), &run_dir);
         let state = RunState {
             metadata,
             state: WorkflowState::Failed,
@@ -1990,6 +2190,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: None,
             final_result: None,
+            artifacts,
             v1_read_only: false,
         };
         self.runs
@@ -2059,6 +2260,50 @@ impl WorkflowHandle {
     ) -> Result<(), WorkflowError> {
         self.runtime
             .record_final_result(&self.run_id, metadata)
+            .await
+    }
+
+    pub async fn commit_artifact(
+        &self,
+        logical_name: &str,
+        kind: ArtifactKind,
+        value: ArtifactValue,
+        media_type: Option<&str>,
+    ) -> Result<ArtifactMetadata, WorkflowError> {
+        self.runtime
+            .commit_artifact(&self.run_id, logical_name, kind, value, media_type)
+            .await
+    }
+
+    pub async fn persist_canonical_final_result(
+        &self,
+        value: serde_json::Value,
+        schema_revision: Option<WorkflowRevision>,
+    ) -> Result<CanonicalFinalResult, WorkflowError> {
+        self.runtime
+            .persist_canonical_final_result(&self.run_id, value, schema_revision)
+            .await
+    }
+
+    pub async fn list_artifacts(&self) -> Result<Vec<ArtifactMetadata>, WorkflowError> {
+        self.runtime.list_artifacts(&self.run_id).await
+    }
+
+    pub async fn get_artifact(
+        &self,
+        artifact_id: &super::state::WorkflowArtifactId,
+    ) -> Result<super::artifacts::ArtifactContent, WorkflowError> {
+        self.runtime.get_artifact(&self.run_id, artifact_id).await
+    }
+
+    pub async fn read_artifact_range(
+        &self,
+        artifact_id: &super::state::WorkflowArtifactId,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<super::artifacts::ArtifactContentRange, WorkflowError> {
+        self.runtime
+            .read_artifact_range(&self.run_id, artifact_id, offset, max_bytes)
             .await
     }
 

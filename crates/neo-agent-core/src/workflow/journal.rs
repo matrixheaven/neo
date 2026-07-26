@@ -307,7 +307,7 @@ pub fn canonical_input_hash(input: &serde_json::Value) -> String {
     format!("{hash:x}")
 }
 
-fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+pub fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();
