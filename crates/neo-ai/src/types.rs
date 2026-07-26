@@ -351,6 +351,8 @@ impl ToolSpec {
     }
 }
 
+/// Provider-neutral chat request. Structured-output hints live on
+/// [`RequestOptions::response_format`]; host validation is not performed here.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChatRequest {
     pub model: ModelSpec,

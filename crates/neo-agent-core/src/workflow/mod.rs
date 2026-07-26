@@ -7,9 +7,14 @@ mod lua;
 pub mod recovery;
 pub mod retention;
 pub mod runtime;
+pub mod schema;
 mod state;
 
 pub use capability::WorkflowCapability;
+pub use schema::{
+    CompiledSchema, SchemaErrorCode, SchemaValidationError, StructuredOutputSource,
+    accept_structured_output, attach_response_format_hint, parse_strict_json_value,
+};
 
 pub use admission::{
     AdmissionOccupancy, AdmissionReason, AdmitOutcome, ExecutorPermit, StorageReservation,

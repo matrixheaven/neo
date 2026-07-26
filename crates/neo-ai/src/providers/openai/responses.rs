@@ -118,6 +118,11 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
             body["prompt_cache_retention"] = json!("24h");
         }
     }
+    if let Some(response_format) = &request.options.response_format {
+        body["text"] = json!({
+            "format": response_format.to_openai_responses_text_format(),
+        });
+    }
 
     Ok(body)
 }
@@ -1001,5 +1006,39 @@ mod tests {
             .expect("should emit an error");
         assert!(matches!(error, AiError::Protocol { .. }));
         assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn response_format_maps_json_schema_for_responses_api() {
+        use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, ResponseFormat};
+
+        let format = ResponseFormat {
+            name: "result".to_owned(),
+            schema: json!({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"], "additionalProperties": false}),
+            strict: true,
+        };
+        let request = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("openai".to_owned()),
+                model: "gpt-test".to_owned(),
+                api: ApiKind::OpenAiResponse,
+                capabilities: ModelCapabilities::chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "hi".to_owned(),
+                }],
+            }],
+            tools: vec![],
+            options: crate::RequestOptions {
+                response_format: Some(format.clone()),
+                ..crate::RequestOptions::default()
+            },
+        };
+        let body = request_body(&request).expect("body");
+        assert_eq!(
+            body["text"]["format"],
+            format.to_openai_responses_text_format()
+        );
     }
 }

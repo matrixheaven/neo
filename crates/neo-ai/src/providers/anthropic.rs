@@ -939,4 +939,40 @@ mod tests {
             matches!(err, ProviderError::Protocol(message) if message.contains("invalid raw tool arguments"))
         );
     }
+
+    #[test]
+    fn anthropic_omits_response_format_wire_hint() {
+        use crate::{
+            ApiKind, ModelCapabilities, ModelSpec, ProviderId, RequestOptions, ResponseFormat,
+        };
+
+        let request = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("p".to_owned()),
+                model: "m".to_owned(),
+                api: ApiKind::AnthropicMessages,
+                capabilities: ModelCapabilities::chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "hi".to_owned(),
+                }],
+            }],
+            tools: vec![],
+            options: RequestOptions {
+                response_format: Some(ResponseFormat {
+                    name: "result".to_owned(),
+                    schema: json!({"type": "object"}),
+                    strict: true,
+                }),
+                max_tokens: Some(64),
+                ..RequestOptions::default()
+            },
+        };
+        let body = request_body(&request).expect("unsupported providers omit, do not error");
+        assert!(body.get("response_format").is_none());
+        assert!(body.pointer("/text/format").is_none());
+        assert!(body.pointer("/generationConfig/responseSchema").is_none());
+        assert!(body.pointer("/generationConfig/responseMimeType").is_none());
+    }
 }

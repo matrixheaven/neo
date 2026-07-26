@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt, str::FromStr, time::Duration}
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum CacheRetention {
@@ -297,6 +298,49 @@ impl RequestMetadata {
     }
 }
 
+/// Provider-neutral structured-output hint (JSON Schema + name + strictness).
+///
+/// Wire clients that can express this contract map it into their native request
+/// body. Clients that cannot simply omit the hint. Host schema validation is
+/// always authoritative — presence of this field never means the response was
+/// accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ResponseFormat {
+    /// Stable schema identifier required by some provider wire formats.
+    pub name: String,
+    /// JSON Schema document describing the expected response value.
+    pub schema: Value,
+    /// When true, request strict provider-side adherence where the wire format
+    /// supports it. Host validation still runs either way.
+    pub strict: bool,
+}
+
+impl ResponseFormat {
+    /// OpenAI Chat Completions `response_format` object.
+    #[must_use]
+    pub fn to_openai_chat_response_format(&self) -> Value {
+        serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": self.name,
+                "strict": self.strict,
+                "schema": self.schema,
+            }
+        })
+    }
+
+    /// OpenAI Responses API `text.format` object.
+    #[must_use]
+    pub fn to_openai_responses_text_format(&self) -> Value {
+        serde_json::json!({
+            "type": "json_schema",
+            "name": self.name,
+            "strict": self.strict,
+            "schema": self.schema,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RequestOptions {
     pub temperature: Option<f64>,
@@ -309,6 +353,10 @@ pub struct RequestOptions {
     pub cache: CacheRetention,
     pub session_id: Option<String>,
     pub metadata: RequestMetadata,
+    /// Optional provider-native structured-output hint. Host validation remains
+    /// authoritative regardless of whether a provider honors this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl Default for RequestOptions {
@@ -323,6 +371,148 @@ impl Default for RequestOptions {
             cache: CacheRetention::Short,
             session_id: None,
             metadata: RequestMetadata::default(),
+            response_format: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::fake::FakeModelClient;
+    use crate::types::{ApiKind, ModelCapabilities};
+    use crate::{
+        AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, ModelSpec, ProviderId,
+        StopReason,
+    };
+    use futures::StreamExt;
+    use serde_json::json;
+
+    #[test]
+    fn response_format_schema_is_provider_neutral() {
+        let format = ResponseFormat {
+            name: "child_output".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } },
+                "required": ["ok"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        };
+
+        // Neutral shape: schema + name + strictness only. No provider tag, no
+        // URL/model-name inference field.
+        let encoded = serde_json::to_value(&format).expect("serialize");
+        assert_eq!(encoded["name"], "child_output");
+        assert_eq!(encoded["strict"], true);
+        assert_eq!(encoded["schema"]["type"], "object");
+        assert!(encoded.get("provider").is_none());
+        assert!(encoded.get("api").is_none());
+        assert!(encoded.get("base_url").is_none());
+        assert!(encoded.get("model").is_none());
+
+        let options = RequestOptions {
+            response_format: Some(format.clone()),
+            ..RequestOptions::default()
+        };
+        assert_eq!(options.response_format.as_ref(), Some(&format));
+        assert!(RequestOptions::default().response_format.is_none());
+
+        // OpenAI wire fragments are pure projections of the neutral value.
+        assert_eq!(
+            format.to_openai_chat_response_format(),
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "child_output",
+                    "strict": true,
+                    "schema": format.schema,
+                }
+            })
+        );
+        assert_eq!(
+            format.to_openai_responses_text_format(),
+            json!({
+                "type": "json_schema",
+                "name": "child_output",
+                "strict": true,
+                "schema": format.schema,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_native_structured_output_is_optional_and_host_validated() {
+        // Optional: default omits the hint.
+        assert!(RequestOptions::default().response_format.is_none());
+
+        let format = ResponseFormat {
+            name: "host_authoritative".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": { "answer": { "type": "integer" } },
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        };
+
+        // Provider-native hint is only request metadata. neo-ai does not validate
+        // model output against the schema — FakeModelClient returns ordinary text
+        // that violates the schema and stream collection still succeeds.
+        let client = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "m1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "not-json-and-not-schema".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+
+        let request = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("any".to_owned()),
+                model: "does-not-imply-support".to_owned(),
+                api: ApiKind::Local,
+                capabilities: ModelCapabilities::chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "return structured".to_owned(),
+                }],
+            }],
+            tools: vec![],
+            options: RequestOptions {
+                response_format: Some(format),
+                ..RequestOptions::default()
+            },
+        };
+
+        let events = client
+            .stream_chat(request)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("neo-ai must not host-validate structured output");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AiStreamEvent::TextDelta { text } if text == "not-json-and-not-schema"
+            )),
+            "provider-native hint is optional wire metadata; host validates later"
+        );
+        let recorded = client.requests();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].options.response_format.is_some());
+        // Support is never inferred from model/provider name strings on the request.
+        assert_eq!(recorded[0].model.model, "does-not-imply-support");
+        assert_eq!(recorded[0].model.provider.0, "any");
     }
 }

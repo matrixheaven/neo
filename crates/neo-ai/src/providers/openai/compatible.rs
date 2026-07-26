@@ -121,6 +121,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
             body["prompt_cache_retention"] = json!("24h");
         }
     }
+    if let Some(response_format) = &request.options.response_format {
+        body["response_format"] = response_format.to_openai_chat_response_format();
+    }
 
     Ok(body)
 }
@@ -782,5 +785,62 @@ mod tests {
             .expect("should emit an error");
         assert!(matches!(error, AiError::Protocol { .. }));
         assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn response_format_maps_json_schema_for_chat_completions() {
+        use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, ResponseFormat};
+
+        let format = ResponseFormat {
+            name: "result".to_owned(),
+            schema: json!({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"], "additionalProperties": false}),
+            strict: true,
+        };
+        let request = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("openai".to_owned()),
+                model: "gpt-test".to_owned(),
+                api: ApiKind::OpenAi,
+                capabilities: ModelCapabilities::chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "hi".to_owned(),
+                }],
+            }],
+            tools: vec![],
+            options: crate::RequestOptions {
+                response_format: Some(format.clone()),
+                ..crate::RequestOptions::default()
+            },
+        };
+        let body = request_body(&request).expect("body");
+        assert_eq!(
+            body["response_format"],
+            format.to_openai_chat_response_format()
+        );
+    }
+
+    #[test]
+    fn response_format_is_omitted_when_absent() {
+        use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+
+        let request = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("openai".to_owned()),
+                model: "gpt-test".to_owned(),
+                api: ApiKind::OpenAi,
+                capabilities: ModelCapabilities::chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "hi".to_owned(),
+                }],
+            }],
+            tools: vec![],
+            options: crate::RequestOptions::default(),
+        };
+        let body = request_body(&request).expect("body");
+        assert!(body.get("response_format").is_none());
     }
 }

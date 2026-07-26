@@ -26,6 +26,7 @@ rmcp = { version = "1.8.0", features = ["client", "auth", "transport-child-proce
 rustix = { workspace = true, features = ["fs"] }
 sysinfo.workspace = true
 schemars.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
