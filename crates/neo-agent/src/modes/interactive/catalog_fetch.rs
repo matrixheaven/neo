@@ -62,12 +62,25 @@ pub(super) fn custom_catalog_choice_items(items: Vec<ChoiceItem>) -> Vec<ChoiceI
 }
 
 impl InteractiveController {
+    /// Abort any prior catalog fetch so only one `JoinHandle` remains owned.
+    /// Dropping a Tokio `JoinHandle` detaches the task; always abort first.
+    pub(super) fn abort_pending_catalog_fetch(&mut self) {
+        if let Some(prev) = self.pending_catalog_fetch.take() {
+            prev.handle.abort();
+        }
+    }
+
+    fn set_pending_catalog_fetch(&mut self, pending: PendingCatalogFetch) {
+        self.abort_pending_catalog_fetch();
+        self.pending_catalog_fetch = Some(pending);
+    }
+
     pub(super) fn fetch_known_catalog(&mut self) {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some("Fetching models.dev catalog...".to_owned()));
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
-        self.pending_catalog_fetch = Some(PendingCatalogFetch {
+        self.set_pending_catalog_fetch(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
             pending_add: None,
@@ -154,7 +167,7 @@ impl InteractiveController {
             .chrome_mut()
             .set_custom_working_label(Some(format!("Importing provider {provider_id}...")));
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
-        self.pending_catalog_fetch = Some(PendingCatalogFetch {
+        self.set_pending_catalog_fetch(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
             pending_add: Some(PendingCatalogAdd {
@@ -184,7 +197,7 @@ impl InteractiveController {
                 let url = source.url.clone();
                 let handle =
                     tokio::spawn(async move { neo_ai::catalog::fetch_catalog_from(&url).await });
-                self.pending_catalog_fetch = Some(PendingCatalogFetch {
+                self.set_pending_catalog_fetch(PendingCatalogFetch {
                     source: CatalogFetchSource::Custom(source),
                     handle,
                     pending_add: None,

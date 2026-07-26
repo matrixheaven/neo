@@ -958,6 +958,15 @@ impl MultiAgentRuntime {
     ) -> LiveMessageDelivery {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let known = state.agents.contains_key(agent_id);
+        // A stale steer registration can briefly outlive drain/terminalization.
+        // Never report Delivered for an agent that is already terminal.
+        if state
+            .agents
+            .get(agent_id)
+            .is_some_and(|agent| agent.state.is_terminal())
+        {
+            return LiveMessageDelivery::NotRunning;
+        }
         let Some(entry) = state.steer_handles.get(agent_id) else {
             return if known {
                 LiveMessageDelivery::NotRunning
@@ -1716,6 +1725,9 @@ impl MultiAgentRuntime {
             },
         )
         .await;
+        // Unregister live steer before terminalization so MessageDelegate cannot
+        // report Delivered for a turn that no longer drains the mailbox.
+        drop(live_steer);
         drop(live_cancel);
         self.finish_child_run(&snapshot, started_at, run)
     }
@@ -1805,6 +1817,9 @@ impl MultiAgentRuntime {
             },
         )
         .await;
+        // Unregister live steer before terminalization so MessageDelegate cannot
+        // report Delivered for a turn that no longer drains the mailbox.
+        drop(live_steer);
         drop(live_cancel);
         self.finish_child_run(&snapshot, started_at, run)
     }
@@ -1923,7 +1938,9 @@ impl MultiAgentRuntime {
             .get_mut(id.as_str())
             .expect("agent should exist");
         snapshot.prior_messages = messages.to_vec();
-        if snapshot.state == AgentLifecycleState::Cancelled {
+        // Panic / interrupt terminalization is sticky: do not overwrite an
+        // already-terminal agent with a later normal finish path.
+        if snapshot.state.is_terminal() {
             return snapshot.clone();
         }
         apply_terminal_delegate_update(snapshot, terminal_state, update, is_error)
@@ -4402,6 +4419,27 @@ mod tests {
                 .agent_cancel_tokens
                 .contains_key("agent_test"),
             "dropping the active live-cancel guard should unregister its token"
+        );
+    }
+
+    #[test]
+    fn live_delivery_rejects_terminal_agent_even_if_steer_registered() {
+        let runtime = MultiAgentRuntime::new();
+        let agent = runtime.start_foreground_delegate_for_test("terminal child");
+        let _ = runtime.complete_delegate_for_test(&agent.id, "done");
+        let _registration = runtime.register_live_steer(agent.id.as_str());
+        let outcome = runtime.deliver_live_message(
+            agent.id.as_str(),
+            &crate::multi_agent::DelegateMailboxMessage {
+                id: "msg_after_terminal".to_owned(),
+                text: "should not deliver".to_owned(),
+                delivered: false,
+            },
+        );
+        assert_eq!(
+            outcome,
+            LiveMessageDelivery::NotRunning,
+            "terminal agents must never report Delivered, even with a stale steer handle"
         );
     }
 

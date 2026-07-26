@@ -1242,6 +1242,7 @@ impl InteractiveController {
             self.abort_active_turn();
         }
         self.cancel_pending_clipboard();
+        self.abort_pending_catalog_fetch();
         self.tui
             .transcript_mut()
             .finalize_interrupted_live_entries();

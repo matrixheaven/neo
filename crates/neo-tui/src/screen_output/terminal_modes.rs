@@ -338,8 +338,11 @@ mod windows_input_mode {
             if !self.changed {
                 return;
             }
-            let _ = set(self.original_mode);
-            self.changed = false;
+            // Only clear `changed` after a successful restore so a failed set
+            // leaves the guard able to retry on later leave/Drop.
+            if set(self.original_mode).is_ok() {
+                self.changed = false;
+            }
         }
     }
 
@@ -404,6 +407,53 @@ mod windows_input_mode {
                 original,
                 "restore must write the original mode back"
             );
+        }
+
+        #[test]
+        fn restore_failure_keeps_changed_for_retry() {
+            static MODE: AtomicU32 = AtomicU32::new(0x0007);
+            static SET_CALLS: AtomicU32 = AtomicU32::new(0);
+
+            fn query() -> io::Result<u32> {
+                Ok(MODE.load(Ordering::SeqCst))
+            }
+            fn set(mode: u32) -> io::Result<()> {
+                let calls = SET_CALLS.fetch_add(1, Ordering::SeqCst);
+                if calls == 0 {
+                    // First set enables VT during enter.
+                    MODE.store(mode, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if calls == 1 {
+                    // First restore attempt fails.
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "restore failed",
+                    ));
+                }
+                MODE.store(mode, Ordering::SeqCst);
+                Ok(())
+            }
+
+            let original = MODE.load(Ordering::SeqCst);
+            let mut guard = WindowsInputModeGuard::enter_with(ConsoleModeOps { query, set })
+                .expect("enable VT input mode");
+            assert!(guard.changed);
+
+            guard.restore_with(set);
+            assert!(
+                guard.changed,
+                "failed restore must keep changed so Drop/leave can retry"
+            );
+            assert_eq!(
+                MODE.load(Ordering::SeqCst),
+                original | ENABLE_VIRTUAL_TERMINAL_INPUT,
+                "failed restore must not claim success"
+            );
+
+            guard.restore_with(set);
+            assert!(!guard.changed);
+            assert_eq!(MODE.load(Ordering::SeqCst), original);
         }
     }
 }

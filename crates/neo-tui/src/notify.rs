@@ -5,6 +5,11 @@ use std::io::{self, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Private deadline for the notification helper child only (not ShellRuntime).
+const NOTIFICATION_HELPER_DEADLINE: Duration = Duration::from_secs(5);
 
 #[cfg(any(windows, test))]
 use base64::Engine as _;
@@ -169,7 +174,28 @@ fn wait_for_notification_child(child: &Mutex<Option<Child>>) -> io::Result<ExitS
         .map_err(|_| io::Error::other("desktop notification child lock poisoned"))?
         .take()
         .ok_or_else(|| io::Error::other("desktop notification child already taken"))?;
-    child.wait()
+    wait_notification_child_with_deadline(&mut child, NOTIFICATION_HELPER_DEADLINE)
+}
+
+fn wait_notification_child_with_deadline(
+    child: &mut Child,
+    deadline: Duration,
+) -> io::Result<ExitStatus> {
+    let deadline = Instant::now() + deadline;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "desktop notification command exceeded private helper deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn stop_notification_child(child: &Mutex<Option<Child>>) {
