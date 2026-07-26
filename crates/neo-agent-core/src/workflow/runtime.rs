@@ -22,7 +22,9 @@ use super::journal::{
 };
 use super::limits::WorkflowLimits;
 use super::output::{
-    CanonicalFinalResult, PreparedFinalBody, prepare_final_body, reconstruct_canonical_final_result,
+    CanonicalFinalResult, PreparedFinalBody, TaskOutputMaterials, TaskOutputPage,
+    TaskOutputRequest, prepare_final_body, reconstruct_canonical_final_result,
+    render_task_output_page,
 };
 use super::schema::{
     CompiledSchema, StructuredOutputSource, accept_structured_output, validate_final_lua_result,
@@ -237,6 +239,9 @@ pub struct WorkflowRuntime {
     projection_emitter: Arc<RwLock<Option<Arc<ProjectionEmitter>>>>,
     #[cfg(test)]
     rollback_remove_failure: Arc<AtomicBool>,
+    /// When set, TaskOutput I/O sleeps this long after releasing the run lock.
+    /// Integration tests inject delay to prove I/O does not hold the run mutex.
+    output_io_delay_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for WorkflowRuntime {
@@ -268,6 +273,7 @@ impl WorkflowRuntime {
             projection_emitter: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             rollback_remove_failure: Arc::new(AtomicBool::new(false)),
+            output_io_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -945,15 +951,31 @@ impl WorkflowRuntime {
     }
 
     pub async fn output(&self, run_id: &WorkflowId) -> Result<WorkflowOutput, WorkflowError> {
+        // Bounded projection only: never load or return a complete journal here.
+        // Use `task_output` for paged journal/artifact views (design §35).
+        let materials = self.task_output_materials(run_id).await?;
+        Ok(WorkflowOutput {
+            metadata: materials.metadata,
+            state: materials.state,
+            current_phase: materials.current_phase,
+            invocations: Vec::new(),
+            failure_count: materials.failure_count,
+            actual_usage: materials.actual_usage,
+            inherited_usage: materials.inherited_usage,
+            terminal_reason: materials.terminal_reason,
+            reports: materials.reports,
+            final_result: materials.final_result,
+            artifacts: materials.artifacts.list_metadata().to_vec(),
+        })
+    }
+
+    /// Copy lock-free TaskOutput materials under the run mutex (no I/O).
+    pub async fn task_output_materials(
+        &self,
+        run_id: &WorkflowId,
+    ) -> Result<TaskOutputMaterials, WorkflowError> {
         let state = self.run_state(run_id).await?;
         let guard = state.lock().await;
-        let invocations = if guard.metadata.journal_format_version < journal::JOURNAL_FORMAT_V2
-            && (guard.v1_read_only || guard.journal.is_some())
-        {
-            journal::read_journal(&guard.journal_path()).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
         let final_result = match &guard.final_result {
             Some(meta) => {
                 let artifact = meta
@@ -970,19 +992,69 @@ impl WorkflowRuntime {
             }
             None => None,
         };
-        Ok(WorkflowOutput {
+        let admission_wait_reason = if guard.state == WorkflowState::Queued {
+            Some("waiting_for_worker_permit".to_owned())
+        } else {
+            None
+        };
+        Ok(TaskOutputMaterials {
+            run_id: guard.metadata.run_id.clone(),
+            journal_path: guard.journal_path(),
+            journal_format_version: guard.metadata.journal_format_version,
             metadata: guard.metadata.clone(),
             state: guard.state,
             current_phase: guard.current_phase.clone(),
-            invocations,
+            human_handle: None,
+            invocation_count: guard.invocation_count,
             failure_count: guard.failure_count,
             actual_usage: guard.actual_usage,
             inherited_usage: guard.inherited_usage,
             terminal_reason: guard.terminal_reason.clone(),
+            latest_log_summary: guard.latest_log_summary.clone(),
+            latest_report_summary: guard.latest_report_summary.clone(),
             reports: guard.reports.clone(),
             final_result,
-            artifacts: guard.artifacts.list_metadata().to_vec(),
+            artifacts: guard.artifacts.clone(),
+            pending_user: None,
+            started_child_count: 0,
+            queued_child_count: 0,
+            terminal_child_count: 0,
+            admission_wait_reason,
         })
+    }
+
+    /// Bounded TaskOutput page. Journal/artifact I/O runs outside the run lock.
+    pub async fn task_output(
+        &self,
+        run_id: &WorkflowId,
+        request: TaskOutputRequest,
+    ) -> Result<TaskOutputPage, WorkflowError> {
+        // Do not call pending_user_input here: it scans the full journal.
+        // Summary surfaces wait state via `state` / admission_wait_reason only.
+        let materials = self.task_output_materials(run_id).await?;
+
+        let delay_ms = self
+            .output_io_delay_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        let request_for_io = request.clone();
+        let materials_for_io = materials.clone();
+        let page = tokio::task::spawn_blocking(move || {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            render_task_output_page(&materials_for_io, &request_for_io)
+        })
+        .await
+        .map_err(|e| WorkflowError::Host(format!("TaskOutput worker join failed: {e}")))??;
+        Ok(page)
+    }
+
+    /// Inject slow TaskOutput I/O after the run lock is released (test hook).
+    #[doc(hidden)]
+    pub fn set_output_io_delay_ms_for_test(&self, delay_ms: u64) {
+        self.output_io_delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn pause(
@@ -2341,12 +2413,18 @@ impl WorkflowRuntime {
         run_id: &WorkflowId,
         artifact_id: &super::state::WorkflowArtifactId,
     ) -> Result<super::artifacts::ArtifactContent, WorkflowError> {
-        let state = self.run_state(run_id).await?;
-        let guard = state.lock().await;
-        guard.artifacts.get(artifact_id)
+        let store = {
+            let state = self.run_state(run_id).await?;
+            let guard = state.lock().await;
+            guard.artifacts.clone()
+        };
+        let artifact_id = artifact_id.clone();
+        tokio::task::spawn_blocking(move || store.get(&artifact_id))
+            .await
+            .map_err(|e| WorkflowError::Host(format!("artifact read join failed: {e}")))?
     }
 
-    /// Read a byte range of a journal-visible artifact.
+    /// Read a byte range of a journal-visible artifact (outside the run lock).
     pub async fn read_artifact_range(
         &self,
         run_id: &WorkflowId,
@@ -2354,9 +2432,15 @@ impl WorkflowRuntime {
         offset: u64,
         max_bytes: u64,
     ) -> Result<super::artifacts::ArtifactContentRange, WorkflowError> {
-        let state = self.run_state(run_id).await?;
-        let guard = state.lock().await;
-        guard.artifacts.read_range(artifact_id, offset, max_bytes)
+        let store = {
+            let state = self.run_state(run_id).await?;
+            let guard = state.lock().await;
+            guard.artifacts.clone()
+        };
+        let artifact_id = artifact_id.clone();
+        tokio::task::spawn_blocking(move || store.read_range(&artifact_id, offset, max_bytes))
+            .await
+            .map_err(|e| WorkflowError::Host(format!("artifact range join failed: {e}")))?
     }
 
     async fn rehydrate_run_entry(
@@ -3729,6 +3813,14 @@ impl WorkflowHandle {
 
     pub async fn output(&self) -> Result<WorkflowOutput, WorkflowError> {
         self.runtime.output(&self.run_id).await
+    }
+
+    /// Bounded TaskOutput page (summary/journal/result/artifacts/artifact_content).
+    pub async fn task_output(
+        &self,
+        request: TaskOutputRequest,
+    ) -> Result<TaskOutputPage, WorkflowError> {
+        self.runtime.task_output(&self.run_id, request).await
     }
 
     /// Build typed provenance for a host-dispatched tool or child effect.

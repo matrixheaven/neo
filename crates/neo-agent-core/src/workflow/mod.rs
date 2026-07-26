@@ -62,9 +62,13 @@ pub use launch::{
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
 pub use output::{
-    CanonicalFinalResult, FINAL_RESULT_LOGICAL_NAME, FinalResultBody, PreparedFinalBody,
-    final_body_from_artifact, final_result_exceeds_inline_budget, prepare_final_body,
-    reconstruct_canonical_final_result, serialize_canonical_json_bytes,
+    ArtifactContentPage, CanonicalFinalResult, FINAL_RESULT_LOGICAL_NAME, FinalResultBody,
+    JournalRecordSummary, PendingUserInputMeta, PreparedFinalBody, TaskOutputMaterials,
+    TaskOutputPage, TaskOutputRequest, TaskOutputView, WorkflowOutputSummary,
+    build_artifact_content_page, build_artifacts_page, build_result_page, build_summary_page,
+    compute_query_hash, final_body_from_artifact, final_result_exceeds_inline_budget,
+    measure_tool_result_bytes, page_journal_from_path, page_to_tool_result, prepare_final_body,
+    reconstruct_canonical_final_result, render_task_output_page, serialize_canonical_json_bytes,
 };
 pub use retention::{
     RetentionExclusion, RetentionPolicy, RetentionPreview, RetentionSubject, classify_subject,

@@ -935,27 +935,32 @@ impl BackgroundTaskManager {
         timeout: Duration,
         max_output_bytes: usize,
     ) -> Result<ToolResult, ToolError> {
+        self.output_with_view(
+            task_id,
+            block,
+            timeout,
+            max_output_bytes,
+            crate::workflow::TaskOutputRequest::summary(max_output_bytes as u64),
+        )
+        .await
+    }
+
+    /// Workflow-aware TaskOutput: paged views for workflows; snapshot cap for others.
+    pub async fn output_with_view(
+        &self,
+        task_id: &str,
+        block: bool,
+        timeout: Duration,
+        max_output_bytes: usize,
+        request: crate::workflow::TaskOutputRequest,
+    ) -> Result<ToolResult, ToolError> {
         if let Some(handle) = self.workflow_handle(task_id).await {
             let deadline = Instant::now() + timeout;
             loop {
                 let snapshot = handle.snapshot().await;
                 if !block || snapshot.state.is_terminal() || Instant::now() >= deadline {
-                    let output =
-                        handle
-                            .output()
-                            .await
-                            .map_err(|error| ToolError::InvalidInput {
-                                tool: "TaskOutput".to_owned(),
-                                message: error.to_string(),
-                            })?;
-                    let details =
-                        serde_json::to_value(&output).map_err(|error| ToolError::InvalidInput {
-                            tool: "TaskOutput".to_owned(),
-                            message: error.to_string(),
-                        })?;
-                    return Ok(
-                        ToolResult::ok(format_workflow_output(&output)).with_details(details)
-                    );
+                    return super::workflow_task_output::workflow_task_output(&handle, request)
+                        .await;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -1636,16 +1641,6 @@ fn workflow_status(state: crate::workflow::WorkflowState) -> BackgroundTaskStatu
     }
 }
 
-fn format_workflow_output(output: &crate::workflow::WorkflowOutput) -> String {
-    format!(
-        "task_id: {}\nkind: workflow\nstatus: {}\ninvocations: {}\nfailures: {}",
-        output.metadata.run_id,
-        workflow_status(output.state).as_str(),
-        output.invocations.len(),
-        output.failure_count,
-    )
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskListInput {
@@ -1675,11 +1670,26 @@ struct TaskOutputInput {
     /// Maximum number of seconds to wait when block=true.
     #[schemars(description = "Maximum number of seconds to wait when block=true. Defaults to 30.")]
     timeout: Option<u64>,
-    /// Maximum bytes of output to include in the preview.
+    /// Maximum bytes of the complete ToolResult (content + details).
     #[schemars(
-        description = "Maximum bytes of output to include in the preview. Defaults to the runtime limit when omitted."
+        description = "Maximum bytes of the complete ToolResult including text and structured details. Defaults to the runtime limit when omitted."
     )]
     max_output_bytes: Option<usize>,
+    /// Workflow TaskOutput view: summary | journal | result | artifacts | artifact_content.
+    #[schemars(
+        description = "Workflow TaskOutput view. One of summary, journal, result, artifacts, artifact_content. Defaults to summary. Ignored for non-workflow tasks."
+    )]
+    view: Option<String>,
+    /// Opaque cursor from a previous workflow TaskOutput page (run/view/query bound).
+    #[schemars(
+        description = "Opaque cursor from a previous workflow TaskOutput page. Bound to run, view, and query; wrong cursors are rejected."
+    )]
+    cursor: Option<String>,
+    /// Artifact content-address id (sha256) for artifact_content view.
+    #[schemars(
+        description = "Artifact content SHA-256 for the artifact_content view. Required for that view when no cursor is supplied."
+    )]
+    artifact_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1830,12 +1840,38 @@ impl Tool for TaskOutputTool {
                     .with_details(super::multi_agent_format::swarm_details(&swarm)));
             }
 
+            let view = super::workflow_task_output::parse_view(input.view.as_deref())?;
+            let artifact_id = match input.artifact_id.as_deref() {
+                None => None,
+                Some(sha) => {
+                    // Artifact id is content sha; run id is filled by the handle materials.
+                    // For request hashing we construct a provisional id with a placeholder run.
+                    // The runtime resolves by content sha within the target run's store.
+                    Some(
+                        crate::workflow::WorkflowArtifactId::new(
+                            crate::workflow::WorkflowId::from_existing(input.task_id.clone()),
+                            sha,
+                        )
+                        .map_err(|error| ToolError::InvalidInput {
+                            tool: "TaskOutput".to_owned(),
+                            message: error.to_string(),
+                        })?,
+                    )
+                }
+            };
+            let request = crate::workflow::TaskOutputRequest {
+                view,
+                cursor: input.cursor.clone(),
+                max_output_bytes: max_output_bytes as u64,
+                artifact_id,
+            };
             ctx.background_tasks
-                .output(
+                .output_with_view(
                     &input.task_id,
                     input.block.unwrap_or(false),
                     Duration::from_secs(input.timeout.unwrap_or(30)),
                     max_output_bytes,
+                    request,
                 )
                 .await
         })
