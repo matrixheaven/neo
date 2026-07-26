@@ -1,0 +1,77 @@
+definition_format_version = 2
+name = "large-refactor"
+display_name = "Large Refactor"
+description = "Partition approved refactor work into isolated-worktree slices, preserve verification artifacts, and await explicit human merge/retirement decisions. Never auto-merges or deletes worktrees."
+source_sha256 = "a6aa8100266d6827e90385e5f4a3e16c5053aa57edfd38b33f12687a1d3824b0"
+
+[[phases]]
+id = "intake"
+description = "Capture approved spec and plan"
+
+[[phases]]
+id = "partition"
+description = "Implement independent slices in isolated worktrees"
+
+[[phases]]
+id = "merge_gate"
+description = "Await explicit human merge and retirement decisions"
+
+[[phases]]
+id = "report"
+description = "Return lineage, verification, and unresolved risks"
+
+[input_schema]
+type = "object"
+additionalProperties = false
+required = ["spec"]
+
+[input_schema.properties.spec]
+type = "string"
+minLength = 1
+
+[input_schema.properties.plan]
+type = "string"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = [
+  "ok",
+  "spec",
+  "plan",
+  "lineage",
+  "merge",
+  "retire_worktrees",
+  "verification",
+  "unresolved_risks",
+  "commits",
+]
+
+[output_schema.properties.ok]
+type = "boolean"
+
+[output_schema.properties.spec]
+type = "string"
+
+[output_schema.properties.plan]
+type = "string"
+
+[output_schema.properties.lineage]
+type = "object"
+
+[output_schema.properties.merge]
+type = "boolean"
+
+[output_schema.properties.retire_worktrees]
+type = "boolean"
+
+[output_schema.properties.verification]
+type = "string"
+
+[output_schema.properties.unresolved_risks]
+type = "array"
+items = { type = "string" }
+
+[output_schema.properties.commits]
+type = "array"
+items = { type = "string" }

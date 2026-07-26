@@ -1,0 +1,70 @@
+{
+  "args": {
+    "spec": "Extract workflow admission into a dedicated owner",
+    "plan": "slice A runtime, slice B tests"
+  },
+  "delegate_outcomes": [
+    {
+      "ok": true,
+      "summary": "slice_a implemented",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_slice_a",
+        "ok": true,
+        "slice_id": "slice_a",
+        "summary": "runtime extracted",
+        "commits": [
+          "abc111"
+        ],
+        "verification": "unit tests green",
+        "risks": []
+      }
+    },
+    {
+      "ok": true,
+      "summary": "slice_b implemented",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_slice_b",
+        "ok": true,
+        "slice_id": "slice_b",
+        "summary": "tests moved",
+        "commits": [
+          "abc222"
+        ],
+        "verification": "integration green",
+        "risks": [
+          "docs lag"
+        ]
+      }
+    },
+    {
+      "ok": true,
+      "summary": "review complete",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_slice_review",
+        "ok": true,
+        "summary": "review complete",
+        "risks": [
+          "migration window"
+        ]
+      }
+    }
+  ],
+  "awaited_answers": [
+    {
+      "value": {
+        "merge": false,
+        "retire_worktrees": false,
+        "notes": "hold isolated trees for manual inspection"
+      }
+    }
+  ]
+}

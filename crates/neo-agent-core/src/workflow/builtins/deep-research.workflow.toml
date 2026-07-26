@@ -1,0 +1,66 @@
+definition_format_version = 2
+name = "deep-research"
+display_name = "Deep Research"
+description = "Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
+source_sha256 = "28e8954ea3a1e0eff87b7b02550d776a97e516e4fed2673ed429086c3f852f1a"
+
+[[phases]]
+id = "plan"
+description = "Validate question and create research plan"
+
+[[phases]]
+id = "research"
+description = "Launch heterogeneous research domains"
+
+[[phases]]
+id = "verify"
+description = "Contradiction and gap verification"
+
+[[phases]]
+id = "synthesize"
+description = "Synthesize schema-validated final report"
+
+[input_schema]
+type = "object"
+additionalProperties = false
+required = ["question"]
+
+[input_schema.properties.question]
+type = "string"
+minLength = 1
+
+[input_schema.properties.depth]
+type = "string"
+
+[input_schema.properties.clarify]
+type = "boolean"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok", "question", "report", "confidence", "findings", "plan", "artifacts"]
+
+[output_schema.properties.ok]
+type = "boolean"
+
+[output_schema.properties.question]
+type = "string"
+
+[output_schema.properties.depth]
+type = "string"
+
+[output_schema.properties.report]
+type = "string"
+
+[output_schema.properties.confidence]
+type = "number"
+
+[output_schema.properties.findings]
+type = "array"
+
+[output_schema.properties.plan]
+type = "object"
+
+[output_schema.properties.artifacts]
+type = "array"
+items = { type = "string" }

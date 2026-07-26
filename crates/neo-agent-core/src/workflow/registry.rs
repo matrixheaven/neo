@@ -208,6 +208,26 @@ impl WorkflowDefinitionRegistry {
         Self::default()
     }
 
+    /// Registry projection seeds using the ordinary host-compiled built-ins.
+    ///
+    /// Callers still supply `neo_home` / `workspace` / trust / limits. Built-ins
+    /// resolve through the same paired path as disk definitions (design §40).
+    #[must_use]
+    pub fn with_builtin_definitions(
+        neo_home: PathBuf,
+        workspace: PathBuf,
+        project_trusted: bool,
+        limits: WorkflowLimits,
+    ) -> Self {
+        Self::new(WorkflowDefinitionRegistryConfig {
+            neo_home,
+            workspace,
+            project_trusted,
+            limits,
+            builtins: crate::workflow::builtins::builtin_workflow_definitions(),
+        })
+    }
+
     #[must_use]
     pub fn project_trusted(&self) -> bool {
         self.lock().config.project_trusted

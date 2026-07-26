@@ -869,3 +869,34 @@ impl Tool for ScriptedSwarmTool {
         })
     }
 }
+
+/// Resolve one ordinary built-in definition through the public paired path.
+pub fn resolve_builtin_definition(
+    name: &str,
+    limits: &WorkflowLimits,
+) -> Result<ResolvedWorkflowDefinition, WorkflowError> {
+    let def = crate::workflow::builtins::builtin_workflow_definition(name).ok_or_else(|| {
+        WorkflowError::coded(
+            WorkflowErrorCode::InvalidInput,
+            format!("unknown builtin workflow `{name}`"),
+        )
+    })?;
+    crate::workflow::definition::resolve_paired_definition(
+        &def.name,
+        &def.manifest_bytes,
+        &def.source_bytes,
+        crate::workflow::state::WorkflowSourceOrigin::Builtin,
+        Some(format!("builtin://{}", def.name)),
+        limits,
+    )
+}
+
+/// Run a built-in against a deterministic fixture document.
+pub async fn run_builtin_fixture(
+    name: &str,
+    fixture: &WorkflowFixture,
+    limits: WorkflowLimits,
+) -> Result<FixtureRunReport, WorkflowError> {
+    let definition = resolve_builtin_definition(name, &limits)?;
+    run_fixture(&definition, fixture, limits).await
+}

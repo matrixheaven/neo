@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod artifacts;
+pub mod builtins;
 pub mod capability;
 pub mod check;
 pub mod definition;
@@ -20,6 +21,8 @@ pub mod user_input;
 
 pub use capability::WorkflowCapability;
 
+pub use builtins::{builtin_workflow_definition, builtin_workflow_definitions};
+
 pub use check::{
     CheckDiagnostic, CheckSeverity, WorkflowCheckReport, builtin_manifest_revision_vectors,
     check_definition, check_paired_bytes, check_registry_name,
@@ -27,8 +30,8 @@ pub use check::{
 pub use harness::{
     FixtureArtifactSpec, FixtureAwaitedAnswer, FixtureDelegateOutcome, FixtureExecutionMode,
     FixtureExpectedInvocation, FixtureModelTurn, FixtureRunReport, FixtureSwarmItemOutcome,
-    FixtureToolOutcome, WorkflowFixture, load_fixture, parse_fixture, run_fixture,
-    run_fixture_retained,
+    FixtureToolOutcome, WorkflowFixture, load_fixture, parse_fixture, resolve_builtin_definition,
+    run_builtin_fixture, run_fixture, run_fixture_retained,
 };
 pub use schema::{
     CompiledSchema, SchemaErrorCode, SchemaValidationError, StructuredOutputSource,

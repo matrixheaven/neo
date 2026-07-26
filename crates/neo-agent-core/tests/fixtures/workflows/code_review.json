@@ -1,0 +1,68 @@
+{
+  "args": {
+    "scope": "crates/neo-agent-core/src/workflow",
+    "criteria": "correctness, security, maintainability"
+  },
+  "delegate_outcomes": [
+    {
+      "ok": true,
+      "summary": "security findings",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_security",
+        "findings": [
+          {
+            "severity": "high",
+            "path": "runtime.rs",
+            "line": 42,
+            "evidence": "unbounded allocation risk",
+            "test_gap": "missing limit test"
+          }
+        ]
+      }
+    },
+    {
+      "ok": true,
+      "summary": "correctness findings",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_correctness",
+        "findings": [
+          {
+            "severity": "medium",
+            "path": "lua.rs",
+            "line": 10,
+            "evidence": "edge case on empty table",
+            "test_gap": "empty fixture"
+          }
+        ]
+      }
+    },
+    {
+      "ok": true,
+      "summary": "maintainability findings",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_maintain",
+        "findings": []
+      }
+    },
+    {
+      "ok": true,
+      "summary": "challenge complete",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_challenge",
+        "findings": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+definition_format_version = 2
+name = "code-review"
+display_name = "Code Review"
+description = "Read-only multi-domain code review with structured findings-first output. Never modifies code."
+source_sha256 = "083457581287a1590423fae22b2602b307ccb0e7b05465842ac162d688ade8c4"
+
+[[phases]]
+id = "scope"
+description = "Accept scope and review criteria"
+
+[[phases]]
+id = "review"
+description = "Dispatch independent read-only review domains"
+
+[[phases]]
+id = "challenge"
+description = "Deduplicate and challenge weak findings"
+
+[input_schema]
+type = "object"
+additionalProperties = false
+required = ["scope"]
+
+[input_schema.properties.scope]
+type = "string"
+minLength = 1
+
+[input_schema.properties.criteria]
+type = "string"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["findings", "ok", "scope", "criteria", "summary", "read_only"]
+
+[output_schema.properties.findings]
+type = "array"
+items = { type = "object" }
+
+[output_schema.properties.ok]
+type = "boolean"
+
+[output_schema.properties.scope]
+type = "string"
+
+[output_schema.properties.criteria]
+type = "string"
+
+[output_schema.properties.summary]
+type = "string"
+
+[output_schema.properties.read_only]
+type = "boolean"

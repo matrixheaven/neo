@@ -1,0 +1,87 @@
+{
+  "args": {
+    "question": "How does Neo workflow revision hashing work?",
+    "depth": "standard"
+  },
+  "delegate_outcomes": [
+    {
+      "ok": true,
+      "summary": "primary sources gathered",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_primary",
+        "findings": [
+          {
+            "claim": "revision is SHA-256 of framed bytes",
+            "source": "definition.rs",
+            "evidence": "compute_definition_revision"
+          }
+        ]
+      }
+    },
+    {
+      "ok": true,
+      "summary": "counterpoints gathered",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_counter",
+        "findings": [
+          {
+            "claim": "path and mtime are not hash inputs",
+            "source": "design \u00a710",
+            "evidence": "revision framing contract"
+          }
+        ]
+      }
+    },
+    {
+      "ok": true,
+      "summary": "context gathered",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_context",
+        "findings": []
+      }
+    },
+    {
+      "ok": true,
+      "summary": "no contradictions",
+      "details": {
+        "kind": "delegate",
+        "status": "completed",
+        "mode": "foreground",
+        "agent_id": "fixture_verify",
+        "ok": true,
+        "contradictions": [],
+        "gaps": []
+      }
+    }
+  ],
+  "seed_artifacts": [
+    {
+      "logical_name": "research_plan",
+      "kind": "json",
+      "value": {
+        "question": "How does Neo workflow revision hashing work?",
+        "domains": [
+          "primary_sources",
+          "counterpoints",
+          "context"
+        ]
+      }
+    }
+  ],
+  "expected_artifacts": [
+    {
+      "logical_name": "research_plan",
+      "kind": "json",
+      "value": {}
+    }
+  ]
+}
