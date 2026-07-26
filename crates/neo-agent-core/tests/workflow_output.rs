@@ -26,9 +26,8 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
         output_schema: None,
-
     }
-    }
+}
 
 async fn wait_running(handle: &neo_agent_core::workflow::WorkflowHandle) {
     for _ in 0..200 {

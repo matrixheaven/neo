@@ -35,9 +35,8 @@ fn launch_request() -> WorkflowLaunchRequest {
         launch_source: "test".to_owned(),
         parent_run_id: None,
         output_schema: None,
-
     }
-    }
+}
 
 async fn wait_for_terminal(handle: &neo_agent_core::workflow::WorkflowHandle) {
     tokio::time::timeout(Duration::from_secs(2), async {

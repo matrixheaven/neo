@@ -1941,15 +1941,15 @@ mod tests {
             "Edit"
         }
 
-fn description(&self) -> &'static str {
+        fn description(&self) -> &'static str {
             "custom edit"
         }
 
-fn input_schema(&self) -> serde_json::Value {
+        fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-fn execute<'a>(
+        fn execute<'a>(
             &'a self,
             _ctx: &'a ToolContext,
             _input: serde_json::Value,
@@ -1965,15 +1965,15 @@ fn execute<'a>(
             "Write"
         }
 
-fn description(&self) -> &'static str {
+        fn description(&self) -> &'static str {
             "custom write"
         }
 
-fn input_schema(&self) -> serde_json::Value {
+        fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-fn execute<'a>(
+        fn execute<'a>(
             &'a self,
             _ctx: &'a ToolContext,
             _input: serde_json::Value,
@@ -1987,15 +1987,15 @@ fn execute<'a>(
             "Terminal"
         }
 
-fn description(&self) -> &'static str {
+        fn description(&self) -> &'static str {
             "test terminal"
         }
 
-fn input_schema(&self) -> serde_json::Value {
+        fn input_schema(&self) -> serde_json::Value {
             json!({ "type": "object" })
         }
 
-fn execute<'a>(
+        fn execute<'a>(
             &'a self,
             ctx: &'a ToolContext,
             _input: serde_json::Value,

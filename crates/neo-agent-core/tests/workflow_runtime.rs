@@ -29,9 +29,8 @@ fn launch_request() -> WorkflowLaunchRequest {
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
         output_schema: None,
-
     }
-    }
+}
 
 async fn create_run(runtime: &WorkflowRuntime, session_dir: &Path) -> WorkflowHandle {
     runtime

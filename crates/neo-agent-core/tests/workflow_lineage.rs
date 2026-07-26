@@ -27,7 +27,7 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         parent_run_id: None,
         output_schema: None,
     }
-    }
+}
 
 fn completed_with_usage(summary: &str, usage: AgentTokenUsage) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {

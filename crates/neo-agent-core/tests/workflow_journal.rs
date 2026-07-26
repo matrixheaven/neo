@@ -28,7 +28,7 @@ fn sample_metadata(run_id: &str) -> WorkflowRunMetadata {
         journal_format_version: 1,
         output_schema: None,
     }
-    }
+}
 
 fn state_changed(seq: u64, prev: WorkflowState, new: WorkflowState) -> JournalRecord {
     JournalRecord::StateChanged {

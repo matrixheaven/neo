@@ -831,11 +831,11 @@ impl<'a> SessionEventWriter<'a> {
         Self::Jsonl(writer)
     }
 
-fn memory() -> Self {
+    fn memory() -> Self {
         Self::Memory
     }
 
-async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
+    async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
         match self {
             Self::Jsonl(writer) => writer
                 .append_event(event)
@@ -845,7 +845,7 @@ async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
         }
     }
 
-async fn flush(&mut self) -> anyhow::Result<()> {
+    async fn flush(&mut self) -> anyhow::Result<()> {
         match self {
             Self::Jsonl(writer) => writer.flush().await.map_err(anyhow::Error::from),
             Self::Memory => Ok(()),
@@ -1606,7 +1606,7 @@ mod tests {
         );
     }
 
-fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
+    fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
         ApprovalRequest {
             turn: 1,
             id: id.to_owned(),
@@ -1631,7 +1631,7 @@ fn sample_tool_approval_request(id: &str) -> ApprovalRequest {
         }
     }
 
-fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
+    fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
         ApprovalRequest {
             turn: 1,
             id: id.to_owned(),
@@ -3020,7 +3020,7 @@ fn sample_plan_approval_request(id: &str) -> ApprovalRequest {
         assert_eq!(model.model, "gpt-4.1");
     }
 
-fn fake_model() -> ModelSpec {
+    fn fake_model() -> ModelSpec {
         ModelSpec {
             provider: ProviderId("test-provider".to_owned()),
             model: "test-model".to_owned(),
@@ -3029,7 +3029,7 @@ fn fake_model() -> ModelSpec {
         }
     }
 
-fn chat_message_text(message: &ChatMessage) -> String {
+    fn chat_message_text(message: &ChatMessage) -> String {
         let content = match message {
             ChatMessage::System { content }
             | ChatMessage::User { content }
@@ -3046,7 +3046,7 @@ fn chat_message_text(message: &ChatMessage) -> String {
             .join("")
     }
 
-fn test_config(project_dir: &std::path::Path) -> AppConfig {
+    fn test_config(project_dir: &std::path::Path) -> AppConfig {
         AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
@@ -3229,7 +3229,7 @@ fn test_config(project_dir: &std::path::Path) -> AppConfig {
                         launch_source: "test".to_owned(),
                         parent_run_id: None,
                         output_schema: None,
-},
+                    },
                 )
                 .await
                 .expect("seed workflow");
@@ -3350,7 +3350,7 @@ fn test_config(project_dir: &std::path::Path) -> AppConfig {
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
                     output_schema: None,
-},
+                },
             )
             .await
             .expect("seed workflow");
@@ -3522,7 +3522,7 @@ fn test_config(project_dir: &std::path::Path) -> AppConfig {
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
                     output_schema: None,
-},
+                },
             )
             .await
             .expect("seed workflow");
@@ -3627,7 +3627,7 @@ fn test_config(project_dir: &std::path::Path) -> AppConfig {
         );
     }
 
-fn test_mcp_server(
+    fn test_mcp_server(
         id: &str,
         transport: McpTransport,
         url: Option<&str>,

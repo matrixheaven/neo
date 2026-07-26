@@ -69,7 +69,7 @@ async fn make_runner_with_config(
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-},
+            },
         )
         .await
         .expect("create run");
@@ -139,15 +139,15 @@ impl Tool for RecordingTool {
         self.name
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "record workflow swarm input"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         *self.observed.lock().expect("recording lock") = Some(input);
         let result = self.result.clone();
         Box::pin(async move { Ok(result) })

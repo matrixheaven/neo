@@ -423,7 +423,7 @@ impl WorkflowDefinitionRegistry {
         .map(|_| resolved)
     }
 
-fn lock(&self) -> MutexGuard<'_, RegistryInner> {
+    fn lock(&self) -> MutexGuard<'_, RegistryInner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

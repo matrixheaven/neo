@@ -426,7 +426,7 @@ fn base_launch_request(
         parent_run_id: None,
         output_schema: None,
     }
-    }
+}
 
 fn intent_for(
     request: neo_agent_core::workflow::WorkflowLaunchRequest,

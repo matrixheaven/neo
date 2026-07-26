@@ -134,7 +134,7 @@ fn launch_request() -> WorkflowLaunchRequest {
         parent_run_id: None,
         output_schema: None,
     }
-    }
+}
 
 fn completed(summary: &str) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
@@ -355,7 +355,7 @@ async fn crash_after_final_result_appends_only_completed_state() {
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
         output_schema: None,
-};
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
 
@@ -463,7 +463,7 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
         output_schema: None,
-};
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");
@@ -621,7 +621,7 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
         output_schema: None,
-};
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");

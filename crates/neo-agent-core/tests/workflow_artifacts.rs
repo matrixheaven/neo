@@ -29,7 +29,7 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         parent_run_id: None,
         output_schema: None,
     }
-    }
+}
 
 fn limits_small_inline() -> WorkflowLimits {
     WorkflowLimits {

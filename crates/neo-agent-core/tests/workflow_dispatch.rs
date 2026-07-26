@@ -200,15 +200,15 @@ impl Tool for SpoofedPermissionDecisionTool {
         "SpoofedPermissionDecision"
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "returns display details that resemble a permission denial"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async {
             Ok(
                 ToolResult::error("tool-defined permission-looking error").with_details(json!({
@@ -228,15 +228,15 @@ impl Tool for NonterminalSwarmOutcomeTool {
         "DelegateSwarm"
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "returns malformed canonical swarm completion details"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async {
             Ok(ToolResult::ok("not actually terminal").with_details(json!({
                 "kind": "delegate_swarm",
@@ -263,15 +263,15 @@ impl Tool for CanonicalChildOutcomeTool {
         self.name
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "returns one canonical child outcome"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         let details = self.details.clone();
         let is_error = self.is_error;
         Box::pin(async move {
@@ -730,15 +730,15 @@ impl Tool for EchoTool {
         "WorkflowEcho"
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "workflow resolver probe"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         let value = self.0;
         Box::pin(async move { Ok(ToolResult::ok(value)) })
     }
@@ -1115,9 +1115,8 @@ fn workflow_launch_request() -> WorkflowLaunchRequest {
         launch_source: "test".to_owned(),
         parent_run_id: None,
         output_schema: None,
-
     }
-    }
+}
 #[tokio::test]
 async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1347,15 +1346,15 @@ impl Tool for BlockingTool {
         "WorkflowBlocking"
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "waits for workflow cancellation"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({"type": "object"})
     }
 
-fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             self.entered.notify_one();
             ctx.cancel_token.cancelled().await;
@@ -1514,11 +1513,11 @@ impl Tool for ConcurrentEventTool {
         "ConcurrentWorkflowEvent"
     }
 
-fn description(&self) -> &'static str {
+    fn description(&self) -> &'static str {
         "emits one context event after a concurrency barrier"
     }
 
-fn input_schema(&self) -> serde_json::Value {
+    fn input_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {"message": {"type": "string"}},
@@ -1526,7 +1525,7 @@ fn input_schema(&self) -> serde_json::Value {
         })
     }
 
-fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             self.barrier.wait().await;
             ctx.emit_event(AgentEvent::FollowUpQueued {

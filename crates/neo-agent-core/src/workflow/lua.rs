@@ -153,7 +153,7 @@ impl DelegateInput {
         Ok(())
     }
 
-fn to_isolation_request(&self) -> Result<crate::workflow::ChildIsolationRequest, String> {
+    fn to_isolation_request(&self) -> Result<crate::workflow::ChildIsolationRequest, String> {
         self.validate_union()?;
         let worktree = self.parse_worktree()?;
         Ok(crate::workflow::ChildIsolationRequest {
@@ -173,7 +173,7 @@ fn to_isolation_request(&self) -> Result<crate::workflow::ChildIsolationRequest,
         })
     }
 
-fn canonical_request(&self) -> Result<DelegateRequest, String> {
+    fn canonical_request(&self) -> Result<DelegateRequest, String> {
         self.validate_union()?;
         Ok(DelegateRequest {
             task: self.task.clone(),
@@ -205,7 +205,7 @@ impl SwarmItem {
             && self.output_schema.is_none()
     }
 
-fn parse_worktree(&self, index: usize) -> Result<ChildWorktreePolicy, String> {
+    fn parse_worktree(&self, index: usize) -> Result<ChildWorktreePolicy, String> {
         match self
             .worktree
             .as_deref()
@@ -226,7 +226,7 @@ impl SwarmInput {
         self.items.iter().all(SwarmItem::is_homogeneous)
     }
 
-fn canonical_request(&self, max_concurrency: usize) -> Result<DelegateSwarmRequest, String> {
+    fn canonical_request(&self, max_concurrency: usize) -> Result<DelegateSwarmRequest, String> {
         if !self.is_homogeneous_template_form() {
             return Err(
                 "heterogeneous neo.swarm items cannot lower through the DelegateSwarm template adapter"
@@ -489,7 +489,7 @@ impl LuaWorkflowRunner {
         Ok(value)
     }
 
-fn install_hook(
+    fn install_hook(
         &self,
         thread: &mlua::Thread,
         interval: u32,
@@ -527,7 +527,7 @@ fn install_hook(
         );
     }
 
-fn install_neo_table(
+    fn install_neo_table(
         &self,
         lua: &Lua,
         args: &serde_json::Value,
@@ -1211,7 +1211,7 @@ impl JsonMarker {
         }
     }
 
-fn from_meta(kind: &str) -> Option<Self> {
+    fn from_meta(kind: &str) -> Option<Self> {
         match kind {
             JSON_KIND_ARRAY => Some(Self::Array),
             JSON_KIND_OBJECT => Some(Self::Object),

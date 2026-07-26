@@ -51,7 +51,7 @@ impl TerminalEvents for OptionalScriptedEvents {
             .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
     }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+    fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
         Ok(self
             .events
             .pop_front()
@@ -1408,7 +1408,7 @@ async fn idle_terminal_polling_does_not_render_repeated_frames() {
             Ok(InputEvent::Interrupt)
         }
 
-fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
             if self.remaining_idle_polls == 0 {
                 return Ok(Some(InputEvent::Interrupt));
             }
@@ -1466,7 +1466,7 @@ async fn animation_deadline_requests_one_follow_up_frame_without_input() {
             Ok(InputEvent::Interrupt)
         }
 
-fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
             if self.remaining_idle_polls == 0 {
                 return Ok(Some(InputEvent::Interrupt));
             }
@@ -1530,7 +1530,7 @@ async fn cleared_animation_deadline_does_not_render_again_while_idle() {
             Ok(InputEvent::Interrupt)
         }
 
-fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
             if self.remaining_idle_polls == 0 {
                 return Ok(Some(InputEvent::Interrupt));
             }
@@ -1598,7 +1598,7 @@ async fn chrome_only_btw_update_requests_a_frame() {
             Ok(InputEvent::Interrupt)
         }
 
-fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
             if self.idle {
                 self.idle = false;
                 std::thread::sleep(timeout);
@@ -3048,7 +3048,7 @@ async fn event_loop_escape_cancels_active_turn() {
                 .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
         }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
             Ok(self
                 .events
                 .pop_front()
@@ -7269,7 +7269,7 @@ async fn event_loop_interrupt_cancels_active_turn_token() {
                 .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
         }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
             Ok(self
                 .events
                 .pop_front()
@@ -7341,7 +7341,7 @@ async fn event_loop_interrupt_drains_cancelled_barriers_before_exit() {
                 .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
         }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
             Ok(self
                 .events
                 .pop_front()
@@ -11133,7 +11133,7 @@ async fn spawn_workflow_approval_invocation(
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-},
+            },
         )
         .await
         .expect("create workflow");
@@ -16136,7 +16136,7 @@ async fn task_browser_workflow_controls_use_human_handle() {
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-},
+            },
         )
         .await
         .expect("create workflow");
@@ -16519,7 +16519,7 @@ async fn startup_trust_idle_poll_does_not_render_another_frame() {
             Ok(InputEvent::Action(KeybindingAction::SelectConfirm))
         }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
             if self.idle {
                 self.idle = false;
                 Ok(None)
@@ -16573,7 +16573,7 @@ async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
             self.0.pop_front().context("expected scripted input")
         }
 
-fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
             Ok(self.0.pop_front())
         }
     }
