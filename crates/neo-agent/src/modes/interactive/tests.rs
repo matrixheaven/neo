@@ -223,6 +223,7 @@ fn ordinary_tool_request(
             details: vec![format!("tool: {subject}"), format!("path: {path}")],
         },
         options: ordinary_approval_options(session_scope, None),
+        workflow_origin: None,
     }
 }
 
@@ -242,6 +243,7 @@ fn ordinary_shell_request(
             cwd: None,
         },
         options: ordinary_approval_options(session_scope, prefix_rule),
+        workflow_origin: None,
     }
 }
 
@@ -267,6 +269,7 @@ fn background_bash_request() -> ApprovalRequest {
                 action: ApprovalAction::Reject,
             },
         ],
+        workflow_origin: None,
     }
 }
 
@@ -300,6 +303,7 @@ fn plan_review_request(id: &str) -> ApprovalRequest {
                 action: ApprovalAction::RejectPlan,
             },
         ],
+        workflow_origin: None,
     }
 }
 
@@ -679,6 +683,7 @@ fn refresh_git_status_now_updates_after_write_tool_finished() {
         id: "tool-1".to_owned(),
         name: "Write".to_owned(),
         result: ToolResult::ok("wrote file"),
+        workflow_origin: None,
     });
 
     assert_eq!(controller.chrome().git_status_label(), Some("main [+2 -1]"));
@@ -704,6 +709,7 @@ fn refresh_git_status_now_updates_after_edit_tool_finished() {
         id: "tool-1".to_owned(),
         name: "Edit".to_owned(),
         result: ToolResult::ok("edited file"),
+        workflow_origin: None,
     });
 
     assert_eq!(controller.chrome().git_status_label(), Some("main [+3 -2]"));
@@ -959,6 +965,7 @@ fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
         id: "tool-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
+        workflow_origin: None,
     });
 
     let lines = compose_tui_frame(&app, &mut transcript, 80, 12).expect("non-zero terminal size");
@@ -1160,6 +1167,7 @@ fn task_stop_for_question_closes_pending_question_overlay() {
             "kind": "question",
             "status": "stopped"
         })),
+        workflow_origin: None,
     });
 
     assert!(!controller.chrome().question_dialog_is_focused());
@@ -1188,6 +1196,7 @@ fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
         id: "tool-1".to_owned(),
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
+        workflow_origin: None,
     });
 
     let lines = compose_tui_frame(&app, &mut transcript, 80, 12)
@@ -1274,12 +1283,14 @@ async fn controller_snapshot_uses_transcript_tool_card_rendering() {
                     id: "tool-1".to_owned(),
                     name: "Read".to_owned(),
                     arguments: serde_json::json!({ "path": "README.md" }),
+                    workflow_origin: None,
                 },
                 AgentEvent::ToolExecutionFinished {
                     turn: 1,
                     id: "tool-1".to_owned(),
                     name: "Read".to_owned(),
                     result: ToolResult::ok("line one\nline two"),
+                    workflow_origin: None,
                 },
             ])
         },
@@ -1702,6 +1713,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                 id: "write-1".to_owned(),
                 name: "Write".to_owned(),
                 result: ToolResult::ok("write complete"),
+                workflow_origin: None,
             });
             let sender = finish_queued_tx.lock().expect("finish sender lock").take();
             if let Some(sender) = sender {
@@ -1739,6 +1751,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                     "content": content,
                 }],
             }),
+            workflow_origin: None,
         });
     controller.start_turn_with_prompt_origin(Vec::new(), MessageOrigin::User);
     finish_queued_rx.await.expect("finish event queued");
@@ -2547,6 +2560,7 @@ async fn event_loop_ctrl_c_clears_stale_working_state_before_exit_confirmation()
             id: "ask".to_owned(),
             name: "AskUserQuestion".to_owned(),
             arguments: serde_json::json!({ "questions": [] }),
+            workflow_origin: None,
         });
     assert!(controller.chrome().working_label().is_some());
 
@@ -5467,6 +5481,7 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
             id: "committed-read".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
+            workflow_origin: None,
         });
     controller
         .transcript_mut()
@@ -5475,6 +5490,7 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
             id: "committed-read".to_owned(),
             name: "Read".to_owned(),
             result: ToolResult::ok("committed expandable content"),
+            workflow_origin: None,
         });
     let committed = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&committed);
@@ -5488,6 +5504,7 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
             id: "overflow-tool".to_owned(),
             name: "Bash".to_owned(),
             arguments: serde_json::json!({ "command": "overflow-controller-command" }),
+            workflow_origin: None,
         });
     let body = (0..40)
         .map(|index| format!("overflow-controller-sentinel-{index:02}"))
@@ -5500,6 +5517,7 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
             id: "overflow-tool".to_owned(),
             name: "Bash".to_owned(),
             partial_result: ToolResult::ok(body),
+            workflow_origin: None,
         });
 
     let frame = controller.tui.render_terminal_frame(40, 8);
@@ -5586,6 +5604,7 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
+            workflow_origin: None,
         });
     controller
         .transcript_mut()
@@ -5594,6 +5613,7 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
             result: ToolResult::ok("expanded file content"),
+            workflow_origin: None,
         });
     let frame = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&frame);
@@ -5803,6 +5823,7 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
+            workflow_origin: None,
         });
     controller
         .transcript_mut()
@@ -5811,6 +5832,7 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
             result: ToolResult::ok("expanded file content"),
+            workflow_origin: None,
         });
     let frame = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&frame);
@@ -7877,12 +7899,14 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             id: "ordered-tool".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({"path": "ordered.txt"}),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 1,
             id: "ordered-tool".to_owned(),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("ordered-result"),
+            workflow_origin: None,
         },
         AgentEvent::MessageAppended {
             message: AgentMessage::tool_result(
@@ -8036,6 +8060,7 @@ fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
                 id: "exit-plan-2".to_owned(),
                 name: "ExitPlanMode".to_owned(),
                 arguments: serde_json::json!({"plan_summary": "Ready"}),
+                workflow_origin: None,
             },
             AgentEvent::ToolExecutionFinished {
                 turn: 1,
@@ -8047,6 +8072,7 @@ fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
                         "plan_path": plan_path_text,
                     }),
                 ),
+                workflow_origin: None,
             },
             AgentEvent::MessageAppended {
                 message: AgentMessage::tool_result(
@@ -8107,6 +8133,7 @@ fn replay_finalizes_dangling_shell_queue_without_restart() {
             id: "call-1".to_owned(),
             name: "Bash".to_owned(),
             arguments: serde_json::json!({"command": "cargo test"}),
+            workflow_origin: None,
         },
     ]);
     replay_session_into_transcript(&mut transcript, &loaded);
@@ -8146,6 +8173,7 @@ fn replay_background_bash_request() -> ApprovalRequest {
                 action: ApprovalAction::Reject,
             },
         ],
+        workflow_origin: None,
     }
 }
 
@@ -8509,36 +8537,42 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             id: "first-tool".to_owned(),
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "first-order.txt" }),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
             id: "first-tool".to_owned(),
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("first result"),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionStarted {
             turn: 2,
             id: "failed-delegate".to_owned(),
             name: "Delegate".to_owned(),
             arguments: serde_json::json!({ "task": "failed delegate marker" }),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
             id: "failed-delegate".to_owned(),
             name: "Delegate".to_owned(),
             result: neo_agent_core::ToolResult::error("failed delegate marker"),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionStarted {
             turn: 2,
             id: "later-tool".to_owned(),
             name: "Bash".to_owned(),
             arguments: serde_json::json!({ "command": "later-order-command" }),
+            workflow_origin: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
             id: "later-tool".to_owned(),
             name: "Bash".to_owned(),
             result: neo_agent_core::ToolResult::ok("later result"),
+            workflow_origin: None,
         },
     ]
 }
@@ -11707,6 +11741,138 @@ async fn workflow_slash_arguments_do_not_grant_capability() {
         .expect("slash submits");
 
     assert!(!config.workflow_capability.is_available());
+    assert!(
+        controller.active_turn.is_none(),
+        "named workflow slash must not enter a model turn"
+    );
+}
+
+#[tokio::test]
+async fn workflowish_is_not_workflow() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = test_config(temp.path(), temp.path().join("sessions"));
+    let mut controller = controller_for_config(&config);
+
+    // Strict slash_arg boundary: prefix-only forgery is not a workflow command.
+    let handled = controller.handle_slash_command("/workflowish").await;
+    assert!(
+        !handled,
+        "/workflowish must not be consumed as a workflow slash command"
+    );
+    assert!(
+        !config.workflow_capability.is_available(),
+        "/workflowish must not grant workflow capability"
+    );
+
+    // Ordinary text that only contains the word must not create authority either.
+    let handled_text = controller
+        .handle_slash_command("please run /workflow for me")
+        .await;
+    assert!(!handled_text);
+    assert!(!config.workflow_capability.is_available());
+}
+
+#[tokio::test]
+async fn named_workflow_slash_launches_without_model_call() {
+    use neo_agent_core::workflow::{
+        BuiltinWorkflowDefinition, WorkflowDefinitionRegistry, WorkflowDefinitionRegistryConfig,
+        WorkflowLimits, source_sha256_hex,
+    };
+
+    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("workspace");
+    let neo_home = temp.path().join("neo_home");
+    std::fs::create_dir_all(&project_dir).expect("workspace");
+    std::fs::create_dir_all(&neo_home).expect("neo home");
+
+    let script = "return { ok = true }\n";
+    let source_sha = source_sha256_hex(script.as_bytes());
+    let manifest = format!(
+        r#"
+definition_format_version = 2
+name = "demo"
+display_name = "Demo"
+description = "named slash fixture"
+source_sha256 = "{source_sha}"
+
+[[phases]]
+id = "run"
+description = "execute"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok"]
+
+[output_schema.properties.ok]
+type = "boolean"
+"#
+    );
+    let mut config = test_config(&project_dir, temp.path().join("sessions"));
+    config.permission_mode = PermissionMode::Yolo;
+    config.live_permission_mode = std::sync::Arc::new(std::sync::RwLock::new(PermissionMode::Yolo));
+    config.workflow_definitions =
+        WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
+            neo_home,
+            workspace: project_dir.clone(),
+            project_trusted: true,
+            limits: WorkflowLimits::default(),
+            builtins: vec![BuiltinWorkflowDefinition {
+                name: "demo".to_owned(),
+                manifest_bytes: manifest.into_bytes(),
+                source_bytes: script.as_bytes().to_vec(),
+            }],
+        });
+    config
+        .workflow_runtime
+        .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
+        .expect("bind runner");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        &project_dir,
+        move |_request| {
+            let turn_count = std::sync::Arc::clone(&turn_count_clone);
+            async move {
+                turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Vec::<AgentEvent>::new())
+            }
+        },
+    );
+    controller.permission_mode = PermissionMode::Yolo;
+    *controller
+        .live_permission_mode
+        .write()
+        .expect("permission lock") = PermissionMode::Yolo;
+    controller.workflow_capability = config.workflow_capability.clone();
+    controller.local_config = Some(config.clone());
+
+    controller.type_text("/workflow demo");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("named slash submits");
+
+    assert_eq!(
+        turn_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "named slash must perform zero model calls"
+    );
+    assert!(
+        controller.active_turn.is_none(),
+        "named slash must not start a model turn"
+    );
+    assert!(
+        !config.workflow_capability.is_available(),
+        "successful named launch consumes capability"
+    );
+    let tasks = config.background_tasks.list(false, 10).await;
+    assert_eq!(tasks.len(), 1, "named launch registers one background task");
+    assert_eq!(tasks[0].kind, neo_agent_core::BackgroundTaskKind::Workflow);
 }
 
 #[tokio::test]
@@ -11783,6 +11949,7 @@ fn terminal_exit_commits_interrupted_live_entries_before_leave() {
         id: "write-1".to_owned(),
         name: "Write".to_owned(),
         arguments: serde_json::json!({"path": "notes.txt", "content": "draft"}),
+        workflow_origin: None,
     });
     controller.tui.transcript_mut().start_assistant_message();
     controller

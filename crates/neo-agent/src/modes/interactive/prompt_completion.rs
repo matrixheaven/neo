@@ -87,7 +87,10 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "View and manage MCP servers"),
     ("/add-workspace", "Manage additional workspace directories"),
     ("/tasks", "View active background tasks"),
-    ("/workflow", "Authorize one reviewed workflow launch"),
+    (
+        "/workflow",
+        "Launch named workflow or grant one dynamic launch",
+    ),
     ("/plan", "Toggle plan mode (on / off / clear)"),
     ("/compact", "Request manual context compaction"),
     ("/permissions", "select permission mode"),

@@ -452,6 +452,10 @@ pub(crate) struct InteractiveController {
     /// single-page add form is open so submission can build the right input.
     pending_mcp_add_transport: Option<&'static str>,
     pending_interactive_workflow: Option<PendingInteractiveWorkflow>,
+    /// Named `/workflow <name>` Ask-mode launch awaiting Launch/Revise/Cancel.
+    pending_named_workflow_launch: Option<slash_commands::PendingNamedWorkflowLaunch>,
+    /// Sync approval paths (number keys) defer into the next async input tick.
+    deferred_approval_response: Option<neo_agent_core::ApprovalResponse>,
     pending_preflight: Option<InteractivePreflightSpec>,
     mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
@@ -778,6 +782,7 @@ fn default_shell_driver() -> ShellDriver {
                             details: None,
                             terminate: false,
                         },
+                        workflow_origin: None,
                     });
                 })
             };
@@ -926,6 +931,8 @@ impl InteractiveController {
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
             pending_interactive_workflow: None,
+            pending_named_workflow_launch: None,
+            deferred_approval_response: None,
             pending_preflight: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
             skill_store: None,
@@ -1452,7 +1459,7 @@ impl InteractiveController {
         let Some(response) = self.tui.chrome_mut().choose_approval_number(number) else {
             return false;
         };
-        self.resolve_approval(response);
+        self.queue_approval_response(response);
         true
     }
 
@@ -1506,7 +1513,7 @@ impl InteractiveController {
         let Some(response) = self.tui.chrome_mut().deny_approval() else {
             return false;
         };
-        self.resolve_approval(response);
+        self.queue_approval_response(response);
         true
     }
 

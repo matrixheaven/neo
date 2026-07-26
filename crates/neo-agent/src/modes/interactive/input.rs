@@ -29,6 +29,7 @@ impl ExitConfirmation {
 
 impl InteractiveController {
     pub(super) async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
+        self.drain_deferred_approval_response().await;
         if self.handle_pending_approval_event(&event).await? {
             return Ok(false);
         }
@@ -256,6 +257,9 @@ impl InteractiveController {
         // Interrupt rejects every visible approval (and any pending runtime
         // channels) instead of being swallowed by the dialog handler.
         if matches!(event, InputEvent::Interrupt) {
+            if self.pending_named_workflow_launch.take().is_some() {
+                self.workflow_capability.revoke_now();
+            }
             self.reject_all_pending_approvals();
             if self.active_turn.is_some() {
                 self.cancel_active_turn().await?;
@@ -268,7 +272,7 @@ impl InteractiveController {
             .chrome_mut()
             .handle_pending_approval_input(event.clone())
         {
-            self.resolve_approval(response);
+            self.resolve_approval_response(response).await;
         } else {
             self.sync_inline_approval_selection();
         }
@@ -548,6 +552,7 @@ impl InteractiveController {
             return Ok(false);
         }
         if self.reject_pending_approval() {
+            self.drain_deferred_approval_response().await;
             return Ok(false);
         }
         if self.cancel_focused_overlay() {
@@ -816,7 +821,7 @@ impl InteractiveController {
             self.run_selected_command().await?;
         } else if self.tui.chrome().approval_is_pending() {
             if let Some(response) = self.tui.chrome_mut().confirm_or_edit_selected_approval() {
-                self.resolve_approval(response);
+                self.resolve_approval_response(response).await;
             } else {
                 self.sync_inline_approval_selection();
             }
