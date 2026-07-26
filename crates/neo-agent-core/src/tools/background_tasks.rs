@@ -704,6 +704,10 @@ impl BackgroundTaskManager {
 
     /// Metadata-only enumeration for discovery (`TaskList`).
     ///
+    /// Returns only [`BackgroundTaskKind::Bash`], [`BackgroundTaskKind::Question`],
+    /// and [`BackgroundTaskKind::Workflow`]. Delegate and DelegateSwarm kinds are
+    /// never included — use ListDelegates for multi-agent discovery.
+    ///
     /// Never hydrates `<task>.log` bodies. Full output remains available only
     /// through [`Self::output`] / `TaskOutput`.
     pub async fn list_metadata(&self, active_only: bool) -> Vec<BackgroundTaskSnapshot> {
@@ -714,6 +718,12 @@ impl BackgroundTaskManager {
         let mut snapshots = Vec::new();
         for task_id in task_ids {
             if let Some(snapshot) = self.metadata_snapshot(&task_id).await
+                && matches!(
+                    snapshot.kind,
+                    BackgroundTaskKind::Bash
+                        | BackgroundTaskKind::Question
+                        | BackgroundTaskKind::Workflow
+                )
                 && (!active_only || snapshot.status.is_active())
             {
                 snapshots.push(snapshot);
@@ -1689,15 +1699,8 @@ impl Tool for TaskListTool {
             let input: TaskListInput = parse_input(self.name(), input)?;
             let active_only = input.active_only.unwrap_or(true);
             let limit = input.limit.unwrap_or(20).clamp(1, 100);
+            // Kind boundary is owned by list_metadata (Bash|Question|Workflow only).
             let mut tasks = ctx.background_tasks.list_metadata(active_only).await;
-            tasks.retain(|task| {
-                matches!(
-                    task.kind,
-                    BackgroundTaskKind::Bash
-                        | BackgroundTaskKind::Question
-                        | BackgroundTaskKind::Workflow
-                )
-            });
             tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
             tasks.truncate(limit);
             Ok(task_list_result(&tasks, active_only))
@@ -2702,9 +2705,87 @@ mod tests {
             "list_metadata must never hydrate output bodies"
         );
         assert!(
-            metadata.iter().any(|snap| snap.task_id == agent.id.as_str()
-                && snap.kind == BackgroundTaskKind::Delegate),
-            "manager still tracks delegates; TaskList filters them"
+            metadata.iter().all(|snap| {
+                matches!(
+                    snap.kind,
+                    BackgroundTaskKind::Bash
+                        | BackgroundTaskKind::Question
+                        | BackgroundTaskKind::Workflow
+                )
+            }),
+            "list_metadata must exclude delegate/swarm kinds"
+        );
+        assert!(
+            !metadata
+                .iter()
+                .any(|snap| snap.task_id == agent.id.as_str()),
+            "list_metadata must not surface manager delegate projections"
+        );
+        // Manager still tracks delegate projections for TaskOutput/TaskStop adapters.
+        assert_eq!(
+            manager.task_kind(agent.id.as_str()).await,
+            Some(BackgroundTaskKind::Delegate)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_metadata_excludes_delegate_and_swarm_kinds() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = BackgroundTaskManager::new();
+        manager
+            .start_question("q-meta".to_owned(), "Pick one".to_owned())
+            .await;
+
+        let ctx = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_background_tasks(manager.clone());
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("delegate projection must not list");
+        manager.start_delegate(agent.clone()).await;
+
+        let swarm_id = ctx.multi_agent.create_swarm_for_test(vec![(
+            "swarm child",
+            crate::multi_agent::AgentLifecycleState::Running,
+        )]);
+        let swarm = ctx
+            .multi_agent
+            .swarm_snapshot(&swarm_id)
+            .expect("swarm snapshot");
+        manager.start_delegate_swarm(swarm).await;
+
+        let metadata = manager.list_metadata(false).await;
+        assert!(
+            metadata.iter().all(|snap| {
+                matches!(
+                    snap.kind,
+                    BackgroundTaskKind::Bash
+                        | BackgroundTaskKind::Question
+                        | BackgroundTaskKind::Workflow
+                )
+            }),
+            "list_metadata must only return Bash|Question|Workflow"
+        );
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].task_id, "q-meta");
+        assert!(
+            !metadata
+                .iter()
+                .any(|snap| snap.task_id == agent.id.as_str()),
+            "delegate records must not appear in list_metadata"
+        );
+        assert!(
+            !metadata.iter().any(|snap| snap.task_id == swarm_id),
+            "swarm records must not appear in list_metadata"
+        );
+        // Manager may still track projections for other adapters.
+        assert_eq!(
+            manager.task_kind(agent.id.as_str()).await,
+            Some(BackgroundTaskKind::Delegate)
+        );
+        assert_eq!(
+            manager.task_kind(&swarm_id).await,
+            Some(BackgroundTaskKind::DelegateSwarm)
         );
     }
 
