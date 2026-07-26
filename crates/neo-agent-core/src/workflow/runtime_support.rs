@@ -191,30 +191,6 @@ pub(super) fn last_state(records: &[JournalRecord]) -> (WorkflowState, Option<St
         ))
 }
 
-pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> WorkflowInvocationOutcome {
-    WorkflowInvocationOutcome {
-        ok: false,
-        status: WorkflowOutcomeStatus::Interrupted,
-        summary: "interrupted by host exit".to_owned(),
-        interruption: None,
-        details: serde_json::json!({"reason": "host_exit", "call_index": invocation.call_index}),
-        actual_usage: None,
-        child_refs: Vec::new(),
-    }
-}
-
-pub(super) fn resource_limited_outcome(reason: &str) -> WorkflowInvocationOutcome {
-    WorkflowInvocationOutcome {
-        ok: false,
-        status: WorkflowOutcomeStatus::ResourceLimited,
-        summary: reason.to_owned(),
-        interruption: None,
-        details: serde_json::json!({"reason": reason}),
-        actual_usage: None,
-        child_refs: Vec::new(),
-    }
-}
-
 pub(super) fn compact_resource_limited_outcome(
     reason: &str,
     original: &WorkflowInvocationOutcome,
@@ -252,12 +228,6 @@ pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) 
         input_cache_write_tokens: 0,
     });
     total.saturating_add(usage)
-}
-
-pub(super) fn usage_total(usage: Option<AgentTokenUsage>) -> u64 {
-    usage.map_or(0, |usage| {
-        u64::from(usage.input_tokens) + u64::from(usage.output_tokens)
-    })
 }
 
 pub(super) fn recovered_phase(records: &[JournalRecord]) -> Option<String> {

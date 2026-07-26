@@ -1,14 +1,20 @@
+pub mod admission;
 pub mod capability;
 mod error;
 pub mod journal;
 pub mod limits;
 mod lua;
 pub mod recovery;
+pub mod retention;
 pub mod runtime;
 mod state;
 
 pub use capability::WorkflowCapability;
 
+pub use admission::{
+    AdmissionOccupancy, AdmissionReason, AdmitOutcome, ExecutorPermit, StorageReservation,
+    WorkerPermit, WorkflowAdmission,
+};
 pub use error::{WorkflowError, WorkflowErrorCode};
 pub use journal::{
     JournalRecord, JournalWriter, canonical_input_hash, find_incomplete_invocations, journal_path,
@@ -16,6 +22,10 @@ pub use journal::{
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
+pub use retention::{
+    RetentionExclusion, RetentionPolicy, RetentionPreview, RetentionSubject, classify_subject,
+    preview_mark_sweep,
+};
 pub use runtime::{
     ReplayPrefix, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
     WorkflowProjectionStage, WorkflowRuntime, compute_replay_prefix,

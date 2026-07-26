@@ -260,6 +260,9 @@ fn runtime_workflow_from_file(
     if let Some(value) = workflow.lua_source_bytes {
         limits.lua_source_bytes = value;
     }
+    if let Some(value) = workflow.manifest_bytes {
+        limits.manifest_bytes = value;
+    }
     if let Some(value) = workflow.lua_vm_memory_bytes {
         limits.lua_vm_memory_bytes = value;
     }
@@ -275,11 +278,32 @@ fn runtime_workflow_from_file(
     if let Some(value) = workflow.journal_total_bytes {
         limits.journal_total_bytes = value;
     }
+    if let Some(value) = workflow.artifact_record_bytes {
+        limits.artifact_record_bytes = value;
+    }
+    if let Some(value) = workflow.artifact_total_bytes {
+        limits.artifact_total_bytes = value;
+    }
+    if let Some(value) = workflow.global_storage_bytes {
+        limits.global_storage_bytes = value;
+    }
+    if let Some(value) = workflow.pending_record_bytes {
+        limits.pending_record_bytes = value;
+    }
+    if let Some(value) = workflow.task_output_page_bytes {
+        limits.task_output_page_bytes = value;
+    }
+    if let Some(value) = workflow.max_active_vms {
+        limits.max_active_vms = value;
+    }
+    if let Some(value) = workflow.max_active_workers {
+        limits.max_active_workers = value;
+    }
+    if let Some(value) = workflow.max_active_executors {
+        limits.max_active_executors = value;
+    }
     if let Some(value) = workflow.swarm_concurrency {
         limits.swarm_concurrency = value;
-    }
-    if let Some(value) = workflow.token_cap {
-        limits.token_cap = Some(value);
     }
     limits
 }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
 use super::error::WorkflowError;
 use super::journal::{
     self, IncompleteInvocation, JournalEnvelope, JournalRecord, JournalV2Writer,
@@ -35,7 +36,7 @@ use support::{
     invocation_count_v2, last_state, latest_log_summary, latest_report_summary,
     latest_report_summary_v2, projection_timestamps, projection_timestamps_v2, recovered_phase,
     recovered_phase_v2, recovered_reports, recovered_reports_v2, replay_entries, replay_entries_v2,
-    report_summary, resource_limited_outcome, usage_total,
+    report_summary,
 };
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
@@ -120,6 +121,8 @@ struct RunState {
     worker_active: bool,
     /// Supervisor task that awaits the runner `JoinHandle` and terminalizes panics.
     worker_join: Option<JoinHandle<()>>,
+    /// Active worker+VM admission permit; released on every exit path.
+    worker_permit: Option<WorkerPermit>,
     current_invocation: Option<String>,
     replay_entries: Vec<ReplayEntry>,
     replay_cursor: usize,
@@ -162,6 +165,7 @@ impl RunState {
 pub struct WorkflowRuntime {
     runs: Arc<Mutex<HashMap<String, Arc<Mutex<RunState>>>>>,
     limits: WorkflowLimits,
+    admission: WorkflowAdmission,
     notifications: WorkflowNotificationQueue,
     runner: Arc<RwLock<Option<Arc<Runner>>>>,
     recovery_resolver: Arc<RwLock<Option<Arc<RecoveryResolver>>>>,
@@ -188,9 +192,11 @@ impl Default for WorkflowRuntime {
 impl WorkflowRuntime {
     #[must_use]
     pub fn new(limits: WorkflowLimits) -> Self {
+        let admission = WorkflowAdmission::new(limits.clone());
         Self {
             runs: Arc::new(Mutex::new(HashMap::new())),
             limits,
+            admission,
             notifications: WorkflowNotificationQueue::default(),
             runner: Arc::new(RwLock::new(None)),
             recovery_resolver: Arc::new(RwLock::new(None)),
@@ -263,6 +269,12 @@ impl WorkflowRuntime {
         self.limits.clone()
     }
 
+    /// Host-owned global admission controller (permits, not lifecycle).
+    #[must_use]
+    pub fn admission(&self) -> &WorkflowAdmission {
+        &self.admission
+    }
+
     /// Validate every pure launch boundary before capability reservation.
     pub fn validate_launch_request(
         &self,
@@ -331,6 +343,12 @@ impl WorkflowRuntime {
         };
         let metadata = metadata_for_request(run_id.clone(), request);
 
+        let storage_reservation = self
+            .admission
+            .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?;
+        // Commit so create holds storage for the durable run lifetime.
+        storage_reservation.commit();
+
         let durable_create = (|| {
             journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
             let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
@@ -349,6 +367,7 @@ impl WorkflowRuntime {
         let (writer, projection_sequence, started_at_ms) = match durable_create {
             Ok(durable) => durable,
             Err(error) => {
+                self.admission.release_storage_owner(run_id.as_str());
                 return match std::fs::remove_dir_all(&run_dir) {
                     Ok(()) => Err(error),
                     Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
@@ -379,6 +398,7 @@ impl WorkflowRuntime {
             control: Arc::clone(&control),
             worker_active: false,
             worker_join: None,
+            worker_permit: None,
             current_invocation: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,
@@ -426,6 +446,9 @@ impl WorkflowRuntime {
         }
         std::fs::remove_dir_all(&run_dir)
             .map_err(|error| WorkflowError::Journal(error.to_string()))?;
+        self.admission.release_storage_owner(run_id.as_str());
+        self.admission.dequeue_worker(run_id);
+        self.admission.release_run_occupancy(run_id);
         self.runs.lock().await.remove(&run_id.0);
         Ok(())
     }
@@ -464,22 +487,38 @@ impl WorkflowRuntime {
                 ));
             }
         }
-        self.transition(
-            &state,
-            WorkflowState::Running,
-            "worker_start",
-            WorkflowActor::Runtime,
-        )
-        .await?;
+
+        // Fair FIFO occupancy: unavailable permits leave the run durably queued.
+        let permit = match self.admission.try_admit_worker(run_id) {
+            AdmitOutcome::Granted(permit) => permit,
+            AdmitOutcome::Queued { .. } => {
+                return Ok(());
+            }
+        };
+
+        if let Err(error) = self
+            .transition(
+                &state,
+                WorkflowState::Running,
+                "worker_start",
+                WorkflowActor::Runtime,
+            )
+            .await
+        {
+            drop(permit);
+            return Err(error);
+        }
 
         let (handle, metadata, session_dir) = {
             let mut guard = state.lock().await;
             if guard.state != WorkflowState::Running {
+                drop(permit);
                 return Err(WorkflowError::InvalidInput(
                     "worker start lost running state".to_owned(),
                 ));
             }
             guard.worker_active = true;
+            guard.worker_permit = Some(permit);
             let session_dir = guard
                 .run_dir
                 .parent()
@@ -1026,7 +1065,7 @@ impl WorkflowRuntime {
         call_index: u64,
         kind: WorkflowInvocationKind,
         canonical_input: serde_json::Value,
-        provider_backed: bool,
+        _provider_backed: bool,
         effect_fn: F,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError>
     where
@@ -1067,11 +1106,6 @@ impl WorkflowRuntime {
                 guard.replay_live = true;
             }
 
-            let capped = provider_backed
-                && self
-                    .limits
-                    .token_cap
-                    .is_some_and(|cap| usage_total(guard.actual_usage) >= cap);
             let journal = guard.journal.clone().ok_or_else(|| {
                 WorkflowError::Journal("workflow journal is unavailable".to_owned())
             })?;
@@ -1099,7 +1133,6 @@ impl WorkflowRuntime {
                 journal,
                 prepared_start,
                 control,
-                capped,
                 timestamp_ms,
             }
         };
@@ -1144,15 +1177,11 @@ impl WorkflowRuntime {
         }
 
         // --- external effect: no runtime locks ---
-        let outcome = if prepared.capped {
-            resource_limited_outcome("workflow actual token cap reached")
-        } else {
-            effect_fn(WorkflowInvocationContext {
-                invocation_id: prepared.prepared_start.invocation_id.clone(),
-                cancel_token: prepared.control.stop_token.clone(),
-            })
-            .await
-        };
+        let outcome = effect_fn(WorkflowInvocationContext {
+            invocation_id: prepared.prepared_start.invocation_id.clone(),
+            cancel_token: prepared.control.stop_token.clone(),
+        })
+        .await;
 
         self.finalize_invocation(
             state,
@@ -1160,7 +1189,6 @@ impl WorkflowRuntime {
             prepared.prepared_start.invocation_id,
             kind,
             outcome,
-            prepared.capped,
         )
         .await
     }
@@ -1172,7 +1200,6 @@ impl WorkflowRuntime {
         invocation_id: String,
         kind: WorkflowInvocationKind,
         outcome: WorkflowInvocationOutcome,
-        capped: bool,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
         let run_id = {
             let guard = state.lock().await;
@@ -1199,7 +1226,7 @@ impl WorkflowRuntime {
 
         let (sequence, outcome, resource_limit_reason) = match append_result {
             Ok(sequence) => {
-                let reason = capped.then(|| "workflow actual token cap reached".to_owned());
+                let reason = None;
                 (sequence, prepared_finish.outcome, reason)
             }
             Err(WorkflowError::JournalRecordLimitExceeded { .. }) => {
@@ -1321,6 +1348,7 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.worker_active = false;
             guard.worker_join = None;
+            self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
                 return Ok(());
             }
@@ -1430,6 +1458,7 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.worker_active = false;
             guard.worker_join = None;
+            self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
                 return Ok(());
             }
@@ -1519,6 +1548,11 @@ impl WorkflowRuntime {
             );
         }
         Ok(())
+    }
+
+    fn release_worker_admission_locked(&self, state: &mut RunState) {
+        state.worker_permit = None;
+        self.admission.release_run_occupancy(&state.metadata.run_id);
     }
 
     fn mark_recovery_failure_locked(&self, state: &mut RunState, reason: &str) {
@@ -1626,6 +1660,12 @@ impl WorkflowRuntime {
                     WorkflowProjectionStage::Updated
                 },
             );
+            if new_state.is_terminal()
+                || new_state == WorkflowState::Paused
+                || new_state == WorkflowState::AwaitingUser
+            {
+                self.release_worker_admission_locked(&mut guard);
+            }
             if new_state.is_terminal()
                 && let Some(session_dir) = guard.run_dir.parent().and_then(Path::parent)
             {
@@ -1739,6 +1779,7 @@ impl WorkflowRuntime {
             control: Arc::clone(&control),
             worker_active: false,
             worker_join: None,
+            worker_permit: None,
             current_invocation: None,
             replay_entries,
             replay_cursor: 0,
@@ -1791,6 +1832,7 @@ impl WorkflowRuntime {
             control: Arc::clone(&control),
             worker_active: false,
             worker_join: None,
+            worker_permit: None,
             current_invocation: None,
             replay_entries,
             replay_cursor: 0,
@@ -1858,6 +1900,7 @@ impl WorkflowRuntime {
             control: Arc::clone(&control),
             worker_active: false,
             worker_join: None,
+            worker_permit: None,
             current_invocation: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,
@@ -1882,7 +1925,6 @@ struct PreparedInvoke {
     journal: SharedJournal,
     prepared_start: effect::PreparedInvocationStart,
     control: Arc<RunControl>,
-    capped: bool,
     timestamp_ms: u64,
 }
 
