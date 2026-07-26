@@ -879,11 +879,11 @@ impl ParseState {
         }
         self.flush_thinking_ready();
 
-        let tool_events = self
-            .tool_calls
-            .finish_all()
-            .map_err(|err| ProviderError::Protocol(err.to_string()))?;
-        self.push_tool_events(tool_events);
+        let outcome = self.tool_calls.finish_all();
+        self.push_tool_events(outcome.events);
+        if let Some(err) = outcome.error {
+            return Err(ProviderError::Protocol(err.to_string()));
+        }
 
         if self.saw_tool_call {
             self.last_stop_reason = StopReason::ToolUse;

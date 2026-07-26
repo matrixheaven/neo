@@ -23,6 +23,12 @@ pub enum ToolCallAssemblyError {
     MissingName { id: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishAllOutcome {
+    pub events: Vec<ToolCallAssemblyEvent>,
+    pub error: Option<ToolCallAssemblyError>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ToolCallKey {
     Indexed(u64),
@@ -59,8 +65,9 @@ impl StreamingToolCallAssembler {
         Ok(update_slot(slot, chunk))
     }
 
-    pub fn finish_all(&mut self) -> Result<Vec<ToolCallAssemblyEvent>, ToolCallAssemblyError> {
-        let mut out = Vec::new();
+    pub fn finish_all(&mut self) -> FinishAllOutcome {
+        let mut events = Vec::new();
+        let mut error = None;
         for (key, slot) in &mut self.slots {
             if slot.finished {
                 continue;
@@ -70,28 +77,31 @@ impl StreamingToolCallAssembler {
                 .clone()
                 .unwrap_or_else(|| fallback_id_for_key(*key));
             let Some(name) = slot.name.clone() else {
-                return Err(ToolCallAssemblyError::MissingName { id });
+                if error.is_none() {
+                    error = Some(ToolCallAssemblyError::MissingName { id });
+                }
+                continue;
             };
             if !slot.started {
                 slot.started = true;
-                out.push(ToolCallAssemblyEvent::Start {
+                events.push(ToolCallAssemblyEvent::Start {
                     id: id.clone(),
                     name,
                 });
                 if !slot.raw_arguments.is_empty() {
-                    out.push(ToolCallAssemblyEvent::ArgsDelta {
+                    events.push(ToolCallAssemblyEvent::ArgsDelta {
                         id: id.clone(),
                         json_fragment: slot.raw_arguments.clone(),
                     });
                 }
             }
             slot.finished = true;
-            out.push(ToolCallAssemblyEvent::End {
+            events.push(ToolCallAssemblyEvent::End {
                 id,
                 raw_arguments: slot.raw_arguments.clone(),
             });
         }
-        Ok(out)
+        FinishAllOutcome { events, error }
     }
 
     pub fn finish_with_final_arguments(
@@ -225,7 +235,7 @@ mod tests {
                 Some("\"Cargo.toml\"}"),
             ))
             .unwrap();
-        let end = assembler.finish_all().unwrap();
+        let end = assembler.finish_all().events;
 
         assert_eq!(
             [first, second, end].concat(),
@@ -305,7 +315,7 @@ mod tests {
                 Some(".toml\"}"),
             ))
             .unwrap();
-        let end = assembler.finish_all().unwrap();
+        let end = assembler.finish_all().events;
 
         assert_eq!(
             events.into_iter().chain(end).collect::<Vec<_>>(),
@@ -343,7 +353,7 @@ mod tests {
         let events = assembler
             .ingest(chunk(None, Some("call-1"), Some("read"), Some(".toml\"}")))
             .unwrap();
-        let end = assembler.finish_all().unwrap();
+        let end = assembler.finish_all().events;
 
         assert!(events.contains(&ToolCallAssemblyEvent::Start {
             id: "call-1".to_owned(),
@@ -418,7 +428,7 @@ mod tests {
                 .ingest(chunk(Some(1), None, None, Some("\"neo\"}")))
                 .unwrap(),
         );
-        events.extend(assembler.finish_all().unwrap());
+        events.extend(assembler.finish_all().events);
 
         assert!(events.contains(&ToolCallAssemblyEvent::End {
             id: "call-a".to_owned(),
@@ -447,7 +457,7 @@ mod tests {
         assembler
             .ingest(chunk(Some(0), None, None, Some("\"}")))
             .unwrap();
-        let end = assembler.finish_all().unwrap();
+        let end = assembler.finish_all().events;
 
         assert_eq!(
             repeated,
@@ -512,5 +522,38 @@ mod tests {
             result,
             Err(ToolCallAssemblyError::AmbiguousUnindexedToolCalls)
         ));
+    }
+
+    #[test]
+    fn finish_all_emits_end_for_started_named_tools_before_missing_name() {
+        let mut assembler = StreamingToolCallAssembler::new();
+        assembler
+            .ingest(chunk(
+                Some(0),
+                Some("call-named"),
+                Some("read"),
+                Some("{\"path\":\"x\"}"),
+            ))
+            .unwrap();
+        // Unnamed unfinished slot must not block finishing the named tool.
+        assembler
+            .ingest(chunk(Some(1), Some("call-missing"), None, Some("{}")))
+            .unwrap();
+
+        let outcome = assembler.finish_all();
+
+        assert_eq!(
+            outcome.events,
+            vec![ToolCallAssemblyEvent::End {
+                id: "call-named".to_owned(),
+                raw_arguments: "{\"path\":\"x\"}".to_owned(),
+            }]
+        );
+        assert_eq!(
+            outcome.error,
+            Some(ToolCallAssemblyError::MissingName {
+                id: "call-missing".to_owned(),
+            })
+        );
     }
 }
