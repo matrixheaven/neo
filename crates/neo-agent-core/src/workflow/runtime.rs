@@ -791,9 +791,7 @@ impl WorkflowRuntime {
         for entry in entries {
             // Run-local failures are contained inside rehydrate_run_entry as
             // inspectable failed handles. Only registry invariants return Err.
-            if let Err(error) = self.rehydrate_run_entry(entry, &mut handles).await {
-                return Err(error);
-            }
+            self.rehydrate_run_entry(entry, &mut handles).await?;
         }
         for handle in &handles {
             let snapshot = handle.snapshot().await;

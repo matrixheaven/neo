@@ -417,9 +417,7 @@ impl MultiAgentRuntime {
         let reason_text = reason.to_owned();
         let (snapshot, tokens) = {
             let mut state = self.state.lock().expect("multi-agent state poisoned");
-            let Some(existing) = state.swarms.get(swarm_id) else {
-                return None;
-            };
+            let existing = state.swarms.get(swarm_id)?;
             let mut snapshot = project_swarm_from_agents(&state, existing);
             let pending_ids: Vec<String> = snapshot
                 .children
