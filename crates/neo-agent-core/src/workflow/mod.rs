@@ -19,6 +19,7 @@ pub use capability::WorkflowCapability;
 pub use schema::{
     CompiledSchema, SchemaErrorCode, SchemaValidationError, StructuredOutputSource,
     accept_structured_output, attach_response_format_hint, parse_strict_json_value,
+    validate_final_lua_result,
 };
 
 pub use definition::{

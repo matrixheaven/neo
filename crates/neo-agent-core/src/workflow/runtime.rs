@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
 use super::artifacts::{ArtifactKind, ArtifactMetadata, ArtifactStore, ArtifactValue};
-use super::error::WorkflowError;
+use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
     self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord, JournalV2Writer,
     canonical_input_hash, find_incomplete_invocations_v2,
@@ -22,6 +22,7 @@ use super::limits::WorkflowLimits;
 use super::output::{
     CanonicalFinalResult, PreparedFinalBody, prepare_final_body, reconstruct_canonical_final_result,
 };
+use super::schema::{CompiledSchema, validate_final_lua_result};
 use super::state::{
     WorkflowActor, WorkflowFinalResultMetadata, WorkflowId, WorkflowInvocationKind,
     WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRevision,
@@ -1238,6 +1239,58 @@ impl WorkflowRuntime {
             Vec::new(),
             guard.terminal_reason.clone(),
         )
+    }
+
+    /// Validate (optional) final output schema then persist the Lua return.
+    ///
+    /// Schema failures are typed `schema_invalid` with message prefix
+    /// `schema_invalid_final_result` and never trigger a model call or repair turn.
+    pub async fn accept_final_lua_result(
+        &self,
+        run_id: &WorkflowId,
+        value: serde_json::Value,
+        schema: Option<&CompiledSchema>,
+        schema_revision: Option<WorkflowRevision>,
+    ) -> Result<CanonicalFinalResult, WorkflowError> {
+        if let Some(schema) = schema {
+            validate_final_lua_result(schema, &value).map_err(|err| {
+                WorkflowError::coded(WorkflowErrorCode::SchemaInvalid, err.message)
+            })?;
+        }
+        self.persist_canonical_final_result(run_id, value, schema_revision)
+            .await
+    }
+
+    /// Transition `Queued -> Running` without spawning a supervised worker.
+    ///
+    /// Production workers use [`Self::start_worker`]. Direct `LuaWorkflowRunner`
+    /// execution (host-bound scripts and unit fixtures) call this so durable
+    /// host APIs observe a Running run.
+    pub async fn enter_running_without_worker(
+        &self,
+        run_id: &WorkflowId,
+    ) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        {
+            let guard = state.lock().await;
+            if guard.state != WorkflowState::Queued {
+                return Err(WorkflowError::InvalidInput(
+                    "enter_running_without_worker requires queued state".to_owned(),
+                ));
+            }
+            if guard.worker_active {
+                return Err(WorkflowError::InvalidInput(
+                    "worker already active".to_owned(),
+                ));
+            }
+        }
+        self.transition(
+            &state,
+            WorkflowState::Running,
+            "direct_execution",
+            WorkflowActor::Runtime,
+        )
+        .await
     }
 
     /// List journal-visible artifact metadata for a run.
@@ -2626,6 +2679,25 @@ impl WorkflowHandle {
     ) -> Result<CanonicalFinalResult, WorkflowError> {
         self.runtime
             .persist_canonical_final_result(&self.run_id, value, schema_revision)
+            .await
+    }
+
+    /// Validate optional final schema then persist. Never invokes a model.
+    pub async fn accept_final_lua_result(
+        &self,
+        value: serde_json::Value,
+        schema: Option<&CompiledSchema>,
+        schema_revision: Option<WorkflowRevision>,
+    ) -> Result<CanonicalFinalResult, WorkflowError> {
+        self.runtime
+            .accept_final_lua_result(&self.run_id, value, schema, schema_revision)
+            .await
+    }
+
+    /// Put this run into Running without a supervised worker (direct Lua execution).
+    pub async fn enter_running_for_direct_execution(&self) -> Result<(), WorkflowError> {
+        self.runtime
+            .enter_running_without_worker(&self.run_id)
             .await
     }
 

@@ -6,13 +6,14 @@ use neo_agent_core::runtime::WorkflowDispatchHandle;
 use neo_agent_core::tools::{
     ProcessSupervisor, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult,
 };
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2, run_dir};
 use neo_agent_core::workflow::{
     LuaWorkflowRunner, WorkflowActor, WorkflowHandle, WorkflowInvocationKind, WorkflowLimits,
     WorkflowPhase, WorkflowRuntime,
 };
 
 struct RunnerFixture {
-    _dir: tempfile::TempDir,
+    session_dir: tempfile::TempDir,
     runner: LuaWorkflowRunner,
     handle: WorkflowHandle,
 }
@@ -71,12 +72,59 @@ async fn make_runner_with_config(
         )
         .await
         .expect("create run");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running for direct Lua execution");
     let runner = LuaWorkflowRunner::new(dispatch, handle.clone(), limits);
     RunnerFixture {
-        _dir: dir,
+        session_dir: dir,
         runner,
         handle,
     }
+}
+
+fn journal_path(fixture: &RunnerFixture) -> std::path::PathBuf {
+    run_dir(fixture.session_dir.path(), &fixture.handle.run_id).join("journal.jsonl")
+}
+
+fn v2_started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
+    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+        .expect("collect v2 journal");
+    envelopes
+        .into_iter()
+        .filter_map(|envelope| match envelope.payload {
+            JournalPayload::InvocationStarted { kind, .. } => Some(kind),
+            _ => None,
+        })
+        .collect()
+}
+
+fn v2_started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
+    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+        .expect("collect v2 journal");
+    envelopes
+        .into_iter()
+        .filter_map(|envelope| match envelope.payload {
+            JournalPayload::InvocationStarted {
+                canonical_input: Some(input),
+                ..
+            } => Some(input),
+            _ => None,
+        })
+        .collect()
+}
+
+fn v2_finished_summaries(fixture: &RunnerFixture) -> Vec<String> {
+    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+        .expect("collect v2 journal");
+    envelopes
+        .into_iter()
+        .filter_map(|envelope| match envelope.payload {
+            JournalPayload::InvocationFinished { outcome, .. } => Some(outcome.summary),
+            _ => None,
+        })
+        .collect()
 }
 
 struct RecordingTool {
@@ -141,11 +189,10 @@ async fn semantic_validation_precedes_durable_invocation() {
             "{error}"
         );
     }
-    let output = fixture.handle.output().await.expect("workflow output");
-    assert!(!output.invocations.iter().any(|record| matches!(
-        record,
-        neo_agent_core::workflow::JournalRecord::InvocationStarted { .. }
-    )));
+    assert!(
+        v2_started_kinds(&fixture).is_empty(),
+        "semantic failure must not journal InvocationStarted"
+    );
 }
 
 #[tokio::test]
@@ -251,23 +298,23 @@ async fn disabled_apis_are_unavailable_but_pcall_remains() {
                     local allowed = {
                         phase=true, log=true, delegate=true, swarm=true,
                         verify=true, verify_command=true, report=true, fail=true,
+                        json_array=true, json_object=true,
                     }
                     local count = 0
                     for name, value in pairs(neo) do
                         if type(value) == "function" then
-                            assert(allowed[name])
+                            assert(allowed[name], name)
                             count = count + 1
                         end
                     end
-                    return count == 8
+                    return count == 10
                 end)(),
             }
             "#,
             serde_json::json!({}),
         )
         .await
-        .expect("sandbox inspection")
-        .expect("table result");
+        .expect("sandbox inspection");
 
     assert!(
         result
@@ -297,21 +344,15 @@ async fn neo_fail_is_terminal_even_when_pcall_catches_it() {
         matches!(error, neo_agent_core::workflow::WorkflowError::Failed(ref reason) if reason == "deliberate"),
         "{error}"
     );
-    let output = fixture.handle.output().await.expect("workflow output");
-    assert!(output.invocations.iter().any(|record| matches!(
-        record,
-        neo_agent_core::workflow::JournalRecord::InvocationStarted {
-            kind: WorkflowInvocationKind::Fail,
-            ..
-        }
-    )));
-    assert!(!output.invocations.iter().any(|record| matches!(
-        record,
-        neo_agent_core::workflow::JournalRecord::InvocationStarted {
-            kind: WorkflowInvocationKind::Delegate,
-            ..
-        }
-    )));
+    let kinds = v2_started_kinds(&fixture);
+    assert!(
+        kinds.contains(&WorkflowInvocationKind::Fail),
+        "expected Fail invocation, got {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&WorkflowInvocationKind::Delegate),
+        "delegate must not run after fail: {kinds:?}"
+    );
 
     let limits = WorkflowLimits {
         pause_hook_interval: 10_000,
@@ -356,8 +397,7 @@ async fn neo_verify_failure_is_a_catchable_outcome_table() {
             serde_json::json!({}),
         )
         .await
-        .expect("verification failure should be catchable")
-        .expect("table result");
+        .expect("verification failure should be catchable");
 
     assert_eq!(result["caught"], true);
     assert_eq!(result["status"], "failed");
@@ -392,16 +432,8 @@ async fn local_host_operations_are_durable() {
     let output = fixture.handle.output().await.expect("workflow output");
     assert_eq!(output.current_phase.as_deref(), Some("build"));
     assert_eq!(output.reports, vec![serde_json::json!({"result": "ok"})]);
-    let started = output
-        .invocations
-        .iter()
-        .filter_map(|record| match record {
-            neo_agent_core::workflow::JournalRecord::InvocationStarted { kind, .. } => Some(*kind),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        started,
+        v2_started_kinds(&fixture),
         [
             WorkflowInvocationKind::Phase,
             WorkflowInvocationKind::Log,
@@ -450,8 +482,7 @@ async fn child_failure_outcome_returns_normally() {
             serde_json::json!({}),
         )
         .await
-        .expect("child failure is a normal host result")
-        .expect("outcome table");
+        .expect("child failure is a normal host result");
 
     assert_eq!(result["ok"], false);
     assert_eq!(result["status"], "failed");
@@ -503,8 +534,7 @@ async fn verify_command_failure_message_is_durable_and_script_visible() {
             serde_json::json!({}),
         )
         .await
-        .expect("catch command failure")
-        .expect("result");
+        .expect("catch command failure");
     assert_eq!(
         *observed.lock().expect("recording lock"),
         Some(serde_json::json!({
@@ -515,12 +545,11 @@ async fn verify_command_failure_message_is_durable_and_script_visible() {
     assert_eq!(result["caught"], true, "{result}");
     assert_eq!(result["outcome_type"], "table", "{result}");
     assert_eq!(result["summary"], "custom failure", "{result}");
-    let output = fixture.handle.output().await.expect("workflow output");
-    assert!(output.invocations.iter().any(|record| matches!(
-        record,
-        neo_agent_core::workflow::JournalRecord::InvocationFinished { outcome, .. }
-            if outcome.summary == "custom failure"
-    )));
+    let summaries = v2_finished_summaries(&fixture);
+    assert!(
+        summaries.iter().any(|s| s == "custom failure"),
+        "expected custom failure summary, got {summaries:?}"
+    );
 }
 
 #[tokio::test]
@@ -545,12 +574,14 @@ async fn swarm_concurrency_is_runtime_owned() {
         observed.lock().expect("recording lock").as_ref().unwrap()["max_concurrency"],
         4
     );
-    let output = fixture.handle.output().await.expect("workflow output");
-    assert!(output.invocations.iter().any(|record| matches!(
-        record,
-        neo_agent_core::workflow::JournalRecord::InvocationStarted { canonical_input, .. }
-            if canonical_input.get("max_concurrency").is_none()
-    )));
+    let inputs = v2_started_inputs(&fixture);
+    assert!(
+        inputs
+            .iter()
+            .any(|input| input.get("max_concurrency").is_none()
+                && input.get("description").is_some()),
+        "canonical swarm journal input must omit max_concurrency: {inputs:?}"
+    );
 }
 
 #[tokio::test]
@@ -610,4 +641,137 @@ async fn lua_workflow_runner_reports_lua_errors() {
         .expect_err("script should fail");
 
     assert!(error.to_string().contains("boom"));
+}
+
+#[tokio::test]
+async fn lua_return_conversion_preserves_empty_array_and_object_markers() {
+    let fixture = make_runner().await;
+    let result = fixture
+        .runner
+        .execute(
+            r#"
+            local empty_array = neo.json_array({})
+            local empty_object = neo.json_object({})
+            local top_mutable = pcall(function() empty_array[1] = "x" end)
+            local obj_mutable = pcall(function() empty_object.a = 1 end)
+            return {
+                empty_array = empty_array,
+                empty_object = empty_object,
+                unmarked_empty = {},
+                array = neo.json_array({10, 20}),
+                object = neo.json_object({a = 1, b = 2}),
+                markers_immutable = (not top_mutable) and (not obj_mutable),
+            }
+            "#,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("marker conversion");
+
+    assert_eq!(result["empty_array"], serde_json::json!([]));
+    assert_eq!(result["empty_object"], serde_json::json!({}));
+    assert_eq!(result["unmarked_empty"], serde_json::json!({}));
+    assert_eq!(result["array"], serde_json::json!([10, 20]));
+    assert_eq!(result["object"], serde_json::json!({"a": 1, "b": 2}));
+    assert_eq!(result["markers_immutable"], true);
+
+    let output = fixture.handle.output().await.expect("output");
+    assert_eq!(
+        output.final_result.as_ref().and_then(|r| match &r.body {
+            neo_agent_core::workflow::FinalResultBody::Inline { value } => Some(value.clone()),
+            _ => None,
+        }),
+        Some(result)
+    );
+}
+
+#[tokio::test]
+async fn lua_return_conversion_rejects_sparse_mixed_cyclic_and_non_finite_values() {
+    let fixture = make_runner().await;
+
+    for (label, script) in [
+        (
+            "sparse",
+            r#"local t = {}; t[1] = "a"; t[3] = "c"; return t"#,
+        ),
+        ("mixed", r#"return {1, a = 2}"#),
+        ("cyclic", r#"local t = {}; t.self = t; return t"#),
+        ("nan", r#"return (0/0)"#),
+        ("inf", r#"return (1/0)"#),
+        (
+            "json_array_with_object_keys",
+            r#"return neo.json_array({a = 1})"#,
+        ),
+        (
+            "json_object_with_array_keys",
+            r#"return neo.json_object({1, 2})"#,
+        ),
+        ("multiple_returns", r#"return 1, 2"#),
+    ] {
+        let error = fixture
+            .runner
+            .execute(script, serde_json::json!({}))
+            .await
+            .expect_err(label);
+        assert!(
+            matches!(
+                error,
+                neo_agent_core::workflow::WorkflowError::InvalidInput(_)
+            ) || error.to_string().contains("must return at most one")
+                || error.to_string().contains("invalid workflow input")
+                || error.to_string().contains("non-finite")
+                || error.to_string().contains("cyclic")
+                || error.to_string().contains("sparse")
+                || error.to_string().contains("mixed")
+                || error.to_string().contains("json_array")
+                || error.to_string().contains("json_object"),
+            "{label}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn workflow_host_denies_model_supplied_limits() {
+    let fixture = make_runner().await;
+    for script in [
+        r#"neo.swarm({ description = "x", items = {{title="a", value="b"}}, prompt_template = "do {{item}}", max_concurrency = 99 })"#,
+        r#"neo.delegate({ task = "t", token_cap = 100 })"#,
+        r#"neo.delegate({ task = "t", timeout_secs = 5 })"#,
+        r#"neo.delegate({ task = "t", max_active_vms = 2 })"#,
+        r#"neo.verify_command({ command = "true", timeout_secs = 1 })"#,
+        r#"neo.swarm({ description = "x", items = {{title="a", value="b"}}, prompt_template = "do {{item}}", token_cap = 1 })"#,
+    ] {
+        let error = fixture
+            .runner
+            .execute(script, serde_json::json!({}))
+            .await
+            .expect_err("model-supplied limit must be rejected");
+        assert!(
+            error.to_string().contains("unknown field")
+                || error.to_string().contains("invalid workflow input"),
+            "script={script} error={error}"
+        );
+    }
+
+    // Host-owned concurrency is still applied; journal input omits the field.
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.register(RecordingTool {
+        name: "DelegateSwarm",
+        observed: std::sync::Arc::clone(&observed),
+        result: ToolResult::error("recorded"),
+    });
+    let fixture = make_runner_with_registry(WorkflowLimits::default(), Vec::new(), registry).await;
+    fixture
+        .runner
+        .execute(
+            r#"return neo.swarm({ description = "one", items = {{title="x", value="x"}}, prompt_template = "do {{item}}" })"#,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("swarm without model concurrency");
+    assert_eq!(
+        observed.lock().expect("recording lock").as_ref().unwrap()["max_concurrency"],
+        4
+    );
 }

@@ -5,6 +5,9 @@
 //! validator. Definition-level input/output schema compilation in
 //! [`super::definition`] also uses [`CompiledSchema`] — there is no second
 //! schema engine. Neo never accepts provider wire acceptance as proof of validity.
+//!
+//! Final Lua returns are validated here too. A final-result schema failure never
+//! triggers a model call: no child session owns the Lua return.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -153,6 +156,23 @@ pub fn accept_structured_output(
     };
     schema.validate_instance(&value)?;
     Ok(value)
+}
+
+/// Validate a final Lua-converted JSON value against the definition output schema.
+///
+/// This path never consults a model: there is no child session and no hidden
+/// repair turn for top-level Lua returns. Callers map failures to
+/// `failed(schema_invalid_final_result)`.
+pub fn validate_final_lua_result(
+    schema: &CompiledSchema,
+    value: &Value,
+) -> Result<(), SchemaValidationError> {
+    schema.validate_instance(value).map_err(|mut err| {
+        if err.code == SchemaErrorCode::SchemaInvalid {
+            err.message = format!("schema_invalid_final_result: {}", err.message);
+        }
+        err
+    })
 }
 
 /// Child-call composition seam: attach a provider-neutral response-format hint.

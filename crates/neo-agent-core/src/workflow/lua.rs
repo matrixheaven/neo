@@ -1,12 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Value, VmState};
+use mlua::{
+    Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value, VmState,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::schema::CompiledSchema;
+use super::state::WorkflowRevision;
 use super::{
     WorkflowError, WorkflowHandle, WorkflowInvocationKind, WorkflowInvocationOutcome,
     WorkflowLimits, WorkflowOutcomeStatus,
@@ -121,11 +126,21 @@ struct VerifyCommandInput {
     failure_message: Option<String>,
 }
 
+/// Maximum nesting depth for Lua-to-JSON conversion.
+const MAX_JSON_DEPTH: usize = 128;
+
+const JSON_KIND_META: &str = "__neo_json_kind";
+const JSON_KIND_ARRAY: &str = "array";
+const JSON_KIND_OBJECT: &str = "object";
+const READONLY_BACKING: &str = "__neo_readonly_backing";
+
 /// Runs Lua workflow scripts in a sandboxed `mlua` VM with strict host APIs.
 pub struct LuaWorkflowRunner {
     dispatch: WorkflowDispatchHandle,
     handle: WorkflowHandle,
     limits: WorkflowLimits,
+    final_schema: Option<CompiledSchema>,
+    schema_revision: Option<WorkflowRevision>,
 }
 
 impl LuaWorkflowRunner {
@@ -138,14 +153,34 @@ impl LuaWorkflowRunner {
             dispatch,
             handle,
             limits,
+            final_schema: None,
+            schema_revision: None,
         }
     }
 
+    /// Attach the definition final `output_schema` validated after Lua returns.
+    #[must_use]
+    pub fn with_final_schema(
+        mut self,
+        schema: CompiledSchema,
+        revision: Option<WorkflowRevision>,
+    ) -> Self {
+        self.final_schema = Some(schema);
+        self.schema_revision = revision;
+        self
+    }
+
+    /// Execute a sandboxed Lua script and return one canonical JSON value.
+    ///
+    /// - Zero returns and a single `nil` become JSON `null`.
+    /// - Multiple return values fail.
+    /// - On success the value is schema-validated (when configured) and persisted
+    ///   as the run's canonical final result — never discarded by the binder.
     pub async fn execute(
         &self,
         source: &str,
         args: serde_json::Value,
-    ) -> Result<Option<serde_json::Value>, WorkflowError> {
+    ) -> Result<serde_json::Value, WorkflowError> {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|error| WorkflowError::Lua(error.to_string()))?;
@@ -181,7 +216,7 @@ impl LuaWorkflowRunner {
             Arc::clone(&resource_limited),
             Arc::clone(&fatal_reason),
         );
-        let result: mlua::Result<Value> = thread.into_async(()).await;
+        let result: mlua::Result<MultiValue> = thread.into_async(()).await;
 
         if let Some(reason) = fatal_message(&fatal_reason)? {
             return Err(WorkflowError::Failed(reason));
@@ -200,10 +235,29 @@ impl LuaWorkflowRunner {
         if self.handle.is_pause_requested() {
             return Err(WorkflowError::Paused("workflow pause requested".to_owned()));
         }
-        match result {
-            Ok(value) => lua_return_to_json(&lua, value).map_err(map_lua_error),
-            Err(error) => Err(map_lua_error(error)),
+        let multi = match result {
+            Ok(values) => values,
+            Err(error) => return Err(map_lua_error(error)),
+        };
+        if multi.len() > 1 {
+            return Err(WorkflowError::InvalidInput(
+                "workflow script must return at most one value".to_owned(),
+            ));
         }
+        let raw = multi.into_iter().next().unwrap_or(Value::Nil);
+        let value = lua_return_to_json(&lua, raw, self.limits.artifact_record_bytes)
+            .map_err(map_lua_error)?;
+
+        // Persist before returning so production binders that discard the
+        // Result value still leave a durable FinalResultRecorded record.
+        self.handle
+            .accept_final_lua_result(
+                value.clone(),
+                self.final_schema.as_ref(),
+                self.schema_revision.clone(),
+            )
+            .await?;
+        Ok(value)
     }
 
     fn install_hook(
@@ -538,7 +592,7 @@ impl LuaWorkflowRunner {
                 let fatal = Arc::clone(&fatal);
                 async move {
                     check_fatal(&fatal)?;
-                    let report = lua_value_to_json(&lua, value)?;
+                    let report = lua_value_to_json(&lua, value, 16 * 1024 * 1024)?;
                     invoke_local(
                         &handle,
                         &call_index,
@@ -589,6 +643,20 @@ impl LuaWorkflowRunner {
             })
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
         neo.set("fail", fail)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+
+        let json_array = lua
+            .create_function(|lua, value: Value| mark_json_container(lua, value, JsonMarker::Array))
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("json_array", json_array)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+
+        let json_object = lua
+            .create_function(|lua, value: Value| {
+                mark_json_container(lua, value, JsonMarker::Object)
+            })
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("json_object", json_object)
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         lua.globals()
@@ -652,7 +720,7 @@ fn make_read_only(value: Value, lua: &Lua, message: &'static str) -> mlua::Resul
     let read_only = lua.create_table()?;
     let meta = lua.create_table()?;
     meta.set("__index", backing.clone())?;
-    meta.raw_set("__neo_readonly_backing", backing.clone())?;
+    meta.raw_set(READONLY_BACKING, backing.clone())?;
     let next: Function = lua.globals().get("next")?;
     let iterator_backing = backing.clone();
     let iterator = lua.create_function(move |_, (_state, key): (Value, Value)| {
@@ -683,7 +751,8 @@ fn decode_input<T>(lua: &Lua, value: Value, api: &str) -> mlua::Result<(T, serde
 where
     T: serde::de::DeserializeOwned,
 {
-    let value = lua_value_to_json(lua, value)?;
+    // Host inputs share the strict converter; size is enforced again at journal append.
+    let value = lua_value_to_json(lua, value, 16 * 1024 * 1024)?;
     let decoded = serde_json::from_value(value.clone()).map_err(|error| {
         mlua::Error::external(WorkflowError::InvalidInput(format!("{api}: {error}")))
     })?;
@@ -733,39 +802,380 @@ fn failed_outcome(
     }
 }
 
-fn lua_value_to_json(lua: &Lua, value: Value) -> mlua::Result<serde_json::Value> {
-    lua.from_value(thaw_read_only(lua, value, 0)?)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonMarker {
+    Array,
+    Object,
 }
 
-fn thaw_read_only(lua: &Lua, value: Value, depth: usize) -> mlua::Result<Value> {
-    if depth >= 128 {
-        return Err(mlua::Error::SerializeError(
-            "Lua table nesting exceeds 128 levels".to_owned(),
+impl JsonMarker {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Array => JSON_KIND_ARRAY,
+            Self::Object => JSON_KIND_OBJECT,
+        }
+    }
+
+    fn from_meta(kind: &str) -> Option<Self> {
+        match kind {
+            JSON_KIND_ARRAY => Some(Self::Array),
+            JSON_KIND_OBJECT => Some(Self::Object),
+            _ => None,
+        }
+    }
+}
+
+fn lua_value_to_json(lua: &Lua, value: Value, max_bytes: u64) -> mlua::Result<serde_json::Value> {
+    let mut visiting = HashSet::new();
+    let mut size = 0_u64;
+    let converted = convert_lua_value(lua, value, 0, &mut visiting, max_bytes, &mut size)?;
+    Ok(converted)
+}
+
+/// Top-level return: `nil` becomes JSON `null` (never omitted).
+fn lua_return_to_json(lua: &Lua, value: Value, max_bytes: u64) -> mlua::Result<serde_json::Value> {
+    lua_value_to_json(lua, value, max_bytes)
+}
+
+fn convert_lua_value(
+    lua: &Lua,
+    value: Value,
+    depth: usize,
+    visiting: &mut HashSet<*const c_void>,
+    max_bytes: u64,
+    size: &mut u64,
+) -> mlua::Result<serde_json::Value> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(conversion_error(
+            "Lua table nesting exceeds maximum JSON depth",
         ));
     }
-    let Value::Table(table) = value else {
-        return Ok(value);
+    match value {
+        Value::Nil => {
+            account_bytes(size, max_bytes, 4)?;
+            Ok(serde_json::Value::Null)
+        }
+        Value::Boolean(b) => {
+            account_bytes(size, max_bytes, if b { 4 } else { 5 })?;
+            Ok(serde_json::Value::Bool(b))
+        }
+        Value::Integer(i) => {
+            account_bytes(size, max_bytes, 20)?;
+            Ok(serde_json::Value::Number(i.into()))
+        }
+        Value::Number(n) => {
+            if !n.is_finite() {
+                return Err(conversion_error(
+                    "non-finite Lua numbers cannot convert to JSON",
+                ));
+            }
+            account_bytes(size, max_bytes, 32)?;
+            let number = serde_json::Number::from_f64(n)
+                .ok_or_else(|| conversion_error("non-finite Lua numbers cannot convert to JSON"))?;
+            Ok(serde_json::Value::Number(number))
+        }
+        Value::String(s) => {
+            let text = s
+                .to_str()
+                .map_err(|_| conversion_error("Lua string is not valid UTF-8"))?;
+            account_bytes(size, max_bytes, text.len() as u64 + 2)?;
+            Ok(serde_json::Value::String(text.to_owned()))
+        }
+        Value::Table(table) => convert_table(lua, table, depth, visiting, max_bytes, size),
+        Value::Function(_) => Err(conversion_error("functions cannot convert to JSON")),
+        Value::Thread(_) => Err(conversion_error("threads cannot convert to JSON")),
+        Value::UserData(_) => Err(conversion_error("userdata cannot convert to JSON")),
+        Value::LightUserData(_) => Err(conversion_error("light userdata cannot convert to JSON")),
+        Value::Error(err) => Err(conversion_error(&format!(
+            "error values cannot convert to JSON: {err}"
+        ))),
+        other => Err(conversion_error(&format!(
+            "unsupported Lua value for JSON conversion: {other:?}"
+        ))),
+    }
+}
+
+fn convert_table(
+    lua: &Lua,
+    table: mlua::Table,
+    depth: usize,
+    visiting: &mut HashSet<*const c_void>,
+    max_bytes: u64,
+    size: &mut u64,
+) -> mlua::Result<serde_json::Value> {
+    let ptr = table.to_pointer();
+    if !visiting.insert(ptr) {
+        return Err(conversion_error("cyclic Lua tables cannot convert to JSON"));
+    }
+    let result = (|| {
+        let marker = table_json_marker(&table)?;
+        let source = table_source(&table)?;
+        let mut string_entries: Vec<(String, Value)> = Vec::new();
+        let mut integer_entries: Vec<(i64, Value)> = Vec::new();
+        for pair in source.pairs::<Value, Value>() {
+            let (key, value) = pair?;
+            match key {
+                Value::String(s) => {
+                    let text = s.to_str().map_err(|_| {
+                        conversion_error("Lua object keys must be valid UTF-8 strings")
+                    })?;
+                    string_entries.push((text.to_owned(), value));
+                }
+                Value::Integer(i) => integer_entries.push((i, value)),
+                Value::Number(_) => {
+                    return Err(conversion_error(
+                        "Lua table number keys must be integers for JSON conversion",
+                    ));
+                }
+                _ => {
+                    return Err(conversion_error(
+                        "Lua table keys must be strings or integers for JSON conversion",
+                    ));
+                }
+            }
+        }
+
+        let has_strings = !string_entries.is_empty();
+        let has_integers = !integer_entries.is_empty();
+        if has_strings && has_integers {
+            return Err(conversion_error(
+                "mixed string/integer Lua tables cannot convert to JSON",
+            ));
+        }
+
+        let prefer = match marker {
+            Some(JsonMarker::Array) => {
+                if has_strings {
+                    return Err(conversion_error(
+                        "neo.json_array requires integer keys 1..n only",
+                    ));
+                }
+                JsonMarker::Array
+            }
+            Some(JsonMarker::Object) => {
+                if has_integers {
+                    return Err(conversion_error(
+                        "neo.json_object requires string keys only",
+                    ));
+                }
+                JsonMarker::Object
+            }
+            None if !has_strings && !has_integers => JsonMarker::Object,
+            None if has_integers => JsonMarker::Array,
+            None => JsonMarker::Object,
+        };
+
+        match prefer {
+            JsonMarker::Array => {
+                integer_entries.sort_by_key(|(k, _)| *k);
+                let n = integer_entries.len();
+                for (idx, (key, _)) in integer_entries.iter().enumerate() {
+                    let expected = i64::try_from(idx + 1)
+                        .map_err(|_| conversion_error("Lua array length exceeds i64"))?;
+                    if *key != expected {
+                        return Err(conversion_error(
+                            "sparse or non-1-based Lua arrays cannot convert to JSON",
+                        ));
+                    }
+                }
+                account_bytes(size, max_bytes, 2)?;
+                let mut array = Vec::with_capacity(n);
+                for (_, value) in integer_entries {
+                    array.push(convert_lua_value(
+                        lua,
+                        value,
+                        depth + 1,
+                        visiting,
+                        max_bytes,
+                        size,
+                    )?);
+                    account_bytes(size, max_bytes, 1)?;
+                }
+                Ok(serde_json::Value::Array(array))
+            }
+            JsonMarker::Object => {
+                account_bytes(size, max_bytes, 2)?;
+                let mut map = serde_json::Map::new();
+                // Deterministic key order for stable host hashing.
+                string_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                for (key, value) in string_entries {
+                    account_bytes(size, max_bytes, key.len() as u64 + 3)?;
+                    let converted =
+                        convert_lua_value(lua, value, depth + 1, visiting, max_bytes, size)?;
+                    map.insert(key, converted);
+                }
+                Ok(serde_json::Value::Object(map))
+            }
+        }
+    })();
+    visiting.remove(&ptr);
+    result
+}
+
+fn table_source(table: &mlua::Table) -> mlua::Result<mlua::Table> {
+    if let Some(meta) = table.metatable() {
+        if let Ok(backing) = meta.raw_get::<mlua::Table>(READONLY_BACKING) {
+            return Ok(backing);
+        }
+    }
+    Ok(table.clone())
+}
+
+fn table_json_marker(table: &mlua::Table) -> mlua::Result<Option<JsonMarker>> {
+    let Some(meta) = table.metatable() else {
+        return Ok(None);
     };
-    let source = table
-        .metatable()
-        .and_then(|meta| meta.raw_get::<mlua::Table>("__neo_readonly_backing").ok())
-        .unwrap_or(table);
+    match meta.raw_get::<Value>(JSON_KIND_META)? {
+        Value::Nil => Ok(None),
+        Value::String(s) => {
+            let kind = s
+                .to_str()
+                .map_err(|_| conversion_error("invalid JSON marker metatable"))?;
+            Ok(JsonMarker::from_meta(kind.as_ref()))
+        }
+        _ => Err(conversion_error("invalid JSON marker metatable")),
+    }
+}
+
+fn mark_json_container(lua: &Lua, value: Value, marker: JsonMarker) -> mlua::Result<Value> {
+    let Value::Table(table) = value else {
+        return Err(mlua::Error::external(WorkflowError::InvalidInput(format!(
+            "neo.json_{} requires a table",
+            marker.as_str()
+        ))));
+    };
+    // Validate shape against the marker before wrapping.
+    let source = table_source(&table)?;
+    let mut has_string = false;
+    let mut has_integer = false;
+    let mut integer_keys = Vec::new();
+    for pair in source.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        match key {
+            Value::String(_) => has_string = true,
+            Value::Integer(i) => {
+                has_integer = true;
+                integer_keys.push(i);
+            }
+            Value::Number(_) => {
+                return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                    "JSON container keys must be strings or integers".to_owned(),
+                )));
+            }
+            _ => {
+                return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                    "JSON container keys must be strings or integers".to_owned(),
+                )));
+            }
+        }
+    }
+    match marker {
+        JsonMarker::Array => {
+            if has_string {
+                return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                    "neo.json_array requires integer keys 1..n only".to_owned(),
+                )));
+            }
+            if has_integer {
+                integer_keys.sort_unstable();
+                for (idx, key) in integer_keys.iter().enumerate() {
+                    let expected = i64::try_from(idx + 1).map_err(|_| {
+                        mlua::Error::external(WorkflowError::InvalidInput(
+                            "neo.json_array length exceeds i64".to_owned(),
+                        ))
+                    })?;
+                    if *key != expected {
+                        return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                            "neo.json_array requires dense integer keys 1..n".to_owned(),
+                        )));
+                    }
+                }
+            }
+        }
+        JsonMarker::Object => {
+            if has_integer {
+                return Err(mlua::Error::external(WorkflowError::InvalidInput(
+                    "neo.json_object requires string keys only".to_owned(),
+                )));
+            }
+        }
+    }
+    wrap_json_marker(lua, table, marker)
+}
+
+fn wrap_json_marker(lua: &Lua, table: mlua::Table, marker: JsonMarker) -> mlua::Result<Value> {
+    // Preserve existing read-only backing if present; otherwise copy.
+    let backing = if let Some(meta) = table.metatable() {
+        if let Ok(existing) = meta.raw_get::<mlua::Table>(READONLY_BACKING) {
+            existing
+        } else {
+            deep_copy_table(lua, &table, 0)?
+        }
+    } else {
+        deep_copy_table(lua, &table, 0)?
+    };
+    let read_only = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.set("__index", backing.clone())?;
+    meta.raw_set(READONLY_BACKING, backing.clone())?;
+    meta.raw_set(JSON_KIND_META, marker.as_str())?;
+    let next: Function = lua.globals().get("next")?;
+    let iterator_backing = backing.clone();
+    let iterator = lua.create_function(move |_, (_state, key): (Value, Value)| {
+        next.call::<MultiValue>((iterator_backing.clone(), key))
+    })?;
+    meta.set(
+        "__pairs",
+        lua.create_function(move |_, _: Value| Ok((iterator.clone(), Value::Nil, Value::Nil)))?,
+    )?;
+    meta.set(
+        "__len",
+        lua.create_function(move |_, _: Value| Ok(backing.raw_len()))?,
+    )?;
+    meta.set(
+        "__newindex",
+        lua.create_function(move |_, (_table, _key, _value): (Value, Value, Value)| {
+            Err::<(), _>(mlua::Error::external(WorkflowError::InvalidOperation(
+                "json markers are immutable".to_owned(),
+            )))
+        })?,
+    )?;
+    meta.set("__metatable", "json-marker")?;
+    read_only.set_metatable(Some(meta));
+    Ok(Value::Table(read_only))
+}
+
+fn deep_copy_table(lua: &Lua, table: &mlua::Table, depth: usize) -> mlua::Result<mlua::Table> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(conversion_error(
+            "Lua table nesting exceeds maximum JSON depth",
+        ));
+    }
+    let source = table_source(table)?;
     let copy = lua.create_table()?;
     for pair in source.pairs::<Value, Value>() {
         let (key, value) = pair?;
-        copy.raw_set(
-            thaw_read_only(lua, key, depth + 1)?,
-            thaw_read_only(lua, value, depth + 1)?,
-        )?;
+        let value = match value {
+            Value::Table(inner) => Value::Table(deep_copy_table(lua, &inner, depth + 1)?),
+            other => other,
+        };
+        copy.raw_set(key, value)?;
     }
-    Ok(Value::Table(copy))
+    Ok(copy)
 }
 
-fn lua_return_to_json(lua: &Lua, value: Value) -> mlua::Result<Option<serde_json::Value>> {
-    match value {
-        Value::Nil => Ok(None),
-        other => lua_value_to_json(lua, other).map(Some),
+fn account_bytes(size: &mut u64, max_bytes: u64, add: u64) -> mlua::Result<()> {
+    *size = size.saturating_add(add);
+    if *size > max_bytes {
+        return Err(conversion_error(&format!(
+            "JSON value exceeds configured byte limit {max_bytes}"
+        )));
     }
+    Ok(())
+}
+
+fn conversion_error(message: &str) -> mlua::Error {
+    mlua::Error::external(WorkflowError::InvalidInput(message.to_owned()))
 }
 
 fn outcome_to_lua_table(lua: &Lua, outcome: &WorkflowInvocationOutcome) -> mlua::Result<Value> {
