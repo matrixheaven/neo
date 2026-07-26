@@ -903,7 +903,7 @@ async fn message_delegate_delivers_to_running_background_delegate_as_live_steer(
         .await
         .expect("message should deliver");
     assert!(
-        message_result.content.contains("status: delivered"),
+        message_result.content.contains("outcome: delivered"),
         "{}",
         message_result.content
     );
