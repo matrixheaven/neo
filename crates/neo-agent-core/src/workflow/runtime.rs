@@ -2672,27 +2672,101 @@ impl WorkflowRuntime {
             return Ok(());
         }
 
-        let records_v2 = match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
-            Ok(records) if !records.is_empty() => records,
-            Ok(_) => {
-                handles.push(
-                    self.insert_failed_run(
-                        run_dir,
-                        metadata,
-                        "corrupt journal: missing initial state".to_owned(),
-                    )
-                    .await,
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                handles.push(
-                    self.insert_failed_run(run_dir, metadata, format!("corrupt journal: {error}"))
+        let mut records_v2 =
+            match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
+                Ok(records) if !records.is_empty() => records,
+                Ok(_) => {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            "corrupt journal: missing initial state".to_owned(),
+                        )
                         .await,
-                );
-                return Ok(());
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            format!("corrupt journal: {error}"),
+                        )
+                        .await,
+                    );
+                    return Ok(());
+                }
+            };
+        // Durable host-exit: Queued/Running runs paused by process exit must
+        // leave a journaled state transition so projection sequences advance
+        // and session rehydrate can emit WorkflowUpdated exactly once.
+        let (last_state, _) = support::last_state_v2(&records_v2);
+        if last_state.rehydrates_as_paused_host_exit() {
+            let timestamp_ms = current_timestamp_ms();
+            match effect::prepare_transition(
+                &writer,
+                metadata.run_id.clone(),
+                last_state,
+                WorkflowState::Paused,
+                "host_exit",
+                WorkflowActor::Runtime,
+                timestamp_ms,
+            ) {
+                Ok(prepared) => {
+                    if let Err(error) =
+                        effect::commit_transition(&mut writer, &prepared, &self.limits)
+                    {
+                        handles.push(
+                            self.insert_failed_run(
+                                run_dir,
+                                metadata,
+                                format!("host_exit recovery failed: {error}"),
+                            )
+                            .await,
+                        );
+                        return Ok(());
+                    }
+                    records_v2 =
+                        match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
+                            Ok(records) if !records.is_empty() => records,
+                            Ok(_) => {
+                                handles.push(
+                                    self.insert_failed_run(
+                                        run_dir,
+                                        metadata,
+                                        "host_exit recovery cleared journal".to_owned(),
+                                    )
+                                    .await,
+                                );
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                handles.push(
+                                    self.insert_failed_run(
+                                        run_dir,
+                                        metadata,
+                                        format!("host_exit recovery reread failed: {error}"),
+                                    )
+                                    .await,
+                                );
+                                return Ok(());
+                            }
+                        };
+                }
+                Err(error) => {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            format!("host_exit recovery transition rejected: {error}"),
+                        )
+                        .await,
+                    );
+                    return Ok(());
+                }
             }
-        };
+        }
         let (final_state, terminal_reason) = v2_projection_state(&records_v2);
         handles.push(
             self.insert_rehydrated_v2(

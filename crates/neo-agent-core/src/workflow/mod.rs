@@ -68,8 +68,9 @@ pub use artifacts::{
 };
 pub use error::{WorkflowError, WorkflowErrorCode};
 pub use journal::{
-    JournalRecord, JournalWriter, canonical_input_hash, find_incomplete_invocations, journal_path,
-    read_journal, read_run_metadata, run_dir, write_run_metadata,
+    JournalPayload, JournalRecord, JournalWriter, canonical_input_hash, collect_journal_v2,
+    find_incomplete_invocations, journal_path, read_journal, read_run_metadata, run_dir,
+    write_run_metadata,
 };
 pub use launch::{
     LaunchAuthorizationMode, WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts,

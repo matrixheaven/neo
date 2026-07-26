@@ -11135,6 +11135,10 @@ async fn spawn_workflow_approval_invocation(
         )
         .await
         .expect("create workflow");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("workflow must be running before approval-backed invoke");
     let harness = neo_agent_core::harness::FakeHarness::from_turns([]);
     let agent_config = neo_agent_core::AgentConfig::for_model(harness.model())
         .with_workspace_root(&config.project_dir)
@@ -11177,11 +11181,12 @@ async fn spawn_workflow_approval_invocation(
 }
 
 fn assert_cancelled_workflow_invocation_journal(journal_path: &Path) {
-    let records = neo_agent_core::workflow::read_journal(journal_path).expect("read journal");
-    assert!(records.iter().any(|record| {
+    let envelopes =
+        neo_agent_core::workflow::collect_journal_v2(journal_path, None).expect("read v2 journal");
+    assert!(envelopes.iter().any(|envelope| {
         matches!(
-            record,
-            neo_agent_core::workflow::JournalRecord::InvocationFinished { outcome, .. }
+            &envelope.payload,
+            neo_agent_core::workflow::JournalPayload::InvocationFinished { outcome, .. }
                 if outcome.status == neo_agent_core::workflow::WorkflowOutcomeStatus::Cancelled
         )
     }));
