@@ -198,11 +198,18 @@ impl LiveRenderer {
         output
     }
 
-    pub(crate) fn reset(&mut self) {
+    /// Emit kitty deletes for previously tracked image IDs, then clear software state.
+    ///
+    /// Callers must write the returned bytes to the terminal (or the same
+    /// transaction/transition buffer as other live output) before the next frame.
+    #[must_use]
+    pub(crate) fn reset(&mut self) -> String {
+        let deletes = delete_kitty_images(&self.previous_kitty_image_ids);
         self.previous_lines.clear();
         self.previous_cursor = None;
         self.previous_kitty_image_ids.clear();
         self.full_redraw_pending = false;
+        deletes
     }
 
     #[must_use]
@@ -216,4 +223,40 @@ fn push_absolute_move(output: &mut String, row: usize, col: usize) {
     let ansi_row = row.saturating_add(1);
     let ansi_col = col.saturating_add(1);
     let _ = write!(output, "\x1b[{ansi_row};{ansi_col}H");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_emits_kitty_deletes_for_previous_ids() {
+        let mut renderer = LiveRenderer::new(80, 24);
+        renderer
+            .render_to(
+                &mut Vec::new(),
+                0u16,
+                vec![
+                    "\x1b_Ga=T,f=100,i=41,r=1;payload\x1b\\".to_owned(),
+                    "\x1b_Ga=T,f=100,i=77,r=1;payload\x1b\\".to_owned(),
+                ],
+                None,
+            )
+            .expect("seed kitty image ids");
+
+        let deletes = renderer.reset();
+        assert!(
+            deletes.contains("\x1b_Ga=d,d=I,i=41,q=2\x1b\\"),
+            "missing delete for id 41: {deletes:?}"
+        );
+        assert!(
+            deletes.contains("\x1b_Ga=d,d=I,i=77,q=2\x1b\\"),
+            "missing delete for id 77: {deletes:?}"
+        );
+        assert_eq!(renderer.previous_line_count(), 0);
+        assert!(
+            renderer.reset().is_empty(),
+            "second reset must not re-emit deletes after ids were cleared"
+        );
+    }
 }

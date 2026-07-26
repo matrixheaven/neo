@@ -218,8 +218,10 @@ impl InlineTerminal {
         let previous_live_rows = next_live.previous_line_count();
 
         if entering_review {
-            next_live.reset();
-            // Alternate screen starts at the top-left of a fresh buffer.
+            // Alternate screen is a fresh surface. Do not reset-with-deletes a
+            // clone of the primary live renderer — that would destroy image IDs
+            // still owned by `saved_normal_live` on the primary buffer.
+            next_live = LiveRenderer::new(next_geometry.width, next_geometry.height);
             next_geometry.live_top = 0;
             next_geometry.cursor_col = 0;
             next_geometry.cursor_row = 0;
@@ -443,6 +445,9 @@ impl InlineTerminal {
                     .map_or(self.geometry.live_top, |geo| geo.live_top);
                 transition.extend_from_slice(saved.clear_at_origin(live_top).as_bytes());
             }
+            // Review-surface live may still track kitty IDs; emit deletes before
+            // abandoning software state.
+            transition.extend_from_slice(self.live.reset().as_bytes());
             transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
                 let _ = output.write_all(RESET_SCROLL_REGION);
@@ -464,7 +469,6 @@ impl InlineTerminal {
             }
             self.review_surface = false;
             self.mouse_capture = false;
-            self.live.reset();
         }
         let result = if was_review {
             Ok(())
@@ -488,7 +492,14 @@ impl InlineTerminal {
         if let Some(modes) = &mut self.modes {
             modes.resume()?;
         }
-        self.live.reset();
+        // suspend_prepare already wrote kitty deletes via clear_live_to / reset.
+        // resume has no output writer; non-empty deletes would be unrecoverable.
+        let deletes = self.live.reset();
+        if !deletes.is_empty() {
+            return Err(std::io::Error::other(
+                "live renderer resume saw pending kitty deletes; suspend_prepare must clear live first",
+            ));
+        }
         self.resize(width, height, cursor_col, cursor_row, generation)?;
         Ok(())
     }
@@ -511,6 +522,9 @@ impl InlineTerminal {
                     .map_or(self.geometry.live_top, |geo| geo.live_top);
                 transition.extend_from_slice(saved.clear_at_origin(live_top).as_bytes());
             }
+            // Review-surface live may still track kitty IDs; emit deletes before
+            // abandoning software state.
+            transition.extend_from_slice(self.live.reset().as_bytes());
             transition.extend_from_slice(RESET_SCROLL_REGION);
             if let Err(error) = output.write_all(&transition).and_then(|()| output.flush()) {
                 let _ = output.write_all(RESET_SCROLL_REGION);
@@ -532,7 +546,6 @@ impl InlineTerminal {
             }
             self.review_surface = false;
             self.mouse_capture = false;
-            self.live.reset();
             if let Some(modes) = &mut self.modes {
                 modes.leave();
             } else {
